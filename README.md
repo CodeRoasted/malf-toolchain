@@ -1,8 +1,27 @@
 # malf-toolchain
 
-CodeRoast's public build toolchain — the compiler (and, later, the `malf` build system and
-shared lint/format config) that every CodeRoast repo's CI provisions, so public and private
-repos build on the **identical** toolchain with no cross-repo credential.
+The pinned, public, reproducible build toolchain every CodeRoast repository compiles on — so a
+CodeRoast build is a pure function of its source: the same on our CI, on your fork, and on a
+private repo none of us can see.
+
+## What this is — and why it's its own repo
+
+CodeRoast distils a raw log stream into a **MetaLog**: a small, deterministic fingerprint of what
+your system actually did — *bit-identical across runs*, citable, and re-derivable to the exact
+source line. Every product — Sift's structural CI diff, anomaly detection, AI triage — is just a
+lens on that one artifact. "Bit-identical across runs" isn't a slogan; it's the property that lets
+a structural fact sit behind a hard CI gate instead of a dashboard.
+
+A bit-identical *artifact* needs a bit-identical *build*. Floating-point contraction, ABI, and
+standard-library internals all leak the compiler into the output — so *which compiler, built how*
+is part of the determinism contract, not an environment detail to leave to chance. This repo is
+where that part is made explicit and public: **one compiler, pinned, built reproducibly from
+pristine upstream source, provisioned identically by every CodeRoast repo's CI.** No per-repo
+drift, no "works on my runner," no private toolchain a fork can't reach.
+
+It's also the short answer to *how we build*: the toolchain is open even where the product is
+closed. You don't have to take our word that the builds are reproducible — the compiler, its full
+source, and the exact recipe that produced it are all right here.
 
 ## gcc-15.3 (PR124309 fix)
 
@@ -39,5 +58,6 @@ GPLv3 §6.
 
 ## Roadmap
 
-The `malf` build system and shared developer config (clangd / clang-tidy / clang-format) move
-here as a follow-up, so "how we build" is one public, reproducible reference.
+`malf` — CodeRoast's build orchestrator, a thin layer over Conan editable workspaces — and the
+shared developer config (clangd / clang-tidy / clang-format) move here as a follow-up, so the
+whole of *how we build* lives in one public, reproducible reference.
