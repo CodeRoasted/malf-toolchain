@@ -1,0 +1,57 @@
+name: 'Setup gcc-15.3 toolchain'
+description: |
+  Provision the from-source gcc-15.3 (PR124309 fix) that the CodeRoast dev profile uses, by
+  downloading the PUBLIC release asset published by this repo's build-gcc-toolchain.yml and
+  extracting it to /opt/gcc-15.3 — so a repo-local `linux-gcc15-release` conan profile
+  (CC/CXX=/opt/gcc-15.3/bin/...) resolves it.
+
+  The release is PUBLIC, so the download is anonymous: NO token, NO ghcr, NO packages:read.
+  Usable by both public and private consumer repos (public->public / private->public), with
+  no dependency on any private repo.
+
+  Replaces apt-installing PPA g++-15 (= 15.2, which mis-records partitioned-module linemaps
+  → "Bad import dependency" on insight_diff / coderoast.server.core).
+
+inputs:
+  tag:
+    description: 'Release tag holding the toolchain asset.'
+    required: false
+    default: 'gcc-15.3.0'
+  asset:
+    description: 'Toolchain tarball asset name.'
+    required: false
+    default: 'gcc-15.3-noble-x64.tar.zst'
+
+runs:
+  using: composite
+  steps:
+    - name: Download + verify + extract gcc-15.3 → /opt (public release, no token)
+      shell: bash
+      env:
+        REPO: CodeRoasted/malf-toolchain
+        TAG: ${{ inputs.tag }}
+        ASSET: ${{ inputs.asset }}
+      run: |
+        set -euo pipefail
+        base="https://github.com/${REPO}/releases/download/${TAG}"
+        cd "$RUNNER_TEMP"
+        # Retry the pull: the toolchain layer is ~450 MB and the CDN occasionally drops the
+        # connection mid-download. Wipe partials between attempts so the checksum can't pass
+        # on a truncated file.
+        pulled=""
+        for attempt in 1 2 3; do
+          rm -f "$ASSET" "$ASSET.sha256" 2>/dev/null || true
+          if curl -fsSL -o "$ASSET" "${base}/${ASSET}" \
+             && curl -fsSL -o "$ASSET.sha256" "${base}/${ASSET}.sha256"; then pulled=1; break; fi
+          echo "::warning::toolchain download failed (attempt ${attempt}/3) — retrying after backoff"
+          sleep $((attempt * 10))
+        done
+        [ -n "$pulled" ] || { echo "::error::toolchain download failed after 3 attempts (network)"; exit 1; }
+        # Verify the published checksum before trusting the archive.
+        sha256sum -c "$ASSET.sha256"
+        command -v zstd >/dev/null 2>&1 || sudo apt-get install -y zstd
+        sudo tar -C /opt -I zstd -xf "$ASSET"
+        # Confirm the compiler is present and ≥15.3 (PR124309 fix).
+        v=$(/opt/gcc-15.3/bin/g++ -dumpversion)
+        echo "Provisioned gcc $v at /opt/gcc-15.3 (from ${REPO}@${TAG})"
+        case "$v" in 15.3*|15.[4-9]*|1[6-9].*) ;; *) echo "::error::/opt/gcc-15.3 reports $v (<15.3 — PR124309 not fixed)"; exit 1 ;; esac

@@ -1,0 +1,156 @@
+# build-gcc-toolchain.yml — build gcc from source and publish it as a PUBLIC release on this
+# repo, so every CodeRoast repo's CI (public AND private) provisions the SAME compiler the dev
+# profile uses (malf/profiles/linux-gcc15-release → /opt/gcc-15.3), with no token and no
+# dependency on any private repo.
+#
+# WHY gcc-15.3: gcc <15.3 mis-records linemaps for a partitioned api module that imports a
+# cross-package module (PR124309) → "Bad import dependency"; blocks insight_diff +
+# coderoast.server.core. The fix is gcc 15.3, not a code restructure.
+#
+# GPLv3 COMPLIANCE: GCC is GPLv3. This workflow publishes the binary publicly, so it also
+# publishes the **Corresponding Source** in the same release — the pristine, UNMODIFIED
+# gcc-<ver>.tar.xz from ftp.gnu.org (sha-pinned below) — and the exact build recipe IS this
+# file (the configure invocation). Together they satisfy GPLv3 §6(d). We do not patch gcc.
+#
+# Re-run ONLY on a gcc bump (new gcc_version). Build ≈ 2 h (3-stage bootstrap); consumers
+# pull the release asset in ≈ 1-2 min via .github/actions/setup-gcc153.
+name: Build gcc toolchain (→ public release)
+
+on:
+  workflow_dispatch:
+    inputs:
+      gcc_version:
+        description: 'GCC version to build (must be ≥15.3 — the PR124309 fix)'
+        required: true
+        default: '15.3.0'
+
+permissions:
+  contents: write   # gh release create/upload on this repo
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-24.04   # noble — the same image consumer CI runs on (glibc parity)
+    timeout-minutes: 240
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Validate version (refuse <15.3 — would re-introduce PR124309)
+        run: |
+          set -euo pipefail
+          V='${{ inputs.gcc_version }}'
+          if ! printf '%s\n' "$V" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::gcc_version must be MAJOR.MINOR.PATCH (got '$V')"; exit 1; fi
+          maj=${V%%.*}; rest=${V#*.}; min=${rest%%.*}
+          if [ "$maj" -lt 15 ] || { [ "$maj" -eq 15 ] && [ "$min" -lt 3 ]; }; then
+            echo "::error::gcc $V < 15.3 still has PR124309 — refusing to publish"; exit 1; fi
+          {
+            echo "GCC_VERSION=$V"
+            echo "PREFIX=/opt/gcc-${maj}.${min}"
+            echo "TAG=gcc-${V}"                  # release tag, e.g. gcc-15.3.0
+            echo "ASSET=gcc-${V%.*}-noble-x64.tar.zst"  # e.g. gcc-15.3-noble-x64.tar.zst
+          } >> "$GITHUB_ENV"
+
+      - name: Install build prerequisites
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential flex bison zstd curl
+
+      - name: Fetch + verify gcc source (the GPLv3 Corresponding Source)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          # Pinned source hashes (sha256, over authenticated TLS from ftp.gnu.org).
+          # A version with no pin here is refused — never build/publish an unverified compiler.
+          declare -A GCC_SHA256=(
+            [15.3.0]=fa59c1beef8995f27c4d71c1df227587189315d3e6faff1bb4306e61b0c530eb
+          )
+          want="${GCC_SHA256[$GCC_VERSION]:-}"
+          if [ -z "$want" ]; then
+            echo "::error::no pinned sha256 for gcc $GCC_VERSION — add it to GCC_SHA256 before building"; exit 1; fi
+          curl -fsSL "https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz" -o "gcc-${GCC_VERSION}.tar.xz"
+          echo "${want}  gcc-${GCC_VERSION}.tar.xz" | sha256sum -c -
+          sha256sum "gcc-${GCC_VERSION}.tar.xz" | tee "gcc-${GCC_VERSION}.tar.xz.sha256"
+
+      - name: Build gcc ${{ env.GCC_VERSION }} from source (3-stage bootstrap)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          tar xf "gcc-${GCC_VERSION}.tar.xz"
+          cd "gcc-${GCC_VERSION}"
+          ./contrib/download_prerequisites
+          cd ..
+          mkdir build && cd build
+          # Configure MIRRORS the dev compiler exactly (g++ -v on /opt/gcc-15.3); UNMODIFIED gcc.
+          "../gcc-${GCC_VERSION}/configure" \
+            --prefix="$PREFIX" \
+            --enable-languages=c,c++ \
+            --disable-multilib \
+            --enable-bootstrap \
+            --with-pkgversion="coderoast gcc-${GCC_VERSION} (PR124309 fix)"
+          make -j"$(nproc)"
+          sudo make install
+
+      - name: Verify the built compiler (version + PR124309 partition repro)
+        run: |
+          set -euo pipefail
+          "$PREFIX/bin/g++" --version | head -1
+          test "$("$PREFIX/bin/g++" -dumpversion)" = "$GCC_VERSION" \
+            || { echo "::error::built g++ is not $GCC_VERSION"; exit 1; }
+          # Minimal PR124309 repro: a partition that imports a "cross-package" module,
+          # re-exported by an aggregator, then consumed. gcc <15.3 dies with
+          # "Bad import dependency"; 15.3 compiles it. The gate's positive control.
+          d="$RUNNER_TEMP/pr124309"; mkdir -p "$d"; cd "$d"
+          printf 'export module ext;\nexport int ext_v() { return 1; }\n' > ext.cppm
+          printf 'export module pkg:part;\nimport ext;\nexport inline int part_v() { return ext_v(); }\n' > part.cppm
+          printf 'export module pkg;\nexport import :part;\n' > pkg.cppm
+          printf 'import pkg;\nint main() { return part_v() - 1; }\n' > main.cpp
+          GXX="$PREFIX/bin/g++"; FL=(-std=gnu++23 -fmodules-ts -c)
+          "$GXX" "${FL[@]}" -x c++ ext.cppm  -o ext.o
+          "$GXX" "${FL[@]}" -x c++ part.cppm -o part.o
+          "$GXX" "${FL[@]}" -x c++ pkg.cppm  -o pkg.o
+          "$GXX" -std=gnu++23 -fmodules-ts main.cpp ext.o part.o pkg.o -o repro
+          ./repro && echo "PR124309 partition repro: PASS (compiler reads the partition BMI)"
+
+      - name: Package the toolchain (tar.zst) + checksum
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          tar -C /opt -I 'zstd -19 -T0' -cf "$ASSET" "$(basename "$PREFIX")"
+          sha256sum "$ASSET" | tee "$ASSET.sha256"
+
+      - name: Publish PUBLIC release (binary + Corresponding Source + checksums; immutable per version)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          SRC="gcc-${GCC_VERSION}.tar.xz"
+          # GPLv3 §6 notice + source pointer, shipped IN the release.
+          cat > RELEASE_NOTES.md <<EOF
+          # gcc ${GCC_VERSION} — CodeRoast build toolchain (Linux x86_64, noble)
+
+          Vanilla **GNU GCC ${GCC_VERSION}**, built UNMODIFIED from source for CodeRoast CI
+          (the PR124309 fix; the dev profile pins this exact compiler at /opt/gcc-15.3).
+
+          ## License — GPLv3
+          GCC is licensed under the GNU GPL v3. This is a binary redistribution, so the
+          **Corresponding Source** is provided here per GPLv3 §6:
+          - \`${SRC}\` — the pristine, unmodified upstream source (sha256 verified against
+            ftp.gnu.org: see \`${SRC}.sha256\`).
+          - The exact build recipe (configure flags) is \`.github/workflows/build-gcc-toolchain.yml\`
+            in this repo. We apply no patches.
+
+          Provision it in CI via \`CodeRoasted/malf-toolchain/.github/actions/setup-gcc153@main\`.
+          EOF
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            if gh release view "$TAG" --json assets -q '.assets[].name' | grep -qx "$ASSET"; then
+              echo "::error::$ASSET already published on '$TAG' — a published compiler is immutable. Bump the version."; exit 1
+            fi
+          else
+            gh release create "$TAG" --title "gcc ${GCC_VERSION}" --notes-file RELEASE_NOTES.md --latest=false
+          fi
+          gh release upload "$TAG" "$ASSET" "$ASSET.sha256" "$SRC" "$SRC.sha256"
+          {
+            echo "## gcc ${GCC_VERSION} published → release \`$TAG\`"
+            echo "- binary: \`$ASSET\` ($(du -h "$ASSET" | cut -f1)) · sha \`$(cut -d' ' -f1 "$ASSET.sha256")\`"
+            echo "- source: \`$SRC\` ($(du -h "$SRC" | cut -f1)) — GPLv3 Corresponding Source"
+          } >> "$GITHUB_STEP_SUMMARY"
