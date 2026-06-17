@@ -1,0 +1,69 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║ PARKED — DO NOT USE for the modules build (2026-06-06). gcc-16.1.0 ICEs        ║
+# ║ (segfault in build_special_member_call) on the LogCraft 1.5.1 module-attached  ║
+# ║ engine classes' member-init — a released-version regression (gcc-15.2 clean,   ║
+# ║ clang-21 clean). Filed upstream: GCC Bugzilla #<PENDING — see                  ║
+# ║ logcraft/technical_docs/gcc16_ice_repro/UPSTREAM_BUG_REPORT.md>. SHIP/CI STAYS  ║
+# ║ gcc-15. The profile is correct + kept (it builds non-dense TUs + the std        ║
+# ║ module fine) so the leg comes back the day GCC fixes the ICE — re-verify then.  ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+#
+# linux-gcc16-release — gcc-16.1.0 (STABLE) + libstdc++-16 + Release. The import-std
+# libstdc++ leg.
+#
+# SOURCE: built from the GNU RELEASE tarball (gcc-16.1.0.tar.xz), NOT the
+# ubuntu-toolchain-r/test PPA — that PPA only ships a 16.0.x TRUNK SNAPSHOT
+# (16.0.1 experimental), unsuitable for a determinism leg (moving target). The
+# stable 16.1.0 is built once to a user prefix (no sudo):
+#     mkdir -p ~/toolchains/src && cd ~/toolchains/src
+#     wget https://ftp.gnu.org/gnu/gcc/gcc-16.1.0/gcc-16.1.0.tar.xz
+#     tar xf gcc-16.1.0.tar.xz && cd gcc-16.1.0 && ./contrib/download_prerequisites
+#     cd .. && mkdir build && cd build
+#     ../gcc-16.1.0/configure --prefix=$HOME/toolchains/gcc-16.1 \
+#         --enable-languages=c,c++ --disable-multilib --disable-bootstrap \
+#         --program-suffix=-16.1 MAKEINFO=missing
+#     make -j$(nproc) && make install
+# (release tarballs ship pre-generated lexers → no flex/bison/makeinfo/sudo).
+#
+# WHY: gcc-16's libstdc++ ships a complete std/std.compat module
+# (libstdc++.modules.json → std.cc that CMake's CXX_MODULE_STD ON compiles) — the
+# GNU counterpart to linux-clang21-libcxx-release (libc++'s std.cppm) for `import
+# std`. gcc-15 stays the ship/CI + determinism-reference leg.
+#
+# Flags MIRROR gcc-15 / clang-21 (-O3 -march=x86-64-v2, gnu23) so it stays
+# byte-comparable on the cross-stdlib determinism diagonal. Auto-keys to
+# 'gcc16-release' (own conan cache + build-gcc16-release/ tree) via the generic
+# linux-* arm. Toolchain-only: NOT wired into CI/determinism gates yet.
+[settings]
+arch=x86_64
+build_type=Release
+compiler=gcc
+compiler.version=16
+compiler.cppstd=gnu23
+compiler.libcxx=libstdc++11
+os=Linux
+
+[buildenv]
+# Full path to the user-prefix from-source 16.1.0 (it is NOT on PATH; the apt
+# g++-16 is the rejected snapshot). Mirrors how gcc-15 pins CC=gcc-15/CXX=g++-15.
+CC=/home/windows/toolchains/gcc-16.1/bin/gcc-16.1
+CXX=/home/windows/toolchains/gcc-16.1/bin/g++-16.1
+
+[conf]
+# -O3 -march=x86-64-v2: identical to the gcc-15 / clang legs so the determinism
+# diagonal is flag-comparable. The rpath bakes the from-source libstdc++.so.6
+# (lib64) into every binary so tests RUN without LD_LIBRARY_PATH (the user-prefix
+# gcc's runtime is not on the system loader path).
+tools.build:cflags=["-O3", "-march=x86-64-v2"]
+tools.build:cxxflags=["-O3", "-march=x86-64-v2"]
+tools.build:exelinkflags=["-Wl,-rpath,/home/windows/toolchains/gcc-16.1/lib64"]
+tools.build:sharedlinkflags=["-Wl,-rpath,/home/windows/toolchains/gcc-16.1/lib64"]
+# CMAKE_C/CXX_COMPILER for conan's CMakeToolchain. [buildenv] CC/CXX alone do NOT set these — without
+# this conf conan defaults CMAKE_CXX_COMPILER to /usr/bin/g++-16 (the rejected apt 16.0.1 snapshot,
+# absent anyway), so the from-source 16.1.0 must be named explicitly here too.
+tools.build:compiler_executables={"c": "/home/windows/toolchains/gcc-16.1/bin/gcc-16.1", "cpp": "/home/windows/toolchains/gcc-16.1/bin/g++-16.1"}
+# Editable build-dir keying ([[malf-build-type-isolation]]): the profile carries the keyed
+# build dir so a RAW `conan create --profile <this>` (no malf env) resolves an editable dep's
+# matching-profile build tree — closing the cross-stdlib editable .a contamination. malf still
+# sets MALF_EDITABLE_BUILD_DIR (takes precedence; covers sanitizer profiles).
+user.malf:editable_build_dir=build-gcc16-release

@@ -1,0 +1,26 @@
+# clang-21 + libstdc++ + Release — the determinism cross-compiler leg (vs gcc15-release) and
+# the future ship toolchain (concepts/modules). Flags MIRROR linux-gcc15-release so the
+# determinism gate proves clang-21 ≡ gcc-15 bit-identity (det_math is integer/no-libm/
+# -ffp-contract-invariant by design, so the serialized document must match across both).
+# Requires clang-21 (apt.llvm.org).
+[settings]
+arch=x86_64
+build_type=Release
+compiler=clang
+compiler.version=21
+compiler.cppstd=gnu23
+compiler.libcxx=libstdc++11
+os=Linux
+
+[buildenv]
+CC=clang-21
+CXX=clang++-21
+
+[conf]
+tools.build:cflags=["-O3", "-march=x86-64-v2"]
+tools.build:cxxflags=["-O3", "-march=x86-64-v2"]
+# Editable build-dir keying ([[malf-build-type-isolation]]): the profile carries the keyed
+# build dir so a RAW `conan create --profile <this>` (no malf env) resolves an editable dep's
+# matching-profile build tree — closing the cross-stdlib editable .a contamination. malf still
+# sets MALF_EDITABLE_BUILD_DIR (takes precedence; covers sanitizer profiles).
+user.malf:editable_build_dir=build-clang21-release

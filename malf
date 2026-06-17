@@ -1,0 +1,1593 @@
+#!/usr/bin/env bash
+# malf — unified build system for coderoast C++ projects
+#
+# Usage:
+#   malf build   [subdir] [--debug|--release|--asan|--profile <name>]
+#   malf test    [subdir] [--debug|--release] [--filter PATTERN]
+#   malf lint    [--all-files] [-c|--console]
+#   malf format  [--check]
+#   malf commands|compile-commands
+#   malf bench   [subdir] [--quick] [--filter REGEX] [--compare] [--repetitions N]
+#   malf clean   [build|conan|editables|all]
+#   malf bump    X.Y.Z
+#   malf run     <exe-name>
+#   malf editables [list|sync]
+#
+# Workspace Dependencies:
+#   Workspace packages are automatically registered as Conan editables and
+#   built in dependency order. This keeps local builds fast and incremental.
+#   CMakeDeps resolves concrete library files from each dependency's build/
+#   directory, and header paths from each package's api/ directory.
+#   
+# Run from any directory that contains a conanfile.py (or a parent of
+# subdirs that contain one).
+
+set -euo pipefail
+
+MALF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CWD="$(pwd)"
+MALF_WORKSPACE_ROOT="${MALF_WORKSPACE_ROOT:-$(cd "$MALF_DIR/.." && pwd)}"
+# The dev-default toolchain (founder 2026-06-04, the clang→libc++ flip). Single
+# source of truth — the profile fallback, the cache-key arm, and the build-dir
+# naming below all derive from it.
+MALF_DEFAULT_PROFILE="linux-clang21-libcxx-release"
+MALF_AUTO_WORKSPACE_DEPS="${MALF_AUTO_WORKSPACE_DEPS:-1}"
+
+# ─── Cache resolution ────────────────────────────────────────────────────────
+# Local cache: workspace-shared .conan2 by default so sibling repos reuse the
+# same internal and third-party packages. Override with CONAN_HOME when you
+# explicitly need an isolated cache.
+export CONAN_HOME="${CONAN_HOME:-$MALF_WORKSPACE_ROOT/.conan2}"
+# Build-type isolation: CONAN_HOME is the BASE cache. Per-build-type builds get a keyed SUBDIR
+# under it (_malf_use_keyed_cache, after the profile is resolved) so a sanitizer build's
+# instrumented deps can never be served to a non-instrumented link — even when CI pins
+# CONAN_HOME=$WORKSPACE/.conan2 (conan's package_id ignores the sanitizer cflags, so isolation
+# must be by cache PATH, not package_id). The base stays the default-release cache.
+MALF_CONAN_HOME_BASE="$CONAN_HOME"
+
+# ─── Profile resolution ──────────────────────────────────────────────────────
+# 1) CONAN_HOME/profiles/, 2) malf dir, 3) per-repo dir (if in a subdirectory)
+_malf_profile_path() {
+    # Resolve a conan profile by name to a path in the conan cache (conan create finds
+    # profiles there by name). Source of truth, in order: the registry malf/profiles/,
+    # a flat malf/ profile, then a per-repo profile. When a source exists we COPY it into
+    # the cache EVERY time (overwrite) so a profile EDIT always propagates — the prior
+    # "cache wins" shortcut silently served a stale copy after an edit (a real footgun).
+    local name="${MALF_PROFILE_NAME:-$MALF_DEFAULT_PROFILE}"
+    local cache_p="$CONAN_HOME/profiles/$name"
+    local src
+    for src in "$MALF_DIR/profiles/$name" "$MALF_DIR/$name"; do
+        if [[ -f "$src" ]]; then
+            mkdir -p "$CONAN_HOME/profiles"; cp -f "$src" "$cache_p"; echo "$cache_p"; return
+        fi
+    done
+    local repo_p
+    while IFS= read -r repo_p; do
+        if [[ -f "$repo_p/$name" ]]; then
+            mkdir -p "$CONAN_HOME/profiles"; cp -f "$repo_p/$name" "$cache_p"; echo "$cache_p"; return
+        fi
+    done < <(find "$MALF_WORKSPACE_ROOT" -maxdepth 1 -type d ! -name '.*' ! -path "$MALF_WORKSPACE_ROOT")
+    # No in-tree source: fall back to a pre-existing cache profile (e.g. conan-detected).
+    [[ -f "$cache_p" ]] && { echo "$cache_p"; return; }
+    echo "malf: error: Conan profile '$name' not found in $MALF_DIR/profiles/, $MALF_DIR/, any repo dir, or $CONAN_HOME/profiles/" >&2
+    exit 1
+}
+
+# Select a build profile by name (the registry: malf/profiles/<name>). Derives the build
+# type FROM the profile so the cmake preset matches, and — for a sanitizer profile — points
+# the BUILD context at a clean profile so build tools (m4/autoconf/cmake) are never
+# instrumented (an ASan/MSan-built m4 breaks libcurl/autotools autoreconf).
+_malf_apply_profile() {
+    MALF_PROFILE_NAME="$1"
+    MALF_PROFILE="$(_malf_profile_path)" || exit 1
+    local bt
+    bt="$(sed -nE 's/^[[:space:]]*build_type[[:space:]]*=[[:space:]]*([A-Za-z]+).*/\1/p' "$MALF_PROFILE" | head -n1)"
+    [[ -n "$bt" ]] && MALF_CONFIG="$bt"
+    # Match the actual conf FLAG lines (tools.build:...-fsanitize=...), not a comment that
+    # merely mentions -fsanitize (e.g. the libc++ profile's "NOT a sanitizer profile" note).
+    if grep -qE '^[[:space:]]*tools\.build:.*-fsanitize=' "$MALF_PROFILE"; then
+        MALF_BUILD_PROFILE="$(MALF_PROFILE_NAME="${MALF_CLEAN_BUILD_PROFILE:-linux-gcc15-release}" _malf_profile_path)"
+    else
+        MALF_BUILD_PROFILE="$MALF_PROFILE"
+    fi
+    # Export the profile-named editable subdir so recipe layouts resolve a dep's
+    # lib from its OWN profile's build dir (matches _malf_editable_build_dir).
+    # ALWAYS named — the default leg included (build-clang21-libcxx-release).
+    export MALF_EDITABLE_BUILD_DIR="build-$(_malf_build_key)"
+}
+
+# ─── Build-type isolation ([[malf-build-type-isolation]]) ─────────────────────
+# CONAN-CACHE isolation key from the active profile. The dev default -> "" so the
+# shared base cache (.conan2) is reused; any other profile (gcc-15 ship /
+# clang-libstdc++ / sanitizer / msan) -> a distinct key, so its conan packages can
+# never collide with the base (an ASan-built libz.a reaching a release link, or a
+# libstdc++ .a reaching a libc++ link).
+#
+# NOTE: this keys the CACHE only. BUILD TREES are named by _malf_build_key below,
+# which names EVERY leg — the default included (build-clang21-libcxx-release/) —
+# so an unnamed build/ can never be mistaken for "whichever toolchain built last".
+_malf_profile_key() {
+    # Dev default is clang-21 + libc++ (devXP/tooling + the cross-stdlib determinism diagonal;
+    # founder 2026-06-04, the clang→libc++ flip) -> IT is the unkeyed base cache.
+    # gcc-15+libstdc++ (ship + the diagonal's reference leg) and clang-21+libstdc++ are explicit
+    # + keyed. Conan coexists the stdlibs by package_id (the -stdlib flag folds into it).
+    case "${MALF_PROFILE_NAME:-$MALF_DEFAULT_PROFILE}" in
+        $MALF_DEFAULT_PROFILE|"") echo "" ;;
+        linux-*)                  echo "${MALF_PROFILE_NAME#linux-}" ;;
+        *)                        echo "$MALF_PROFILE_NAME" ;;
+    esac
+}
+
+# BUILD-TREE name key from the active profile: ALWAYS named, default included.
+# Every leg builds into build-<key>/ (build-clang21-libcxx-release/,
+# build-gcc15-release/, build-clang21-asan/, ...): the tree self-documents its
+# toolchain, and the old asymmetry — the default leg squatting on a bare build/
+# while the gcc leg was named — is gone.
+_malf_build_key() {
+    local name="${MALF_PROFILE_NAME:-$MALF_DEFAULT_PROFILE}"
+    case "$name" in
+        linux-*) echo "${name#linux-}" ;;
+        *)       echo "$name" ;;
+    esac
+}
+
+# The DEFAULT profile's build root under a directory (what .clangd's
+# CompilationDatabase points at, whatever profile the CURRENT command runs).
+_malf_default_build_root() {
+    echo "$1/build-${MALF_DEFAULT_PROFILE#linux-}"
+}
+
+# Point CONAN_HOME at a build-type-keyed SUBDIR of the base, then re-seed global.conf + hooks +
+# re-resolve the profiles into it. No-op for the default profile (key == "") — the load-time base
+# seed stands. Call AFTER the profile is resolved (post arg-parse), BEFORE conan install.
+_malf_use_keyed_cache() {
+    local key; key="$(_malf_profile_key)"
+    [[ -z "$key" ]] && return 0
+    export CONAN_HOME="$MALF_CONAN_HOME_BASE/$key"
+    mkdir -p "$CONAN_HOME/profiles"
+    [[ ! -f "$CONAN_HOME/global.conf" && -f "$MALF_DIR/global.conf" ]] && cp "$MALF_DIR/global.conf" "$CONAN_HOME/global.conf"
+    # re-resolve the host + clean-build-context profiles INTO the keyed cache (paths live under
+    # CONAN_HOME/profiles); preserve any explicit --debug/--release the caller set.
+    local _saved_config="$MALF_CONFIG"
+    _malf_apply_profile "$MALF_PROFILE_NAME"
+    MALF_CONFIG="$_saved_config"
+    _malf_install_workspace_hooks
+}
+MALF_PROFILE="$(_malf_profile_path)"
+MALF_PROFILE_NAME="$(basename "$MALF_PROFILE")"
+# Editable layouts read this env at conan time; the default path never goes through
+# _malf_apply_profile (which re-exports it for --profile runs), so seed it here.
+export MALF_EDITABLE_BUILD_DIR="build-$(_malf_build_key)"
+# Build-context profile (the tools that DO the building — m4, autoconf, cmake). Defaults
+# to the host profile; --asan points it at a NORMAL profile so sanitizer flags never
+# instrument build tools (an ASan-built m4 breaks libcurl/autotools autoreconf).
+MALF_BUILD_PROFILE="${MALF_BUILD_PROFILE:-$MALF_PROFILE}"
+# The profile `--asan` selects (sugar for `--profile $MALF_ASAN_PROFILE`): clang-21 +
+# libstdc++ + ASan/UBSan (libFuzzer via the harness target). Requires clang-21 installed.
+MALF_ASAN_PROFILE="${MALF_ASAN_PROFILE:-linux-clang21-asan}"
+
+# ─── Conan global.conf / hooks ───────────────────────────────────────────────
+# Seed the local cache's global.conf from malf dir if it doesn't exist yet.
+if [[ ! -f "$CONAN_HOME/global.conf" && -f "$MALF_DIR/global.conf" ]]; then
+    mkdir -p "$CONAN_HOME"
+    cp "$MALF_DIR/global.conf" "$CONAN_HOME/global.conf"
+fi
+
+_malf_install_workspace_hooks() {
+    local hooks_dir="$CONAN_HOME/extensions/hooks"
+    mkdir -p "$hooks_dir"
+
+    local source_hook installed_hook
+    while IFS= read -r source_hook; do
+        installed_hook="$hooks_dir/$(basename "$source_hook")"
+        if [[ ! -f "$installed_hook" ]] || ! cmp -s "$source_hook" "$installed_hook"; then
+            cp "$source_hook" "$installed_hook"
+        fi
+    done < <(find "$MALF_WORKSPACE_ROOT" -path '*/scripts/conan_hooks/hook_*.py' | sort)
+}
+
+_malf_install_workspace_hooks
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+_malf_pkg_ref() {
+    local conanfile="$1"
+    python3 -c 'import ast,pathlib,sys
+tree=ast.parse(pathlib.Path(sys.argv[1]).read_text())
+nodes=list(tree.body)+[n for c in tree.body if isinstance(c,ast.ClassDef) for n in c.body]
+get=lambda k:next(n.value.value for n in nodes if isinstance(n,ast.Assign) and any(getattr(t,"id","")==k for t in n.targets))
+print(get("name")+"/"+get("version"))' "$conanfile"
+}
+
+_malf_workspace_dep_entries() {
+    local target="$1"
+    local include_test_requires="${2:-1}"
+    python3 - "$MALF_WORKSPACE_ROOT" "$target" "$include_test_requires" <<'PY'
+import ast
+import pathlib
+import sys
+
+workspace = pathlib.Path(sys.argv[1]).resolve()
+target_dir = pathlib.Path(sys.argv[2]).resolve()
+include_test_requires = sys.argv[3] != "0"
+ignore_parts = {".conan2", ".git", ".venv", "node_modules", "test_package"}
+
+
+def should_skip(path: pathlib.Path) -> bool:
+    # "build" + every profile-named tree (build-gcc15-release, build-clang21-…).
+    return any(part in ignore_parts or part == "build" or part.startswith("build-")
+               for part in path.parts)
+
+
+def recipe_info(conanfile: pathlib.Path):
+    tree = ast.parse(conanfile.read_text(), filename=str(conanfile))
+    nodes = list(tree.body)
+    for item in tree.body:
+        if isinstance(item, ast.ClassDef):
+            nodes.extend(item.body)
+
+    name = None
+    version = None
+    for node in nodes:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not isinstance(node.value, ast.Constant) or not isinstance(node.value.value, str):
+            continue
+        for target in node.targets:
+            if not isinstance(target, ast.Name):
+                continue
+            if target.id == "name":
+                name = node.value.value
+            elif target.id == "version":
+                version = node.value.value
+
+    # Regular requires propagate to consumers; test_requires do not (conan's
+    # `test` trait), so we bucket them separately — the dep walk follows regular
+    # requires transitively but pulls a package's test_requires only for the
+    # build target itself (see visit() below). A test_requires-only editable
+    # (e.g. the playground's insight_diff) is otherwise never rebuilt, so the
+    # integration gate silently links a stale upstream.
+    requires = []
+    test_requires = []
+
+    def add(kind, value):
+        (test_requires if kind == "test_requires" else requires).append(value)
+
+    # 1. Class variable: requires/test_requires = "pkg/1.0" or ["pkg1/1.0", ...]
+    for node in nodes:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not isinstance(target, ast.Name) or target.id not in ("requires", "test_requires"):
+                continue
+            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                add(target.id, node.value.value)
+            elif isinstance(node.value, ast.List):
+                for elt in node.value.elts:
+                    if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                        add(target.id, elt.value)
+
+    # 2. Method calls: self.requires("pkg/1.0") / self.test_requires("pkg/1.0")
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Attribute) or node.func.attr not in ("requires", "test_requires"):
+            continue
+        if not node.args:
+            continue
+        arg = node.args[0]
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            add(node.func.attr, arg.value)
+
+    return name, version, requires, test_requires
+
+
+recipes = {}
+for conanfile in workspace.rglob("conanfile.py"):
+    if should_skip(conanfile):
+        continue
+    name, version, requires, test_requires = recipe_info(conanfile)
+    if not name or not version:
+        continue
+    ref = f"{name}/{version}"
+    recipes[ref] = {
+        "dir": str(conanfile.parent.resolve()),
+        "requires": requires,
+        "test_requires": test_requires,
+    }
+
+target_info = recipe_info(target_dir / "conanfile.py")
+target_ref = f"{target_info[0]}/{target_info[1]}"
+order = []
+seen = set()
+visiting = set()
+
+
+def visit(ref: str, is_target: bool = False):
+    if ref in seen or ref in visiting:
+        return
+    visiting.add(ref)
+    recipe = recipes.get(ref)
+    if recipe:
+        # Follow regular requires transitively. The target's test_requires are
+        # added as extra roots (when enabled) but are NOT transitive — a
+        # dependency's test_requires belong to *its* test build, not ours.
+        deps = list(recipe["requires"])
+        if is_target and include_test_requires:
+            deps += recipe["test_requires"]
+        for dep in deps:
+            if dep in recipes:
+                visit(dep)
+        if ref != target_ref:
+            order.append((ref, recipe["dir"]))
+    visiting.remove(ref)
+    seen.add(ref)
+
+
+visit(target_ref, is_target=True)
+for ref, directory in order:
+    print(f"{ref}\t{directory}")
+PY
+}
+
+_malf_workspace_packages() {
+    # Emit "name/version<TAB>dir" for every workspace recipe, regardless of the
+    # dependency graph. Unlike _malf_workspace_dep_entries (which is scoped to a
+    # single build target's deps), this enumerates the whole workspace — it is
+    # what `editables sync` re-registers so a coordinated version bump propagates
+    # to the editable registry in one pass.
+    python3 - "$MALF_WORKSPACE_ROOT" <<'PY'
+import ast
+import pathlib
+import sys
+
+workspace = pathlib.Path(sys.argv[1]).resolve()
+ignore_parts = {".conan2", ".git", ".venv", "node_modules", "test_package"}
+
+
+def should_skip(path: pathlib.Path) -> bool:
+    # "build" + every profile-named tree (build-gcc15-release, build-clang21-…).
+    return any(part in ignore_parts or part == "build" or part.startswith("build-")
+               for part in path.parts)
+
+
+def recipe_ref(conanfile: pathlib.Path):
+    tree = ast.parse(conanfile.read_text(), filename=str(conanfile))
+    nodes = list(tree.body)
+    for item in tree.body:
+        if isinstance(item, ast.ClassDef):
+            nodes.extend(item.body)
+    name = version = None
+    for node in nodes:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not isinstance(node.value, ast.Constant) or not isinstance(node.value.value, str):
+            continue
+        for target in node.targets:
+            if not isinstance(target, ast.Name):
+                continue
+            if target.id == "name":
+                name = node.value.value
+            elif target.id == "version":
+                version = node.value.value
+    return name, version
+
+
+for conanfile in sorted(workspace.rglob("conanfile.py")):
+    if should_skip(conanfile):
+        continue
+    name, version = recipe_ref(conanfile)
+    if not name or not version:
+        continue
+    print(f"{name}/{version}\t{conanfile.parent.resolve()}")
+PY
+}
+
+_malf_resolve_target() {
+    # Given an optional subdir arg, return the absolute path to the dir
+    # containing a conanfile.py. Errors if none found.
+    local arg="${1:-}"
+    local target
+    if [[ -n "$arg" ]]; then
+        if [[ -d "$CWD/$arg" ]]; then
+            target="$CWD/$arg"
+        elif [[ -d "$arg" ]]; then
+            target="$(cd "$arg" && pwd)"
+        else
+            echo "malf: error: '$arg' is not a directory" >&2; exit 1
+        fi
+    else
+        target="$CWD"
+    fi
+    if [[ ! -f "$target/conanfile.py" ]]; then
+        echo "malf: error: no conanfile.py found in $target" >&2; exit 1
+    fi
+    echo "$target"
+}
+
+_malf_build_dir() {
+    local target="$1"
+    # build-<key>/<rel-of-target> under CWD — ALWAYS profile-named (the default leg
+    # included), so an ASan tree never clobbers the release one and a bare build/
+    # can never masquerade as "whichever toolchain built last".
+    local key bdir rel
+    key="$(_malf_build_key)"; bdir="build-$key"
+    rel="$(realpath --relative-to="$CWD" "$target" 2>/dev/null || echo ".")"
+    if [[ "$rel" == "." ]]; then
+        echo "$CWD/$bdir"
+    else
+        echo "$CWD/$bdir/$rel"
+    fi
+}
+
+_malf_preset() {
+    case "${MALF_CONFIG:-Release}" in
+        Debug)   echo "conan-debug" ;;
+        Release) echo "conan-release" ;;
+        *) echo "malf: error: unknown config ${MALF_CONFIG}" >&2; exit 1 ;;
+    esac
+}
+
+_malf_conan_install_args() {
+    local build_type="${MALF_CONFIG:-Release}"
+    echo "--build=missing" \
+         "--profile:host=$MALF_PROFILE" \
+         "--profile:build=$MALF_BUILD_PROFILE" \
+         "-s" "build_type=$build_type"
+}
+
+_malf_editable_add() {
+    local pkg_dir="$1"
+    local pkg_ref name version
+    pkg_ref="$(_malf_pkg_ref "$pkg_dir/conanfile.py")"
+    # Extract name and version from ref (name/version)
+    name="${pkg_ref%/*}"
+    version="${pkg_ref#*/}"
+    # Register this package as an editable pointing to its source directory
+    conan editable add "$pkg_dir" --name="$name" --version="$version" -of "$pkg_dir"
+}
+
+_malf_editables_clear() {
+    # Remove all editables by deleting the Conan editables config file
+    # (Conan doesn't support removing all editables via command line)
+    rm -f "$CONAN_HOME/editable_packages.json"
+}
+
+_malf_editable_build_dir() {
+    # Build-type-keyed (2026-06-04 editable-isolation pass): editables build into <pkg>/build[-<key>],
+    # MATCHING the recipe layout `cpp.build.libdirs = [os.environ.get("MALF_EDITABLE_BUILD_DIR","build")]`
+    # (exported by _malf_apply_profile). So a keyed-profile consumer (gcc-15 / clang-21-libc++ / asan)
+    # links the dep's OWN keyed build — no cross-stdlib/-compiler ABI mismatch. (The clang-21/libc++ leg
+    # surfaced the old bug: a libc++ TU linking a libstdc++ editable .a — `__1` vs `__cxx11` mangling.)
+    # ALWAYS profile-named now (default -> <pkg>/build-clang21-libcxx-release); a raw
+    # `conan create --profile X` (env unset) reads the same name from the profile's
+    # user.malf:editable_build_dir conf; the recipes' bare-"build" fallback is the
+    # no-profile-conf last resort only. [[malf-build-type-isolation]] — this is the
+    # "reviewed conanfile-layout pass".
+    local pkg_dir="$1"
+    echo "$pkg_dir/${MALF_EDITABLE_BUILD_DIR:-build}"
+}
+
+_malf_cmake_feature_args() {
+    local target="$1"
+    local tests="$2"
+    local benches="$3"
+    local cmakelists="$target/CMakeLists.txt"
+    [[ -f "$cmakelists" ]] || return 0
+    python3 - "$cmakelists" "$tests" "$benches" <<'PY'
+import pathlib
+import re
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text()
+tests = sys.argv[2]
+benches = sys.argv[3]
+for name in re.findall(r"option\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)", text):
+    if "BUILD_TESTS" in name:
+        print(f"-D{name}={tests}")
+    elif "BUILD_BENCH" in name:
+        print(f"-D{name}={benches}")
+PY
+}
+
+_malf_dependency_cmake_args() {
+    _malf_cmake_feature_args "$1" OFF OFF
+}
+
+_malf_build_editable_package() {
+    local pkg_dir="$1"
+    local build_dir pkg_ref user_presets_backup
+    pkg_ref="$(_malf_pkg_ref "$pkg_dir/conanfile.py")"
+    build_dir="$(_malf_editable_build_dir "$pkg_dir")"
+    mkdir -p "$build_dir"
+
+    echo "malf: building editable $pkg_ref in $build_dir"
+
+    user_presets_backup="$(_malf_backup_user_presets "$pkg_dir")"
+
+    # shellcheck disable=SC2046
+    if ! conan install "$pkg_dir" \
+        --output-folder="$build_dir" \
+        $(_malf_conan_install_args); then
+        _malf_restore_user_presets "$pkg_dir" "$user_presets_backup"
+        return 1
+    fi
+
+    _malf_write_user_presets "$pkg_dir" "$build_dir"
+
+    local cmake_args=()
+    mapfile -t cmake_args < <(_malf_dependency_cmake_args "$pkg_dir")
+    if ! _malf_configure_and_build "$pkg_dir" "$build_dir" "${cmake_args[@]}"; then
+        _malf_restore_user_presets "$pkg_dir" "$user_presets_backup"
+        return 1
+    fi
+
+    _malf_restore_user_presets "$pkg_dir" "$user_presets_backup"
+}
+
+_malf_bootstrap_workspace_deps() {
+    local target="$1"
+    # 1 (default) includes the target's test_requires editables in the rebuild
+    # set; cmd_build passes 0 since a non-test build never links them.
+    local include_test_requires="${2:-1}"
+
+    if [[ "$MALF_AUTO_WORKSPACE_DEPS" == "0" ]]; then
+        return 0
+    fi
+
+    local entries=()
+    mapfile -t entries < <(_malf_workspace_dep_entries "$target" "$include_test_requires")
+    if [[ ${#entries[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    local entry ref dep_dir
+
+    echo "malf: registering local workspace dependencies as editables from $MALF_WORKSPACE_ROOT"
+    for entry in "${entries[@]}"; do
+        IFS=$'\t' read -r ref dep_dir <<< "$entry"
+        [[ -n "$ref" && -n "$dep_dir" ]] || continue
+        _malf_editable_add "$dep_dir"
+    done
+
+    for entry in "${entries[@]}"; do
+        IFS=$'\t' read -r ref dep_dir <<< "$entry"
+        [[ -n "$ref" && -n "$dep_dir" ]] || continue
+        _malf_build_editable_package "$dep_dir"
+    done
+}
+
+_malf_write_user_presets() {
+    local target="$1"
+    local build_dir="$2"
+    local rel_build
+    rel_build="$(realpath --relative-to="$target" "$build_dir" 2>/dev/null || echo "build")"
+    cat > "$target/CMakeUserPresets.json" <<JSON
+{
+    "version": 4,
+    "vendor": {
+        "conan": {}
+    },
+    "include": [
+        "$rel_build/CMakePresets.json"
+    ]
+}
+JSON
+}
+
+_malf_backup_user_presets() {
+    local target="$1"
+    local user_presets="$target/CMakeUserPresets.json"
+    if [[ -f "$user_presets" ]]; then
+        local backup
+        backup="$(mktemp -t CMakeUserPresets.XXXXXX.json)"
+        cp "$user_presets" "$backup"
+        echo "$backup"
+        return
+    fi
+    echo ""
+}
+
+_malf_restore_user_presets() {
+    local target="$1"
+    local backup="${2:-}"
+    local user_presets="$target/CMakeUserPresets.json"
+    if [[ -n "$backup" && -f "$backup" ]]; then
+        cp "$backup" "$user_presets"
+        rm -f "$backup"
+    else
+        rm -f "$user_presets"
+    fi
+}
+
+_malf_configure_and_build() {
+    local target="$1"
+    local build_dir="$2"
+    shift 2
+    local preset
+    preset="$(_malf_preset)"
+    cmake --preset "$preset" -S "$target" -B "$build_dir" \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+        "$@"
+    cmake --build "$build_dir" -j"$(nproc)"
+}
+
+_malf_merge_compile_commands() {
+    # Fold the just-built package's compile_commands.json into the root DB that
+    # .clangd reads (CompilationDatabase: build-clang21-libcxx-release — the DEFAULT
+    # leg's named build root; .clangd is static, so it tracks the dev default).
+    # This keeps the editor's index in step with the incremental build WITHOUT the
+    # full `malf commands` workspace walk: one file merge, no reconfigure. Entries
+    # are keyed by source file — the freshly built package's entries replace any
+    # stale entry for the same file, while entries contributed by *other* packages
+    # already in the root DB are preserved (multi-package repos).
+    local build_dir="$1"
+    local root_db="$(_malf_default_build_root "$CWD")/compile_commands.json"
+    local pkg_db="$build_dir/compile_commands.json"
+    # Building the repo root itself: cmake already wrote the root DB in place.
+    [[ "$(realpath -m "$pkg_db")" == "$(realpath -m "$root_db")" ]] && return 0
+    [[ -f "$pkg_db" ]] || return 0
+    python3 - "$pkg_db" "$root_db" <<'PY'
+import json, sys
+from pathlib import Path
+
+pkg_db = Path(sys.argv[1])
+root_db = Path(sys.argv[2])
+
+try:
+    pkg_entries = json.loads(pkg_db.read_text())
+except Exception as exc:  # malformed/partial DB: leave the root untouched
+    raise SystemExit(f"malf: skipping compile_commands merge ({pkg_db}: {exc})")
+
+root_entries = []
+if root_db.exists():
+    try:
+        root_entries = json.loads(root_db.read_text())
+    except Exception:
+        root_entries = []  # stale/corrupt root DB is rebuilt from this package
+
+# Files just rebuilt take precedence: drop their prior root entries, then append.
+rebuilt = {e.get("file") for e in pkg_entries}
+merged = [e for e in root_entries if e.get("file") not in rebuilt]
+merged.extend(pkg_entries)
+
+root_db.parent.mkdir(parents=True, exist_ok=True)
+root_db.write_text(json.dumps(merged, indent=2) + "\n")
+print(f"malf: refreshed {root_db} for clangd "
+      f"({len(merged)} entries, {len(pkg_entries)} from this build)")
+PY
+}
+
+# ─── Commands ────────────────────────────────────────────────────────────────
+
+cmd_build() {
+    local subdir=""
+    local user_presets_backup=""
+    MALF_CONFIG="Debug"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --debug)   MALF_CONFIG="Debug" ;;
+            --release) MALF_CONFIG="Release" ;;
+            # Select any registry profile (malf/profiles/<name>): build type + clean
+            # build-context for sanitizers are derived from the profile.
+            --profile) shift; _malf_apply_profile "$1" ;;
+            # Sugar: ASan/UBSan(+libFuzzer-via-target) gate profile (canon→eidos parse path).
+            --asan)    _malf_apply_profile "$MALF_ASAN_PROFILE" ;;
+            *) subdir="$1" ;;
+        esac
+        shift
+    done
+
+    _malf_use_keyed_cache
+
+    local target build_dir
+    target="$(_malf_resolve_target "$subdir")"
+    build_dir="$(_malf_build_dir "$target")"
+    mkdir -p "$build_dir"
+
+    echo "=== malf build: $target ($MALF_CONFIG${MALF_PROFILE_NAME:+, $MALF_PROFILE_NAME}) ==="
+
+    _malf_bootstrap_workspace_deps "$target" 0
+
+    user_presets_backup="$(_malf_backup_user_presets "$target")"
+    trap '_malf_restore_user_presets "$target" "$user_presets_backup"' RETURN
+
+    # shellcheck disable=SC2046
+    conan install "$target" \
+        --output-folder="$build_dir" \
+        $(_malf_conan_install_args)
+
+    # Conan writes CMakeUserPresets.json to the source dir with multiple includes,
+    # causing "Duplicate preset" errors. Rewrite it to include only the local build dir.
+    _malf_write_user_presets "$target" "$build_dir"
+
+    local cmake_args=()
+    mapfile -t cmake_args < <(_malf_cmake_feature_args "$target" OFF OFF)
+    _malf_configure_and_build "$target" "$build_dir" "${cmake_args[@]}"
+    trap - RETURN
+    [[ -n "$user_presets_backup" ]] && rm -f "$user_presets_backup"
+
+    _malf_merge_compile_commands "$build_dir"
+
+    echo "=== done: $build_dir ==="
+}
+
+cmd_test() {
+    local subdir=""
+    local user_presets_backup=""
+    local gtest_filter=""
+    local verbose=false
+    MALF_CONFIG="Debug"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --debug)   MALF_CONFIG="Debug" ;;
+            --release) MALF_CONFIG="Release" ;;
+            --profile) shift; _malf_apply_profile "$1" ;;
+            --asan)    _malf_apply_profile "$MALF_ASAN_PROFILE" ;;
+            --verbose) verbose=true ;;
+            --filter)
+                shift
+                [[ $# -gt 0 ]] || { echo "malf test: --filter requires a pattern" >&2; exit 1; }
+                gtest_filter="$1"
+                ;;
+            *) subdir="$1" ;;
+        esac
+        shift
+    done
+
+    _malf_use_keyed_cache
+
+    local target build_dir
+    target="$(_malf_resolve_target "$subdir")"
+    build_dir="$(_malf_build_dir "$target")"
+
+    # End-to-end packages whose tests rely on optimized producer code paths
+    # cannot meaningfully run under -O0/Debug (throughput drops 10–30x and
+    # the in-test drain watchdog times out before the scenario completes).
+    # Force such packages to Release so `malf test` produces meaningful
+    # results regardless of MALF_CONFIG.
+    local target_basename
+    target_basename="$(basename "$target")"
+    case "$target_basename" in
+        insight-playground)
+            if [[ "$MALF_CONFIG" != "Release" ]]; then
+                echo "malf test: $target_basename requires Release (e2e throughput-sensitive); overriding MALF_CONFIG=$MALF_CONFIG -> Release" >&2
+                MALF_CONFIG="Release"
+                build_dir="$(_malf_build_dir "$target")"
+            fi
+            ;;
+    esac
+
+    echo "=== malf test: $target ($MALF_CONFIG) ==="
+
+    _malf_bootstrap_workspace_deps "$target"
+
+    user_presets_backup="$(_malf_backup_user_presets "$target")"
+    trap '_malf_restore_user_presets "$target" "$user_presets_backup"' RETURN
+
+    # shellcheck disable=SC2046
+    conan install "$target" \
+        --output-folder="$build_dir" \
+        $(_malf_conan_install_args)
+
+    # Conan writes CMakeUserPresets.json to the source dir with multiple includes,
+    # causing "Duplicate preset" errors. Rewrite it to include only the local build dir.
+    _malf_write_user_presets "$target" "$build_dir"
+
+    local cmake_args=()
+    mapfile -t cmake_args < <(_malf_cmake_feature_args "$target" ON OFF)
+    _malf_configure_and_build "$target" "$build_dir" "${cmake_args[@]}"
+    trap - RETURN
+    [[ -n "$user_presets_backup" ]] && rm -f "$user_presets_backup"
+
+    _malf_merge_compile_commands "$build_dir"
+
+    local ctest_args=(--test-dir "$build_dir" --output-on-failure)
+    $verbose && ctest_args+=(--verbose)
+    [[ -n "$gtest_filter" ]] && ctest_args+=(-R "$gtest_filter")
+    ctest "${ctest_args[@]}"
+}
+
+cmd_lint() {
+    local console=false all_files=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -c|--console)   console=true ;;
+            --all-files)    all_files=true ;;
+            *) echo "malf lint: unknown option $1" >&2; exit 1 ;;
+        esac
+        shift
+    done
+
+    # clang-tidy config: prefer CWD, fall back to the canonical config in this repo (config/)
+    local tidy_config=""
+    if [[ -f "$CWD/.clang-tidy" ]]; then
+        tidy_config="$CWD/.clang-tidy"
+    elif [[ -f "$MALF_DIR/config/.clang-tidy" ]]; then
+        tidy_config="$MALF_DIR/config/.clang-tidy"
+    fi
+
+    # compile_commands.json: prefer CWD/compile_commands.json, then the default
+    # leg's named build root (where _malf_merge_compile_commands maintains the DB).
+    local comp_db=""
+    if [[ -f "$CWD/compile_commands.json" ]]; then
+        comp_db="$CWD"
+    elif [[ -f "$(_malf_default_build_root "$CWD")/compile_commands.json" ]]; then
+        comp_db="$(_malf_default_build_root "$CWD")"
+    fi
+
+    if [[ -z "$comp_db" ]]; then
+        echo "malf lint: warning: no compile_commands.json found; clang-tidy may miss context" >&2
+    fi
+
+    local output_file=""
+    if ! $console; then
+        output_file="$CWD/lint_output.txt"
+        > "$output_file"
+    fi
+
+    # Use the clang-tidy from the SAME install as the build compiler (clang-21).
+    # A C++ module BMI (.pcm) is pinned to the exact clang BUILD that produced it, so a
+    # clang-tidy from a different install — e.g. a 21.1.0 release in /usr/local vs the
+    # apt.llvm.org 21.1.8 snapshot in /usr/lib/llvm-21 — can't read it, and every TU
+    # that imports a module errors out. Deriving clang-tidy from clang-21's resolved
+    # path keeps them in lockstep (and the resource-dir below consistent). Fall back to
+    # PATH if that install ships no clang-tidy, and say so.
+    local clang_bin clang_tidy_bin="" install_tidy="" tidy_matches_build=false
+    clang_bin="$(command -v clang-21 || command -v clang || true)"
+    if [[ -n "$clang_bin" ]]; then
+        install_tidy="$(dirname "$(readlink -f "$clang_bin")")/clang-tidy"
+        # Same install as the build clang → its clang-tidy can read this build's
+        # module BMIs (.pcm), so C++ module files become lintable (see the filter below).
+        [[ -x "$install_tidy" ]] && { clang_tidy_bin="$install_tidy"; tidy_matches_build=true; }
+    fi
+    if [[ -z "$clang_tidy_bin" ]]; then
+        clang_tidy_bin="$(command -v clang-tidy-21 || command -v clang-tidy || true)"
+        [[ -n "$install_tidy" && -n "$clang_tidy_bin" ]] && \
+            echo "malf lint: note: $install_tidy missing; using $clang_tidy_bin (a different clang build — module BMIs won't match it). 'sudo apt install clang-tidy-21' from the same source as clang-21 to align." >&2
+    fi
+    [[ -n "$clang_tidy_bin" ]] || { echo "malf lint: error: clang-tidy not found" >&2; exit 1; }
+
+    # clang-tidy needs clang-21's OWN resource-dir to find its builtin headers
+    # (stddef.h / limits.h via include_next), else a libc++ DB fails to resolve them.
+    # -w mutes compiler warnings so only clang-tidy diagnostics surface.
+    local extra_args=("-extra-arg=-w")
+    if [[ -n "$clang_bin" ]]; then
+        local res_dir
+        res_dir="$($clang_bin -print-resource-dir 2>/dev/null || true)"
+        [[ -n "$res_dir" && -d "$res_dir" ]] && extra_args+=("-extra-arg=-resource-dir=${res_dir}")
+    fi
+
+    [[ -n "$comp_db" ]] && extra_args+=("-p" "$comp_db")
+    [[ -n "$tidy_config" ]] && extra_args+=("--config-file=$tidy_config")
+    # Restrict diagnostic output to files under the project root only.
+    # Without this clang-tidy follows #includes into Conan/system headers
+    # and reports tens of thousands of spurious warnings.
+    # Exclude .conan2/, build/ + the keyed build-*/ dirs, and test_package/ to avoid
+    # linting dependencies and CMake-generated probe TUs (e.g. CMakeCXXCompilerId.cpp).
+    # The `build` token here prefix-matches build-gcc15-release/ etc. too.
+    # tests/ + benchmarks/: their TUs `import <pkg>.test;`/`import <pkg>.bench;` (the
+    # full-surface re-export aggregators); under the -P parallel fan-out below, concurrent
+    # clang-tidy processes deserialising those heavy BMIs race in clang::ASTReader and
+    # SIGSEGV (the upstream module ASTReader bug — finishPendingActions ← addedMember). All
+    # 64 library TUs lint clean (verified 2026-06-11); only the test/bench aggregator-imports
+    # crash, and only in parallel. Excluded here so the gate covers 100% of SHIPPING source;
+    # test/bench keep -Werror + sanitizers. Remove when clang's module ASTReader is fixed.
+    extra_args+=("--header-filter=^${CWD}/(?!\.conan2|build|test_package|technical_docs|.*/tests/|.*/benchmarks/).*")
+
+    # Collect files: git-changed (default) or all
+    local files=()
+    if $all_files; then
+        while IFS= read -r f; do files+=("$f"); done < <(
+            find "$CWD" \( -name "*.cpp" -o -name "*.cc" -o -name "*.cxx" -o -name "*.hpp" -o -name "*.h" -o -name "*.cppm" \) \
+                -not -path "*/build/*" -not -path "*/build-*/*" -not -path "*/.conan2/*" -not -path "*/test_package/*" \
+                -not -path "*/technical_docs/*" -not -path "*/tests/*" -not -path "*/benchmarks/*"
+        )
+    else
+        while IFS= read -r f; do
+            [[ "$f" =~ \.(cpp|cc|cxx|h|hpp|cppm)$ ]] && [[ -f "$CWD/$f" ]] && [[ "$f" != */test_package/* ]] && [[ "$f" != */technical_docs/* ]] && [[ "$f" != */tests/* ]] && [[ "$f" != */benchmarks/* ]] && files+=("$CWD/$f")
+        done < <(git -C "$CWD" diff --name-only HEAD 2>/dev/null || true)
+        while IFS= read -r f; do
+            [[ "$f" =~ \.(cpp|cc|cxx|h|hpp|cppm)$ ]] && [[ -f "$CWD/$f" ]] && [[ "$f" != */test_package/* ]] && [[ "$f" != */technical_docs/* ]] && [[ "$f" != */tests/* ]] && [[ "$f" != */benchmarks/* ]] && files+=("$CWD/$f")
+        done < <(git -C "$CWD" diff --name-only --cached 2>/dev/null || true)
+        # dedupe
+        mapfile -t files < <(printf '%s\n' "${files[@]}" | sort -u)
+    fi
+
+    # C++ module files are lintable ONLY when clang-tidy is the same build as the
+    # project's compiler: a module BMI (.pcm) is pinned to the exact clang build, so a
+    # mismatched clang-tidy errors out ("module file '…' built from a different
+    # branch") on every module INTERFACE unit (.cppm) and every TU that `import`s a
+    # named module (the module-import tests, plus 1.5.1 production imports like
+    # coderoast-server's `import coderoast.*`). When clang-tidy MATCHES the build
+    # (derived from clang-21's own install above) we lint them; otherwise we skip them
+    # (they still compile in the build + run as module-import tests) and rely on the
+    # note printed above to align the toolchain.
+    if ! $tidy_matches_build; then
+        local lintable=()
+        local _f
+        for _f in "${files[@]}"; do
+            [[ "$_f" == *.cppm ]] && continue
+            grep -qE '^[[:space:]]*(export[[:space:]]+)?import[[:space:]]+[A-Za-z_]' "$_f" 2>/dev/null && continue
+            lintable+=("$_f")
+        done
+        files=("${lintable[@]}")
+    fi
+
+    if [[ ${#files[@]} -eq 0 ]]; then
+        echo "malf lint: no files to check"
+        return 0
+    fi
+
+    echo "malf lint: checking ${#files[@]} file(s) ..."
+
+    # Parallel execution via xargs -P. Cap at 4 jobs to avoid OOM
+    # (each clang-tidy process can use several hundred MB).
+    local jobs
+    jobs="$(( $(nproc) < 4 ? $(nproc) : 4 ))"
+
+    local tmpdir lint_status=0
+    tmpdir="$(mktemp -d -t malf_lint.XXXXXX)"
+
+    local counter_file="$tmpdir/_progress"
+    touch "$counter_file"
+    export _MALF_TIDY="$clang_tidy_bin"
+    export _MALF_ARGS="${extra_args[*]}"
+    export _MALF_TMP="$tmpdir"
+    export _MALF_CWD="$CWD"
+    export _MALF_TOTAL="${#files[@]}"
+    export _MALF_COUNTER="$counter_file"
+
+    # Pass each file as $1 to avoid xargs {} substitution inside the script body.
+    # shellcheck disable=SC2016
+    printf '%s\0' "${files[@]}" \
+        | xargs -0 -P "$jobs" -n 1 bash -c '
+            f="$1"
+            out=$($_MALF_TIDY $_MALF_ARGS -quiet "$f" 2>&1); rc=$?
+            filtered=$(printf "%s\n" "$out" \
+                | grep -vE "^\[|^Suppressed|warnings generated|^$" || true)
+            key=$(printf "%s" "$f" | md5sum | cut -c1-8)
+            [ -n "$filtered" ] && printf "%s\n" "$filtered" > "$_MALF_TMP/${key}.out"
+            printf "x" >> "$_MALF_COUNTER"
+            n=$(wc -c < "$_MALF_COUNTER")
+            printf "[%d/%d] %s\n" "$n" "$_MALF_TOTAL" "${f#"$_MALF_CWD/"}" >&2
+            exit $rc
+        ' _ || lint_status=1
+
+    # Merge in original file order, then deduplicate identical lines.
+    # Headers included by multiple TUs produce identical diagnostics; awk
+    # keeps the first occurrence of each line and drops repeats.
+    local merged="$tmpdir/_merged.out"
+    for file in "${files[@]}"; do
+        local key
+        key="$(printf '%s' "$file" | md5sum | cut -c1-8)"
+        local slot="$tmpdir/${key}.out"
+        [[ -f "$slot" ]] && cat "$slot" >> "$merged"
+    done
+
+    if [[ -f "$merged" ]]; then
+        local deduped
+        deduped="$(awk '!seen[$0]++' "$merged")"
+        if [[ -n "$output_file" ]]; then
+            printf '%s\n' "$deduped" >> "$output_file"
+        else
+            printf '%s\n' "$deduped"
+        fi
+    fi
+
+    rm -rf "$tmpdir"
+    unset _MALF_TIDY _MALF_ARGS _MALF_TMP _MALF_CWD _MALF_TOTAL _MALF_COUNTER
+
+    if [[ -n "$output_file" ]]; then
+        echo "malf lint: output written to $output_file"
+    fi
+    return "$lint_status"
+}
+
+cmd_format() {
+    local check=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --check) check=true ;;
+            *) echo "malf format: unknown option $1" >&2; exit 1 ;;
+        esac
+        shift
+    done
+
+    # Use the clang-format from the SAME install as the build compiler (clang-21) for
+    # consistency. clang-format is a pure formatter — a version skew can't error like
+    # clang-tidy's BMI mismatch — but different clang-format versions reflow code
+    # differently (churn), so match the toolchain. Derive from clang-21; fall back to PATH.
+    local clang_bin clang_format_bin="" install_fmt=""
+    clang_bin="$(command -v clang-21 || command -v clang || true)"
+    if [[ -n "$clang_bin" ]]; then
+        install_fmt="$(dirname "$(readlink -f "$clang_bin")")/clang-format"
+        [[ -x "$install_fmt" ]] && clang_format_bin="$install_fmt"
+    fi
+    if [[ -z "$clang_format_bin" ]]; then
+        clang_format_bin="$(command -v clang-format-21 || command -v clang-format || true)"
+        [[ -n "$install_fmt" && -n "$clang_format_bin" ]] && \
+            echo "malf format: note: $install_fmt missing; using $clang_format_bin (clang-21 is the build compiler). 'sudo apt install clang-format-21' for version-matched formatting." >&2
+    fi
+    [[ -n "$clang_format_bin" ]] || { echo "malf format: error: clang-format not found" >&2; exit 1; }
+
+    # clang-format config: prefer CWD, fall back to malf dir
+    local format_args
+    if $check; then
+        format_args=(--dry-run --Werror -style=file)
+        echo "=== malf format: checking ==="
+    else
+        format_args=(-i -style=file)
+        echo "=== malf format: formatting ==="
+    fi
+
+    # If no .clang-format in CWD, copy from malf dir so -style=file works
+    if [[ ! -f "$CWD/.clang-format" && -f "$MALF_DIR/.clang-format" ]]; then
+        cp "$MALF_DIR/.clang-format" "$CWD/.clang-format"
+        echo "malf format: copied .clang-format from malf dir"
+    fi
+
+    find "$CWD" \
+        -not -path "*/build/*" \
+        -not -path "*/build-*/*" \
+        -not -path "*/.conan2/*" \
+        -not -path "*/data/*" \
+        -not -path "*/.cache/*" \
+        \( -name "*.cpp" -o -name "*.cxx" -o -name "*.cc" \
+           -o -name "*.h"  -o -name "*.hpp" -o -name "*.cppm" \) \
+        -type f -print0 \
+    | xargs -0 "$clang_format_bin" "${format_args[@]}"
+}
+
+_malf_resolve_preset() {
+    # Resolve the conan configure-preset name (conan-debug / conan-release) the way
+    # cmake does: CMakePresets.json then CMakeUserPresets.json in the SOURCE dir,
+    # following "include" chains. Prints the name, or nothing if none is found.
+    python3 -c "
+import json, pathlib, sys
+subdir = pathlib.Path(sys.argv[1])
+for fname in ('CMakePresets.json', 'CMakeUserPresets.json'):
+    src = subdir / fname
+    if not src.exists():
+        continue
+    try:
+        data = json.loads(src.read_text())
+    except Exception:
+        continue
+    for cp in data.get('configurePresets', []):
+        if cp.get('name', '') in ('conan-release', 'conan-debug'):
+            print(cp['name']); sys.exit(0)
+    for inc in data.get('include', []):
+        inc_path = (subdir / inc).resolve()
+        if not inc_path.exists():
+            continue
+        try:
+            inc_data = json.loads(inc_path.read_text())
+        except Exception:
+            continue
+        for cp in inc_data.get('configurePresets', []):
+            if cp.get('name', '') in ('conan-release', 'conan-debug'):
+                print(cp['name']); sys.exit(0)
+" "$1" 2>/dev/null || true
+}
+
+_malf_configure_test_package() {
+    # Configure a package's test_package so clangd indexes it too. conan create
+    # builds it in a temp dir that the editor never sees, so we re-install its deps
+    # and configure it in-tree. The COMPILER comes from the profile buildenv
+    # (CC/CXX) — sourced below — not the toolchain (which only adds stdlib flags like
+    # -stdlib=libc++); without it a libc++ profile would fall back to system g++.
+    local subdir="$1" tp_build="$2"
+    local main_ref
+    main_ref="$(_malf_pkg_ref "$subdir/conanfile.py")"
+    # Fresh every run: the test_package build dir is unkeyed (reused across
+    # profiles), so a stale CMakeCache/toolchain from a prior profile clashes (a
+    # cached g++ vs a libc++ toolchain). Cheap — deps stay conan-cached.
+    rm -rf "$tp_build"
+    mkdir -p "$tp_build"
+    # Deps: the tested package ($main_ref == self.tested_reference_str) + every
+    # literal-versioned (test_)requires() in the test_package conanfile (e.g. a
+    # private visible=False dep it re-requires for itself).
+    local tp_req_args=("--requires=$main_ref")
+    while IFS= read -r req; do
+        [[ -n "$req" ]] && tp_req_args+=("--requires=$req")
+    done < <(python3 -c "
+import re, pathlib
+txt = pathlib.Path('$subdir/test_package/conanfile.py').read_text()
+for r in re.findall(r\"(?:test_)?requires\\s*\\(\\s*['\\\"]([^'\\\"]+)['\\\"]\\s*\\)\", txt):
+    print(r)
+" 2>/dev/null || true)
+    echo "malf commands: installing test_package deps ($main_ref) in $(basename "$subdir")"
+    conan install \
+        "${tp_req_args[@]}" \
+        -g CMakeToolchain -g CMakeDeps \
+        --output-folder="$tp_build" \
+        --profile:host="$MALF_PROFILE" \
+        --profile:build="$MALF_PROFILE" \
+        --build=missing \
+        -c "tools.cmake.cmaketoolchain:generator=Ninja" \
+        -s "build_type=Debug" \
+        2>&1 | grep -vE "^$|^======|^Requirements|^Packages|^Build" || true
+
+    local tp_toolchain="$tp_build/conan_toolchain.cmake"
+    [[ -f "$tp_toolchain" ]] || return 0
+    # The tested module package ships its native config (FILE_SET CXX_MODULES) into the dir
+    # malf JUST configured it in — the PARENT of tp_build (= _malf_build_dir "$subdir"). For a
+    # MULTI-package repo that dir ($CWD/build[-key]/<rel>) differs from the editable build dir
+    # the recipe's builddir resolves to ($pkg/build[-key]), so find_package(<pkg>) misses it.
+    # Point it at the real config dir; single-package repos already coincide (harmless redundancy).
+    local main_build_dir; main_build_dir="$(dirname "$tp_build")"
+    echo "malf commands: configuring $(basename "$subdir")/test_package"
+    if ! ( source "$tp_build/conanbuild.sh" 2>/dev/null
+           cmake -S "$subdir/test_package" \
+                 -B "$tp_build" \
+                 -G Ninja \
+                 "-DCMAKE_TOOLCHAIN_FILE=$tp_toolchain" \
+                 "-DCMAKE_PREFIX_PATH=$main_build_dir" \
+                 -DCMAKE_BUILD_TYPE=Debug \
+                 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ) \
+             > "$tp_build/cmake_configure.log" 2>&1; then
+        echo "malf commands: test_package configure FAILED:" >&2
+        tail -20 "$tp_build/cmake_configure.log" >&2
+    fi
+}
+
+_malf_merge_db_tree() {
+    # Merge every compile_commands.json under the build root into
+    # <build_root>/compile_commands.json (what .clangd's CompilationDatabase
+    # points at). Structure-agnostic.
+    local build_root="$1"
+    local root_db="$build_root/compile_commands.json"
+    python3 - "$build_root" "$root_db" << 'PY'
+import json, sys
+from pathlib import Path
+
+build_dir   = Path(sys.argv[1]).resolve()
+root_output = Path(sys.argv[2]).resolve()
+
+# A single-package repo configures into build/ itself, so its DB IS root_output —
+# read it first so those entries survive. Multi-package repos configure into
+# build/<pkg>/ and root_output was cleared before the walk, so it is absent here.
+dbs_pre = [root_output] if root_output.exists() else []
+dbs_sub = sorted(p.resolve() for p in build_dir.rglob("compile_commands.json")
+                 if p.resolve() != root_output)
+dbs = dbs_pre + dbs_sub
+
+if not dbs:
+    raise SystemExit(f"malf commands: no compile_commands.json under {build_dir} "
+                     "(did every configure fail?)")
+
+merged, seen = [], set()
+for db in dbs:
+    try:
+        entries = json.loads(db.read_text())
+    except Exception as exc:
+        print(f"malf commands: warning: {db}: {exc}", file=sys.stderr)
+        continue
+    for e in entries:                       # one entry per file (clangd convention)
+        key = e.get("file")
+        if key not in seen:
+            seen.add(key)
+            merged.append(e)
+
+root_output.write_text(json.dumps(merged, indent=2) + "\n")
+print(f"malf commands: merged {len(dbs)} database(s) -> {root_output} "
+      f"({len(merged)} entries)")
+PY
+}
+
+cmd_compile_commands() {
+    # Generate the repo-level compile_commands.json that .clangd reads
+    # (CompilationDatabase: build-clang21-libcxx-release — the default leg's named
+    # build root). A repo is just a LIST of package dirs — the root
+    # if it has a conanfile.py, else every subdir with one — so there is NO single-
+    # vs-multi branch: each package is conan-installed, configured via its conan
+    # preset (the SAME compiler/flags `malf build` uses), its test_package is
+    # configured, and every emitted DB under build/ is merged. Debug config so test
+    # targets match `malf build` / `malf test`.
+    local build_root; build_root="$(_malf_build_dir "$CWD")"
+    MALF_CONFIG="Debug"
+    mkdir -p "$build_root"
+    # Rebuild the editor DB from scratch: clear the merged output so a single-package
+    # repo's own DB (which lands at build/compile_commands.json) is the only copy the
+    # merge reads back in (no stale entries from a previous run).
+    rm -f "$build_root/compile_commands.json"
+
+    while IFS= read -r pkg_conanfile; do
+        local subdir subdir_name subdir_build
+        subdir="$(dirname "$pkg_conanfile")"
+        subdir_name="$(basename "$subdir")"
+        # Canonical build dir, mirroring `malf build <subdir>` — always under the
+        # root build/ tree (root -> build/, subdir -> build/<subdir>). Editable
+        # builds in <pkg>/build/ are intentionally NOT used (may be stale / tests=OFF).
+        subdir_build="$(_malf_build_dir "$subdir")"
+
+        # conan install if this build dir has no toolchain/preset yet, so deps
+        # (including test_requires like gtest) are present before cmake configures.
+        if [[ ! -f "$subdir_build/CMakePresets.json" ]]; then
+            mkdir -p "$subdir_build"
+            echo "malf commands: installing deps for $subdir_name"
+            # shellcheck disable=SC2046
+            conan install "$subdir" \
+                --output-folder="$subdir_build" \
+                $(_malf_conan_install_args) \
+                2>&1 | grep -vE "^$|^======|^Requirements|^Packages|^Build" || true
+        fi
+        [[ -f "$subdir_build/CMakePresets.json" ]] || continue
+
+        # Register/build the editable workspace deps this package needs.
+        _malf_bootstrap_workspace_deps "$subdir"
+
+        # test_package (if any) -> its own compile_commands.json.
+        if [[ -f "$subdir/test_package/CMakeLists.txt" ]]; then
+            _malf_configure_test_package "$subdir" "$subdir_build/test_package"
+        fi
+
+        # Point the source dir's CMakeUserPresets.json at the canonical build dir.
+        # This MUST run AFTER the test_package install above. In a SINGLE-package repo
+        # (subdir == repo root) that install — run from the repo root — APPENDS
+        # build/test_package/CMakePresets.json to this very CMakeUserPresets.json
+        # (conan updates an existing one unconditionally; the user_presets conf does not
+        # suppress it). Both it and build/CMakePresets.json define `conan-debug`, so the
+        # preset graph gains a duplicate and `cmake --preset conan-debug` aborts
+        # ("Duplicate preset: conan-debug") — the package (with tests ON) then never
+        # configures, and its unit-test TUs never reach the DB. Re-asserting the
+        # canonical single-include here removes that pollution before we configure.
+        _malf_write_user_presets "$subdir" "$subdir_build"
+
+        # Configure the package itself via its preset -> compile_commands.json.
+        # The preset's binaryDir is authoritative, so do NOT pass -B.
+        local preset=""
+        preset="$(_malf_resolve_preset "$subdir")"
+        if [[ -n "$preset" ]]; then
+            echo "malf commands: configuring $subdir_name ($preset)"
+            local cmake_feature_args=()
+            mapfile -t cmake_feature_args < <(_malf_cmake_feature_args "$subdir" ON ON)
+            cmake --preset "$preset" -S "$subdir" \
+                -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+                "${cmake_feature_args[@]}" 2>&1 | tail -1 || \
+                echo "malf commands: warning: cmake configure failed for $subdir_name (continuing)"
+        fi
+    done < <(
+        if [[ -f "$CWD/conanfile.py" ]]; then
+            echo "$CWD/conanfile.py"
+        else
+            find "$CWD" -maxdepth 3 -name "conanfile.py" \
+                -not -path "*/test_package/*" -not -path "*/.conan2/*" -not -path "*/build*/*" \
+                | sort
+        fi
+    )
+
+    _malf_merge_db_tree "$build_root"
+}
+
+cmd_bench() {
+    local subdir="" quick=false filter="" compare=false threshold="0.10" baseline="" extra=()
+    local repetitions=""
+    local user_presets_backup=""
+    MALF_CONFIG="Release"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --compare)   compare=true ;;
+            --threshold) threshold="$2"; shift ;;
+            --baseline)  baseline="$2"; shift ;;
+            --repetitions) repetitions="$2"; shift ;;
+            --quick)     quick=true ;;
+            --filter)    filter="$2"; shift ;;
+            --debug)     MALF_CONFIG="Debug" ;;
+            --release)   MALF_CONFIG="Release" ;;
+            --profile)   shift; _malf_apply_profile "$1" ;;
+            --asan)      _malf_apply_profile "$MALF_ASAN_PROFILE" ;;
+            --)          shift; extra+=("$@"); break ;;
+            -*)          extra+=("$1") ;;
+            *)           subdir="$1" ;;
+        esac
+        shift
+    done
+
+    _malf_use_keyed_cache
+
+    local target build_dir
+    target="$(_malf_resolve_target "$subdir")"
+    build_dir="$(_malf_build_dir "$target")"
+
+    echo "=== malf bench: $target ($MALF_CONFIG) ==="
+
+    _malf_bootstrap_workspace_deps "$target"
+
+    user_presets_backup="$(_malf_backup_user_presets "$target")"
+    trap '_malf_restore_user_presets "$target" "$user_presets_backup"' RETURN
+
+    # install + configure + build
+    # shellcheck disable=SC2046
+    conan install "$target" \
+        --output-folder="$build_dir" \
+        $(_malf_conan_install_args)
+
+    # Conan writes CMakeUserPresets.json to the source dir with multiple includes,
+    # causing "Duplicate preset" errors. Rewrite it to include only the local build dir.
+    _malf_write_user_presets "$target" "$build_dir"
+
+    local cmake_args=()
+    mapfile -t cmake_args < <(_malf_cmake_feature_args "$target" OFF ON)
+    _malf_configure_and_build "$target" "$build_dir" "${cmake_args[@]}"
+    trap - RETURN
+    [[ -n "$user_presets_backup" ]] && rm -f "$user_presets_backup"
+
+    # Find bench executables (*_bench or *bench*)
+    local bench_exes=()
+    while IFS= read -r exe; do bench_exes+=("$exe"); done < <(
+        find "$build_dir" -maxdepth 3 -type f -executable \
+            \( -name "*bench*" -o -name "*benchmark*" \) \
+            -not -name "*.sh" 2>/dev/null | sort
+    )
+
+    if [[ ${#bench_exes[@]} -eq 0 ]]; then
+        echo "malf bench: no benchmark executables found in $build_dir" >&2; exit 1
+    fi
+
+    local out_dir="$target/bench_results"
+    mkdir -p "$out_dir"
+    local ts
+    ts="$(date +%Y%m%dT%H%M%S)"
+
+    local last_json=""
+    for exe in "${bench_exes[@]}"; do
+        local name
+        name="$(basename "$exe")"
+        local out_file="${out_dir}/${name}_${ts}.json"
+        local bench_args=(
+            "--benchmark_out=${out_file}"
+            "--benchmark_out_format=json"
+        )
+        $quick && bench_args+=("--benchmark_min_time=0.1")
+        # The regression gate is variance-aware (bench_compare.py): comparing needs
+        # SAMPLES, so --compare defaults to 5 repetitions (median + cv aggregates).
+        # A plain `malf bench` stays single-run unless --repetitions is given —
+        # but then the baseline it writes carries no cv, so the next compare falls
+        # back to the current run's cv alone for the widened threshold.
+        local reps="${repetitions:-$($compare && echo 5 || echo 1)}"
+        if [[ "$reps" -gt 1 ]]; then
+            bench_args+=("--benchmark_repetitions=${reps}"
+                         "--benchmark_report_aggregates_only=true")
+        fi
+        [[ -n "$filter" ]] && bench_args+=("--benchmark_filter=$filter")
+
+        echo "=== malf bench: $name ==="
+        "$exe" "${bench_args[@]}" "${extra[@]}"
+        echo "Results saved to: $out_file"
+        last_json="$out_file"
+    done
+
+    # ── update baseline when not comparing ─────────────────────────────────────
+    if ! $compare && [[ -n "$last_json" && -f "$last_json" ]]; then
+        cp "$last_json" "$out_dir/baseline.json"
+        echo "Baseline updated: $out_dir/baseline.json"
+    fi
+
+    # ── bench --compare ────────────────────────────────────────────────────────
+    if $compare; then
+        [[ -z "$baseline" ]] && baseline="$target/bench_results/baseline.json"
+        if [[ ! -f "$baseline" ]]; then
+            echo "malf bench --compare: error: baseline not found: $baseline" >&2; exit 2
+        fi
+        if [[ -z "$last_json" || ! -f "$last_json" ]]; then
+            echo "malf bench --compare: error: no bench JSON produced" >&2; exit 2
+        fi
+        echo
+        echo "Comparing $last_json vs $baseline (floor ±$(python3 -c "print(${threshold}*100)")%, variance-aware)"
+        echo
+        python3 "$MALF_DIR/bench_compare.py" "$baseline" "$last_json" "$threshold"
+    fi
+}
+
+_malf_editables_sync() {
+    # Clear the editable registry and re-register every workspace package at the
+    # version currently declared in its conanfile.py. This is the gate step after
+    # a coordinated version bump: `malf build/test` only refresh the editables of
+    # a target's *dependencies*, so a bumped package that is never itself a dep
+    # (or is only resolved by its new pin) keeps a stale registration and fails
+    # to resolve. Registration alone fixes resolution — editables build on demand.
+    local entries=()
+    mapfile -t entries < <(_malf_workspace_packages)
+    if [[ ${#entries[@]} -eq 0 ]]; then
+        echo "malf editables sync: no workspace packages found under $MALF_WORKSPACE_ROOT" >&2
+        exit 1
+    fi
+
+    # Sync EVERY cache, not just the active one. malf keys CONAN_HOME per build-type
+    # (the base + .conan2/<key> keyed subdirs, each created by _malf_use_keyed_cache);
+    # each keyed cache has its OWN editable registry. Syncing only the active cache left
+    # the others drifting — e.g. after a 1.x→1.5.0 bump the gcc15-release cache still
+    # carried stale 1.4.x editables + a partial 1.5.0 set, so a `--profile linux-gcc15-release`
+    # build failed to resolve a freshly-bumped dep. Identify every conan home by its
+    # settings.yml (the base + every keyed subdir; excludes the base's own p/ and
+    # profiles/ which are not homes). settings.yml is the universal marker — global.conf
+    # is malf-seeded and missing on caches created outside malf (e.g. clang21-release).
+    local caches=("$MALF_CONAN_HOME_BASE") cache_dir
+    for cache_dir in "$MALF_CONAN_HOME_BASE"/*/; do
+        [[ -f "${cache_dir}settings.yml" ]] && caches+=("${cache_dir%/}")
+    done
+
+    local cache entry ref dep_dir label
+    for cache in "${caches[@]}"; do
+        export CONAN_HOME="$cache"
+        label="${cache#$MALF_CONAN_HOME_BASE}"; label="${label#/}"; [[ -z "$label" ]] && label="base"
+        echo "malf editables sync [$label]: re-registering ${#entries[@]} package(s)"
+        _malf_editables_clear
+        for entry in "${entries[@]}"; do
+            IFS=$'\t' read -r ref dep_dir <<< "$entry"
+            [[ -n "$ref" && -n "$dep_dir" ]] || continue
+            _malf_editable_add "$dep_dir"
+        done
+    done
+    echo "malf editables sync: ${#caches[@]} cache(s) re-registered to ${#entries[@]} editables each"
+}
+
+cmd_editables() {
+    local sub="${1:-}"
+    case "$sub" in
+        list)     conan editable list ;;
+        sync)     _malf_editables_sync ;;
+        "")       echo "malf editables: specify a subcommand (list|sync)" >&2; exit 1 ;;
+        *)        echo "malf editables: unknown subcommand '$sub' (list|sync)" >&2; exit 1 ;;
+    esac
+}
+
+cmd_clean() {
+    local target="${1:-all}"
+    case "$target" in
+        build)     rm -rf "$CWD"/build "$CWD"/build-* ;;
+        conan)     rm -rf "$MALF_CONAN_HOME_BASE"/p "$MALF_CONAN_HOME_BASE"/*/p ;;
+        editables) _malf_editables_clear ;;
+        all)       rm -rf "$CWD"/build "$CWD"/build-* "$MALF_CONAN_HOME_BASE"/p "$MALF_CONAN_HOME_BASE"/*/p && _malf_editables_clear ;;
+        *)         echo "malf clean: unknown target '$target' (build|conan|editables|all)" >&2; exit 1 ;;
+    esac
+    echo "malf clean: $target done"
+}
+
+cmd_run() {
+    local exe_name="${1:-}"
+    [[ -n "$exe_name" ]] || { echo "malf run: specify an executable name" >&2; exit 1; }
+    local found
+    found="$(find "$CWD"/build "$CWD"/build-* -type f -executable -name "$exe_name" \
+        -not -name "*.sh" 2>/dev/null | head -1)"
+    if [[ -z "$found" ]]; then
+        echo "malf run: '$exe_name' not found under $CWD/build*" >&2; exit 1
+    fi
+    echo "malf run: $found"
+    exec "$found" "${@:2}"
+}
+
+cmd_help() {
+    cat <<'EOF'
+malf — coderoast build system
+
+Commands:
+    build   [subdir] [--debug|--release|--asan|--profile <name>]
+    test    [subdir] [--debug|--release|--asan|--profile <name>] [--verbose] [--filter PATTERN]
+    lint    [--all-files] [-c|--console]
+    format  [--check]
+    commands | compile-commands
+    bench   [subdir] [--quick] [--filter REGEX] [--debug|--release|--asan|--profile <name>] [--compare] [--threshold N] [--baseline path]
+    clean   [build|conan|editables|all]
+    editables [list|sync]
+    profiles                       list available build profiles (the registry)
+    bump    X.Y.Z                  coordinated workspace version bump, then verify pin coherence
+    run     <exe-name> [args...]
+    bin-dir [subdir] [--asan|--profile <name>]   print the build-type-keyed build dir for a target
+
+Build profiles (--profile <name>, registry in malf/profiles/):
+    --profile selects any registry profile; build type + a clean build-context for
+    sanitizer profiles are derived from the profile. `--asan` is sugar for the ASan
+    profile. `malf profiles` lists them.
+
+Cache:
+    Local  : MALF_WORKSPACE_ROOT/.conan2  (or CONAN_HOME)
+
+Local dev dependency bootstrap:
+    build/test register sibling workspace packages as Conan editables, then
+    run conan install + CMake/Ninja for those editable deps in dependency
+    order. This keeps rebuilds incremental and lets CMakeDeps find libraries
+    from each dependency's build/ directory.
+    Override the scan root with MALF_WORKSPACE_ROOT or disable with MALF_AUTO_WORKSPACE_DEPS=0.
+
+Editables:
+    malf registers workspace editables automatically, but only for a build
+    target's dependencies. After a coordinated version bump, run
+    'malf editables sync' to clear the registry and re-register every workspace
+    package at its current conanfile version (the release-train gate step).
+    'malf editables list' shows the current registry. Manual equivalent of one
+    registration: conan editable add <path> --name=<name> --version=<version> -of <path>
+    Clean all registrations with 'malf clean editables'.
+
+Workspace Conan hooks:
+    Any `scripts/conan_hooks/hook_*.py` files found under MALF_WORKSPACE_ROOT
+    are copied into CONAN_HOME/extensions/hooks and activated automatically.
+
+Profile:
+    $CONAN_HOME/profiles/linux-clang21-libcxx-release  (dev default; or MALF_PROFILE_NAME)
+  gcc-15 (ship + determinism reference leg): --profile linux-gcc15-release
+  clang-21 + libstdc++ (keyed):              --profile linux-clang21-release
+EOF
+}
+
+cmd_profiles() {
+    echo "malf build profiles (registry: malf/profiles/) — use: malf build <subdir> --profile <name>"
+    local seen=" " d f n desc
+    for d in "$MALF_DIR/profiles" "$MALF_DIR"; do
+        [[ -d "$d" ]] || continue
+        for f in "$d"/linux-*; do
+            [[ -f "$f" ]] || continue
+            n="$(basename "$f")"
+            case "$seen" in *" $n "*) continue ;; esac
+            seen="$seen$n "
+            desc="$(grep -m1 -E '^#' "$f" 2>/dev/null | sed 's/^#[[:space:]]*//')"
+            printf "  %-24s %s\n" "$n" "$desc"
+        done
+    done
+    echo "  (--asan == --profile $MALF_ASAN_PROFILE)"
+}
+
+# Print the build directory for a target under the active profile (build-type-keyed). Lets
+# scripts locate built binaries without hardcoding build/<pkg> (which breaks under --asan etc.):
+#   "$(malf bin-dir --asan fuzz)/parse_fuzzer"
+cmd_bin_dir() {
+    local subdir=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --debug)   MALF_CONFIG="Debug" ;;
+            --release) MALF_CONFIG="Release" ;;
+            --profile) shift; _malf_apply_profile "$1" ;;
+            --asan)    _malf_apply_profile "$MALF_ASAN_PROFILE" ;;
+            *)         subdir="$1" ;;
+        esac
+        shift
+    done
+    _malf_build_dir "$(_malf_resolve_target "$subdir")"
+}
+
+# Coordinated workspace version bump: rewrite every version axis to X.Y.Z via
+# pin_coherence's `bump` engine, then re-run the coherence check to prove it
+# (bump rewrites exactly what the check validates → GREEN by construction).
+# Tested for 1.5.0; from then on the founder owns pulling this trigger.
+cmd_bump() {
+    local target="${1:-}"
+    if [[ ! "$target" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "malf bump: usage: malf bump X.Y.Z   (coordinated workspace version bump)" >&2
+        return 1
+    fi
+    local pin="$MALF_WORKSPACE_ROOT/scripts/pin_coherence.py"
+    if [[ ! -f "$pin" ]]; then
+        echo "malf bump: $pin not found — run from a workspace checkout" >&2
+        return 1
+    fi
+    echo "── malf bump $target — rewriting every workspace version axis ──"
+    python3 "$pin" bump "$target" "$MALF_WORKSPACE_ROOT" || return 1
+    echo "── verifying pin coherence at $target ──"
+    python3 "$pin" "$MALF_WORKSPACE_ROOT"
+}
+
+# ─── Dispatch ────────────────────────────────────────────────────────────────
+COMMAND="${1:-help}"
+shift || true
+
+case "$COMMAND" in
+    build)            cmd_build "$@" ;;
+    test)             cmd_test "$@" ;;
+    lint)             cmd_lint "$@" ;;
+    format)           cmd_format "$@" ;;
+    commands|compile-commands) cmd_compile_commands ;;
+    bench)            cmd_bench "$@" ;;
+    clean)            cmd_clean "$@" ;;
+    editables)        cmd_editables "$@" ;;
+    profiles)         cmd_profiles ;;
+    bump)             cmd_bump "$@" ;;
+    run)              cmd_run "$@" ;;
+    bin-dir)          cmd_bin_dir "$@" ;;
+    help|-h|--help)   cmd_help ;;
+    *)
+        echo "malf: unknown command '$COMMAND'" >&2
+        cmd_help >&2
+        exit 1
+        ;;
+esac

@@ -60,12 +60,20 @@ Composite actions consumed cross-repo by `uses:` — true single source, no per-
 
 A consumer build job is then: `checkout` → `setup-gcc153` → `setup-build-env` → `conan-module` (×N).
 
+## malf — the build orchestrator
+
+`malf` (+ `global.conf`, `bench_compare.py`) is CodeRoast's build orchestrator, a thin layer over
+Conan editable workspaces — `malf build` / `malf test` / `malf bench`. It lives here so the whole
+of *how we build* is one public, reproducible reference: same compiler, same profiles, same build
+tool, on our CI and on your fork. Usage: **[MALF.md](MALF.md)**.
+
 ## Shared config & profiles
 
 - `profiles/` — the canonical Conan profiles. `linux-gcc15-release` is the single source; CI gets
-  it via `setup-build-env`, and (follow-up) local `malf` reads it from here too.
+  it via `setup-build-env`, and local `malf` reads it from here (`profiles/`) too.
 - `config/` — the canonical developer/editor config (`.clang-format`, `.clang-tidy`, `.clangd`).
-  Each repo symlinks these, so there is one source of truth and drift is impossible.
+  Each repo symlinks these, so there is one source of truth and drift is impossible; `malf lint`
+  falls back to `config/.clang-tidy`.
 
 ## License
 
@@ -77,7 +85,6 @@ GPLv3 §6.
 
 ## Roadmap
 
-The CI actions, the canonical conan profile, and the shared developer config now live here. The
-remaining move is `malf` itself — CodeRoast's build orchestrator, a thin layer over Conan editable
-workspaces — plus `global.conf`, so the whole of *how we build* lives in one public, reproducible
-reference.
+Everything that defines *how we build* now lives here: the pinned compiler, the conan profiles,
+the shared dev config, the CI actions, and `malf` itself. The toolchain is fully self-contained
+and public — the open half of a product that is otherwise closed.
