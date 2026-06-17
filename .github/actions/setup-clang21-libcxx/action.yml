@@ -1,0 +1,38 @@
+name: 'Setup clang-21 + libc++'
+description: |
+  Provision the clang-21 + libc++-21 leg of the cross-stdlib gates (the determinism diagonal's
+  clang half, and the ASan/fuzz build's stdlib): clang-21 from apt.llvm.org, libc++-21-dev +
+  libc++abi-21-dev, the libc++.modules.json relative-path bridge (import-std prereq), and the
+  clang/clang++ update-alternatives. Single source for the fiddly bits (the modules.json bridge,
+  the clang-21 version) that were copy-pasted across determinism-gate + fuzz-asan-gate.
+
+  The gcc leg is provisioned separately (setup-gcc153 → /opt/gcc-15.3); this action does NOT touch
+  gcc/g++ alternatives. Self-contained: installs wget if absent.
+
+runs:
+  using: composite
+  steps:
+    - name: clang-21 + libc++-21 + modules.json bridge + alternatives
+      shell: bash
+      run: |
+        set -euo pipefail
+        command -v wget >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y wget; }
+        # clang-21 (dev compiler) from apt.llvm.org — the base image's bare clang is too old to
+        # compile std::expected now that the __cpp_concepts<21 shim is retired.
+        wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+        chmod +x /tmp/llvm.sh
+        sudo /tmp/llvm.sh 21
+        # The clang leg builds against libc++ (clang's native std module ships with libc++-21, NOT
+        # libstdc++, so a clang+libstdc++ leg can't do `import std`).
+        sudo apt-get install -y libc++-21-dev libc++abi-21-dev
+        # import-std prereq: libc++.modules.json carries a relative source path CMake misresolves to
+        # /lib/share/libc++/v1 — bridge it once (cxx_modules_migration_contract.md §10.14).
+        sudo mkdir -p /usr/lib/share && sudo ln -sfn /usr/lib/llvm-21/share/libc++ /usr/lib/share/libc++
+        # High priority + force --set: the runner pre-installs an older clang as the clang++
+        # alternative, so a plain --install at the same priority silently keeps it.
+        sudo update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-21   1000
+        sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-21 1000
+        sudo update-alternatives --set clang   /usr/bin/clang-21
+        sudo update-alternatives --set clang++ /usr/bin/clang++-21
+        clang++ --version | head -1
+        clang++ --version | grep -qE 'version 21\.' || { echo "::error::bare clang++ is not clang-21 (std::expected would fail)"; exit 1; }
