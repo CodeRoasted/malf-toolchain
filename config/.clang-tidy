@@ -1,0 +1,62 @@
+# clang-tidy is our lexical/style gate; the dynamic sanitizers (ASan/UBSan/TSan) are
+# the memory/UB/threading oracle. Two families are therefore OFF in Checks below:
+#   -clang-analyzer-*           path-sensitive static analyzer (ON by default): redundant
+#                               with the sanitizers, and its notes trace THROUGH third-party
+#                               headers (asio/.conan2, libc++) un-filterably, drowning signal.
+#   -readability-magic-numbers  twin of the disabled -cppcoreguidelines-avoid-magic-numbers.
+#   -readability-redundant-declaration  libc++ re-declares operator new/delete across <new>;
+#                               the module GMF (.cppm) surfaces it as locationless noise, no first-party value.
+#
+# Checks is a YAML LIST, not a folded scalar (`>`): inside a folded scalar a `#` line is
+# CONTENT, not a comment — it fused with the next token into one bogus glob and silently
+# ate that disable (this had un-disabled -cppcoreguidelines-pro-bounds-avoid-unchecked-
+# container-access and -fuchsia-*). List form has real per-line comments. NB: clang-tidy
+# accepts list form for Checks but NOT for WarningsAsErrors (string only) — keep it scalar.
+#
+# Modules: clang-tidy on this codebase REQUIRES fresh, same-major-version clang BMIs —
+# build the clang tree first, never lint against a gcc compile DB. See
+# technical_docs/operations/modules_tooling.md before touching the lint pipeline.
+Checks:
+  - bugprone-*
+  - performance-*
+  - modernize-*
+  - readability-*
+  - cppcoreguidelines-*
+  - -clang-analyzer-*
+  - -readability-magic-numbers
+  - -readability-redundant-declaration
+
+  # Disabled noisy / conflicting
+  - -cppcoreguidelines-pro-bounds-avoid-unchecked-container-access
+  - -cppcoreguidelines-pro-bounds-pointer-arithmetic
+  - -cppcoreguidelines-pro-bounds-constant-array-index
+  - -cppcoreguidelines-avoid-magic-numbers
+  - -hicpp-avoid-c-arrays
+  - -cppcoreguidelines-avoid-c-arrays
+  - -cppcoreguidelines-pro-bounds-array-to-pointer-decay
+  - -cppcoreguidelines-pro-type-member-init
+  - -modernize-use-trailing-return-type
+  - -readability-isolate-declaration
+  - -readability-braces-around-statements
+  - -google-readability-braces-around-statements
+  - -hicpp-braces-around-statements
+  - -bugprone-easily-swappable-parameters
+
+  # Toolchain / irrelevant ecosystems
+  - -fuchsia-*
+  - -llvm-*
+  - -altera-*
+  - -llvmlibc-*
+  - -boost-use-ranges
+
+CheckOptions:
+  - key: misc-non-private-member-variables-in-classes.PrivateMemberSuffix
+    value: '_'
+
+  - key: modernize-use-uniform-initialization.UseAssignment
+    value: 'false'
+
+WarningsAsErrors: >
+  bugprone-*,
+  performance-*,
+  cppcoreguidelines-*

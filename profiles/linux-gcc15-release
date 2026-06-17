@@ -1,0 +1,47 @@
+# linux-gcc15-release — the gcc-15 ship/CI toolchain (replaces gcc-13).
+# Flags MIRROR linux-clang21-release EXACTLY so the
+# determinism gate proves gcc-15 ≡ clang-21 bit-identity (det_math is integer / no-libm /
+# -ffp-contract-invariant by design, so the serialized document MUST match across both).
+# Auto-keys to the 'gcc15-release' conan cache + build-gcc15-release/ tree via _malf_profile_key
+# (the linux-* arm), so it never contaminates the clang-21 unkeyed base while both coexist.
+# Pinned to from-source gcc-15.3 under /opt (PR124309 fix — see [buildenv]); swap back to the
+# PPA's g++-15 once it ships 15.3 (PPA-only on Noble 24.04).
+[settings]
+arch=x86_64
+build_type=Release
+compiler=gcc
+compiler.version=15
+compiler.cppstd=gnu23
+compiler.libcxx=libstdc++11
+os=Linux
+
+[buildenv]
+# Pinned to from-source gcc-15.3 under /opt (PR124309 fix — gcc <15.3 mis-records linemaps for
+# a partitioned module that imports a cross-package module both directly AND via a sibling
+# partition → "Bad import dependency" on read; blocks insight_diff + coderoast.server.core
+# partitions). 15.2→15.3 is an ABI-stable point release, so the gcc15-release conan cache
+# (third-party .a) stays valid; only first-party module BMIs (15.x BMI format) need rebuilding.
+# Swap back to gcc-15/g++-15 once the ubuntu-toolchain-r/test PPA ships 15.3.
+CC=/opt/gcc-15.3/bin/gcc
+CXX=/opt/gcc-15.3/bin/g++
+# 15.3 binaries link its newer libstdc++; expose it to build-time gtest_discover_tests runs.
+LD_LIBRARY_PATH=/opt/gcc-15.3/lib64
+
+[conf]
+# Portable x86_64 baseline (SSE4.2 / POPCNT / CX16). Safe on every GitHub-hosted runner;
+# -march=native would make the build host emit AVX2/AVX-512 the test runner may not support
+# (SIGILL in gtest_discover_tests). Going through [conf] (not [buildenv] CXXFLAGS) is
+# mandatory: only tools.build:cflags / tools.build:cxxflags are propagated by Conan's
+# CMakeToolchain into CMAKE_C_FLAGS_INIT / CMAKE_CXX_FLAGS_INIT.
+tools.build:cflags=["-O3", "-march=x86-64-v2"]
+tools.build:cxxflags=["-O3", "-march=x86-64-v2"]
+# from-source gcc-15.3 lives under /opt; rpath its libstdc++ into every binary so tests run
+# without LD_LIBRARY_PATH (determinism-neutral — the gate compares serialized output, not the
+# loader path). Drop when the PPA's system-libstdc++ 15.3 lands.
+tools.build:exelinkflags=["-Wl,-rpath,/opt/gcc-15.3/lib64"]
+tools.build:sharedlinkflags=["-Wl,-rpath,/opt/gcc-15.3/lib64"]
+# Editable build-dir keying ([[malf-build-type-isolation]]): the profile carries the keyed
+# build dir so a RAW `conan create --profile <this>` (no malf env) resolves an editable dep's
+# matching-profile build tree — closing the cross-stdlib editable .a contamination. malf still
+# sets MALF_EDITABLE_BUILD_DIR (takes precedence; covers sanitizer profiles).
+user.malf:editable_build_dir=build-gcc15-release

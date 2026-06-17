@@ -1,0 +1,119 @@
+CompileFlags:
+  CompilationDatabase: build-clang21-libcxx-release
+  # No toolchain pins. clangd follows compile_commands.json (the package's real
+  # -std / -stdlib / -isystem) and clang-21 auto-detects the system gcc-15
+  # libstdc++ — so this tracks whichever stdlib the package was built under
+  # (libstdc++ today, libc++ after the dev-default flip) with zero divergence,
+  # instead of forcing libstdc++ and fighting a libc++ build's DB.
+  #
+  # MODULES (named modules + import std): clangd needs ALL of the following or every
+  # `import` in the .cppm graph diagnoses "module not found" even with a perfect DB —
+  # none of it is configurable from this file (it's a CLI flag), so it lives on the
+  # editor's clangd invocation (VS Code: "clangd.arguments"):
+  #   1. clangd >= 19 started experimental support; run clangd-21 (match the clang-21
+  #      toolchain) with --experimental-modules-support. Ubuntu's default `clangd` is 18
+  #      → zero modules support, every import errors.
+  #   2. build/compile_commands.json must come from the CLANG preset (`malf commands`
+  #      against linux-clang21): clangd can't consume gcc's -fmodule-mapper/-fmodules-ts
+  #      commands nor .gcm CMIs from the gcc-15 tree.
+  #   3. The DB must list every importable module unit (all .cppm) AND the std module
+  #      TU (CMake's import-std support emits it); clangd then builds its OWN BMIs —
+  #      it ignores the build's .pcm files, so it works before a build completes.
+  #   4. Stale-BMI DevX ([[clangd-modules-stale-bmi-devx]]): after switching toolchain/
+  #      profile, wipe `rm -rf .cache/clangd` or stale cached BMIs poison diagnostics.
+  # Full triage matrix: technical_docs/operations/modules_tooling.md
+
+---
+
+Diagnostics:
+  # spdlog + fmt's consteval format-string checker still trips clangd's
+  # frontend even with the libstdc++ toolchain pin above (likely a fmt
+  # header version skew between clangd's parser and the Conan-installed
+  # fmt). GCC compiles cleanly, so suppress the false positive globally;
+  # real format errors still surface at compile time on the CI matrix.
+  Suppress:
+    - invalid_consteval_call
+  ClangTidy:
+    Add:
+      - "*"
+    Remove:
+      # modules: a non-exported helper in a NAMED namespace already has module linkage
+      # (internal, not exported, NOT TU-local). This check pushes static/anon-ns = TU-local,
+      # which makes inline interface templates that use it ill-formed (exposes TU-local entity).
+      - misc-use-internal-linkage
+      - altera-struct-pack-align
+      - altera-unroll-loops
+      - cppcoreguidelines-pro-type-member-init
+      - cppcoreguidelines-pro-bounds-pointer-arithmetic
+      - cppcoreguidelines-pro-bounds-constant-array-index
+      - fuchsia-default-arguments-calls
+      - fuchsia-default-arguments-declarations
+      - fuchsia-overloaded-operator
+      - fuchsia-statically-constructed-objects
+      - fuchsia-trailing-return
+      - llvm-header-guard
+      - llvmlibc-callee-namespace
+      - llvmlibc-implementation-in-namespace
+      - llvmlibc-inline-function-decl
+      - llvmlibc-restrict-system-libc-headers
+      - llvm-include-order
+      - misc-non-private-member-variables-in-classes
+      - modernize-use-trailing-return-type
+      - readability-isolate-declaration
+      - readability-braces-around-statements
+      - google-readability-braces-around-statements
+      - hicpp-braces-around-statements
+      - bugprone-easily-swappable-parameters
+      - cppcoreguidelines-avoid-magic-numbers
+      - hicpp-avoid-c-arrays
+      - cppcoreguidelines-avoid-c-arrays
+      - cppcoreguidelines-pro-bounds-array-to-pointer-decay
+    CheckOptions:
+      misc-non-private-member-variables-in-classes.PrivateMemberSuffix: "_"
+      modernize-use-uniform-initialization.UseAssignment: "false"
+
+---
+
+# Remove conan deps
+If:
+  PathMatch: .conan2/.*
+Diagnostics:
+  Suppress: ["*"]
+
+---
+
+# Remove magic numbers inside tests
+If:
+  PathMatch: .*/tests/.*
+Diagnostics:
+  Suppress:
+    - readability-magic-numbers
+
+---
+
+# clangd's BACKGROUND INDEXER crashes (SIGSEGV in clang::ASTReader::finishPendingActions
+# ← CXXRecordDecl::addedMember) when it concurrently deserializes the test/bench TUs that
+# `import <pkg>.test;` / `import <pkg>.bench;` (the full-surface re-export aggregators). This
+# is the SAME upstream named-module ASTReader bug that crashes standalone clang-tidy
+# ([[clang-tidy-crashes-on-modules]]) — not config/provenance/stale-BMI. A single-file parse
+# (clangd --check, or just OPENING the file) is fine; only the concurrent indexer trips it,
+# and after 5 crashes VS Code stops restarting the server. Skip indexing these TUs: live
+# diagnostics on the file you open still work; only the project-wide xref entries for the
+# test/bench TUs are dropped (their symbols aren't navigation targets anyway). Remove when
+# clang's module ASTReader is fixed (a future clang point/major) and re-test.
+If:
+  PathMatch: .*/(tests|benchmarks)/.*
+Index:
+  Background: Skip
+
+---
+
+# test_package is compiled during conan create, not in workspace build
+# It gets its dependencies from Conan's temporary build context
+# Suppress header-not-found errors since GTest paths vary by Conan cache layout
+If:
+  PathMatch: .*/test_package/.*
+Diagnostics:
+  Suppress:
+    - clang-diagnostic-error
+  UnusedIncludes: Strict

@@ -1,0 +1,88 @@
+name: 'Setup CodeRoast build env'
+description: |
+  The shared C++ build environment every CodeRoast repo's CI uses, as ONE step: apt base +
+  the pinned CMake 4.3.x + Conan (no profile autodetect) + the conan dep-binary cache + the
+  canonical conan profile fetched from THIS toolchain repo (single source — no per-repo
+  vendored `linux-gcc15-release` copy).
+
+  Run AFTER `setup-gcc153` (the profile pins CC/CXX=/opt/gcc-15.3/bin/...). This replaces the
+  inlined 5-step block (Setup environment → Setup Conan → Cache → Setup Conan profile) that
+  was copy-pasted across every consumer CI. Consumers add repo-specific apt via `extra-apt`.
+
+  Owns `CONAN_HOME` (exported to `$GITHUB_ENV` as <workspace>/.conan2) so consumers no longer
+  declare it at job level; later steps (conan-module, etc.) read it as `$CONAN_HOME`.
+
+inputs:
+  extra-apt:
+    description: 'Extra apt packages (space-separated), e.g. "libpq-dev redis-tools postgresql-client".'
+    required: false
+    default: ''
+  conan-version:
+    description: 'Conan version to install.'
+    required: false
+    default: '2.28.1'
+  profile:
+    description: 'Conan profile (in this repo''s profiles/) to install into $CONAN_HOME/profiles.'
+    required: false
+    default: 'linux-gcc15-release'
+
+runs:
+  using: composite
+  steps:
+    - name: apt base + pinned CMake 4.3.x; export CONAN_HOME
+      shell: bash
+      env:
+        EXTRA_APT: ${{ inputs.extra-apt }}
+      run: |
+        set -euo pipefail
+        # CONAN_HOME owned here (single definition) — visible to every later step as $CONAN_HOME.
+        echo "CONAN_HOME=$GITHUB_WORKSPACE/.conan2" >> "$GITHUB_ENV"
+        sudo apt-get update
+        sudo apt-get install -y ninja-build python3-pip build-essential $EXTRA_APT
+        # Pin the dev-validated CMake 4.3.x workspace-wide (dev/CI parity). Repos that arm
+        # `import std` need CXX_MODULE_STD (experimental UUID 451f2fe2 — present only in CMake
+        # 4.3.x); Ubuntu Noble ships 3.28 without that gate. Harmless / kept consistent elsewhere.
+        sudo python3 -m pip install --break-system-packages "cmake==4.3.1"
+        hash -r
+        case "$(cmake --version | head -1)" in
+          *" 4.3."*) cmake --version ;;
+          *) echo "::error::expected CMake 4.3.x (got: $(cmake --version | head -1))"; exit 1 ;;
+        esac
+
+    - name: Setup Conan ${{ inputs.conan-version }}
+      uses: conan-io/setup-conan@v1
+      with:
+        version: ${{ inputs.conan-version }}
+        home: ${{ env.CONAN_HOME }}
+        cache_packages: false
+        profile_detect: false
+
+    - name: Stage the canonical conan profile (single source — from malf-toolchain)
+      shell: bash
+      env:
+        PROFILE: ${{ inputs.profile }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        # The profile lives ONCE in this toolchain repo (no per-repo vendored copy). Stage it into
+        # the workspace under .malf-toolchain/ so the cache key below can hash it (hashFiles is
+        # workspace-relative), then it is installed into $CONAN_HOME/profiles in the step after cache.
+        mkdir -p "$GITHUB_WORKSPACE/.malf-toolchain"
+        cp "$ACTION_PATH/../../../profiles/$PROFILE" "$GITHUB_WORKSPACE/.malf-toolchain/$PROFILE"
+
+    - name: Cache conan dep binaries (keyed on the dep set + the gcc-15.3 profile)
+      uses: actions/cache@v5
+      with:
+        path: ${{ env.CONAN_HOME }}
+        key: conan-gcc153-${{ runner.os }}-${{ hashFiles('**/conanfile.py', '.malf-toolchain/*') }}
+        restore-keys: |
+          conan-gcc153-${{ runner.os }}-
+
+    - name: Install the conan profile into $CONAN_HOME
+      shell: bash
+      env:
+        PROFILE: ${{ inputs.profile }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$CONAN_HOME/profiles"
+        cp "$GITHUB_WORKSPACE/.malf-toolchain/$PROFILE" "$CONAN_HOME/profiles/$PROFILE"

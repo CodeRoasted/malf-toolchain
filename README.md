@@ -48,6 +48,25 @@ Run the `Build gcc toolchain` workflow (`workflow_dispatch`, pinned source sha, 
 a minimal PR124309 repro). It publishes the binary + the Corresponding Source to a new
 `gcc-<version>` release. ≈ 2 h; consumers then pull in ≈ 1-2 min.
 
+## CI actions
+
+Composite actions consumed cross-repo by `uses:` — true single source, no per-repo copy:
+
+| Action | Purpose |
+|---|---|
+| `setup-gcc153` | Provision the from-source gcc-15.3 to `/opt/gcc-15.3` (above). |
+| `setup-build-env` | The shared C++ build env as one step: apt base + pinned CMake 4.3.x + Conan (no autodetect) + the conan dep-binary cache + the canonical `linux-gcc15-release` profile (fetched from `profiles/` here — no per-repo vendored copy). Owns `CONAN_HOME`. Run after `setup-gcc153`; pass repo-specific apt via `extra-apt`. |
+| `conan-module` | Test / create one Conan module (gated by `test`/`create` inputs from `dorny/paths-filter`), with a gdb crash-diagnose fallback for `-march` SIGILLs. Reconciled from the three drifted per-repo copies. |
+
+A consumer build job is then: `checkout` → `setup-gcc153` → `setup-build-env` → `conan-module` (×N).
+
+## Shared config & profiles
+
+- `profiles/` — the canonical Conan profiles. `linux-gcc15-release` is the single source; CI gets
+  it via `setup-build-env`, and (follow-up) local `malf` reads it from here too.
+- `config/` — the canonical developer/editor config (`.clang-format`, `.clang-tidy`, `.clangd`).
+  Each repo symlinks these, so there is one source of truth and drift is impossible.
+
 ## License
 
 Repo content (the action, workflow, scripts) is CodeRoast's. **The published gcc binaries are
@@ -58,6 +77,7 @@ GPLv3 §6.
 
 ## Roadmap
 
-`malf` — CodeRoast's build orchestrator, a thin layer over Conan editable workspaces — and the
-shared developer config (clangd / clang-tidy / clang-format) move here as a follow-up, so the
-whole of *how we build* lives in one public, reproducible reference.
+The CI actions, the canonical conan profile, and the shared developer config now live here. The
+remaining move is `malf` itself — CodeRoast's build orchestrator, a thin layer over Conan editable
+workspaces — plus `global.conf`, so the whole of *how we build* lives in one public, reproducible
+reference.

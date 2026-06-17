@@ -1,0 +1,100 @@
+name: 'Conan Module'
+description: |
+  Test / create one Conan module (package) using Conan and CMake directly. Each phase is
+  gated by an explicit input so callers can skip work the diff filter declared unaffected
+  (plumb straight from `dorny/paths-filter` outputs).
+
+  Single source of truth: this reconciles the three drifted per-repo copies that previously
+  lived in coderoast-server / insight-eidos / logcraft. It assumes the conan profile is
+  already installed in `$CONAN_HOME/profiles` (by `setup-build-env`) — it does NOT vendor or
+  copy a profile itself.
+
+inputs:
+  module:
+    description: Module path relative to the repo root (e.g. `core`, `auth`, `infra/redis`, `explain`).
+    required: true
+  test:
+    description: |
+      'true' to conan install + cmake build + ctest the module (Release). Anything else skips
+      the phase.
+    required: true
+  create:
+    description: |
+      'true' to run `conan create <module>`. Anything else skips it.
+    required: true
+  profile:
+    description: Conan profile name in `$CONAN_HOME/profiles` to build with.
+    required: false
+    default: 'linux-gcc15-release'
+
+runs:
+  using: composite
+  steps:
+    - name: Install + build ${{ inputs.module }}
+      if: inputs.test == 'true'
+      shell: bash
+      env:
+        MODULE: ${{ inputs.module }}
+        PROFILE_NAME: ${{ inputs.profile }}
+      run: |
+        set -euo pipefail
+        exec > >(tee -a "$GITHUB_WORKSPACE/build.log") 2>&1   # mirror build+test output — the Sift dogfood diffs it
+        PROFILE="$CONAN_HOME/profiles/$PROFILE_NAME"
+        conan install "$MODULE" \
+          --output-folder="build/$MODULE" \
+          --build=missing \
+          --profile:host="$PROFILE" \
+          --profile:build="$PROFILE" \
+          -s build_type=Release
+        cmake --preset conan-release -S "$MODULE" -B "build/$MODULE"
+        cmake --build "build/$MODULE"
+        # Robust test detection (folded in from the eidos copy): some modules emit Testing/ but
+        # not a top-level CTestTestfile.cmake.
+        if [[ -d "build/$MODULE/Testing" || -f "build/$MODULE/CTestTestfile.cmake" ]]; then
+          ctest --test-dir "build/$MODULE" --output-on-failure
+        fi
+
+    # If the test phase failed, try to extract a backtrace from any test binary that crashes
+    # during startup (e.g. SIGILL from a library that auto-dispatches CPU features beyond the
+    # build's -march baseline). Without this we get an empty stderr and no clue what trapped.
+    - name: Diagnose test crash for ${{ inputs.module }}
+      if: failure() && inputs.test == 'true'
+      shell: bash
+      env:
+        MODULE: ${{ inputs.module }}
+      run: |
+        set +e
+        echo "::group::Runner CPU features"
+        lscpu | head -25
+        grep -m1 -oE '(sse4_2|avx2?|avx512[a-z]*|bmi[12]?|fma|adx|popcnt)( |$)' /proc/cpuinfo | sort -u
+        echo "::endgroup::"
+        sudo apt-get install -y -qq gdb >/dev/null
+        for bin in "build/$MODULE"/*tests "build/$MODULE"/*_tests; do
+          [ -x "$bin" ] || continue
+          echo "::group::gdb --batch on $bin"
+          gdb --batch \
+              -ex 'set pagination off' \
+              -ex 'handle SIGILL stop print pass' \
+              -ex 'run --gtest_list_tests' \
+              -ex 'thread apply all bt' \
+              -ex 'info registers' \
+              -ex 'x/4i $pc' \
+              "$bin" 2>&1 | tail -120
+          echo "::endgroup::"
+        done
+
+    - name: Create ${{ inputs.module }} package
+      if: inputs.create == 'true'
+      shell: bash
+      env:
+        MODULE: ${{ inputs.module }}
+        PROFILE_NAME: ${{ inputs.profile }}
+      run: |
+        set -euo pipefail
+        exec > >(tee -a "$GITHUB_WORKSPACE/build.log") 2>&1   # mirror build+test output — the Sift dogfood diffs it
+        PROFILE="$CONAN_HOME/profiles/$PROFILE_NAME"
+        conan create "$MODULE" \
+          --build=missing \
+          --build-test=missing \
+          --profile:host="$PROFILE" \
+          --profile:build="$PROFILE"
