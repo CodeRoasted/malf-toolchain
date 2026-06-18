@@ -85,6 +85,18 @@ MSVC needs a **native Windows** host — the Linux runner above (in WSL2) can't 
 PowerShell on the host (same machine, outside WSL2) to register an org runner with the
 label **`malf-windows`**, then route the eidos probe to it:
 
+**Host prerequisites** — the GitHub-hosted `windows-2025` image pre-bakes these; a fresh
+host doesn't. The probe steps use `shell: pwsh` (**PowerShell 7**, not the built-in
+Windows PowerShell 5.1) and Python (its CMake 4.3 step is `python -m pip install`). Install
+once (git + gh you already have if you registered the runner):
+
+```powershell
+winget install --id Microsoft.PowerShell --source winget   # pwsh 7 — REQUIRED (shell: pwsh)
+winget install --id Python.Python.3.12   --source winget   # Python — REQUIRED (CMake pip step)
+```
+Without `pwsh` the very first probe step fails with `pwsh: command not found`. setup-msvc1452
+installs the MSVC 14.52 toolset itself, so you do **not** pre-install Visual Studio.
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File malf\runner\install-runner.ps1      # registers "malf-runner-win" (label malf-windows)
 powershell -ExecutionPolicy Bypass -File malf\runner\start-runner.ps1        # foreground; Ctrl+C to stop
