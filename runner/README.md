@@ -86,8 +86,8 @@ PowerShell on the host (same machine, outside WSL2) to register an org runner wi
 label **`malf-windows`**, then route the eidos probe to it:
 
 ```powershell
-pwsh malf\runner\install-runner.ps1      # registers "malf-runner-win" (label malf-windows)
-pwsh malf\runner\start-runner.ps1        # foreground; Ctrl+C to stop
+powershell -ExecutionPolicy Bypass -File malf\runner\install-runner.ps1      # registers "malf-runner-win" (label malf-windows)
+powershell -ExecutionPolicy Bypass -File malf\runner\start-runner.ps1        # foreground; Ctrl+C to stop
 ```
 ```bash
 gh variable set WIN_RUNS_ON --org CodeRoasted --body malf-windows --visibility private   # → local

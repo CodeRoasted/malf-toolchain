@@ -31,10 +31,10 @@ function Log($m) { Write-Host "[runner] $m" -ForegroundColor Cyan }
 
 # 1) Registration token — minted via gh unless RUNNER_TOKEN was provided.
 if (-not $Token) {
-  if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { throw "gh not found and RUNNER_TOKEN unset — install gh or pass a token" }
+  if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { throw "gh not found and RUNNER_TOKEN unset, install gh or pass a token" }
   Log "Minting an org registration token via gh (org: $Org)…"
   $Token = (gh api -X POST "/orgs/$Org/actions/runners/registration-token" -q .token)
-  if (-not $Token) { throw "could not mint a token — is gh authed as an admin of org '$Org'?" }
+  if (-not $Token) { throw "could not mint a token, is gh authed as an admin of org '$Org'?" }
 }
 
 # 2) Download the runner once (skip if already extracted).
@@ -50,7 +50,7 @@ if (-not (Test-Path (Join-Path $RunnerDir 'config.cmd'))) {
   Expand-Archive -Path $zip -DestinationPath $RunnerDir -Force
   Remove-Item $zip -Force
 } else {
-  Log "Runner already extracted in $RunnerDir — reconfiguring."
+  Log "Runner already extracted in $RunnerDir, reconfiguring."
 }
 
 # 3) Configure against the ORG (idempotent via --replace), with the malf-windows label.

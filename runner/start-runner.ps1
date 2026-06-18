@@ -10,7 +10,7 @@ $ErrorActionPreference = 'Stop'
 
 $runCmd = Join-Path $RunnerDir 'run.cmd'
 if (-not (Test-Path $runCmd)) {
-  Write-Host "[runner] ERROR: no runner at $RunnerDir — run install-runner.ps1 first (or set RUNNER_DIR)." -ForegroundColor Red
+  Write-Host "[runner] ERROR: no runner at $RunnerDir, run install-runner.ps1 first (or set RUNNER_DIR)." -ForegroundColor Red
   exit 1
 }
 
