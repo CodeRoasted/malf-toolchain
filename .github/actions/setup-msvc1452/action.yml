@@ -1,0 +1,139 @@
+name: Setup MSVC 14.52 (Preview)
+description: >
+  Install MSVC >= 14.52.36418 (the C++23-modules fix floor) on a Windows runner and
+  activate its dev environment (cl.exe / link.exe + INCLUDE/LIB on PATH for the rest of
+  the job). The stock runner ships only released toolsets (14.51 and older), all bugged;
+  14.52 is Preview-only (GA ~Nov 2026), so we install it from the VS 2026 Insiders channel
+  via the version-agnostic VC.Preview.Tools component (there is no version-pinned
+  Component.VC.14.52.*). Anonymous, no secrets — fetches from Microsoft each run.
+
+  NOTE — drift: the Insiders Preview floats (weekly). This action pins a >= floor, not an
+  exact toolset; a shipped determinism CLAIM must ride 14.52 GA, never this Preview. See
+  the workspace memory msvc-1452-gather-via-preview-component + bugs.md.
+
+inputs:
+  min-version:
+    description: 'Minimum acceptable MSVC toolset version (the fix floor)'
+    required: false
+    default: '14.52.36418'
+  arch:
+    description: 'Target architecture for the activated dev environment'
+    required: false
+    default: 'x64'
+
+outputs:
+  toolset-version:
+    description: 'The gathered MSVC toolset version (e.g. 14.52.36502)'
+    value: ${{ steps.gather.outputs.toolset-version }}
+  install-path:
+    description: 'The VS Build Tools install path that carries the gathered toolset'
+    value: ${{ steps.gather.outputs.install-path }}
+  vcvars-path:
+    description: 'Absolute path to the vcvars64.bat that activates the gathered toolset'
+    value: ${{ steps.gather.outputs.vcvars-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install VS Build Tools (Insiders) + the 14.52 Preview component
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        # VS 2026 = major 18; its early channel is 'insiders' (VS 2022's 'pre' was renamed).
+        # /vs/18/pre and /vs/18/release are unregistered (aka.ms 302s to Bing); only insiders
+        # resolves to a real CDN bootstrapper, and it carries the preview MSVC toolset.
+        $url = 'https://aka.ms/vs/18/insiders/vs_buildtools.exe'
+        $exe = Join-Path $env:RUNNER_TEMP 'vs_buildtools_insiders.exe'
+        Write-Host "Downloading $url"
+        Invoke-WebRequest -Uri $url -OutFile $exe
+        if (-not (Test-Path $exe)) { throw "bootstrapper download failed" }
+
+        # Guard the silent-corruption trap: an unregistered aka.ms slug returns a 0-byte / HTML
+        # page (not a 404), saved as the .exe → Start-Process "corrupted and unreadable".
+        $len = (Get-Item $exe).Length
+        $sig = -join ([System.IO.File]::ReadAllBytes($exe)[0..1] | ForEach-Object { [char]$_ })
+        Write-Host "downloaded $len bytes, signature '$sig'"
+        if ($len -lt 1MB -or $sig -ne 'MZ') {
+          throw "downloaded file is not a valid Windows executable (size=$len, sig='$sig') — bad bootstrapper URL"
+        }
+
+        $installPath = Join-Path $env:RUNNER_TEMP 'msvc1452'
+        $vsArgs = @(
+          '--quiet', '--norestart', '--wait', '--nocache',
+          '--installPath', $installPath,
+          '--add', 'Microsoft.VisualStudio.Workload.VCTools',
+          '--add', 'Microsoft.VisualStudio.Component.VC.CoreBuildTools',
+          '--add', 'Microsoft.VisualStudio.Component.VC.Preview.Tools.x86.x64'
+        )
+        Write-Host "Installing VS Build Tools (Insiders) + VC.Preview.Tools to $installPath"
+        $proc = Start-Process -FilePath $exe -ArgumentList $vsArgs -Wait -PassThru
+        $code = $proc.ExitCode
+        Write-Host "installer exit code: $code"
+        # 0 = ok, 3010 = ok-reboot-required, 1641 = ok-reboot-initiated.
+        if ($code -ne 0 -and $code -ne 3010 -and $code -ne 1641) {
+          $logs = Get-ChildItem "$env:TEMP\dd_*.log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+          if ($logs) { Write-Host "=== tail of newest VS setup log ==="; Get-Content $logs[0].FullName -Tail 80 }
+          throw "VS Build Tools install failed (exit $code)"
+        }
+        if (-not (Test-Path $installPath)) { throw "install path $installPath does not exist after install" }
+        "MSVC1452_INSTALL=$installPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
+
+    - name: Verify the floor + activate the dev environment
+      id: gather
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $installPath = $env:MSVC1452_INSTALL
+
+        # VERDICT — the gathered toolset must clear the fix floor (fail loud on a silent no-op
+        # to the released 14.51, runner-images #14101).
+        $msvc = Join-Path $installPath 'VC\Tools\MSVC'
+        if (-not (Test-Path $msvc)) { throw "no MSVC toolset dir under $msvc — gather produced nothing" }
+        $sets = Get-ChildItem $msvc -Directory | Sort-Object Name -Descending
+        Write-Host "gathered toolsets: $($sets.Name -join ', ')"
+        $newest = [version]$sets[0].Name
+        $floor  = [version]'${{ inputs.min-version }}'
+        if ($newest -lt $floor) {
+          throw "GATHER FAILED: newest toolset $newest < required $floor. The Preview component did not install (silent no-op to released 14.51) or 14.52 left the Insiders catalog."
+        }
+        $toolset = $sets[0].Name
+        Write-Host "GATHER OK: $toolset >= $floor"
+
+        # Locate vcvars64.bat (the custom install path is not assumed).
+        $vcvars = Get-ChildItem -Path $installPath -Recurse -Filter vcvars64.bat -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $vcvars) { throw "vcvars64.bat not found under $installPath — the build-scripts component did not install" }
+        $vcvarsPath = $vcvars.FullName
+        Write-Host "vcvars64.bat: $vcvarsPath"
+
+        # ACTIVATE — run vcvars for the gathered toolset and export its env delta to the job
+        # (GITHUB_ENV for vars, GITHUB_PATH for the new PATH entries), so cl.exe / Ninja / conan
+        # in every subsequent step use 14.52. (Same mechanism as ilammy/msvc-dev-cmd, but for our
+        # freshly-installed side-by-side toolset rather than a pre-installed instance.)
+        $before = @{}
+        Get-ChildItem Env: | ForEach-Object { $before[$_.Name] = $_.Value }
+
+        $dump = Join-Path $env:RUNNER_TEMP 'msvc_env.txt'
+        cmd /c "`"$vcvarsPath`" -vcvars_ver=$toolset -arch=${{ inputs.arch }} >nul 2>&1 && set" | Out-File -FilePath $dump -Encoding utf8
+        $captured = @{}
+        Get-Content $dump | ForEach-Object {
+          if ($_ -match '^([^=]+)=(.*)$') { $captured[$matches[1]] = $matches[2] }
+        }
+        if (-not $captured.ContainsKey('VCToolsVersion')) {
+          throw "vcvars did not activate (no VCToolsVersion in the captured env) — toolset=$toolset"
+        }
+        Write-Host "activated VCToolsVersion=$($captured['VCToolsVersion'])"
+
+        foreach ($name in $captured.Keys) {
+          if ($name -ieq 'Path') { continue }
+          if (-not $before.ContainsKey($name) -or $before[$name] -ne $captured[$name]) {
+            "$name=$($captured[$name])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+        }
+        $beforePath = @($before['Path'] -split ';')
+        ($captured['Path'] -split ';') | Where-Object { $_ -and ($beforePath -notcontains $_) } | ForEach-Object {
+          $_ | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+        }
+
+        "toolset-version=$toolset" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+        "install-path=$installPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+        "vcvars-path=$vcvarsPath"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii

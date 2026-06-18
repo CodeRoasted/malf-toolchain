@@ -1,0 +1,41 @@
+# windows-msvc-release — the Windows / MSVC build profile (shared, single-sourced here).
+#
+# TOOLCHAIN: MSVC >= 14.52.36418, installed by malf-toolchain's setup-msvc1452 action
+# (VS 2026 Insiders channel + the VC.Preview.Tools component — see that action + the
+# workspace memory msvc-1452-gather-via-preview-component). 14.52 is the C++23-modules fix
+# floor: the released 14.51 / 14.44 toolsets miscompile our module DTOs (consumer-TU
+# special-member double-free) and carry an import-std/stop_token C1116 (bugs.md).
+#
+# WHY MSVC, NOT CLANG (a probe-proven decision): clang + import std on Windows is a dead end
+# (no libc++ in the official LLVM Windows release → CXX_MODULE_STD rejects the MSVC STL).
+# MSVC cl.exe is the only mature import-std path; it ships std.ixx.
+#
+# ⚠ DETERMINISM-MODEL FLAG (Daidalos): MSVC is a THIRD compiler + stdlib outside the pinned
+# gcc-15/libstdc++ ≡ clang-21/libc++ diagonal. det_math is integer / no-libm, so the canonical
+# digest SHOULD hold cross-OS, but that is MEASURED (the probe), not CLAIMED. A shipped cross-OS
+# determinism claim rides 14.52 GA, never the weekly-moving Preview. (insight_determinism_model.md.)
+[settings]
+arch=x86_64
+build_type=Release
+compiler=msvc
+# 195 = MSVC 19.5x / toolset 14.5x (VS 2026). The setup-msvc1452 action gathers 14.52.36502;
+# the runner's released toolset (14.51) is BELOW our fix floor and must not be selected.
+compiler.version=195
+compiler.cppstd=23
+compiler.runtime=dynamic
+compiler.runtime_type=Release
+os=Windows
+
+[conf]
+# Ninja is mandatory for import std (CMake supports CXX_MODULE_STD only under Ninja, never the
+# Visual Studio generator — it can't build the std BMI for imported targets). Conan's
+# CMakeToolchain must emit Ninja, or CMAKE_GENERATOR_TOOLSET leaks and breaks the build.
+tools.cmake.cmaketoolchain:generator=Ninja
+# Point conan's vcvars at the side-by-side install setup-msvc1452 lays down (MSVC1452_INSTALL),
+# so conan selects OUR instance instead of auto-detecting the runner's pre-installed VS via
+# vswhere. compiler.version=195 → conan vs_version=18 + vcvars_ver=14.5, which resolves to the
+# highest 14.5x in that install = 14.52. Empty string (action not run) = fall back to vswhere.
+tools.microsoft.msbuild:installation_path={{ os.getenv("MSVC1452_INSTALL", "") }}
+# NO -march here: that is a gcc/clang flag MSVC does not understand. MSVC's x64 default codegen
+# (SSE2 baseline, /fp:precise — no contraction) is the determinism-relevant portable floor, the
+# equivalent of the Linux profiles' -march=x86-64-v2 + -ffp-contract=off, without a flag.
