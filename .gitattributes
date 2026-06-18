@@ -1,0 +1,22 @@
+# Enforce LF line endings across the entire repository
+* text=auto eol=lf
+*.cpp text eol=lf
+*.hpp text eol=lf
+*.h text eol=lf
+*.c text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.cmake text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.sh text eol=lf
+
+# Explicitly binary files
+*.o binary
+*.a binary
+*.so binary
+*.exe binary
+*.dll binary
+*.ninja binary
