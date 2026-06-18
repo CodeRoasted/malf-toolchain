@@ -29,7 +29,7 @@ outputs:
     description: 'The VS Build Tools install path that carries the gathered toolset'
     value: ${{ steps.gather.outputs.install-path }}
   vcvars-path:
-    description: 'Absolute path to the vcvars64.bat that activates the gathered toolset'
+    description: 'Absolute path to the vcvarsall.bat that activates the gathered toolset'
     value: ${{ steps.gather.outputs.vcvars-path }}
 
 runs:
@@ -107,17 +107,19 @@ runs:
         $toolset = $sets[0].Name
         Write-Host "GATHER OK: $toolset >= $floor"
 
-        # Locate vcvars64.bat (the custom install path is not assumed).
-        $vcvars = Get-ChildItem -Path $installPath -Recurse -Filter vcvars64.bat -ErrorAction SilentlyContinue | Select-Object -First 1
+        # Locate vcvarsall.bat (the custom install path is not assumed). vcvarsall takes the target
+        # architecture as its first positional arg — unlike vcvars64.bat, which is the x64-only
+        # wrapper and rejects an -arch= flag.
+        $vcvars = Get-ChildItem -Path $installPath -Recurse -Filter vcvarsall.bat -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $vcvars) {
           Write-Host "=== activation scripts found under $installPath (vcvars*/VsDevCmd) ==="
           Get-ChildItem -Path $installPath -Recurse -Include vcvars64.bat,vcvarsall.bat,VsDevCmd.bat -ErrorAction SilentlyContinue | Select-Object FullName | Format-Table -AutoSize -Wrap
           Write-Host "=== install tree (depth 3) ==="
           Get-ChildItem -Path $installPath -Recurse -Depth 3 -Directory -ErrorAction SilentlyContinue | Select-Object FullName | Format-Table -AutoSize -Wrap
-          throw "vcvars64.bat not found under $installPath — the build-scripts component did not install"
+          throw "vcvarsall.bat not found under $installPath — the build-scripts component did not install"
         }
         $vcvarsPath = $vcvars.FullName
-        Write-Host "vcvars64.bat: $vcvarsPath"
+        Write-Host "vcvarsall.bat: $vcvarsPath"
 
         # ACTIVATE — run vcvars for the gathered toolset and export its env delta to the job
         # (GITHUB_ENV for vars, GITHUB_PATH for the new PATH entries), so cl.exe / Ninja / conan
@@ -132,7 +134,7 @@ runs:
         $mm = ($toolset -split '\.')[0..1] -join '.'
         $out  = Join-Path $env:RUNNER_TEMP 'vcvars_out.txt'
         $dump = Join-Path $env:RUNNER_TEMP 'msvc_env.txt'
-        cmd /c "call `"$vcvarsPath`" -vcvars_ver=$mm -arch=${{ inputs.arch }} > `"$out`" 2>&1 & set > `"$dump`""
+        cmd /c "call `"$vcvarsPath`" ${{ inputs.arch }} -vcvars_ver=$mm > `"$out`" 2>&1 & set > `"$dump`""
         Write-Host "=== vcvars output ==="
         Get-Content $out -ErrorAction SilentlyContinue
         $captured = @{}
