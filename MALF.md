@@ -77,8 +77,10 @@ Profile `linux-gcc15-release` is resolved from `malf/profiles/` (copied into `$C
 
 `runner/` provisions an org-level self-hosted runner (label `malf-local`) so the
 **private** repos' CI + `release-publish` stop consuming GitHub-hosted minutes. Toggle
-hosted⇄local with one org variable (`CI_RUNS_ON=malf-local`). Public repos stay on
-`ubuntu-latest` and must never target it (fork-PR RCE). Full guide: `runner/README.md`.
+hosted⇄local with one org variable (`CI_RUNS_ON=malf-local`). A Windows twin
+(`install-runner.ps1` + `start-runner.ps1`, label `malf-windows`, toggle `WIN_RUNS_ON`)
+serves the private eidos Windows probe. Public repos stay on the GitHub-hosted runners and
+must never target either (fork-PR RCE). Full guide: `runner/README.md`.
 
 ## Bundled fallbacks
 

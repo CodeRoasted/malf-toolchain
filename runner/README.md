@@ -78,6 +78,28 @@ running (jobs queue until a matching runner is online).
 superproject's gates + lints (`determinism-gate`, `fuzz-asan-gate`, and the `*-lint`
 workflows). The heavy cross-package gates are the biggest savings.
 
+## Windows runner (eidos Windows Portability Probe)
+
+MSVC needs a **native Windows** host — the Linux runner above (in WSL2) can't serve it.
+`install-runner.ps1` + `start-runner.ps1` are the Windows twin: run them in a Windows
+PowerShell on the host (same machine, outside WSL2) to register an org runner with the
+label **`malf-windows`**, then route the eidos probe to it:
+
+```powershell
+pwsh malf\runner\install-runner.ps1      # registers "malf-runner-win" (label malf-windows)
+pwsh malf\runner\start-runner.ps1        # foreground; Ctrl+C to stop
+```
+```bash
+gh variable set WIN_RUNS_ON --org CodeRoasted --body malf-windows --visibility private   # → local
+gh variable delete WIN_RUNS_ON --org CodeRoasted                                          # → windows-2025
+```
+
+**Only the PRIVATE `insight-eidos` probe reads `WIN_RUNS_ON`.** canon + metalog Windows
+probes stay hard-pinned to `windows-2025` (public = free + fork-safe). First run installs
+MSVC 14.52 (Insiders Preview, ~GBs) on the host via `setup-msvc1452`; needs git + python +
+gh on Windows. (The eidos probe also needs Heph's `provision.cpp` Win32 port to go green —
+the runner solves *minutes*, not that source blocker.)
+
 ## Notes
 
 - **Warm caches = faster than hosted.** A persistent runner keeps the conan cache,
@@ -87,6 +109,3 @@ workflows). The heavy cross-package gates are the biggest savings.
 - **Determinism/fuzz gates** clone fresh and use their own build dirs, so a persistent
   workspace is fine. If you ever want clean-room fidelity, re-run `install-runner.sh`
   with the runner reconfigured `--ephemeral` (one job per registration).
-- **Windows/MSVC** jobs (`windows-portability-probe`) are a separate concern — they need
-  a Windows runner and the `setup-msvc1452` toolchain; this Linux runner does not serve
-  them. They run rarely (`workflow_dispatch`) and canon/metalog are public (free).
