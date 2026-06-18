@@ -22,13 +22,42 @@ org runner is visible to *all* repos, so this is enforced at the **workflow laye
 
 ```bash
 # as an org admin, with gh authenticated:
-malf/runner/install-runner.sh
+malf/runner/install-runner.sh        # registers a runner named "malf-runner"
+malf/runner/start-runner.sh          # run it in the foreground — Ctrl+C to stop
 ```
 
-It mints an org registration token (via `gh`), downloads the latest runner, configures
-it against `github.com/CodeRoasted` with the label **`malf-local`**, and installs it as a
-service. Override via env: `ORG`, `LABELS`, `NAME`, `RUNNER_DIR`, `RUNNER_ARCH`,
-`AS_SERVICE=false` (foreground `./run.sh`), or `RUNNER_TOKEN=…` to skip the gh mint.
+`install-runner.sh` mints an org registration token (via `gh`), downloads the latest
+runner into **`~/actions-runner-malf`**, and configures it against `github.com/CodeRoasted`
+with name **`malf-runner`** and label **`malf-local`**. It does **not** start anything —
+`start-runner.sh` runs it in the foreground so you watch jobs stream and `Ctrl+C` to stop
+(cleaner than a service under WSL2). Override via env: `ORG`, `LABELS`, `NAME`,
+`RUNNER_DIR`, `RUNNER_ARCH`, `RUNNER_TOKEN=…` (skip the gh mint), or `AS_SERVICE=true`
+(install a background systemd service instead of running foreground).
+
+## Run / stop
+
+```bash
+malf/runner/start-runner.sh    # foreground; jobs stream in the terminal
+# Ctrl+C                       # stops the runner (deregisters its session cleanly)
+```
+While stopped, queued jobs simply wait; start it again to drain them. (It only does work
+while running, so "pause" = Ctrl+C, "resume" = start-runner.sh.)
+
+## Rename an existing runner (e.g. the auto-named DESKTOP-… → malf-runner)
+
+There's no in-place rename — remove the old registration and re-register:
+
+```bash
+cd ~/actions-runner-malf
+# if a background service was installed, remove it first:
+sudo ./svc.sh stop 2>/dev/null; sudo ./svc.sh uninstall 2>/dev/null || true
+# deregister the current runner:
+./config.sh remove --token "$(gh api -X POST /orgs/CodeRoasted/actions/runners/remove-token -q .token)"
+cd -                                   # back to the workspace
+malf/runner/install-runner.sh          # re-registers as "malf-runner"
+malf/runner/start-runner.sh            # foreground
+```
+(Or just remove it from the org runners UI — the ⋯ menu → Remove — then re-run install.)
 
 ## Toggle: hosted ⇄ local (one variable, no code edits)
 

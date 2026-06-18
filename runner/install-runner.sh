@@ -24,7 +24,7 @@ set -euo pipefail
 
 ORG="${ORG:-CodeRoasted}"
 LABELS="${LABELS:-malf-local}"
-NAME="${NAME:-$(hostname)-malf}"
+NAME="${NAME:-malf-runner}"
 RUNNER_DIR="${RUNNER_DIR:-$HOME/actions-runner-malf}"
 RUNNER_ARCH="${RUNNER_ARCH:-x64}"   # x64 | arm64
 
@@ -70,20 +70,22 @@ log "Configuring org runner '$NAME' (labels: $LABELS)…"
   --unattended \
   --replace
 
-# 4) Install + start as a service so it survives reboots (run.sh for a foreground run).
-if [[ "${AS_SERVICE:-true}" == "true" ]]; then
-  log "Installing + starting the runner service…"
+# 4) Optionally install as a background service (opt-in). Default is FOREGROUND so you
+#    run it from a terminal with start-runner.sh and Ctrl+C to stop — clearer on WSL2,
+#    where the systemd-based svc.sh is unreliable.
+if [[ "${AS_SERVICE:-false}" == "true" ]]; then
+  log "AS_SERVICE=true → installing + starting the background service…"
   sudo ./svc.sh install
   sudo ./svc.sh start
   sudo ./svc.sh status || true
-  log "Service installed. Stop/remove later with: sudo ./svc.sh stop && sudo ./svc.sh uninstall && ./config.sh remove --token <removal-token>"
-else
-  log "AS_SERVICE=false → start it in the foreground with: ./run.sh"
+  log "Service installed. Stop/remove: sudo ./svc.sh stop && sudo ./svc.sh uninstall && ./config.sh remove --token <removal-token>"
 fi
 
 cat <<EOF
 
-[runner] Done. Next:
+[runner] Registered '$NAME' (labels: $LABELS) in $RUNNER_DIR. Next:
+  Start it in the foreground (watch jobs live; Ctrl+C to stop):
+    $(dirname "$0")/start-runner.sh
   Route private CI + release to this box:
     gh variable set CI_RUNS_ON --org $ORG --body $LABELS --visibility private
   Fall back to GitHub-hosted:
