@@ -30,7 +30,7 @@ malf/runner/start-runner.sh          # run it in the foreground — Ctrl+C to st
 runner into **`~/actions-runner-malf`**, and configures it against `github.com/CodeRoasted`
 with name **`malf-runner`** and label **`malf-local`**. It does **not** start anything —
 `start-runner.sh` runs it in the foreground so you watch jobs stream and `Ctrl+C` to stop
-(cleaner than a service under WSL2). Override via env: `ORG`, `LABELS`, `NAME`,
+(cleaner than a service under WSL2). Override via env: `ORG`, `LABELS`, `RUNNER_NAME`,
 `RUNNER_DIR`, `RUNNER_ARCH`, `RUNNER_TOKEN=…` (skip the gh mint), or `AS_SERVICE=true`
 (install a background systemd service instead of running foreground).
 

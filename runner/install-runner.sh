@@ -24,7 +24,9 @@ set -euo pipefail
 
 ORG="${ORG:-CodeRoasted}"
 LABELS="${LABELS:-malf-local}"
-NAME="${NAME:-malf-runner}"
+# NB: namespaced RUNNER_NAME, not NAME — `NAME` is commonly already exported in the
+# environment (e.g. WSL2 sets NAME=<HOSTNAME>), which would silently override the default.
+RUNNER_NAME="${RUNNER_NAME:-malf-runner}"
 RUNNER_DIR="${RUNNER_DIR:-$HOME/actions-runner-malf}"
 RUNNER_ARCH="${RUNNER_ARCH:-x64}"   # x64 | arm64
 
@@ -61,11 +63,11 @@ else
 fi
 
 # 3) Configure against the ORG (idempotent via --replace), with the malf-local label.
-log "Configuring org runner '$NAME' (labels: $LABELS)…"
+log "Configuring org runner '$RUNNER_NAME' (labels: $LABELS)…"
 ./config.sh \
   --url "https://github.com/$ORG" \
   --token "$RUNNER_TOKEN" \
-  --name "$NAME" \
+  --name "$RUNNER_NAME" \
   --labels "$LABELS" \
   --unattended \
   --replace
@@ -83,7 +85,7 @@ fi
 
 cat <<EOF
 
-[runner] Registered '$NAME' (labels: $LABELS) in $RUNNER_DIR. Next:
+[runner] Registered '$RUNNER_NAME' (labels: $LABELS) in $RUNNER_DIR. Next:
   Start it in the foreground (watch jobs live; Ctrl+C to stop):
     $(dirname "$0")/start-runner.sh
   Route private CI + release to this box:
