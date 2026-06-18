@@ -98,8 +98,8 @@ Without `pwsh` the very first probe step fails with `pwsh: command not found`. s
 installs the MSVC 14.52 toolset itself, so you do **not** pre-install Visual Studio.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File malf\runner\install-runner.ps1      # registers "malf-runner-win" (label malf-windows)
-powershell -ExecutionPolicy Bypass -File malf\runner\start-runner.ps1        # foreground; Ctrl+C to stop
+pwsh -ExecutionPolicy Bypass -File malf\runner\install-runner.ps1      # registers "malf-runner-win" (label malf-windows)
+pwsh -ExecutionPolicy Bypass -File malf\runner\start-runner.ps1        # foreground; Ctrl+C to stop
 ```
 ```bash
 gh variable set WIN_RUNS_ON --org CodeRoasted --body malf-windows --visibility private   # → local
