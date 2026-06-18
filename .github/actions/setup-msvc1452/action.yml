@@ -68,7 +68,10 @@ runs:
           # binaries (no scripts). Install BOTH: scripts from released, 14.52 from Preview. vcvars
           # -vcvars_ver=14.52 then selects the Preview toolset for compilation.
           '--add', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
-          '--add', 'Microsoft.VisualStudio.Component.VC.Preview.Tools.x86.x64'
+          '--add', 'Microsoft.VisualStudio.Component.VC.Preview.Tools.x86.x64',
+          # A Windows SDK is mandatory: vcvars refuses to activate (and the linker can't resolve
+          # kernel32 etc.) without one. The minimal workload does not pull it on its own.
+          '--add', 'Microsoft.VisualStudio.Component.Windows11SDK.26100'
         )
         Write-Host "Installing VS Build Tools (Insiders) + VC.Preview.Tools to $installPath"
         $proc = Start-Process -FilePath $exe -ArgumentList $vsArgs -Wait -PassThru
@@ -123,14 +126,21 @@ runs:
         $before = @{}
         Get-ChildItem Env: | ForEach-Object { $before[$_.Name] = $_.Value }
 
+        # Run vcvars (output captured to a log so any failure is diagnosable) and dump the resulting
+        # env to a separate file — '&' (not '&&') so `set` runs even if vcvars warns. Use the
+        # major.minor toolset (14.52); vcvars resolves it to the installed 14.52.x (not the 14.51).
+        $mm = ($toolset -split '\.')[0..1] -join '.'
+        $out  = Join-Path $env:RUNNER_TEMP 'vcvars_out.txt'
         $dump = Join-Path $env:RUNNER_TEMP 'msvc_env.txt'
-        cmd /c "`"$vcvarsPath`" -vcvars_ver=$toolset -arch=${{ inputs.arch }} >nul 2>&1 && set" | Out-File -FilePath $dump -Encoding utf8
+        cmd /c "call `"$vcvarsPath`" -vcvars_ver=$mm -arch=${{ inputs.arch }} > `"$out`" 2>&1 & set > `"$dump`""
+        Write-Host "=== vcvars output ==="
+        Get-Content $out -ErrorAction SilentlyContinue
         $captured = @{}
-        Get-Content $dump | ForEach-Object {
+        Get-Content $dump -ErrorAction SilentlyContinue | ForEach-Object {
           if ($_ -match '^([^=]+)=(.*)$') { $captured[$matches[1]] = $matches[2] }
         }
         if (-not $captured.ContainsKey('VCToolsVersion')) {
-          throw "vcvars did not activate (no VCToolsVersion in the captured env) — toolset=$toolset"
+          throw "vcvars did not activate (no VCToolsVersion) — toolset=$toolset, vcvars_ver=$mm (see vcvars output above)"
         }
         Write-Host "activated VCToolsVersion=$($captured['VCToolsVersion'])"
 
