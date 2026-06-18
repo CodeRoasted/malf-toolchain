@@ -63,6 +63,11 @@ runs:
           '--installPath', $installPath,
           '--add', 'Microsoft.VisualStudio.Workload.VCTools',
           '--add', 'Microsoft.VisualStudio.Component.VC.CoreBuildTools',
+          # The RELEASED grouped toolset lays down the version-agnostic VC\Auxiliary\Build\vcvars*.bat
+          # infrastructure + the Windows SDK base; the Preview component only adds the 14.52 toolset
+          # binaries (no scripts). Install BOTH: scripts from released, 14.52 from Preview. vcvars
+          # -vcvars_ver=14.52 then selects the Preview toolset for compilation.
+          '--add', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
           '--add', 'Microsoft.VisualStudio.Component.VC.Preview.Tools.x86.x64'
         )
         Write-Host "Installing VS Build Tools (Insiders) + VC.Preview.Tools to $installPath"
@@ -101,7 +106,13 @@ runs:
 
         # Locate vcvars64.bat (the custom install path is not assumed).
         $vcvars = Get-ChildItem -Path $installPath -Recurse -Filter vcvars64.bat -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $vcvars) { throw "vcvars64.bat not found under $installPath — the build-scripts component did not install" }
+        if (-not $vcvars) {
+          Write-Host "=== activation scripts found under $installPath (vcvars*/VsDevCmd) ==="
+          Get-ChildItem -Path $installPath -Recurse -Include vcvars64.bat,vcvarsall.bat,VsDevCmd.bat -ErrorAction SilentlyContinue | Select-Object FullName | Format-Table -AutoSize -Wrap
+          Write-Host "=== install tree (depth 3) ==="
+          Get-ChildItem -Path $installPath -Recurse -Depth 3 -Directory -ErrorAction SilentlyContinue | Select-Object FullName | Format-Table -AutoSize -Wrap
+          throw "vcvars64.bat not found under $installPath — the build-scripts component did not install"
+        }
         $vcvarsPath = $vcvars.FullName
         Write-Host "vcvars64.bat: $vcvarsPath"
 
