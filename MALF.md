@@ -73,6 +73,13 @@ Use `commands` or `compile-commands` only when you want a merged database at `bu
 
 Profile `linux-gcc15-release` is resolved from `malf/profiles/` (copied into `$CONAN_HOME/profiles/` on every run so an edit always propagates). Override the name with `MALF_PROFILE_NAME`.
 
+## Self-hosted CI runner (unmetered minutes)
+
+`runner/` provisions an org-level self-hosted runner (label `malf-local`) so the
+**private** repos' CI + `release-publish` stop consuming GitHub-hosted minutes. Toggle
+hosted⇄local with one org variable (`CI_RUNS_ON=malf-local`). Public repos stay on
+`ubuntu-latest` and must never target it (fork-PR RCE). Full guide: `runner/README.md`.
+
 ## Bundled fallbacks
 
 | File | Purpose |
