@@ -16,6 +16,17 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        # Idempotent on a persistent (self-hosted) runner: clang-21, libc++-21, the modules.json
+        # bridge symlink, and the update-alternatives all survive between jobs. Re-running needs sudo
+        # (apt + alternatives) → a password prompt on a self-hosted box. Skip when every end-state
+        # invariant the action guarantees is already in place; the first provision still installs.
+        if command -v clang++-21 >/dev/null 2>&1 \
+           && clang++ --version 2>/dev/null | grep -qE 'version 21\.' \
+           && dpkg -s libc++-21-dev libc++abi-21-dev >/dev/null 2>&1 \
+           && [ -e /usr/lib/share/libc++ ]; then
+          echo "clang-21 + libc++-21 + bridge + alternatives already provisioned — skipping (idempotent skip)"
+          exit 0
+        fi
         command -v wget >/dev/null 2>&1 || { sudo apt-get update && sudo apt-get install -y wget; }
         # clang-21 (dev compiler) from apt.llvm.org — the base image's bare clang is too old to
         # compile std::expected now that the __cpp_concepts<21 shim is retired.

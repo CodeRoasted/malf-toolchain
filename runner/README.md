@@ -116,8 +116,30 @@ the runner solves *minutes*, not that source blocker.)
 
 - **Warm caches = faster than hosted.** A persistent runner keeps the conan cache,
   `/opt/gcc-15.3`, and apt state between jobs (the in-job `setup-*` actions are
-  idempotent), so after the first run, builds skip the cold-cache dependency rebuild
+  idempotent — they **detect-and-skip** when the toolchain is already present at the
+  required version), so after the first run, builds skip the cold-cache dependency rebuild
   that dominates the GitHub-hosted runs.
+- **Elevation is one-time, not per-job — so the cleanest fix needs no standing grant.** The
+  `setup-*` actions provision the toolchain *once* (they need root: `apt`/`tar`/`update-alternatives`
+  on Linux, the VS Build Tools installer — which self-elevates → a UAC prompt — on Windows; MSVC
+  lands in a **persistent** `%LOCALAPPDATA%\malf-msvc1452`). After that first provision they
+  **detect-and-skip**, so **no password prompt / no UAC** on any later job. The recommended model
+  is therefore: **bake the toolchain once** — accept the few sudo prompts (or the one UAC) on the
+  first job, or pre-run the install commands by hand once — then every subsequent job skips with
+  zero elevation. No persistent passwordless-root grant required.
+- **If you want even the first provision non-interactive:** add `NOPASSWD` sudo for the runner user.
+  Be honest about what that buys: `apt-get` / `tar` / `python3` *as root* are each effectively root,
+  so a "scoped" command list is tidiness, **not** a real boundary against malicious code — the actual
+  guarantee is the ⛔ safety rule (this box never runs public / fork code). Grant it *only* because
+  that rule holds, keep it command-scoped (never `NOPASSWD: ALL`), and prefer bake-once above when you can:
+
+  ```bash
+  # /etc/sudoers.d/malf-runner  (edit with `visudo -f`):
+  <runner-user> ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/tar, /usr/bin/update-alternatives, /usr/bin/mkdir, /usr/bin/ln, /usr/bin/python3
+  ```
+
+  On Windows the first VS install shows UAC once (accept it) or run the provisioning job from an
+  already-elevated runner shell; it does not recur once `malf-msvc1452` exists.
 - **Determinism/fuzz gates** clone fresh and use their own build dirs, so a persistent
   workspace is fine. If you ever want clean-room fidelity, re-run `install-runner.sh`
   with the runner reconfigured `--ephemeral` (one job per registration).

@@ -68,7 +68,9 @@ runs:
         lscpu | head -25
         grep -m1 -oE '(sse4_2|avx2?|avx512[a-z]*|bmi[12]?|fma|adx|popcnt)( |$)' /proc/cpuinfo | sort -u
         echo "::endgroup::"
-        sudo apt-get install -y -qq gdb >/dev/null
+        # Skip the sudo install when gdb is already present — on a self-hosted runner (no passwordless
+        # sudo) an unguarded sudo here would block this diagnostic on an interactive password prompt.
+        command -v gdb >/dev/null 2>&1 || sudo apt-get install -y -qq gdb >/dev/null
         for bin in "build/$MODULE"/*tests "build/$MODULE"/*_tests; do
           [ -x "$bin" ] || continue
           echo "::group::gdb --batch on $bin"

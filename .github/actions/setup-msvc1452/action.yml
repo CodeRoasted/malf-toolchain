@@ -39,51 +39,72 @@ runs:
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
-        # VS 2026 = major 18; its early channel is 'insiders' (VS 2022's 'pre' was renamed).
-        # /vs/18/pre and /vs/18/release are unregistered (aka.ms 302s to Bing); only insiders
-        # resolves to a real CDN bootstrapper, and it carries the preview MSVC toolset.
-        $url = 'https://aka.ms/vs/18/insiders/vs_buildtools.exe'
-        $exe = Join-Path $env:RUNNER_TEMP 'vs_buildtools_insiders.exe'
-        Write-Host "Downloading $url"
-        Invoke-WebRequest -Uri $url -OutFile $exe
-        if (-not (Test-Path $exe)) { throw "bootstrapper download failed" }
+        # Persistent install root so a self-hosted runner installs the ~GB toolset ONCE: LOCALAPPDATA
+        # survives between jobs (RUNNER_TEMP is wiped each job → the old path forced a full re-install
+        # AND a fresh UAC elevation every run). On a hosted runner LOCALAPPDATA is per-job, so it still
+        # installs each run as before.
+        $installPath = Join-Path $env:LOCALAPPDATA 'malf-msvc1452'
+        $floor = [version]'${{ inputs.min-version }}'
 
-        # Guard the silent-corruption trap: an unregistered aka.ms slug returns a 0-byte / HTML
-        # page (not a 404), saved as the .exe → Start-Process "corrupted and unreadable".
-        $len = (Get-Item $exe).Length
-        $sig = -join ([System.IO.File]::ReadAllBytes($exe)[0..1] | ForEach-Object { [char]$_ })
-        Write-Host "downloaded $len bytes, signature '$sig'"
-        if ($len -lt 1MB -or $sig -ne 'MZ') {
-          throw "downloaded file is not a valid Windows executable (size=$len, sig='$sig') — bad bootstrapper URL"
+        # Idempotent skip: if a toolset >= the fix floor is already installed at $installPath, reuse it
+        # — no re-download, no installer, no UAC. The VS bootstrapper self-elevates, so SKIPPING the
+        # install is exactly what avoids the elevation popup on a persistent (self-hosted) runner.
+        $have = $false
+        $msvcProbe = Join-Path $installPath 'VC\Tools\MSVC'
+        if (Test-Path $msvcProbe) {
+          $existing = Get-ChildItem $msvcProbe -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending
+          if ($existing -and [version]$existing[0].Name -ge $floor) {
+            Write-Host "MSVC $($existing[0].Name) already at $installPath (>= $floor) — skipping VS Build Tools install (idempotent skip)"
+            $have = $true
+          }
         }
 
-        $installPath = Join-Path $env:RUNNER_TEMP 'msvc1452'
-        $vsArgs = @(
-          '--quiet', '--norestart', '--wait', '--nocache',
-          '--installPath', $installPath,
-          '--add', 'Microsoft.VisualStudio.Workload.VCTools',
-          '--add', 'Microsoft.VisualStudio.Component.VC.CoreBuildTools',
-          # The RELEASED grouped toolset lays down the version-agnostic VC\Auxiliary\Build\vcvars*.bat
-          # infrastructure + the Windows SDK base; the Preview component only adds the 14.52 toolset
-          # binaries (no scripts). Install BOTH: scripts from released, 14.52 from Preview. vcvars
-          # -vcvars_ver=14.52 then selects the Preview toolset for compilation.
-          '--add', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
-          '--add', 'Microsoft.VisualStudio.Component.VC.Preview.Tools.x86.x64',
-          # A Windows SDK is mandatory: vcvars refuses to activate (and the linker can't resolve
-          # kernel32 etc.) without one. The minimal workload does not pull it on its own.
-          '--add', 'Microsoft.VisualStudio.Component.Windows11SDK.26100'
-        )
-        Write-Host "Installing VS Build Tools (Insiders) + VC.Preview.Tools to $installPath"
-        $proc = Start-Process -FilePath $exe -ArgumentList $vsArgs -Wait -PassThru
-        $code = $proc.ExitCode
-        Write-Host "installer exit code: $code"
-        # 0 = ok, 3010 = ok-reboot-required, 1641 = ok-reboot-initiated.
-        if ($code -ne 0 -and $code -ne 3010 -and $code -ne 1641) {
-          $logs = Get-ChildItem "$env:TEMP\dd_*.log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
-          if ($logs) { Write-Host "=== tail of newest VS setup log ==="; Get-Content $logs[0].FullName -Tail 80 }
-          throw "VS Build Tools install failed (exit $code)"
+        if (-not $have) {
+          # VS 2026 = major 18; its early channel is 'insiders' (VS 2022's 'pre' was renamed).
+          # /vs/18/pre and /vs/18/release are unregistered (aka.ms 302s to Bing); only insiders
+          # resolves to a real CDN bootstrapper, and it carries the preview MSVC toolset.
+          $url = 'https://aka.ms/vs/18/insiders/vs_buildtools.exe'
+          $exe = Join-Path $env:RUNNER_TEMP 'vs_buildtools_insiders.exe'
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile $exe
+          if (-not (Test-Path $exe)) { throw "bootstrapper download failed" }
+
+          # Guard the silent-corruption trap: an unregistered aka.ms slug returns a 0-byte / HTML
+          # page (not a 404), saved as the .exe → Start-Process "corrupted and unreadable".
+          $len = (Get-Item $exe).Length
+          $sig = -join ([System.IO.File]::ReadAllBytes($exe)[0..1] | ForEach-Object { [char]$_ })
+          Write-Host "downloaded $len bytes, signature '$sig'"
+          if ($len -lt 1MB -or $sig -ne 'MZ') {
+            throw "downloaded file is not a valid Windows executable (size=$len, sig='$sig') — bad bootstrapper URL"
+          }
+
+          $vsArgs = @(
+            '--quiet', '--norestart', '--wait', '--nocache',
+            '--installPath', $installPath,
+            '--add', 'Microsoft.VisualStudio.Workload.VCTools',
+            '--add', 'Microsoft.VisualStudio.Component.VC.CoreBuildTools',
+            # The RELEASED grouped toolset lays down the version-agnostic VC\Auxiliary\Build\vcvars*.bat
+            # infrastructure + the Windows SDK base; the Preview component only adds the 14.52 toolset
+            # binaries (no scripts). Install BOTH: scripts from released, 14.52 from Preview. vcvars
+            # -vcvars_ver=14.52 then selects the Preview toolset for compilation.
+            '--add', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
+            '--add', 'Microsoft.VisualStudio.Component.VC.Preview.Tools.x86.x64',
+            # A Windows SDK is mandatory: vcvars refuses to activate (and the linker can't resolve
+            # kernel32 etc.) without one. The minimal workload does not pull it on its own.
+            '--add', 'Microsoft.VisualStudio.Component.Windows11SDK.26100'
+          )
+          Write-Host "Installing VS Build Tools (Insiders) + VC.Preview.Tools to $installPath"
+          $proc = Start-Process -FilePath $exe -ArgumentList $vsArgs -Wait -PassThru
+          $code = $proc.ExitCode
+          Write-Host "installer exit code: $code"
+          # 0 = ok, 3010 = ok-reboot-required, 1641 = ok-reboot-initiated.
+          if ($code -ne 0 -and $code -ne 3010 -and $code -ne 1641) {
+            $logs = Get-ChildItem "$env:TEMP\dd_*.log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+            if ($logs) { Write-Host "=== tail of newest VS setup log ==="; Get-Content $logs[0].FullName -Tail 80 }
+            throw "VS Build Tools install failed (exit $code)"
+          }
+          if (-not (Test-Path $installPath)) { throw "install path $installPath does not exist after install" }
         }
-        if (-not (Test-Path $installPath)) { throw "install path $installPath does not exist after install" }
         "MSVC1452_INSTALL=$installPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
 
     - name: Verify the floor + activate the dev environment

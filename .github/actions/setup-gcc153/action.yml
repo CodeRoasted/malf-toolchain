@@ -33,6 +33,17 @@ runs:
         ASSET: ${{ inputs.asset }}
       run: |
         set -euo pipefail
+        # Idempotent on a persistent (self-hosted) runner: /opt/gcc-15.3 survives between jobs, so a
+        # re-provision (download + `sudo tar -C /opt`) is pure waste AND needs sudo — which prompts
+        # for a password on a self-hosted box (the runner user is not in passwordless sudoers). Skip
+        # when the compiler is already present at the required version; the first provision installs.
+        if [ -x /opt/gcc-15.3/bin/g++ ]; then
+          have=$(/opt/gcc-15.3/bin/g++ -dumpversion 2>/dev/null || echo 0)
+          case "$have" in
+            15.3*|15.[4-9]*|1[6-9].*)
+              echo "gcc $have already at /opt/gcc-15.3 — skipping provision (idempotent skip)"; exit 0 ;;
+          esac
+        fi
         base="https://github.com/${REPO}/releases/download/${TAG}"
         cd "$RUNNER_TEMP"
         # Retry the pull: the toolchain layer is ~450 MB and the CDN occasionally drops the

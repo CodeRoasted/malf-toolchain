@@ -37,13 +37,28 @@ runs:
         set -euo pipefail
         # CONAN_HOME owned here (single definition) — visible to every later step as $CONAN_HOME.
         echo "CONAN_HOME=$GITHUB_WORKSPACE/.conan2" >> "$GITHUB_ENV"
-        sudo apt-get update
-        sudo apt-get install -y ninja-build python3-pip build-essential $EXTRA_APT
+        # Idempotent on a persistent (self-hosted) runner: apt state survives between jobs, so the
+        # apt/pip provision is pure waste AND needs sudo → a password prompt on a self-hosted box.
+        # Install only what's actually missing; on a hosted (ephemeral) runner everything is missing
+        # so the full provision still runs.
+        need_apt=0
+        for pkg in ninja-build python3-pip build-essential $EXTRA_APT; do
+          dpkg -s "$pkg" >/dev/null 2>&1 || { need_apt=1; break; }
+        done
+        if [ "$need_apt" = 1 ]; then
+          sudo apt-get update
+          sudo apt-get install -y ninja-build python3-pip build-essential $EXTRA_APT
+        else
+          echo "apt base (+ extra: '${EXTRA_APT:-none}') already present — skipping apt (idempotent skip)"
+        fi
         # Pin the dev-validated CMake 4.3.x workspace-wide (dev/CI parity). Repos that arm
         # `import std` need CXX_MODULE_STD (experimental UUID 451f2fe2 — present only in CMake
-        # 4.3.x); Ubuntu Noble ships 3.28 without that gate. Harmless / kept consistent elsewhere.
-        sudo python3 -m pip install --break-system-packages "cmake==4.3.1"
-        hash -r
+        # 4.3.x); Ubuntu Noble ships 3.28 without that gate. Install only if not already 4.3.x
+        # (the pip install needs sudo → skip it when the pin is already satisfied).
+        case "$(cmake --version 2>/dev/null | head -1)" in
+          *" 4.3."*) ;;
+          *) sudo python3 -m pip install --break-system-packages "cmake==4.3.1"; hash -r ;;
+        esac
         case "$(cmake --version | head -1)" in
           *" 4.3."*) cmake --version ;;
           *) echo "::error::expected CMake 4.3.x (got: $(cmake --version | head -1))"; exit 1 ;;
