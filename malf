@@ -746,6 +746,7 @@ cmd_test() {
     # Force such packages to Release so `malf test` produces meaningful
     # results regardless of MALF_CONFIG.
     local target_basename
+    local extra_conan_opts=()
     target_basename="$(basename "$target")"
     case "$target_basename" in
         insight-playground)
@@ -754,6 +755,10 @@ cmd_test() {
                 MALF_CONFIG="Release"
                 build_dir="$(_malf_build_dir "$target")"
             fi
+            # The disposable cube do-operator harness (tests/do_operator/) needs insight_cube, which
+            # exists only as a workspace editable (release:false -> unvendorable). Enable it for the
+            # full-workspace build; the vendored `conan create` CI path leaves it OFF (cube-free).
+            extra_conan_opts+=(-o "&:with_cube_do_operator=True")
             ;;
     esac
 
@@ -767,7 +772,8 @@ cmd_test() {
     # shellcheck disable=SC2046
     conan install "$target" \
         --output-folder="$build_dir" \
-        $(_malf_conan_install_args)
+        $(_malf_conan_install_args) \
+        "${extra_conan_opts[@]}"
 
     # Conan writes CMakeUserPresets.json to the source dir with multiple includes,
     # causing "Duplicate preset" errors. Rewrite it to include only the local build dir.
