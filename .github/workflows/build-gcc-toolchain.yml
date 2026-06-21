@@ -70,15 +70,19 @@ jobs:
           # A gcc release is built once but may gain a 2nd-ISA asset on a later re-run. An arch whose
           # asset is already on the release is immutable → skip its (≈2 h) build+publish entirely, so a
           # re-run that adds e.g. -arm64 to an -x64-only release rebuilds neither x64 nor the source.
-          # Capture the asset list to a var, then match via here-string — NOT `gh … | grep -q`: under
-          # `set -o pipefail`, grep -q closes the pipe on first match and gh dies with SIGPIPE, so the
-          # pipeline "fails" and a PRESENT asset reads as absent (the false skip=false that rebuilt x64).
-          assets="$(gh release view "$TAG" --json assets -q '.assets[].name' 2>/dev/null || true)"
-          if grep -qxF "$ASSET" <<<"$assets"; then
+          # Detect whether THIS arch's asset is already on the release (via gh api — deterministic; a
+          # `gh release view … -q` returned nothing on the runner) and skip its ≈2 h build+publish if so,
+          # so a re-run that adds e.g. -arm64 to an -x64-only release rebuilds neither x64 nor the source.
+          # Verbose by design: this gate decides a 2 h job, so it prints its inputs + verdict.
+          echo "precheck: repo=$GITHUB_REPOSITORY TAG=$TAG ASSET=$ASSET"
+          if assets="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '.assets[].name' 2>/dev/null)"; then rc=0; else rc=$?; fi
+          printf 'precheck: release lookup rc=%s; assets present:\n%s\n' "$rc" "$assets"
+          if [ "$rc" -eq 0 ] && grep -qxF "$ASSET" <<<"$assets"; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "::notice::$ASSET already on '$TAG' — skipping this arch (immutable; re-run adds only missing ISA assets)."
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "precheck: BUILD this arch (asset absent, or release unreadable rc=$rc)."
           fi
 
       - name: Install build prerequisites
@@ -182,21 +186,21 @@ jobs:
 
           Provision it in CI via \`CodeRoasted/malf-toolchain/.github/actions/setup-gcc153@main\`.
           EOF
-          # Asset/source presence via a captured var + here-string (same SIGPIPE-under-pipefail caveat
-          # as precheck: `gh … | grep -q` can mis-read a present asset/source as absent).
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            assets="$(gh release view "$TAG" --json assets -q '.assets[].name' 2>/dev/null || true)"
-            if grep -qxF "$ASSET" <<<"$assets"; then
+          # Asset/source presence via gh api + here-string match (deterministic; a `gh release view … -q`
+          # returned nothing on the runner, and `… | grep -q` mis-reads under pipefail). A 200 from the
+          # tag endpoint means the release exists; a non-zero (404) means create it first.
+          if rel="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '.assets[].name' 2>/dev/null)"; then
+            if grep -qxF "$ASSET" <<<"$rel"; then
               echo "::error::$ASSET already published on '$TAG' — a published compiler is immutable. Bump the version."; exit 1
             fi
           else
             gh release create "$TAG" --title "gcc ${GCC_VERSION}" --notes-file RELEASE_NOTES.md --latest=false
-            assets=""
+            rel=""
           fi
           # Binary asset (this arch) — immutability checked above.
           gh release upload "$TAG" "$ASSET" "$ASSET.sha256"
           # Corresponding Source — upload only if not already present (first arch publishes it).
-          if grep -qxF "$SRC" <<<"$assets"; then
+          if grep -qxF "$SRC" <<<"$rel"; then
             echo "GPLv3 source $SRC already on '$TAG' — skipping (one source serves all ISA binaries)"
           else
             gh release upload "$TAG" "$SRC" "$SRC.sha256"
