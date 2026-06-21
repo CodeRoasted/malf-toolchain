@@ -18,9 +18,11 @@ inputs:
     required: false
     default: 'gcc-15.3.0'
   asset:
-    description: 'Toolchain tarball asset name.'
+    description: |
+      Toolchain tarball asset name. Default (empty) derives it from `tag` + the runner's ISA
+      (`uname -m`): x86_64 → `-x64`, aarch64 → `-arm64`. Set explicitly only to pin a non-default asset.
     required: false
-    default: 'gcc-15.3-noble-x64.tar.zst'
+    default: ''
 
 runs:
   using: composite
@@ -33,6 +35,19 @@ runs:
         ASSET: ${{ inputs.asset }}
       run: |
         set -euo pipefail
+        # Derive the per-ISA asset name from the runner's architecture unless the caller pinned one.
+        # The build workflow publishes gcc-<maj.min>-noble-{x64,arm64}.tar.zst as siblings on the same
+        # gcc-<ver> release; pick the one matching THIS runner so a single action serves both ISAs.
+        if [ -z "${ASSET:-}" ]; then
+          ver="${TAG#gcc-}"; mm="${ver%.*}"   # gcc-15.3.0 -> 15.3.0 -> 15.3
+          case "$(uname -m)" in
+            x86_64|amd64) arch=x64 ;;
+            aarch64|arm64) arch=arm64 ;;
+            *) echo "::error::setup-gcc153: unsupported arch '$(uname -m)' (no published gcc-15.3 asset)"; exit 1 ;;
+          esac
+          ASSET="gcc-${mm}-noble-${arch}.tar.zst"
+          echo "setup-gcc153: ISA $(uname -m) → asset ${ASSET}"
+        fi
         # Idempotent on a persistent (self-hosted) runner: /opt/gcc-15.3 survives between jobs, so a
         # re-provision (download + `sudo tar -C /opt`) is pure waste AND needs sudo — which prompts
         # for a password on a self-hosted box (the runner user is not in passwordless sudoers). Skip

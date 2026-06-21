@@ -1,0 +1,27 @@
+# linux-clang21-libcxx-arm64-release — the Linux-arm64 (aarch64) twin of linux-clang21-libcxx-release.
+# The clang/libc++ half of the arm64 cross-STDLIB diagonal: paired with linux-gcc15-arm64-release it
+# proves gcc-15/libstdc++ ≡ clang-21/libc++ ON arm64 (the only axis that exposes an unordered_*/
+# hash-iteration-order leak — F5-M8 — and it can differ by ISA). Flags MIRROR the x86 libc++ profile
+# except arch=armv8 and the armv8-a baseline (see linux-gcc15-arm64-release for the ISA-specific notes).
+# clang-21 + libc++-21 come from apt.llvm.org, which serves aarch64 — so setup-clang21-libcxx is already
+# arch-agnostic and needs no arm64 variant; only the conan profile's arch/march change.
+[settings]
+arch=armv8
+build_type=Release
+compiler=clang
+compiler.version=21
+compiler.cppstd=gnu23
+compiler.libcxx=libc++
+os=Linux
+
+[buildenv]
+CC=clang-21
+CXX=clang++-21
+
+[conf]
+tools.build:cflags=["-O3", "-march=armv8-a"]
+tools.build:cxxflags=["-O3", "-march=armv8-a", "-stdlib=libc++"]
+tools.build:exelinkflags=["-stdlib=libc++"]
+tools.build:sharedlinkflags=["-stdlib=libc++"]
+# arm64-keyed build dir (see linux-gcc15-arm64-release); keeps the arm64 libc++ tree off the x86 one.
+user.malf:editable_build_dir=build-clang21-libcxx-arm64-release

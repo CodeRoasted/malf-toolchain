@@ -29,7 +29,20 @@ permissions:
 
 jobs:
   build-and-publish:
-    runs-on: ubuntu-24.04   # noble — the same image consumer CI runs on (glibc parity)
+    # One job per target ISA, NATIVE on a matching runner (a native bootstrap is the determinism
+    # reference; a cross-compiled gcc is NOT bit-equivalent and must never seed the det baseline). Both
+    # arch assets are siblings on the SAME gcc-<ver> release, picked by setup-gcc153 via uname -m.
+    # max-parallel:1 serializes the SHARED release create/upload across arches (the two jobs would
+    # otherwise race on `gh release create` / double-upload the arch-independent source). ~2 h/arch ⇒
+    # ~4 h serial, but this runs ONLY on a gcc bump — rarity, not latency, is the constraint.
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - { arch: x64,   runs_on: ubuntu-24.04 }       # noble x86_64 — glibc parity w/ consumer CI
+          - { arch: arm64, runs_on: ubuntu-24.04-arm }   # noble aarch64 — the 2nd-ISA determinism leg
+    runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 240
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -47,7 +60,7 @@ jobs:
             echo "GCC_VERSION=$V"
             echo "PREFIX=/opt/gcc-${maj}.${min}"
             echo "TAG=gcc-${V}"                  # release tag, e.g. gcc-15.3.0
-            echo "ASSET=gcc-${V%.*}-noble-x64.tar.zst"  # e.g. gcc-15.3-noble-x64.tar.zst
+            echo "ASSET=gcc-${V%.*}-noble-${{ matrix.arch }}.tar.zst"  # e.g. gcc-15.3-noble-arm64.tar.zst
           } >> "$GITHUB_ENV"
 
       - name: Install build prerequisites
@@ -124,18 +137,22 @@ jobs:
           set -euo pipefail
           cd "$RUNNER_TEMP"
           SRC="gcc-${GCC_VERSION}.tar.xz"
-          # GPLv3 §6 notice + source pointer, shipped IN the release.
+          # GPLv3 §6 notice + source pointer, shipped IN the release. The source is ISA-INDEPENDENT
+          # (one upstream tarball satisfies §6 for every published binary), so it is uploaded ONCE by
+          # whichever arch lands first; later arches add only their binary asset.
           cat > RELEASE_NOTES.md <<EOF
-          # gcc ${GCC_VERSION} — CodeRoast build toolchain (Linux x86_64, noble)
+          # gcc ${GCC_VERSION} — CodeRoast build toolchain (Linux x86_64 + aarch64, noble)
 
           Vanilla **GNU GCC ${GCC_VERSION}**, built UNMODIFIED from source for CodeRoast CI
-          (the PR124309 fix; the dev profile pins this exact compiler at /opt/gcc-15.3).
+          (the PR124309 fix; the dev profile pins this exact compiler at /opt/gcc-15.3). Two
+          per-ISA binary assets — \`-x64\` and \`-arm64\` — both native bootstraps of the SAME
+          unmodified source; \`setup-gcc153\` picks one by \`uname -m\`.
 
           ## License — GPLv3
           GCC is licensed under the GNU GPL v3. This is a binary redistribution, so the
           **Corresponding Source** is provided here per GPLv3 §6:
           - \`${SRC}\` — the pristine, unmodified upstream source (sha256 verified against
-            ftp.gnu.org: see \`${SRC}.sha256\`).
+            ftp.gnu.org: see \`${SRC}.sha256\`). One source covers BOTH ISA binaries (no patches).
           - The exact build recipe (configure flags) is \`.github/workflows/build-gcc-toolchain.yml\`
             in this repo. We apply no patches.
 
@@ -148,7 +165,14 @@ jobs:
           else
             gh release create "$TAG" --title "gcc ${GCC_VERSION}" --notes-file RELEASE_NOTES.md --latest=false
           fi
-          gh release upload "$TAG" "$ASSET" "$ASSET.sha256" "$SRC" "$SRC.sha256"
+          # Binary asset (this arch) — immutability already checked above.
+          gh release upload "$TAG" "$ASSET" "$ASSET.sha256"
+          # Corresponding Source — upload only if not already present (first arch publishes it).
+          if gh release view "$TAG" --json assets -q '.assets[].name' | grep -qx "$SRC"; then
+            echo "GPLv3 source $SRC already on '$TAG' — skipping (one source serves all ISA binaries)"
+          else
+            gh release upload "$TAG" "$SRC" "$SRC.sha256"
+          fi
           {
             echo "## gcc ${GCC_VERSION} published → release \`$TAG\`"
             echo "- binary: \`$ASSET\` ($(du -h "$ASSET" | cut -f1)) · sha \`$(cut -d' ' -f1 "$ASSET.sha256")\`"
