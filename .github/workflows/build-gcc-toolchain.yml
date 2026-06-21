@@ -63,13 +63,30 @@ jobs:
             echo "ASSET=gcc-${V%.*}-noble-${{ matrix.arch }}.tar.zst"  # e.g. gcc-15.3-noble-arm64.tar.zst
           } >> "$GITHUB_ENV"
 
+      - name: Already published? (idempotent re-run — add only the missing ISA assets)
+        id: precheck
+        run: |
+          set -euo pipefail
+          # A gcc release is built once but may gain a 2nd-ISA asset on a later re-run. An arch whose
+          # asset is already on the release is immutable → skip its (≈2 h) build+publish entirely, so a
+          # re-run that adds e.g. -arm64 to an -x64-only release rebuilds neither x64 nor the source.
+          if gh release view "$TAG" >/dev/null 2>&1 \
+             && gh release view "$TAG" --json assets -q '.assets[].name' | grep -qx "$ASSET"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$ASSET already on '$TAG' — skipping this arch (immutable; re-run adds only missing ISA assets)."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install build prerequisites
+        if: steps.precheck.outputs.skip != 'true'
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y build-essential flex bison zstd curl
 
       - name: Fetch + verify gcc source (the GPLv3 Corresponding Source)
+        if: steps.precheck.outputs.skip != 'true'
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
@@ -86,6 +103,7 @@ jobs:
           sha256sum "gcc-${GCC_VERSION}.tar.xz" | tee "gcc-${GCC_VERSION}.tar.xz.sha256"
 
       - name: Build gcc ${{ env.GCC_VERSION }} from source (3-stage bootstrap)
+        if: steps.precheck.outputs.skip != 'true'
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
@@ -105,6 +123,7 @@ jobs:
           sudo make install
 
       - name: Verify the built compiler (version + PR124309 partition repro)
+        if: steps.precheck.outputs.skip != 'true'
         run: |
           set -euo pipefail
           "$PREFIX/bin/g++" --version | head -1
@@ -126,6 +145,7 @@ jobs:
           ./repro && echo "PR124309 partition repro: PASS (compiler reads the partition BMI)"
 
       - name: Package the toolchain (tar.zst) + checksum
+        if: steps.precheck.outputs.skip != 'true'
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
@@ -133,6 +153,7 @@ jobs:
           sha256sum "$ASSET" | tee "$ASSET.sha256"
 
       - name: Publish PUBLIC release (binary + Corresponding Source + checksums; immutable per version)
+        if: steps.precheck.outputs.skip != 'true'
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
