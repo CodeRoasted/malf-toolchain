@@ -1,0 +1,95 @@
+name: 'Restore third-party conan cache (ghcr)'
+description: |
+  Pull the THIRD-PARTY conan dependency closure — built once per toolchain by the cache producer
+  (insight-eidos/conan-cache-publish.yml) and stored as a private ghcr OCI artifact — and
+  `conan cache restore` it into $CONAN_HOME. A following `conan ... --build=missing` then resolves
+  the ~26-dep world as DOWNLOADS and rebuilds ONLY the first-party engine packages (the irreducible
+  per-cell codegen). See technical_docs/architecture/ci_conan_binary_cache.md.
+
+  ACCELERATOR, NEVER A GATE. Every failure mode — a cold/missing cache tag, a network drop, oras
+  absent, a restore error — is swallowed (::warning:: / ::notice:: + continue). The consumer then
+  builds the deps from source, exactly as it did before this cache existed. Correctness is gated
+  downstream by the determinism golden, which is byte-identical whether a dep binary was downloaded
+  or rebuilt — the cache changes build PROVENANCE, never output BYTES.
+
+  READ-ONLY: it never uploads. First-party (insight_*/coderoast_*) binaries are excluded at PRODUCE
+  time and never live in this cache — the product moat AND the determinism sweep (each cell must
+  vary first-party codegen, so first-party must never be shared across cells).
+
+  Requires $CONAN_HOME to be set and `conan` on PATH (run it after conan setup, before the build).
+  Currently pwsh/Windows (the wired consumers are the MSVC legs); a bash branch is added when a
+  Linux consumer is wired.
+
+inputs:
+  registry:
+    description: 'OCI repository holding the cache artifact (no tag).'
+    required: false
+    default: 'ghcr.io/coderoasted/conan-cache'
+  tag:
+    description: |
+      Cache tag = the toolset namespace (e.g. msvc1452). Binaries inside are package_id-keyed on
+      compiler.version (major.minor, ABI-stable), so toolset PATCH drift interlinks under one tag;
+      a major/minor toolset bump uses a NEW tag. A wrong/stale entry is harmless — conan install
+      only consumes package_ids that match and rebuilds the rest.
+    required: true
+  token:
+    description: 'Token with packages:read on the registry (e.g. secrets.GITHUB_TOKEN). Needs the job to grant packages: read.'
+    required: true
+  actor:
+    description: 'ghcr login user.'
+    required: false
+    default: ${{ github.actor }}
+
+runs:
+  using: composite
+  steps:
+    - name: Ensure oras (pinned)
+      uses: CodeRoasted/malf-toolchain/.github/actions/ensure-oras@main
+
+    - name: Restore third-party conan cache from ${{ inputs.registry }}:${{ inputs.tag }} (best-effort)
+      shell: pwsh
+      env:
+        CACHE_REF: ${{ inputs.registry }}:${{ inputs.tag }}
+        ORAS_ACTOR: ${{ inputs.actor }}
+        ORAS_TOKEN: ${{ inputs.token }}
+      run: |
+        # ACCELERATOR, NEVER A GATE: no ErrorActionPreference=Stop — a cache problem must never fail
+        # the job. We test outcomes and ::warning:: / ::notice:: + exit 0; --build=missing rebuilds
+        # anything not restored, and the determinism golden gates correctness regardless.
+        if (-not $env:CONAN_HOME) { Write-Host "::warning::CONAN_HOME unset — skipping conan cache restore"; exit 0 }
+        if (-not (Get-Command oras -ErrorAction SilentlyContinue)) {
+          Write-Host "::warning::oras unavailable — skipping cache restore; deps will build from source"; exit 0
+        }
+        if (-not (Get-Command conan -ErrorAction SilentlyContinue)) {
+          Write-Host "::warning::conan not on PATH — skipping cache restore (run this after conan setup)"; exit 0
+        }
+
+        $work = "$env:RUNNER_TEMP/conan-cache-pull"
+        Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Force -Path $work | Out-Null
+
+        # login (password-stdin: never on the command line / process list). A failure here is a miss.
+        $env:ORAS_TOKEN | & oras login ghcr.io --username $env:ORAS_ACTOR --password-stdin 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+          Write-Host "::warning::oras login to ghcr.io failed — skipping cache restore; deps will build from source"; exit 0
+        }
+        # From here a login exists — always logout before exiting so creds never persist on the
+        # (self-hosted) runner. Linear flow, no `exit` inside the pull/restore block.
+        & oras pull $env:CACHE_REF --output $work
+        if ($LASTEXITCODE -eq 0) {
+          $tarball = (Get-ChildItem -Recurse $work -Filter *.tgz | Select-Object -First 1).FullName
+          if ($tarball) {
+            conan cache restore "$tarball"
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "::notice::restored third-party conan cache from $env:CACHE_REF — only first-party engine packages will build from source"
+            } else {
+              Write-Host "::warning::conan cache restore failed — deps will build from source"
+            }
+          } else {
+            Write-Host "::warning::pulled cache artifact contained no .tgz — deps will build from source"
+          }
+        } else {
+          Write-Host "::notice::no warm conan cache at $env:CACHE_REF (cold / miss) — deps will build from source"
+        }
+        & oras logout ghcr.io 2>&1 | Out-Null
+        exit 0

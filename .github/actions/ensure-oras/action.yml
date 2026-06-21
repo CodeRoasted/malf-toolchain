@@ -1,0 +1,67 @@
+name: 'Ensure oras CLI'
+description: |
+  Make the oras CLI available on the runner PATH, pinned to a checksum-verified release.
+
+  SINGLE SOURCE of the oras pin (version + sha256) for every CodeRoast workflow that pushes or
+  pulls OCI artifacts — the conan binary-cache producer (insight-eidos/conan-cache-publish.yml)
+  and the restore-conan-cache action both depend on it, so the supply-chain pin lives in ONE
+  place and can never copy-paste-drift (ci-vendoring-baseline-drift).
+
+  BEST-EFFORT: a download / checksum failure emits a ::warning:: and the step still SUCCEEDS
+  (oras simply stays absent). The CALLER decides fatality — the producer asserts oras is present
+  after this step (a failed push must be loud); the restore action tolerates its absence (the
+  cache is an accelerator, never a gate). Idempotent: a no-op when oras is already on PATH.
+
+  Self-hosted runners may not carry oras; hosted ones never do. Currently Windows/pwsh (the oras
+  users are the MSVC conan-cache legs); a Linux branch is added when a Linux oras user is wired.
+
+inputs:
+  version:
+    description: 'oras release version (no leading v). Bump the sha below WITH it.'
+    required: false
+    default: '1.2.3'
+
+runs:
+  using: composite
+  steps:
+    - name: Ensure oras (pinned + checksum-verified) on PATH
+      shell: pwsh
+      env:
+        ORAS_VERSION: ${{ inputs.version }}
+        # sha256 of oras_<version>_windows_amd64.zip from the oras-project release checksums
+        # (oras_<version>_checksums.txt). MUST be bumped together with `version`.
+        ORAS_SHA256_WINDOWS_AMD64: '8fe890f5c6c89b06fb138839e533a112e0fc026a25b2c8c1b042b32455a56947'
+      run: |
+        # No ErrorActionPreference=Stop: this action is best-effort by contract. We test outcomes
+        # and ::warning:: + exit 0 on any failure, leaving the caller to decide whether absent oras
+        # is fatal. (The single fatal-looking `exit 0`s below are SUCCESS exits.)
+        if (Get-Command oras -ErrorAction SilentlyContinue) {
+          Write-Host "oras already on PATH ($(((& oras version) | Select-Object -First 1)))  — idempotent skip"
+          exit 0
+        }
+        $zip = "$env:RUNNER_TEMP/oras.zip"
+        $dir = "$env:RUNNER_TEMP/oras-bin"
+        $url = "https://github.com/oras-project/oras/releases/download/v$($env:ORAS_VERSION)/oras_$($env:ORAS_VERSION)_windows_amd64.zip"
+        $pulled = $false
+        foreach ($attempt in 1..3) {
+          try {
+            Remove-Item $zip -ErrorAction SilentlyContinue
+            Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+            $pulled = $true; break
+          } catch {
+            Write-Host "::warning::oras download failed (attempt $attempt/3): $_"
+            Start-Sleep -Seconds ($attempt * 5)
+          }
+        }
+        if (-not $pulled) { Write-Host "::warning::oras download failed after 3 attempts — oras stays absent"; exit 0 }
+        $got = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+        if ($got -ne $env:ORAS_SHA256_WINDOWS_AMD64) {
+          # A checksum mismatch is a supply-chain signal, not a flaky download — never trust the binary.
+          Write-Host "::warning::oras zip sha256 mismatch (got $got, expected $($env:ORAS_SHA256_WINDOWS_AMD64)) — refusing it, oras stays absent"
+          exit 0
+        }
+        Expand-Archive -Path $zip -DestinationPath $dir -Force
+        $orasDir = (Get-ChildItem -Recurse $dir -Filter oras.exe | Select-Object -First 1).Directory.FullName
+        if (-not $orasDir) { Write-Host "::warning::oras.exe not found after extract — oras stays absent"; exit 0 }
+        Add-Content -Path $env:GITHUB_PATH -Value $orasDir
+        Write-Host "provisioned oras $($env:ORAS_VERSION) (sha256 verified) -> $orasDir"
