@@ -57,7 +57,11 @@ runs:
         # sift exit (e.g. --fail-on, never set here) or an unreachable endpoint must
         # not fail the step.
         : > "$tmp/sift-empty.log"
+        # --explain-timeout 120s: courtesy runs Phi-3.5-mini on CPU; the real ~4 KB
+        # packet takes ~15-40s, well over the sift default (30s). Generous headroom
+        # so an advisory dogfood does not spuriously time out.
         "$tmp/sift" "$tmp/sift-empty.log" "$SIFT_DOGFOOD_LOG" --explain \
+          --explain-timeout 120000 \
           --format both -o "$tmp/sift-courtesy.json" \
           --baseline-label empty --changed-label "courtesy-dogfood" || true
         python3 - "$tmp/sift-courtesy.json" <<'PY' || true
@@ -66,11 +70,14 @@ runs:
             report = json.load(open(sys.argv[1]))
         except Exception as exc:
             print("courtesy dogfood: no report (" + str(exc) + ")"); sys.exit(0)
-        explanation = report.get("explanation")
-        text = explanation.get("text") if isinstance(explanation, dict) else explanation
-        host = explanation.get("endpoint_host") if isinstance(explanation, dict) else None
-        if text:
-            print("courtesy dogfood OK — narrative from host=" + str(host) + ":\n" + text)
+        ex = report.get("explanation") or {}
+        story = ex.get("story") if isinstance(ex, dict) else None
+        hint = ex.get("action_hint") if isinstance(ex, dict) else None
+        host = ex.get("endpoint_host") if isinstance(ex, dict) else None
+        if story or hint:
+            print("courtesy dogfood OK — narrative from host=" + str(host) + ":")
+            if story: print("  story: " + story)
+            if hint:  print("  action_hint: " + hint)
         else:
             print("courtesy dogfood: no narrative (fail-soft — endpoint unreachable/empty)")
         PY
