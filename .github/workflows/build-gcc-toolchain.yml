@@ -46,6 +46,10 @@ jobs:
     timeout-minutes: 240
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # The publish step runs in $RUNNER_TEMP (where the built tarball lives), NOT a git checkout, so
+      # `gh release upload/create` can't infer the repo from a git remote ("fatal: not a git repository").
+      # GH_REPO pins it for every gh call regardless of cwd (gh does NOT read GITHUB_REPOSITORY itself).
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: Validate version (refuse <15.3 — would re-introduce PR124309)
         run: |
