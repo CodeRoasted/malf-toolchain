@@ -23,7 +23,13 @@
 set -euo pipefail
 
 ORG="${ORG:-CodeRoasted}"
-LABELS="${LABELS:-malf-local}"
+# Two labels on this one box: `malf-local` routes general private-repo CI (org var
+# CI_RUNS_ON); `corpora-runner` routes coderoast-corpora's longitudinal crawl (that
+# repo's REPO var CORPUS_RUNNER=corpora-runner — kept distinct so the long crawl can
+# move to a dedicated box later without disturbing general CI). config.sh --labels takes
+# a comma list; baking both here is what survives a --replace re-register (an API-added
+# label does not).
+LABELS="${LABELS:-malf-local,corpora-runner}"
 # NB: namespaced RUNNER_NAME, not NAME — `NAME` is commonly already exported in the
 # environment (e.g. WSL2 sets NAME=<HOSTNAME>), which would silently override the default.
 RUNNER_NAME="${RUNNER_NAME:-malf-runner}"
@@ -89,7 +95,8 @@ cat <<EOF
   Start it in the foreground (watch jobs live; Ctrl+C to stop):
     $(dirname "$0")/start-runner.sh
   Route private CI + release to this box:
-    gh variable set CI_RUNS_ON --org $ORG --body $LABELS --visibility private
+    gh variable set CI_RUNS_ON --org $ORG --body malf-local --visibility private
+  (Corpus crawl routes separately via coderoast-corpora's repo var CORPUS_RUNNER=corpora-runner.)
   Fall back to GitHub-hosted:
     gh variable delete CI_RUNS_ON --org $ORG
   (Only PRIVATE-repo workflows read CI_RUNS_ON; public repos stay on ubuntu-latest.)
