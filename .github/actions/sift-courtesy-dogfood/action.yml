@@ -1,0 +1,76 @@
+name: Sift courtesy --explain dogfood
+description: >-
+  Exercise `sift --explain` against the CodeRoast COURTESY hosted endpoint
+  (ADR 0017 §5) — the sovereign-CI BYO path. The published sift-action stays
+  Local-Auto / zero-credential (§3.6), so courtesy is reached the only safe way:
+  the sift CLI on our own runner, endpoint+token from org config, trusted
+  (non-fork) events only. Advisory + fail-soft + self-skipping when unconfigured.
+  NEVER wire this into a fork-exposed job — the CI service token must not leak.
+
+inputs:
+  endpoint:
+    description: "Courtesy endpoint base URL (https://.../v1). Empty => skip."
+    required: false
+    default: ""
+  token:
+    description: "CI service token (org secret). Empty => skip."
+    required: false
+    default: ""
+  log:
+    description: "Log file to narrate."
+    required: false
+    default: "build.log"
+  version:
+    description: "sift engine version to install (engine-v<X.Y.Z>)."
+    required: false
+    default: "1.6.0"
+
+runs:
+  using: composite
+  steps:
+    - name: sift --explain via courtesy (advisory)
+      # Defence in depth: refuse to run on a FORK pull_request even if a caller
+      # wires this into a fork-exposed job — the token must never reach fork code.
+      if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      shell: bash
+      env:
+        INSIGHT_LLM_ENDPOINT: ${{ inputs.endpoint }}
+        INSIGHT_LLM_TOKEN: ${{ inputs.token }}
+        SIFT_DOGFOOD_LOG: ${{ inputs.log }}
+        SIFT_DOGFOOD_VERSION: ${{ inputs.version }}
+      run: |
+        set -u
+        if [ -z "${INSIGHT_LLM_ENDPOINT:-}" ] || [ -z "${INSIGHT_LLM_TOKEN:-}" ]; then
+          echo "courtesy dogfood: endpoint/token not configured — skipping"; exit 0
+        fi
+        if [ ! -f "$SIFT_DOGFOOD_LOG" ]; then
+          echo "courtesy dogfood: log '$SIFT_DOGFOOD_LOG' not found — skipping"; exit 0
+        fi
+        tmp="${RUNNER_TEMP:-/tmp}"
+        echo "courtesy dogfood: installing sift engine v$SIFT_DOGFOOD_VERSION"
+        if ! curl -fsSL https://raw.githubusercontent.com/CodeRoasted/sift-action/main/install.sh \
+             | SIFT_INSTALL_DIR="$tmp" sh -s -- "$SIFT_DOGFOOD_VERSION"; then
+          echo "courtesy dogfood: sift install failed — skipping (fail-soft)"; exit 0
+        fi
+        # Diff the log against an empty baseline (everything new) purely to exercise
+        # the BYO->courtesy narrative path on real log content. Advisory: a non-zero
+        # sift exit (e.g. --fail-on, never set here) or an unreachable endpoint must
+        # not fail the step.
+        : > "$tmp/sift-empty.log"
+        "$tmp/sift" "$tmp/sift-empty.log" "$SIFT_DOGFOOD_LOG" --explain \
+          --format both -o "$tmp/sift-courtesy.json" \
+          --baseline-label empty --changed-label "courtesy-dogfood" || true
+        python3 - "$tmp/sift-courtesy.json" <<'PY' || true
+        import json, sys
+        try:
+            report = json.load(open(sys.argv[1]))
+        except Exception as exc:
+            print("courtesy dogfood: no report (" + str(exc) + ")"); sys.exit(0)
+        explanation = report.get("explanation")
+        text = explanation.get("text") if isinstance(explanation, dict) else explanation
+        host = explanation.get("endpoint_host") if isinstance(explanation, dict) else None
+        if text:
+            print("courtesy dogfood OK — narrative from host=" + str(host) + ":\n" + text)
+        else:
+            print("courtesy dogfood: no narrative (fail-soft — endpoint unreachable/empty)")
+        PY
