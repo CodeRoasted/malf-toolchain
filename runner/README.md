@@ -119,6 +119,18 @@ the runner solves *minutes*, not that source blocker.)
   idempotent — they **detect-and-skip** when the toolchain is already present at the
   required version), so after the first run, builds skip the cold-cache dependency rebuild
   that dominates the GitHub-hosted runs.
+- **The host must not squat a CI service-container port.** Some private workflows attach
+  GitHub `services:` containers that publish a **fixed host port** — `coderoast-server`
+  `ci.yml` runs `postgres:16-alpine` on host **5432** and `redis:7-alpine` on host **6379**.
+  If a boot-enabled host service already holds that port, the service container can't bind it
+  and the job fails (cryptic "port already allocated" / connection-refused). The classic trap:
+  a hand-`apt install postgresql` leaves a Debian cluster that `postgresql-common`
+  `systemctl enable`s, so it **auto-starts on every boot** and squats 5432 — colliding with
+  CI's own ephemeral postgres. Keep these ports free on the host: `sudo systemctl disable --now
+  postgresql` (the cluster's data is preserved; it just won't auto-start). Local dev gets its
+  DB from the repo's **docker** container, not the host cluster — `bash
+  coderoast-server/scripts/start_postgres_dev.sh` (`pg_coderoast_dev`, host port overridable via
+  `POSTGRES_HOST_PORT`). CI owns 5432/6379 via its service containers; the host owns neither.
 - **Elevation is one-time, not per-job — so the cleanest fix needs no standing grant.** The
   `setup-*` actions provision the toolchain *once* (they need root: `apt`/`tar`/`update-alternatives`
   on Linux, the VS Build Tools installer — which self-elevates → a UAC prompt — on Windows; MSVC
