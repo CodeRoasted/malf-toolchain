@@ -442,6 +442,21 @@ _malf_editable_add() {
     # Extract name and version from ref (name/version)
     name="${pkg_ref%/*}"
     version="${pkg_ref#*/}"
+    # Evict any STALE-version editable for this package before (re-)registering the
+    # current one. The registry (editable_packages.json) is keyed by name/version, and
+    # `conan editable add` REFUSES a version that mismatches the recipe (so a bump can't
+    # add the new ref atop the old) — but conan never revalidates EXISTING entries, so a
+    # coordinated bump (e.g. 1.5.3 -> 1.6.2) leaves the old ref orphaned at the same
+    # path. The registry then carries BOTH refs, and a consumer still resolving the old
+    # pin mid-bump silently builds from the stale editable. Removing every other-version
+    # ref for this name first makes the per-build refresh self-healing across bumps — the
+    # normal "bump then build the consumer" cycle needs no manual `editables sync`.
+    # Idempotent: re-adding the current ref over itself is a no-op; the loop skips it.
+    local existing
+    while IFS= read -r existing; do
+        [[ -n "$existing" && "$existing" != "$pkg_ref" ]] || continue
+        conan editable remove --refs "$existing" >/dev/null 2>&1 || true
+    done < <(conan editable list 2>/dev/null | grep -E "^${name}/")
     # Register this package as an editable pointing to its source directory
     conan editable add "$pkg_dir" --name="$name" --version="$version" -of "$pkg_dir"
 }
@@ -1382,11 +1397,13 @@ cmd_bench() {
 
 _malf_editables_sync() {
     # Clear the editable registry and re-register every workspace package at the
-    # version currently declared in its conanfile.py. This is the gate step after
-    # a coordinated version bump: `malf build/test` only refresh the editables of
-    # a target's *dependencies*, so a bumped package that is never itself a dep
-    # (or is only resolved by its new pin) keeps a stale registration and fails
-    # to resolve. Registration alone fixes resolution — editables build on demand.
+    # version currently declared in its conanfile.py. `malf build/test` now self-heal
+    # stale same-name editables for the deps they touch (see _malf_editable_add), so the
+    # normal "bump then build a consumer" cycle no longer needs this. Sync remains the
+    # one-shot for the cases the per-build path can't reach: a bumped package that is
+    # never built as a dep in a given cache (its stale ref lingers unused), and syncing
+    # EVERY keyed cache at once (the per-build path only refreshes the active one).
+    # Registration alone fixes resolution — editables build on demand.
     local entries=()
     mapfile -t entries < <(_malf_workspace_packages)
     if [[ ${#entries[@]} -eq 0 ]]; then
