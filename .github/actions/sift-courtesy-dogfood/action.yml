@@ -1,34 +1,37 @@
 name: Sift courtesy --explain dogfood
 description: >-
-  Exercise `sift --explain` against the CodeRoast COURTESY hosted endpoint
-  (ADR 0017 §5) — the sovereign-CI BYO path. The published sift-action stays
-  Local-Auto / zero-credential (§3.6), so courtesy is reached the only safe way:
-  the sift CLI on our own runner, endpoint+token from org config, trusted
-  (non-fork) events only. Advisory + fail-soft + self-skipping when unconfigured.
-  NEVER wire this into a fork-exposed job — the CI service token must not leak.
+  Narrate the sift-action's ALREADY-COMPUTED report against the CodeRoast
+  COURTESY hosted endpoint (ADR 0017 §5) — the sovereign-CI BYO path. The
+  published sift-action stays Local-Auto / zero-credential (§3.6), so it runs
+  with explain:false and writes report.json; THIS step narrates that report via
+  `sift explain --report`, so the story explains the Action's real diff (not a
+  re-diff against an empty baseline). Endpoint+token come from org config; runs
+  on our own runner, trusted (non-fork) events only. Advisory + fail-soft +
+  self-skipping when unconfigured. NEVER wire this into a fork-exposed job — the
+  CI service token must not leak.
 
 inputs:
   endpoint:
-    description: "Courtesy endpoint base URL (https://.../v1). Empty => skip."
+    description: "Courtesy endpoint URL (https://.../v1/chat/completions). Empty => skip."
     required: false
     default: ""
   token:
     description: "CI service token (org secret). Empty => skip."
     required: false
     default: ""
-  log:
-    description: "Log file to narrate."
+  report:
+    description: "Path to the report.json from the sift-action `report-path` output. Empty => skip (cold start / no diff)."
     required: false
-    default: "build.log"
+    default: ""
   version:
-    description: "sift engine version to install (engine-v<X.Y.Z>)."
+    description: "sift engine version to install (engine-v<X.Y.Z>); must be >= 1.6.1 for `explain --report`."
     required: false
-    default: "1.6.0"
+    default: "1.6.1"
 
 runs:
   using: composite
   steps:
-    - name: sift --explain via courtesy (advisory)
+    - name: sift explain --report via courtesy (advisory)
       # Defence in depth: refuse to run on a FORK pull_request even if a caller
       # wires this into a fork-exposed job — the token must never reach fork code.
       if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
@@ -36,15 +39,18 @@ runs:
       env:
         INSIGHT_LLM_ENDPOINT: ${{ inputs.endpoint }}
         INSIGHT_LLM_TOKEN: ${{ inputs.token }}
-        SIFT_DOGFOOD_LOG: ${{ inputs.log }}
+        SIFT_DOGFOOD_REPORT: ${{ inputs.report }}
         SIFT_DOGFOOD_VERSION: ${{ inputs.version }}
       run: |
         set -u
         if [ -z "${INSIGHT_LLM_ENDPOINT:-}" ] || [ -z "${INSIGHT_LLM_TOKEN:-}" ]; then
           echo "courtesy dogfood: endpoint/token not configured — skipping"; exit 0
         fi
-        if [ ! -f "$SIFT_DOGFOOD_LOG" ]; then
-          echo "courtesy dogfood: log '$SIFT_DOGFOOD_LOG' not found — skipping"; exit 0
+        if [ -z "${SIFT_DOGFOOD_REPORT:-}" ]; then
+          echo "courtesy dogfood: no report-path (cold start / no diff) — skipping"; exit 0
+        fi
+        if [ ! -f "$SIFT_DOGFOOD_REPORT" ]; then
+          echo "courtesy dogfood: report '$SIFT_DOGFOOD_REPORT' not found — skipping"; exit 0
         fi
         tmp="${RUNNER_TEMP:-/tmp}"
         echo "courtesy dogfood: installing sift engine v$SIFT_DOGFOOD_VERSION"
@@ -52,25 +58,25 @@ runs:
              | SIFT_INSTALL_DIR="$tmp" sh -s -- "$SIFT_DOGFOOD_VERSION"; then
           echo "courtesy dogfood: sift install failed — skipping (fail-soft)"; exit 0
         fi
-        # Diff the log against an empty baseline (everything new) purely to exercise
-        # the BYO->courtesy narrative path on real log content. Advisory: a non-zero
-        # sift exit (e.g. --fail-on, never set here) or an unreachable endpoint must
-        # not fail the step.
-        : > "$tmp/sift-empty.log"
-        # --explain-timeout 120s: courtesy runs Phi-3.5-mini on CPU; the real ~4 KB
-        # packet takes ~15-40s, well over the sift default (30s). Generous headroom
-        # so an advisory dogfood does not spuriously time out.
-        "$tmp/sift" "$tmp/sift-empty.log" "$SIFT_DOGFOOD_LOG" --explain \
+        # Narrate the Action's already-computed report (no re-diff, no baseline —
+        # avoids the baseline-drift trap). `--explain-endpoint` is passed EXPLICITLY
+        # so this is unambiguously the BYO->courtesy path: never a fall-through to the
+        # Local-Auto model pull. --explain-timeout 120s: courtesy runs Phi-3.5-mini on
+        # CPU and the ~4 KB packet takes ~15-40s, well over the 30s default. Advisory:
+        # a non-zero exit or unreachable endpoint must not fail the step.
+        "$tmp/sift" explain --report "$SIFT_DOGFOOD_REPORT" \
+          --explain-endpoint "$INSIGHT_LLM_ENDPOINT" \
           --explain-timeout 120000 \
-          --format both -o "$tmp/sift-courtesy.json" \
-          --baseline-label empty --changed-label "courtesy-dogfood" || true
-        python3 - "$tmp/sift-courtesy.json" <<'PY' || true
+          --format json -o "$tmp/sift-narrative.json" || true
+        python3 - "$tmp/sift-narrative.json" <<'PY' || true
         import json, os, sys
+        # `sift explain --report --format json` emits the narrative object DIRECTLY
+        # ({story, action_hint?, model?, endpoint_host?}) — `{}` when no narrative
+        # was produced (fail-soft: unreachable endpoint / zero significant changes).
         try:
-            report = json.load(open(sys.argv[1]))
+            ex = json.load(open(sys.argv[1]))
         except Exception as exc:
-            print("courtesy dogfood: no report (" + str(exc) + ")"); sys.exit(0)
-        ex = report.get("explanation") or {}
+            print("courtesy dogfood: no narrative (" + str(exc) + ")"); sys.exit(0)
         story = ex.get("story") if isinstance(ex, dict) else None
         hint = ex.get("action_hint") if isinstance(ex, dict) else None
         host = ex.get("endpoint_host") if isinstance(ex, dict) else None
