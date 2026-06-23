@@ -65,7 +65,7 @@ runs:
           --format both -o "$tmp/sift-courtesy.json" \
           --baseline-label empty --changed-label "courtesy-dogfood" || true
         python3 - "$tmp/sift-courtesy.json" <<'PY' || true
-        import json, sys
+        import json, os, sys
         try:
             report = json.load(open(sys.argv[1]))
         except Exception as exc:
@@ -78,6 +78,18 @@ runs:
             print("courtesy dogfood OK — narrative from host=" + str(host) + ":")
             if story: print("  story: " + story)
             if hint:  print("  action_hint: " + hint)
+            # Surface the narrative in the GitHub job summary (it lives nowhere else —
+            # the Action's comment carries the deterministic diff, not the courtesy
+            # narrative). Markdown summary: emoji for colour (no ANSI in summaries).
+            summary = os.environ.get("GITHUB_STEP_SUMMARY")
+            if summary:
+                with open(summary, "a", encoding="utf-8") as fh:
+                    fh.write("### \U0001F916 Sift — courtesy `--explain` (advisory)\n\n")
+                    if story:
+                        fh.write("\U0001F535 **What changed:** " + story + "\n\n")
+                    if hint:
+                        fh.write("\U0001F7E2 **Suggested next step:** " + hint + "\n\n")
+                    fh.write("> _Narrative via `" + str(host) + "` — advisory, not a gate._\n")
         else:
             print("courtesy dogfood: no narrative (fail-soft — endpoint unreachable/empty)")
         PY
