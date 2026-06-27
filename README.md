@@ -33,8 +33,8 @@ CodeRoast builds C++23 (named modules + `import std`) on three toolchains, each 
 job. Determinism is proven *across* them — the MetaLog and the Sift diff are bit-identical on all
 three on the shared **plain-text** corpus — so this is the diagonal, not a fallback ladder. (The
 JSON-ingestion surfaces — numeric/ordinal drift, OTEL fields — are now bit-identical by execution on
-all three at the canon→metalog instrument too; one downstream detection cell is held honestly under
-the MSVC leg.)
+all three too, end to end: the canon→metalog instrument **and** the eidos detection leg, with no cell
+left by construction.)
 
 | Leg | Toolchain | Role |
 |---|---|---|
@@ -82,13 +82,12 @@ Insiders channel (the version-agnostic Preview component); `setup-msvc1452` inst
 The MSVC build is bit-identical to the Linux golden across canon, metalog, and the Sift diff
 (eidos) on the shared **plain-text** determinism corpus — the cross-OS half of the claim, measured,
 not assumed. The JSON-ingestion surfaces (W1 ordinal histograms, OTEL trace/severity fields) are now
-**bit-identical by execution on MSVC too**, at the canon→metalog instrument: a JSON-ordinal corpus
-line forces the simdjson slow path, and both Windows probes reproduce the JSON-bearing golden
-byte-identically (a corpus-input refreeze, not a format change). One downstream cell is still held
-honestly rather than folded: the **eidos end-to-end ordinal earth-mover** is exercised on MSVC by
-construction only (its parse-replay leg diffs a plain-text baseline) — integer-safe and
-cross-stdlib-by-execution on Linux; closing it (edit that baseline + re-hash its goldens) is a
-deliberate later step.
+**bit-identical by execution on MSVC too**, end to end: a JSON-ordinal corpus line forces the simdjson
+slow path at the canon→metalog instrument, and the eidos parse-replay leg carries a JSON-ordinal drift
+row through to the structural diff — every Windows probe reproduces its JSON-bearing golden
+byte-identically (a corpus-input refreeze, not a format change). **No cell is held by construction**:
+all three legs are MSVC-by-execution on the JSON surfaces, the cross-OS half measured across the whole
+chain, not assumed.
 
 ## CI actions
 
@@ -138,7 +137,7 @@ clang-21/libc++, MSVC 14.52), the conan profiles, the shared dev config, the CI 
 itself. The cross-toolchain × cross-OS determinism diagonal is measured green — the MetaLog and the
 Sift structural diff are bit-identical across gcc/libstdc++, clang/libc++, and MSVC, on Linux and
 Windows alike, on the shared plain-text corpus — and the JSON-ingestion surfaces (numeric/ordinal
-drift, OTEL fields) are now bit-identical **by execution** on all three too, at the canon→metalog
-instrument. (One downstream cell held honestly: the eidos end-to-end ordinal earth-mover is
-MSVC-by-construction — see the MSVC leg.) The toolchain is fully self-contained and public — the open
+drift, OTEL fields) are now bit-identical **by execution** on all three too, end to end — the
+canon→metalog instrument and the eidos structural-diff leg alike, with no cell left by construction.
+The toolchain is fully self-contained and public — the open
 half of a product that is otherwise closed, and the public proof behind "deterministic by construction."
