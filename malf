@@ -10,6 +10,7 @@
 #   malf bench   [subdir] [--quick] [--filter REGEX] [--compare] [--repetitions N]
 #   malf clean   [build|conan|editables|all]
 #   malf bump    X.Y.Z
+#   malf cut-verify [pkg] [--profile <name>] [--list]
 #   malf run     <exe-name>
 #   malf editables [list|sync]
 #
@@ -1490,6 +1491,11 @@ Commands:
     editables [list|sync]
     profiles                       list available build profiles (the registry)
     bump    X.Y.Z                  coordinated workspace version bump, then verify pin coherence
+    cut-verify [pkg] [--profile <name>] [--list]
+                                   pre-cut Release Gate: forced `conan create` for every
+                                   release:true package (packages.yml), dep order, clean export —
+                                   catches conan-create-only drift (test_package / sibling) before
+                                   the tag. --list prints the canonical released set and exits.
     run     <exe-name> [args...]
     bin-dir [subdir] [--asan|--profile <name>]   print the build-type-keyed build dir for a target
 
@@ -1584,6 +1590,138 @@ cmd_bump() {
     python3 "$pin" "$MALF_WORKSPACE_ROOT"
 }
 
+# Pre-cut Release Gate: forced `conan create` for EVERY released package (the
+# `release: true` set in packages.yml), in dependency order, from a CLEAN EXPORT.
+# Catches the conan-create-only drift class — a rotted test_package, or a sibling
+# package the editable `malf test <repo>` never compiles — BEFORE the tag, not AT
+# it (the v1.6.2 eidos break; [[conan-create-only-drift-at-tag]]). The released set
+# is the ONE canonical source (scripts/pin_coherence.py released, from packages.yml),
+# shared with the tag-time Release Gate — no second hand-maintained list to drift
+# (compatibility_matrix.md § Release Gates; [[ci-vendoring-baseline-drift]]).
+#
+# Non-vacuity is the whole point of the gate:
+#   * --build="<pkg>/*" FORCES each package from source even when a cached binary
+#     exists; plain --build=missing CACHE-SKIPS it (0 compile steps → vacuous exit 0).
+#   * conan create (not the editable build) is the ONLY path that exports to the
+#     cache and compiles the test_package consumer smoke + a package's tests from a
+#     clean export — exactly what `malf test`/editables never build.
+#   * a DEDICATED, editable-FREE cache: first-party deps resolve from the cache
+#     packages THIS sweep builds in dep order, never from a working-tree editable
+#     (which would shadow the clean export the gate exists to exercise). The dev's
+#     editable registry is untouched. Override the cache with MALF_CUT_VERIFY_CONAN_HOME
+#     (CI points it at the warm dep cache so only first-party packages rebuild).
+#
+# Usage: malf cut-verify [pkg-name] [--profile <name>] [--list]
+#   pkg-name   scope the sweep to one released package (else: the whole set)
+#   --list     print the canonical released set (dep order) and exit — build nothing
+cmd_cut_verify() {
+    local only="" list_only=false
+    # A RELEASE gate builds the way the cut SHIPS: gcc-15 / libstdc++ — the canonical
+    # conan-create environment (release-publish + the conan-module action default), not
+    # the dev-default clang/libc++. Overridable with --profile (e.g. a clang-only box).
+    _malf_apply_profile "${MALF_CUT_VERIFY_PROFILE:-linux-gcc15-release}"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --profile) shift; _malf_apply_profile "$1" ;;
+            --list)    list_only=true ;;
+            --only)    shift; only="$1" ;;
+            -*)        echo "malf cut-verify: unknown option '$1'" >&2; exit 1 ;;
+            *)         only="$1" ;;   # positional scope filter: a package NAME
+        esac
+        shift
+    done
+
+    local pin="$MALF_WORKSPACE_ROOT/scripts/pin_coherence.py"
+    [[ -f "$pin" ]] || { echo "malf cut-verify: $pin not found — run from a workspace checkout" >&2; return 1; }
+
+    # The canonical released-package list, topo-ordered (deps before dependents).
+    local released
+    released="$(python3 "$pin" released "$MALF_WORKSPACE_ROOT")" \
+        || { echo "malf cut-verify: failed to resolve the released-package list" >&2; return 1; }
+
+    if $list_only; then
+        echo "malf cut-verify: canonical released set (packages.yml release:true, dep order):"
+        printf '%s\n' "$released" | awk -F'\t' 'NF>=2 {printf "  %-30s %s\n", $1, $2}'
+        return 0
+    fi
+
+    # ── Dedicated, editable-free clean-export cache (see header) ──────────────
+    export CONAN_HOME="${MALF_CUT_VERIFY_CONAN_HOME:-$MALF_CONAN_HOME_BASE/cut-verify}"
+    mkdir -p "$CONAN_HOME/profiles"
+    [[ ! -f "$CONAN_HOME/global.conf" && -f "$MALF_DIR/global.conf" ]] && cp "$MALF_DIR/global.conf" "$CONAN_HOME/global.conf"
+    _malf_apply_profile "$MALF_PROFILE_NAME"      # re-resolve the profile INTO this cache
+    _malf_install_workspace_hooks
+    rm -f "$CONAN_HOME/editable_packages.json"    # CLEAN-EXPORT invariant: no editables
+    # CLEAN-EXPORT invariant #2: recipes branch their cmake builddirs on MALF_EDITABLE_BUILD_DIR
+    # (e.g. canon/eidos ship their OWN cmake config under lib/cmake/<pkg> with cmake_find_mode=none;
+    # when the var is set they ALSO list the editable build-tree dir). A clean conan create has no
+    # editable build tree, so that path is bogus and pollutes CMAKE_PREFIX_PATH → find_package fails.
+    # Real CI (conan-module / release-publish) runs with it UNSET; match that exactly. _malf_apply_profile
+    # exported it just above, so unset it here, after.
+    unset MALF_EDITABLE_BUILD_DIR
+
+    echo "=== malf cut-verify: forced conan create over the released set ($MALF_PROFILE_NAME) ==="
+    echo "    cache: $CONAN_HOME"
+
+    local profile_args=(
+        --profile:host="$MALF_PROFILE"
+        --profile:build="$MALF_BUILD_PROFILE"
+        -s build_type=Release
+    )
+
+    local name path deps total=0 ok=0
+    local -a failed=() skipped=()
+    local -A broke=()   # name -> 1 once it failed or was skipped (blocks dependents)
+
+    while IFS=$'\t' read -r name path deps; do
+        [[ -n "$name" && -n "$path" ]] || continue
+        if [[ -n "$only" && "$name" != "$only" && "$(basename "$path")" != "$only" ]]; then
+            continue
+        fi
+        total=$((total+1))
+
+        # SKIP (don't FAIL) a package whose first-party dep already broke — its
+        # conan create would fail for a MISSING upstream, not a defect of its own.
+        # Reporting it as "blocked" keeps cascade noise out of the failure list.
+        local blocked="" dep
+        for dep in ${deps//,/ }; do
+            [[ -n "${broke[$dep]:-}" ]] && { blocked="$dep"; break; }
+        done
+        if [[ -n "$blocked" ]]; then
+            skipped+=("$name (dep $blocked failed)")
+            broke["$name"]=1
+            echo "--- cut-verify: SKIP $name — upstream $blocked failed ---" >&2
+            continue
+        fi
+
+        echo "::group::cut-verify [$total] conan create $name ($path)"
+        # --build=missing: third-party + not-yet-built first-party deps build if absent
+        #   (deps earlier in dep order are already in-cache from THIS sweep → current).
+        # --build="$name/*": FORCE this package from source (kills the cache-skip).
+        if conan create "$path" "${profile_args[@]}" --build=missing --build="$name/*"; then
+            ok=$((ok+1)); echo "::endgroup::"
+        else
+            echo "::endgroup::"
+            failed+=("$name"); broke["$name"]=1
+            echo "::error::cut-verify FAIL — conan create $name ($path) failed" >&2
+        fi
+    done <<< "$released"
+
+    echo
+    if [[ $total -eq 0 ]]; then
+        echo "malf cut-verify: no released package matched '$only'" >&2; return 1
+    fi
+    if [[ ${#failed[@]} -gt 0 ]]; then
+        echo "❌ malf cut-verify: ${#failed[@]} released package(s) FAILED forced conan create: ${failed[*]}" >&2
+        [[ ${#skipped[@]} -gt 0 ]] && echo "   blocked (upstream failed): ${skipped[*]}" >&2
+        echo "   A failure here is a conan-create-only break (rotted test_package / sibling package) that" >&2
+        echo "   'malf test' + editables never compile — fix at root BEFORE the cut. [[conan-create-only-drift-at-tag]]" >&2
+        return 1
+    fi
+    echo "✅ malf cut-verify: all $ok released package(s) conan-create clean —"
+    echo "   forced from-source rebuild + test_package, dependency order, clean export ($MALF_PROFILE_NAME)."
+}
+
 # ─── Dispatch ────────────────────────────────────────────────────────────────
 COMMAND="${1:-help}"
 shift || true
@@ -1599,6 +1737,7 @@ case "$COMMAND" in
     editables)        cmd_editables "$@" ;;
     profiles)         cmd_profiles ;;
     bump)             cmd_bump "$@" ;;
+    cut-verify)       cmd_cut_verify "$@" ;;
     run)              cmd_run "$@" ;;
     bin-dir)          cmd_bin_dir "$@" ;;
     help|-h|--help)   cmd_help ;;
