@@ -31,8 +31,10 @@ source, and the exact recipe that produced it are all right here.
 
 CodeRoast builds C++23 (named modules + `import std`) on three toolchains, each with a distinct
 job. Determinism is proven *across* them — the MetaLog and the Sift diff are bit-identical on all
-three on the shared **plain-text** corpus — so this is the diagonal, not a fallback ladder. (One
-JSON-path boundary is stated precisely, not folded, under the MSVC leg.)
+three on the shared **plain-text** corpus — so this is the diagonal, not a fallback ladder. (The
+JSON-ingestion surfaces — numeric/ordinal drift, OTEL fields — are now bit-identical by execution on
+all three at the canon→metalog instrument too; one downstream detection cell is held honestly under
+the MSVC leg.)
 
 | Leg | Toolchain | Role |
 |---|---|---|
@@ -79,13 +81,14 @@ Insiders channel (the version-agnostic Preview component); `setup-msvc1452` inst
 14.52 floor, activates the dev env, and exports `MSVC1452_INSTALL` so Conan points `vcvars` at it.
 The MSVC build is bit-identical to the Linux golden across canon, metalog, and the Sift diff
 (eidos) on the shared **plain-text** determinism corpus — the cross-OS half of the claim, measured,
-not assumed. One boundary is held honestly rather than folded under that banner: the corpus carries
-no JSON lines, so the JSON-ingestion surfaces (W1 ordinal histograms, OTEL trace/severity fields)
-are bit-identical **by construction** — pure-integer arithmetic, no float / `float→int` / `libm` —
-and verified **cross-stdlib by-execution** on Linux (gcc/libstdc++ ≡ clang/libc++), but **not yet
-MSVC-by-execution** (simdjson never runs against the cross-OS golden on Windows). Closing it — one
-JSON corpus line plus a golden refreeze — is a deliberate post-cut step, never wedged into a
-release, since it first exposes the MSVC JSON path to that golden.
+not assumed. The JSON-ingestion surfaces (W1 ordinal histograms, OTEL trace/severity fields) are now
+**bit-identical by execution on MSVC too**, at the canon→metalog instrument: a JSON-ordinal corpus
+line forces the simdjson slow path, and both Windows probes reproduce the JSON-bearing golden
+byte-identically (a corpus-input refreeze, not a format change). One downstream cell is still held
+honestly rather than folded: the **eidos end-to-end ordinal earth-mover** is exercised on MSVC by
+construction only (its parse-replay leg diffs a plain-text baseline) — integer-safe and
+cross-stdlib-by-execution on Linux; closing it (edit that baseline + re-hash its goldens) is a
+deliberate later step.
 
 ## CI actions
 
@@ -134,7 +137,8 @@ Everything that defines *how we build* now lives here: the three pinned compiler
 clang-21/libc++, MSVC 14.52), the conan profiles, the shared dev config, the CI actions, and `malf`
 itself. The cross-toolchain × cross-OS determinism diagonal is measured green — the MetaLog and the
 Sift structural diff are bit-identical across gcc/libstdc++, clang/libc++, and MSVC, on Linux and
-Windows alike, on the shared plain-text corpus. (One boundary held honestly: the JSON-ingestion
-surfaces are bit-identical by construction and cross-stdlib by-execution, not yet MSVC-by-execution —
-see the MSVC leg.) The toolchain is fully self-contained and public — the open half of a product that
-is otherwise closed, and the public proof behind "deterministic by construction."
+Windows alike, on the shared plain-text corpus — and the JSON-ingestion surfaces (numeric/ordinal
+drift, OTEL fields) are now bit-identical **by execution** on all three too, at the canon→metalog
+instrument. (One downstream cell held honestly: the eidos end-to-end ordinal earth-mover is
+MSVC-by-construction — see the MSVC leg.) The toolchain is fully self-contained and public — the open
+half of a product that is otherwise closed, and the public proof behind "deterministic by construction."
