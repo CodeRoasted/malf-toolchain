@@ -12,19 +12,21 @@ description: |
   after this step (a failed push must be loud); the restore action tolerates its absence (the
   cache is an accelerator, never a gate). Idempotent: a no-op when oras is already on PATH.
 
-  Self-hosted runners may not carry oras; hosted ones never do. Currently Windows/pwsh (the oras
-  users are the MSVC conan-cache legs); a Linux branch is added when a Linux oras user is wired.
+  Self-hosted runners may not carry oras; hosted ones never do. Two branches by runner OS — Windows/pwsh
+  (the MSVC conan-cache legs) and Linux/bash (the cut-verify gate + the Linux cache producer); each pins
+  its OWN platform sha256, bumped together with `version`.
 
 inputs:
   version:
-    description: 'oras release version (no leading v). Bump the sha below WITH it.'
+    description: 'oras release version (no leading v). Bump the shas below WITH it.'
     required: false
     default: '1.2.3'
 
 runs:
   using: composite
   steps:
-    - name: Ensure oras (pinned + checksum-verified) on PATH
+    - name: Ensure oras (pinned + checksum-verified) on PATH — Windows
+      if: runner.os == 'Windows'
       shell: pwsh
       env:
         ORAS_VERSION: ${{ inputs.version }}
@@ -65,3 +67,39 @@ runs:
         if (-not $orasDir) { Write-Host "::warning::oras.exe not found after extract — oras stays absent"; exit 0 }
         Add-Content -Path $env:GITHUB_PATH -Value $orasDir
         Write-Host "provisioned oras $($env:ORAS_VERSION) (sha256 verified) -> $orasDir"
+
+    - name: Ensure oras (pinned + checksum-verified) on PATH — Linux
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        ORAS_VERSION: ${{ inputs.version }}
+        # sha256 of oras_<version>_linux_amd64.tar.gz from the SAME oras-project release checksums
+        # (oras_<version>_checksums.txt) — verified against the file; the windows sha above is from the
+        # same release. MUST be bumped together with `version`.
+        ORAS_SHA256_LINUX_AMD64: 'b4efc97a91f471f323f193ea4b4d63d8ff443ca3aab514151a30751330852827'
+      run: |
+        # Best-effort by contract (mirrors the pwsh branch): NO `set -e` — warn + exit 0 on any
+        # failure, leaving the caller to decide whether absent oras is fatal.
+        set -uo pipefail
+        if command -v oras >/dev/null 2>&1; then
+          echo "oras already on PATH ($(oras version | head -1)) — idempotent skip"; exit 0
+        fi
+        tgz="$RUNNER_TEMP/oras.tar.gz"; dir="$RUNNER_TEMP/oras-bin"
+        url="https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz"
+        pulled=0
+        for attempt in 1 2 3; do
+          rm -f "$tgz"
+          if curl -fsSL "$url" -o "$tgz"; then pulled=1; break; fi
+          echo "::warning::oras download failed (attempt $attempt/3)"; sleep $((attempt * 5))
+        done
+        if [ "$pulled" != 1 ]; then echo "::warning::oras download failed after 3 attempts — oras stays absent"; exit 0; fi
+        got="$(sha256sum "$tgz" | awk '{print $1}')"
+        if [ "$got" != "$ORAS_SHA256_LINUX_AMD64" ]; then
+          # A checksum mismatch is a supply-chain signal, not a flaky download — never trust the binary.
+          echo "::warning::oras tarball sha256 mismatch (got $got, expected $ORAS_SHA256_LINUX_AMD64) — refusing it, oras stays absent"; exit 0
+        fi
+        mkdir -p "$dir"
+        if ! tar -xzf "$tgz" -C "$dir"; then echo "::warning::oras extract failed — oras stays absent"; exit 0; fi
+        if [ ! -x "$dir/oras" ]; then echo "::warning::oras binary not found after extract — oras stays absent"; exit 0; fi
+        echo "$dir" >> "$GITHUB_PATH"
+        echo "provisioned oras $ORAS_VERSION (sha256 verified) -> $dir"

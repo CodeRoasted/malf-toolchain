@@ -17,8 +17,8 @@ description: |
   vary first-party codegen, so first-party must never be shared across cells).
 
   Requires $CONAN_HOME to be set and `conan` on PATH (run it after conan setup, before the build).
-  Currently pwsh/Windows (the wired consumers are the MSVC legs); a bash branch is added when a
-  Linux consumer is wired.
+  Two branches by runner OS — pwsh/Windows (the MSVC legs) and bash/Linux (the cut-verify gate); each
+  pulls the same artifact and `conan cache restore`s it, both best-effort.
 
 inputs:
   registry:
@@ -46,7 +46,8 @@ runs:
     - name: Ensure oras (pinned)
       uses: CodeRoasted/malf-toolchain/.github/actions/ensure-oras@main
 
-    - name: Restore third-party conan cache from ${{ inputs.registry }}:${{ inputs.tag }} (best-effort)
+    - name: Restore third-party conan cache from ${{ inputs.registry }}:${{ inputs.tag }} (Windows, best-effort)
+      if: runner.os == 'Windows'
       shell: pwsh
       env:
         CACHE_REF: ${{ inputs.registry }}:${{ inputs.tag }}
@@ -92,4 +93,46 @@ runs:
           Write-Host "::notice::no warm conan cache at $env:CACHE_REF (cold / miss) — deps will build from source"
         }
         & oras logout ghcr.io 2>&1 | Out-Null
+        exit 0
+
+    - name: Restore third-party conan cache from ${{ inputs.registry }}:${{ inputs.tag }} (Linux, best-effort)
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        CACHE_REF: ${{ inputs.registry }}:${{ inputs.tag }}
+        ORAS_ACTOR: ${{ inputs.actor }}
+        ORAS_TOKEN: ${{ inputs.token }}
+      run: |
+        # ACCELERATOR, NEVER A GATE (mirrors the pwsh branch): NO `set -e` — a cache problem must never
+        # fail the job. Test outcomes, ::warning:: / ::notice:: + exit 0; --build=missing rebuilds
+        # anything not restored, and the gate downstream is what enforces correctness.
+        set -uo pipefail
+        if [ -z "${CONAN_HOME:-}" ]; then echo "::warning::CONAN_HOME unset — skipping conan cache restore"; exit 0; fi
+        if ! command -v oras  >/dev/null 2>&1; then echo "::warning::oras unavailable — skipping cache restore; deps will build from source"; exit 0; fi
+        if ! command -v conan >/dev/null 2>&1; then echo "::warning::conan not on PATH — skipping cache restore (run this after conan setup)"; exit 0; fi
+
+        work="$RUNNER_TEMP/conan-cache-pull"
+        rm -rf "$work"; mkdir -p "$work"
+
+        # login (password-stdin: never on the command line / process list). A failure here is a miss.
+        if ! printf '%s' "$ORAS_TOKEN" | oras login ghcr.io --username "$ORAS_ACTOR" --password-stdin >/dev/null 2>&1; then
+          echo "::warning::oras login to ghcr.io failed — skipping cache restore; deps will build from source"; exit 0
+        fi
+        # From here a login exists — always logout before exiting so creds never persist on the
+        # (self-hosted) runner. Linear flow, no early exit inside the pull/restore block.
+        if oras pull "$CACHE_REF" --output "$work"; then
+          tarball="$(find "$work" -name '*.tgz' -type f | head -n1)"
+          if [ -n "$tarball" ]; then
+            if conan cache restore "$tarball"; then
+              echo "::notice::restored third-party conan cache from $CACHE_REF — only first-party engine packages will build from source"
+            else
+              echo "::warning::conan cache restore failed — deps will build from source"
+            fi
+          else
+            echo "::warning::pulled cache artifact contained no .tgz — deps will build from source"
+          fi
+        else
+          echo "::notice::no warm conan cache at $CACHE_REF (cold / miss) — deps will build from source"
+        fi
+        oras logout ghcr.io >/dev/null 2>&1 || true
         exit 0
