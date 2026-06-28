@@ -8,7 +8,7 @@
 #   malf format  [--check]
 #   malf commands|compile-commands
 #   malf bench   [subdir] [--quick] [--filter REGEX] [--compare] [--repetitions N]
-#   malf clean   [build|conan|editables|all]
+#   malf clean   [build|conan|editables|stale|all]
 #   malf bump    X.Y.Z
 #   malf cut-verify [pkg] [--profile <name>] [--list]
 #   malf run     <exe-name>
@@ -1451,14 +1451,120 @@ cmd_editables() {
     esac
 }
 
+# Surgically remove STALE first-party conan packages: old-version (and ghost/renamed)
+# binaries of CodeRoast-owned packages left in the cache after a coordinated version bump.
+# They are INERT for malf builds — editables shadow every first-party ref at the current
+# version — but they are disk bloat and a real footgun for any RAW (non-malf) conan call,
+# especially the stray ~/.conan2 which has no editables to shadow them. The surgical opposite
+# of `clean conan` (which nukes every package dir, third-party included, forcing a full
+# from-source rebuild — gcc15 has no ConanCenter binaries). SAFE by construction: removes ONLY
+# CodeRoast namespaces (pin_coherence.CODEROAST_PREFIXES — the single source of truth) at a
+# version != the uniform workspace baseline; NEVER third-party, NEVER the current version.
+# Sweeps every cache `editables sync` touches (base + keyed subdirs) plus the stray default
+# home. [[conan-cache-hygiene-multi-home]] [[build-via-malf-editables]].
+_malf_clean_stale() {
+    # Homes: base + every keyed subdir (settings.yml marker, exactly as editables sync), plus
+    # the stray default ~/.conan2 iff it is a real, DISTINCT cache (raw conan ran outside malf).
+    local homes=("$MALF_CONAN_HOME_BASE") d
+    for d in "$MALF_CONAN_HOME_BASE"/*/; do
+        [[ -f "${d}settings.yml" ]] && homes+=("${d%/}")
+    done
+    if [[ -f "$HOME/.conan2/settings.yml" ]] \
+        && [[ "$(realpath "$HOME/.conan2")" != "$(realpath "$MALF_CONAN_HOME_BASE")" ]]; then
+        homes+=("$HOME/.conan2")
+    fi
+
+    # Read-only planning pass (Python): derive the uniform baseline + owned namespaces from
+    # the recipes, list each home, emit "home<TAB>ref" for every stale first-party package.
+    # Python only READS (conan list); the conan remove WRITES stay in bash below, visible.
+    local plan
+    plan="$(python3 - "$MALF_WORKSPACE_ROOT" "${homes[@]}" <<'PY'
+import ast, json, os, pathlib, subprocess, sys
+
+ws = pathlib.Path(sys.argv[1]).resolve()
+homes = sys.argv[2:]
+sys.path.insert(0, str(ws / "scripts"))
+from pin_coherence import CODEROAST_PREFIXES   # single source of truth for owned namespaces
+
+# Uniform workspace baseline from the first-party recipes (refuse to guess if non-uniform).
+ignore = {".conan2", ".git", ".venv", "node_modules", "test_package"}
+def skip(p): return any(x in ignore or x == "build" or x.startswith("build-") for x in p.parts)
+versions = set()
+for cf in ws.rglob("conanfile.py"):
+    if skip(cf):
+        continue
+    tree = ast.parse(cf.read_text(), filename=str(cf))
+    nodes = list(tree.body)
+    for item in tree.body:
+        if isinstance(item, ast.ClassDef):
+            nodes.extend(item.body)
+    name = version = None
+    for node in nodes:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) \
+                and isinstance(node.value.value, str):
+            for tgt in node.targets:
+                if getattr(tgt, "id", None) == "name":
+                    name = node.value.value
+                elif getattr(tgt, "id", None) == "version":
+                    version = node.value.value
+    if name and name.startswith(CODEROAST_PREFIXES) and version:
+        versions.add(version)
+if len(versions) != 1:
+    sys.stderr.write(f"malf clean stale: workspace baseline is not uniform "
+                     f"({sorted(versions) or 'no first-party recipes found'}) — fix pin coherence "
+                     f"(`malf bump` / `malf editables sync`) before pruning stale cache\n")
+    sys.exit(2)
+baseline = next(iter(versions))
+sys.stderr.write(f"malf clean stale: baseline {baseline}; sweeping {len(homes)} cache(s)\n")
+
+for home in homes:
+    res = subprocess.run(["conan", "list", "*/*", "--format=json"],
+                         env={**os.environ, "CONAN_HOME": home}, capture_output=True, text=True)
+    if res.returncode != 0:
+        continue
+    try:
+        refs = json.loads(res.stdout).get("Local Cache", {})
+    except json.JSONDecodeError:
+        continue
+    for ref in refs:
+        name, _, version = ref.partition("/")
+        if name.startswith(CODEROAST_PREFIXES) and version and version != baseline:
+            print(f"{home}\t{ref}")
+PY
+)" || return 1
+
+    if [[ -z "$plan" ]]; then
+        echo "malf clean stale: no stale first-party packages in any cache — already clean."
+        return 0
+    fi
+
+    local removed=0 failed=0 home ref label
+    while IFS=$'\t' read -r home ref; do
+        [[ -n "$home" && -n "$ref" ]] || continue
+        label="${home#$MALF_CONAN_HOME_BASE}"; label="${label#/}"
+        [[ -z "$label" ]] && label="base"
+        [[ "$home" == "$HOME/.conan2" ]] && label="stray ~/.conan2"
+        if CONAN_HOME="$home" conan remove "$ref" -c >/dev/null 2>&1; then
+            echo "  removed  $ref   [$label]"
+            removed=$((removed + 1))
+        else
+            echo "  FAILED   $ref   [$label]" >&2
+            failed=$((failed + 1))
+        fi
+    done <<< "$plan"
+    echo "malf clean stale: removed $removed stale first-party ref(s) ($failed failed)"
+    [[ $failed -eq 0 ]]
+}
+
 cmd_clean() {
     local target="${1:-all}"
     case "$target" in
         build)     rm -rf "$CWD"/build "$CWD"/build-* ;;
         conan)     rm -rf "$MALF_CONAN_HOME_BASE"/p "$MALF_CONAN_HOME_BASE"/*/p ;;
         editables) _malf_editables_clear ;;
+        stale)     _malf_clean_stale; return $? ;;
         all)       rm -rf "$CWD"/build "$CWD"/build-* "$MALF_CONAN_HOME_BASE"/p "$MALF_CONAN_HOME_BASE"/*/p && _malf_editables_clear ;;
-        *)         echo "malf clean: unknown target '$target' (build|conan|editables|all)" >&2; exit 1 ;;
+        *)         echo "malf clean: unknown target '$target' (build|conan|editables|stale|all)" >&2; exit 1 ;;
     esac
     echo "malf clean: $target done"
 }
@@ -1487,7 +1593,10 @@ Commands:
     format  [--check]
     commands | compile-commands
     bench   [subdir] [--quick] [--filter REGEX] [--debug|--release|--asan|--profile <name>] [--compare] [--threshold N] [--baseline path]
-    clean   [build|conan|editables|all]
+    clean   [build|conan|editables|stale|all]
+                                   stale = surgically prune old-version/ghost first-party packages
+                                   from every cache (base + keyed + stray ~/.conan2); third-party
+                                   and the current version are never touched
     editables [list|sync]
     profiles                       list available build profiles (the registry)
     bump    X.Y.Z                  coordinated workspace version bump, verify pin coherence, repackage Sift Action bundle
