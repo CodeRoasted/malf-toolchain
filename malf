@@ -1490,7 +1490,7 @@ Commands:
     clean   [build|conan|editables|all]
     editables [list|sync]
     profiles                       list available build profiles (the registry)
-    bump    X.Y.Z                  coordinated workspace version bump, then verify pin coherence
+    bump    X.Y.Z                  coordinated workspace version bump, verify pin coherence, repackage Sift Action bundle
     cut-verify [pkg] [--profile <name>] [--list]
                                    pre-cut Release Gate: forced `conan create` for every
                                    release:true package (packages.yml), dep order, clean export —
@@ -1571,7 +1571,9 @@ cmd_bin_dir() {
 
 # Coordinated workspace version bump: rewrite every version axis to X.Y.Z via
 # pin_coherence's `bump` engine, then re-run the coherence check to prove it
-# (bump rewrites exactly what the check validates → GREEN by construction).
+# (bump rewrites exactly what the check validates → GREEN by construction). Finally
+# repackage the Sift Action bundle so the committed dist/index.js (the artifact
+# action.yml runs) bakes in the new SIFT_VERSION rather than the previous engine.
 # Tested for 1.5.0; from then on the founder owns pulling this trigger.
 cmd_bump() {
     local target="${1:-}"
@@ -1587,7 +1589,33 @@ cmd_bump() {
     echo "── malf bump $target — rewriting every workspace version axis ──"
     python3 "$pin" bump "$target" "$MALF_WORKSPACE_ROOT" || return 1
     echo "── verifying pin coherence at $target ──"
-    python3 "$pin" "$MALF_WORKSPACE_ROOT"
+    python3 "$pin" "$MALF_WORKSPACE_ROOT" || return 1
+
+    # ── Sift Action bundle: dist/index.js is the COMMITTED artifact action.yml
+    # executes (`main: dist/index.js`) and bakes SIFT_VERSION in at esbuild time.
+    # The bump above rewrote only the SOURCE (src/sift-version.ts), so the bundle
+    # now still downloads the PREVIOUS engine release. INV-8 parses the source and
+    # the sift-action ci.yml dist-sync gate only catches the drift AFTER the fact —
+    # so re-bundle here, at bump time, leaving a coherent artifact by construction
+    # (the bundle is a derived axis; never trust a human to hand-sync it).
+    local action_dir="$MALF_WORKSPACE_ROOT/sift-action"
+    if [[ -f "$action_dir/src/sift-version.ts" ]]; then
+        echo "── repackaging sift-action bundle (dist/index.js) at $target ──"
+        if [[ ! -d "$action_dir/node_modules" ]]; then
+            echo "malf bump: $action_dir/node_modules missing — run 'npm ci' there first;" >&2
+            echo "  the bump rewrote src/sift-version.ts but cannot regenerate dist/index.js" >&2
+            return 1
+        fi
+        ( cd "$action_dir" && npm run package ) || {
+            echo "malf bump: 'npm run package' failed — dist/index.js still bakes in the old engine version" >&2
+            return 1
+        }
+        if ! grep -q "SIFT_VERSION = \"$target\"" "$action_dir/dist/index.js"; then
+            echo "malf bump: dist/index.js does not embed SIFT_VERSION = \"$target\" after repackage" >&2
+            return 1
+        fi
+        echo "✓ sift-action bundle repackaged — dist/index.js downloads engine-v$target"
+    fi
 }
 
 # Pre-cut Release Gate: forced `conan create` for EVERY released package (the
