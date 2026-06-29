@@ -88,8 +88,10 @@ _malf_apply_profile() {
     # merely mentions -fsanitize (e.g. the libc++ profile's "NOT a sanitizer profile" note).
     if grep -qE '^[[:space:]]*tools\.build:.*-fsanitize=' "$MALF_PROFILE"; then
         MALF_BUILD_PROFILE="$(MALF_PROFILE_NAME="${MALF_CLEAN_BUILD_PROFILE:-linux-gcc15-release}" _malf_profile_path)"
+        MALF_IS_SANITIZER=1
     else
         MALF_BUILD_PROFILE="$MALF_PROFILE"
+        MALF_IS_SANITIZER=0
     fi
     # Export the profile-named editable subdir so recipe layouts resolve a dep's
     # lib from its OWN profile's build dir (matches _malf_editable_build_dir).
@@ -615,6 +617,21 @@ _malf_restore_user_presets() {
     fi
 }
 
+# Build parallelism. Sanitizer builds (ASan/UBSan/MSan) are FAR heavier in the clang frontend:
+# import-std module instantiation under instrumentation drives deep frontend recursion AND ~3 GB/TU.
+# Under full -j$(nproc) on a memory-tight box this OOM-thrashes AND starves the frontend's stack →
+# the intermittent "stack exhaustion" frontend ICE on the heaviest module TU (insight-eidos's
+# metalog_pyramid.cpp, which imports the big metalog compose/diff module forest). So for a sanitizer
+# build ONLY, cap parallelism by available memory (the determinism-gate precedent, ~3 GB/job).
+# Non-sanitizer builds keep full -j (byte-identical behaviour to before).
+_malf_build_jobs() {
+    local ncpu; ncpu="$(nproc 2>/dev/null || echo 2)"
+    [[ "${MALF_IS_SANITIZER:-0}" == "1" ]] || { echo "$ncpu"; return; }
+    local mem_gb; mem_gb="$(awk '/MemAvailable/{print int($2/1024/1024)}' /proc/meminfo 2>/dev/null || echo 4)"
+    local jobs=$(( mem_gb / 3 )); (( jobs < 1 )) && jobs=1; (( jobs > ncpu )) && jobs=$ncpu
+    echo "$jobs"
+}
+
 _malf_configure_and_build() {
     local target="$1"
     local build_dir="$2"
@@ -624,7 +641,16 @@ _malf_configure_and_build() {
     cmake --preset "$preset" -S "$target" -B "$build_dir" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         "$@"
-    cmake --build "$build_dir" -j"$(nproc)"
+    local jobs; jobs="$(_malf_build_jobs)"
+    if [[ "${MALF_IS_SANITIZER:-0}" == "1" ]]; then
+        # The companion to the -j cap: give the clang frontend stack headroom for the deep
+        # import-std module instantiation under instrumentation (the named "stack exhaustion"
+        # mechanism). The soft rlimit is inherited by ninja's child compiler processes; raising
+        # it is best-effort (a lower hard cap is fine — the -j cap still relieves the pressure).
+        ulimit -s 131072 2>/dev/null || true   # 128 MB frontend stack (default ~8 MB)
+        echo "malf: sanitizer build — -j$jobs (mem-aware) + 128MB compiler stack (frontend-ICE guard)" >&2
+    fi
+    cmake --build "$build_dir" -j"$jobs"
 }
 
 _malf_merge_compile_commands() {
