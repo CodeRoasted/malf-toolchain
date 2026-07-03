@@ -1,0 +1,29 @@
+name: 'CodeRoast module conformance'
+description: |
+  C++23 module-unit conformance gate (the §11.9.x rule set: sealed <pkg>.detail, no internal-manifest
+  re-export, no `export using` re-homing, no thread_local / C-library macro token in a module unit,
+  detail units shipped under the PRIVATE install seal). All six rules are per-module-unit-local, so
+  this runs per-repo (a package repo lints its OWN modules on every PR) or over a whole tree.
+
+  Ships module_conformance_lint.py single-sourced with the action and runs its self-test first, so the
+  gate cannot rot into a pass-everything no-op. Requires python3 (present on GitHub-hosted + the
+  self-hosted runners). Run after `actions/checkout`.
+
+inputs:
+  root:
+    description: 'Directory to scan for .cppm module units (defaults to the workspace root — the caller repo checkout).'
+    required: false
+    default: '.'
+
+runs:
+  using: composite
+  steps:
+    - name: C++ modules conformance (self-test + scan)
+      shell: bash
+      env:
+        ROOT: ${{ inputs.root }}
+        SCRIPT: ${{ github.action_path }}/module_conformance_lint.py
+      run: |
+        set -euo pipefail
+        python3 "$SCRIPT" --selftest   # the rule set must fire on synthetic violations (teeth)
+        python3 "$SCRIPT" "$ROOT"
