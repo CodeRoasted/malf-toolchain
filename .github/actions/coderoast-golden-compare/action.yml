@@ -1,0 +1,57 @@
+name: 'CodeRoast golden compare'
+description: |
+  Cross-compare the determinism digests emitted by every leg of a Determinism-Golden-Proof matrix
+  (e.g. gcc/clang × x86/arm64 + msvc). Every leg's digest must be byte-identical — the agreed digest
+  IS the validated golden (proof of cross-toolchain / cross-ISA / cross-OS bit-identity). ANY
+  divergence FAILS (a determinism break), which gates the release. There is no committed golden: the
+  golden is this per-release agreed value, so it cannot go stale.
+
+  Fail-closed: fewer than `min-legs` digests present is a hard error (a missing leg must never let the
+  gate pass vacuously). Point `digests-dir` at where every leg's digest artifact was downloaded.
+
+inputs:
+  digests-dir:
+    description: 'Directory holding every leg''s emitted digest file (recursively — one per downloaded artifact).'
+    required: true
+  min-legs:
+    description: 'Minimum number of leg digests that MUST be present (fail-closed against a vacuous compare).'
+    required: false
+    default: '2'
+  out:
+    description: 'Path to write the validated golden (the agreed digest) to. Empty = do not write.'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Compare every leg's digest (all must be byte-identical)
+      shell: bash
+      env:
+        DIGESTS_DIR: ${{ inputs.digests-dir }}
+        MIN_LEGS: ${{ inputs.min-legs }}
+        OUT: ${{ inputs.out }}
+      run: |
+        set -euo pipefail
+        mapfile -t files < <(find "$DIGESTS_DIR" -type f | sort)
+        n="${#files[@]}"
+        if [ "$n" -lt "$MIN_LEGS" ]; then
+          echo "::error::golden-compare: only $n leg digest(s) under $DIGESTS_DIR (need >= $MIN_LEGS) — a missing leg must never let the gate pass vacuously."
+          exit 1
+        fi
+        ref="${files[0]}"
+        echo "reference leg: $(basename "$(dirname "$ref")")/$(basename "$ref")  sha256=$(sha256sum "$ref" | cut -c1-16)…"
+        rc=0
+        for f in "${files[@]}"; do
+          if cmp -s "$ref" "$f"; then st="IDENTICAL"; else st="DIVERGENT"; rc=1; fi
+          printf '  %-46s %s\n' "$(basename "$(dirname "$f")")/$(basename "$f")" "$st"
+        done
+        if [ "$rc" -ne 0 ]; then
+          echo "::error::golden-compare: DETERMINISM BREAK — the $n legs' digests are NOT byte-identical (see per-leg status above). This gates the release; never dismiss it as a transport artifact."
+          exit 1
+        fi
+        echo "::notice::golden-compare: all $n legs byte-identical — cross-toolchain/ISA/OS determinism proven; golden validated."
+        if [ -n "$OUT" ]; then
+          cp "$ref" "$OUT"
+          echo "validated golden → $OUT (sha256 $(sha256sum "$ref" | awk '{print $1}'))"
+        fi
