@@ -1,34 +1,21 @@
 name: 'Publish Benchmark'
 description: |
-  Measure a package's benchmark suite fresh on the release runner and attach the raw
-  google-benchmark JSON(s) as asset(s) on the package's OWN GitHub Release. The Topic-H
-  benchmark-evidence producer: each engine measures itself at its tag and publishes its
-  numbers; the superproject's aggregation job later merges every package's asset into the
-  public coderoast-hub (normalizing / scrubbing at that private->public boundary).
+  Measure a package's benchmark suite fresh on the release runner and attach the raw google-benchmark
+  JSON(s) as asset(s) on the package's OWN GitHub Release. The Topic-H benchmark-evidence producer:
+  each engine measures itself at its tag and publishes its numbers; the superproject's aggregation job
+  later merges every package's asset into the public coderoast-hub.
 
-  Runs `malf bench <subdir> --repetitions 5` (median + cv aggregates — variance-aware) ONCE,
-  then publishes one asset per bench executable named in `outputs`. This supports both a
-  single-package repo (one bench exe) AND a multi-exe package like insight-eidos, where one
-  `malf bench` build produces several bench executables (detection + engine) — subdirs there
-  are NOT malf targets, so a single run + per-exe upload is the only correct shape.
+  Thin wrapper: the measure + scaling-guard is the single-sourced `measure-benchmark` action; this adds
+  "ensure the Release exists + upload". (The `coderoast-release` reusable workflow uses
+  `measure-benchmark` directly so a bad benchmark gates the release before it is created.)
 
-  Workspace is pinned to the caller's checkout: MALF_AUTO_WORKSPACE_DEPS=0 forces first-party
-  deps to resolve from the conan cache, so the CALLER must have vendored them first (the
-  ci_fetch_conan_package pattern) — this action does NOT vendor deps. It assumes setup-gcc153 +
-  setup-build-env already ran (CONAN_HOME + the profile are staged).
-
-  Integrity: a run captured with CPU frequency scaling ENABLED is REJECTED before upload — a
-  throttled / variable measurement must never become published evidence. Pin the runner's
-  governor to 'performance' (disable scaling).
+  Assumes setup-gcc153 + setup-build-env already ran and the caller vendored first-party deps.
 
 inputs:
   outputs:
     description: |
       Newline-separated `<bench_exe_basename>=<hub-label>` pairs — one per bench executable this
-      package's build produces. Each is uploaded as `<hub-label>-benchmark.json`. Examples:
-        single: `insight_canon_bench=insight-canon`
-        multi:  `insight_detection_bench=insight-eidos-detection`
-                `insight_engine_bench=insight-eidos-engine`
+      package's build produces. Each is uploaded as `<hub-label>-benchmark.json`.
     required: true
   tag:
     description: 'The package release tag (vX.Y.Z) whose Release receives the asset(s).'
@@ -48,66 +35,29 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Measure (malf bench, fresh, variance-aware)
-      shell: bash
-      env:
-        SUBDIR: ${{ inputs.subdir }}
-        PROFILE: ${{ inputs.profile }}
-        ACTION_PATH: ${{ github.action_path }}
-      run: |
-        set -euo pipefail
-        # The malf driver lives at the root of THIS action's repo (malf-toolchain).
-        MALF="$(cd "$ACTION_PATH/../../.." && pwd)/malf"
-        [ -x "$MALF" ] || { echo "::error::malf driver not found/executable at $MALF"; exit 1; }
-        args=(bench)
-        [ -n "$SUBDIR" ] && args+=("$SUBDIR")
-        args+=(--profile "$PROFILE" --repetitions 5)
-        # No --benchmark_out override: malf writes ONE JSON per bench exe to <target>/bench_results/
-        # (<exe>_<ts>.json), which the upload step maps to labels. MALF_DEFAULT_PROFILE=$PROFILE makes
-        # this profile malf's "default" so its cache-key is empty (_malf_profile_key) and it builds in
-        # the BASE conan cache — the same $CONAN_HOME the caller vendored deps into (a per-profile KEYED
-        # sub-cache would never see them). MALF_AUTO_WORKSPACE_DEPS=0 stops it hunting sibling editables.
-        MALF_DEFAULT_PROFILE="$PROFILE" MALF_AUTO_WORKSPACE_DEPS=0 MALF_WORKSPACE_ROOT="$GITHUB_WORKSPACE" \
-          "$MALF" "${args[@]}"
+    - name: Measure + validate the benchmark JSON(s)
+      uses: CodeRoasted/malf-toolchain/.github/actions/measure-benchmark@main
+      with:
+        outputs: ${{ inputs.outputs }}
+        subdir: ${{ inputs.subdir }}
+        profile: ${{ inputs.profile }}
+        dest: ${{ runner.temp }}/bench-assets
 
-    - name: Guard scaling + publish each bench exe's JSON to the Release
+    - name: Ensure the Release exists + upload each JSON
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.token }}
         TAG: ${{ inputs.tag }}
-        OUTPUTS: ${{ inputs.outputs }}
       run: |
         set -euo pipefail
-        # Ensure the Release exists (the publish job created it; be robust to a manual re-run).
+        # Idempotent: create the Release if the publish job hasn't (robust to a manual re-run).
         gh release view "$TAG" >/dev/null 2>&1 \
           || gh release create "$TAG" --title "$TAG" --notes "Benchmark evidence attached by CI for $TAG."
-
         published=0
-        while IFS='=' read -r exe label; do
-          exe="$(echo "$exe" | xargs)"; label="$(echo "$label" | xargs)"
-          if [ -z "$exe" ] || [ -z "$label" ]; then continue; fi
-          # Newest JSON this run wrote for this exe (find is repo-wide: <target>/bench_results/ varies
-          # with subdir — root for a whole-package run, core/ for a subdir target).
-          json="$(find "$GITHUB_WORKSPACE" -path "*/bench_results/${exe}_*.json" -printf '%T@ %p\n' 2>/dev/null \
-                    | sort -rn | head -1 | cut -d' ' -f2-)"
-          if [ -z "$json" ] || [ ! -f "$json" ]; then echo "::error::no benchmark JSON for exe '$exe' under any bench_results/ — did the build produce it?"; exit 1; fi
-
-          # Reject a throttled capture — a scaling-enabled run must never become published evidence.
-          python3 - "$json" "$exe" <<'PY'
-        import json, sys
-        ctx = json.load(open(sys.argv[1])).get("context", {})
-        if ctx.get("cpu_scaling_enabled"):
-            print(f"::error::CPU frequency scaling was ENABLED during the '{sys.argv[2]}' benchmark — "
-                  "refusing to publish a throttled/variable measurement. Pin the runner governor to "
-                  "'performance' (disable scaling), then re-run.")
-            sys.exit(1)
-        print(f"cpu scaling disabled — '{sys.argv[2]}' measurement admissible")
-        PY
-
-          asset="$RUNNER_TEMP/${label}-benchmark.json"
-          cp "$json" "$asset"
-          gh release upload "$TAG" "$asset" --clobber
-          echo "attached ${label}-benchmark.json (from $(basename "$json")) to Release $TAG"
+        for f in "$RUNNER_TEMP"/bench-assets/*-benchmark.json; do
+          [ -f "$f" ] || continue
+          gh release upload "$TAG" "$f" --clobber
+          echo "attached $(basename "$f") to Release $TAG"
           published=$((published + 1))
-        done <<< "$OUTPUTS"
-        [ "$published" -gt 0 ] || { echo "::error::no outputs published — check the 'outputs' mapping"; exit 1; }
+        done
+        [ "$published" -gt 0 ] || { echo "::error::no benchmark JSON collected to publish"; exit 1; }

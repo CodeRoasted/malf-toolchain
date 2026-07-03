@@ -4,10 +4,9 @@ description: |
   the canonical build env (apt / CMake 4.3.x / Conan / dep-binary cache / profile) + the cross-repo
   Conan vendor loop (data manifest) + a fresh build.log + the per-module build/test/create loop.
 
-  Kills the copy-pasted checkout / setup / vendor / module-build boilerplate — and the
-  three-way-drifted `ci_fetch_conan_package.sh` — that previously lived in every consumer repo. Both
-  helper scripts are single-sourced here (the fetch script ships with this action; the per-module
-  logic is shared from the sibling `conan-module` action).
+  Kills the copy-pasted checkout / setup / vendor / module-build boilerplate that previously lived in
+  every consumer repo. The vendor loop is the shared `coderoast-vendor` action (single-sources the
+  fetch script); the per-module build logic is shared from the sibling `conan-module` action.
 
   Use it as the FIRST (usually only) build step in the job. `runs-on` and `permissions` stay in the
   caller — they are job-level keys a composite action cannot hold. Follow this step with a
@@ -69,42 +68,16 @@ runs:
         extra-apt: ${{ inputs.extra-apt }}
         profile: ${{ inputs.profile }}
 
-    - name: Vendor cross-repo Conan deps + start build.log capture
+    - name: Vendor cross-repo Conan deps
+      uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-vendor@main
+      with:
+        vendor: ${{ inputs.vendor }}
+        github-token: ${{ inputs.github-token }}
+        release-token: ${{ inputs.release-token }}
+
+    - name: Start build.log capture (fresh, AFTER vendoring so Sift diffs only the build+test output)
       shell: bash
-      env:
-        VENDOR: ${{ inputs.vendor }}
-        GH_PUBLIC_TOKEN: ${{ inputs.github-token }}
-        GH_RELEASE_TOKEN: ${{ inputs.release-token }}
-        CIFETCH: ${{ github.action_path }}/ci_fetch_conan_package.sh
-      run: |
-        set -euo pipefail
-        # Restore each declared cross-repo dep from its GitHub Release, choosing the token by declared
-        # visibility (public -> GITHUB_TOKEN; private -> CR_RELEASE_TOKEN). The fetch script is
-        # single-sourced with this action (no per-repo copy) and is itself idempotent.
-        while IFS= read -r row; do
-          row="${row%%#*}"                                 # strip trailing comments
-          # shellcheck disable=SC2086                       # intentional word-split of the manifest row
-          set -- $row
-          [ "$#" -ge 1 ] || continue                       # skip blank / comment-only lines
-          if [ "$#" -lt 4 ]; then
-            echo "::error::vendor row needs >=4 fields '<pkg> <ver> <owner/repo> <public|private> [tag]', got: $row"
-            exit 1
-          fi
-          pkg="$1"; ver="$2"; repo="$3"; vis="$4"; tag="${5:-}"
-          case "$vis" in
-            public)  tok="$GH_PUBLIC_TOKEN" ;;
-            private) tok="$GH_RELEASE_TOKEN" ;;
-            *) echo "::error::vendor row '$pkg' has bad visibility '$vis' (want public|private)"; exit 1 ;;
-          esac
-          if [ -z "$tok" ]; then
-            echo "::error::vendor row '$pkg' is '$vis' but coderoast-ci got no ${vis}-token"; exit 1
-          fi
-          echo "coderoast-ci: vendoring $pkg/$ver from $repo ($vis)"
-          GH_TOKEN="$tok" bash "$CIFETCH" "$pkg" "$ver" "$repo" ${tag:+"$tag"}
-        done <<< "$VENDOR"
-        # Fresh build.log AFTER vendoring so the Sift dogfood diffs only the build+test output, not
-        # the vendor download noise.
-        : > "$GITHUB_WORKSPACE/build.log"
+      run: ': > "$GITHUB_WORKSPACE/build.log"'
 
     - name: Build + test + create the modules
       shell: bash

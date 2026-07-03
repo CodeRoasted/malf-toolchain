@@ -1,0 +1,62 @@
+name: 'CodeRoast vendor'
+description: |
+  Restore cross-repo Conan deps from their GitHub Releases into the local cache, driven by a data
+  manifest. Single-sources the fetch script (ci_fetch_conan_package.sh ships here) and the
+  token-by-visibility selection. Used by both coderoast-ci (build half) and coderoast-release.
+
+  Assumes setup-build-env already ran (CONAN_HOME staged). Does not check out or build anything.
+
+inputs:
+  vendor:
+    description: |
+      Newline-separated cross-repo Conan deps to restore, one per row:
+        <pkg> <version> <owner/repo> <public|private> [release-tag]
+      `public` deps resolve with `github-token`; `private` deps use `release-token`. release-tag
+      defaults to v<version>. `#` starts a comment. Blank / omitted = no vendoring.
+    required: false
+    default: ''
+  github-token:
+    description: 'Token for PUBLIC-repo release reads — pass secrets.GITHUB_TOKEN. Required only if any vendor row is `public`.'
+    required: false
+    default: ''
+  release-token:
+    description: 'Token for PRIVATE-repo release reads — pass secrets.CR_RELEASE_TOKEN. Required only if any vendor row is `private`.'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Vendor cross-repo Conan deps
+      shell: bash
+      env:
+        VENDOR: ${{ inputs.vendor }}
+        GH_PUBLIC_TOKEN: ${{ inputs.github-token }}
+        GH_RELEASE_TOKEN: ${{ inputs.release-token }}
+        CIFETCH: ${{ github.action_path }}/ci_fetch_conan_package.sh
+      run: |
+        set -euo pipefail
+        # Restore each declared cross-repo dep from its GitHub Release, choosing the token by declared
+        # visibility (public -> GITHUB_TOKEN; private -> CR_RELEASE_TOKEN). The fetch script is
+        # single-sourced with this action (no per-repo copy) and is itself idempotent.
+        while IFS= read -r row; do
+          row="${row%%#*}"                                 # strip trailing comments
+          # shellcheck disable=SC2086                       # intentional word-split of the manifest row
+          set -- $row
+          [ "$#" -ge 1 ] || continue                       # skip blank / comment-only lines
+          if [ "$#" -lt 4 ]; then
+            echo "::error::vendor row needs >=4 fields '<pkg> <ver> <owner/repo> <public|private> [tag]', got: $row"
+            exit 1
+          fi
+          pkg="$1"; ver="$2"; repo="$3"; vis="$4"; tag="${5:-}"
+          case "$vis" in
+            public)  tok="$GH_PUBLIC_TOKEN" ;;
+            private) tok="$GH_RELEASE_TOKEN" ;;
+            *) echo "::error::vendor row '$pkg' has bad visibility '$vis' (want public|private)"; exit 1 ;;
+          esac
+          if [ -z "$tok" ]; then
+            echo "::error::vendor row '$pkg' is '$vis' but coderoast-vendor got no ${vis}-token"; exit 1
+          fi
+          echo "coderoast-vendor: vendoring $pkg/$ver from $repo ($vis)"
+          GH_TOKEN="$tok" bash "$CIFETCH" "$pkg" "$ver" "$repo" ${tag:+"$tag"}
+        done <<< "$VENDOR"

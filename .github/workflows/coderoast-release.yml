@@ -1,0 +1,147 @@
+name: CodeRoast Release
+
+# Shared release job for CodeRoast Conan-package repos, as a reusable workflow: resolve+validate the
+# tag -> checkout@tag -> toolchain + build env -> vendor cross-repo deps -> (optional) measure the
+# benchmark FRESH -> verify each recipe version == tag -> conan create -> export the cache tarball ->
+# create the GitHub Release and attach the tarball(s) + benchmark JSON(s).
+#
+# The benchmark GATES the release: it is measured before the Release is created, so a bad/throttled
+# benchmark fails the job and no Release is published. Benchmark is optional (omit `benchmark`).
+#
+# A caller wires this as the job AFTER its own CI (a workflow_call to the repo's ci.yml), so a red CI
+# blocks the release: `release: { needs: ci, uses: .../coderoast-release.yml@main, ... }`.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Release tag vMAJOR.MINOR.PATCH (caller passes github.ref_name on a tag push, or its dispatch tag input).'
+        type: string
+        required: true
+      packages:
+        description: 'Newline `<conan-pkg>:<recipe-dir>` pairs to build + publish, e.g. `logcraft_core:core`.'
+        type: string
+        required: true
+      vendor:
+        description: 'Newline cross-repo vendor manifest (`<pkg> <ver> <owner/repo> <public|private> [tag]`) restored before conan create. Blank = none.'
+        type: string
+        required: false
+        default: ''
+      benchmark:
+        description: 'Optional measure-benchmark outputs mapping (`<bench_exe>=<label>` per line). Empty = no benchmark.'
+        type: string
+        required: false
+        default: ''
+      benchmark-subdir:
+        description: 'malf bench target subdir for the benchmark (e.g. `core`).'
+        type: string
+        required: false
+        default: ''
+      profile:
+        description: 'Conan profile name to build with.'
+        type: string
+        required: false
+        default: 'linux-gcc15-release'
+    secrets:
+      CR_RELEASE_TOKEN:
+        description: 'PAT (Contents:read) for PRIVATE-repo vendor deps. Required only if any vendor row is `private`.'
+        required: false
+
+concurrency:
+  # Two concurrent publishes of the same tag would race on `gh release upload --clobber`. Serialise.
+  group: coderoast-release-${{ github.workflow }}-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ${{ vars.CI_RUNS_ON || 'ubuntu-latest' }}
+    permissions:
+      contents: write   # create / upload GitHub Releases
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Resolve + validate tag
+        id: tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag '$TAG' does not match vMAJOR.MINOR.PATCH"; exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout at the tag
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ steps.tag.outputs.tag }}   # always build the requested tag (manual re-runs are release replays)
+
+      - name: Provision gcc-15.3 toolchain (PR124309 fix; replaces PPA gcc-15 = 15.2)
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-gcc153@main
+
+      - name: Setup build env (apt + CMake 4.3.x + Conan + dep cache + canonical profile)
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-env@main
+        with:
+          profile: ${{ inputs.profile }}
+
+      - name: Vendor cross-repo Conan deps
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-vendor@main
+        with:
+          vendor: ${{ inputs.vendor }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          release-token: ${{ secrets.CR_RELEASE_TOKEN }}
+
+      - name: Measure benchmark fresh (optional; gates the release — runs before it is created)
+        if: ${{ inputs.benchmark != '' }}
+        uses: CodeRoasted/malf-toolchain/.github/actions/measure-benchmark@main
+        with:
+          outputs: ${{ inputs.benchmark }}
+          subdir: ${{ inputs.benchmark-subdir }}
+          profile: ${{ inputs.profile }}
+          # dest defaults to $GITHUB_WORKSPACE/release-assets — the same dir the tarballs land in.
+
+      - name: Verify recipe versions, conan create, export cache tarballs
+        env:
+          PACKAGES: ${{ inputs.packages }}
+          VERSION: ${{ steps.tag.outputs.version }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          PROFILE: ${{ inputs.profile }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          PROFILE_PATH="$CONAN_HOME/profiles/$PROFILE"
+          while IFS= read -r row; do
+            row="${row%%#*}"; row="$(echo "$row" | xargs)"
+            [ -n "$row" ] || continue
+            pkg="${row%%:*}"; dir="${row#*:}"
+            if [ -z "$pkg" ] || [ -z "$dir" ] || [ "$pkg" = "$row" ]; then
+              echo "::error::bad package row '$row' — want '<conan-pkg>:<recipe-dir>'"; exit 1
+            fi
+            # Refuse to publish a vX.Y.Z release from a recipe that still says version="A.B.C".
+            ver="$(sed -nE "s/^[[:space:]]*version[[:space:]]*=[[:space:]]*['\"]([^'\"]+)['\"].*/\1/p" "$dir/conanfile.py" | head -n1 || true)"
+            if [ "$ver" != "$VERSION" ]; then
+              echo "::error::$dir/conanfile.py version='$ver' != tag '$TAG' (version $VERSION)"; exit 1
+            fi
+            conan create "$dir" \
+              --profile:host="$PROFILE_PATH" --profile:build="$PROFILE_PATH" \
+              --build=missing --build-test=missing
+            # conan cache save captures the recipe + all cached binaries for the ref; the consumer
+            # restores it byte-for-byte with conan cache restore.
+            conan cache save "${pkg}/${ver}:*" --file="release-assets/${pkg}-${ver}.tgz"
+            ls -lh "release-assets/${pkg}-${ver}.tgz"
+          done <<< "$PACKAGES"
+
+      - name: Create the Release + attach every asset (tarballs + benchmark JSON)
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "$TAG" --notes "Automated Conan-package release for $TAG.
+
+          Attached \`*.tgz\` are produced by \`conan cache save\` and consumed downstream by
+          \`conan cache restore\`. Any \`*-benchmark.json\` is the fresh benchmark measured at this tag."
+          fi
+          gh release upload "$TAG" release-assets/* --clobber
