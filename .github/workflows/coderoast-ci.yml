@@ -1,0 +1,57 @@
+name: CodeRoast CI
+
+# The shared CI job for every CodeRoast C++ repo, as a reusable workflow. It wraps the two composite
+# building blocks — `coderoast-ci` (checkout + toolchain + build env + cross-repo vendor loop + the
+# per-module build/test/create loop) and `coderoast-ci-sift` (the standard, advisory Sift dogfood) —
+# and owns the job-level shell (runs-on) so callers keep only the trigger, permissions, and their two
+# data manifests. A caller becomes ~4 lines: permissions + `uses:` + `with: {vendor, modules}` +
+# `secrets: inherit`.
+#
+# Exception: `coderoast-server` needs `services:` (redis + postgres), which a `uses:` job cannot
+# declare, so it stays a bespoke composite-based job that calls the `coderoast-ci` composite directly.
+#
+# Sift dogfood is the standard `sift-action@v1` integration only — the internal courtesy `--explain`
+# endpoint is intentionally NOT wired here (retired from in-CI dogfood; the composite still supports it
+# opt-in if ever re-armed).
+
+on:
+  workflow_call:
+    inputs:
+      modules:
+        description: 'Newline modules manifest: `<module> [test] [create]` (test/create default true).'
+        type: string
+        required: true
+      vendor:
+        description: 'Newline vendor manifest: `<pkg> <ver> <owner/repo> <public|private> [tag]`. Blank = no cross-repo deps.'
+        type: string
+        required: false
+        default: ''
+      extra-apt:
+        description: 'Extra apt packages for the build env (e.g. "libpq-dev redis-tools").'
+        type: string
+        required: false
+        default: ''
+    secrets:
+      CR_RELEASE_TOKEN:
+        description: 'Fine-grained PAT (Contents:read) for PRIVATE-repo release reads. Required only if any vendor row is `private`. Pass via `secrets: inherit`.'
+        required: false
+
+jobs:
+  build:
+    runs-on: ${{ vars.CI_RUNS_ON || 'ubuntu-latest' }}
+    steps:
+      - name: CI — checkout + toolchain + build env + cross-repo vendor + build/test
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-ci@main
+        with:
+          vendor: ${{ inputs.vendor }}
+          modules: ${{ inputs.modules }}
+          extra-apt: ${{ inputs.extra-apt }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          release-token: ${{ secrets.CR_RELEASE_TOKEN }}
+
+      - name: Sift dogfood — standard sift-action integration (advisory; never fails the build)
+        if: ${{ always() }}
+        continue-on-error: true    # the advisory guarantee lives here, at the job-step boundary
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-ci-sift@main
+        with:
+          build-status: ${{ job.status == 'success' && 'green' || 'red' }}
