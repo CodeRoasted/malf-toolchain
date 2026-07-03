@@ -32,6 +32,10 @@ inputs:
     description: 'Conan profile name in `$CONAN_HOME/profiles` to build with.'
     required: false
     default: 'linux-gcc15-release'
+  timeout:
+    description: 'Seconds before the benchmark run is presumed DEADLOCKED — the watchdog then dumps thread backtraces (gdb) and fails, instead of hanging to the runner limit. Default 1200 (20 min).'
+    required: false
+    default: '1200'
   dest:
     description: 'Directory to write the validated `<label>-benchmark.json` file(s) into. Default $GITHUB_WORKSPACE/release-assets.'
     required: false
@@ -46,6 +50,7 @@ runs:
         SUBDIR: ${{ inputs.subdir }}
         PROFILE: ${{ inputs.profile }}
         ACTION_PATH: ${{ github.action_path }}
+        TIMEOUT: ${{ inputs.timeout }}
       run: |
         set -euo pipefail
         # The malf driver lives at the root of THIS action's repo (malf-toolchain).
@@ -54,11 +59,14 @@ runs:
         args=(bench)
         [ -n "$SUBDIR" ] && args+=("$SUBDIR")
         args+=(--profile "$PROFILE" --repetitions 5)
-        # MALF_DEFAULT_PROFILE=$PROFILE makes this profile malf's "default" so its cache-key is empty
-        # (_malf_profile_key) and it builds in the BASE conan cache — the same $CONAN_HOME the caller
+        # Run under the deadlock watchdog: a hung benchmark dumps every thread's backtrace and fails,
+        # instead of blocking to the 6h runner limit. `env` carries the MALF_* vars through the
+        # watchdog to malf. MALF_DEFAULT_PROFILE=$PROFILE makes this profile malf's "default" so its
+        # cache-key is empty and it builds in the BASE conan cache — the same $CONAN_HOME the caller
         # vendored deps into. MALF_AUTO_WORKSPACE_DEPS=0 stops it hunting sibling editables.
-        MALF_DEFAULT_PROFILE="$PROFILE" MALF_AUTO_WORKSPACE_DEPS=0 MALF_WORKSPACE_ROOT="$GITHUB_WORKSPACE" \
-          "$MALF" "${args[@]}"
+        bash "$ACTION_PATH/bench_watchdog.sh" "$TIMEOUT" -- \
+          env MALF_DEFAULT_PROFILE="$PROFILE" MALF_AUTO_WORKSPACE_DEPS=0 MALF_WORKSPACE_ROOT="$GITHUB_WORKSPACE" \
+            "$MALF" "${args[@]}"
 
     - name: Guard scaling + collect each bench exe's JSON
       shell: bash
