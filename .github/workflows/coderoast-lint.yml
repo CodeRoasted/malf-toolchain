@@ -1,31 +1,107 @@
 name: CodeRoast Lint
 
-# Shared actionlint gate for every CodeRoast repo, as a reusable workflow. Replaces the
-# copy-pasted-and-drifted `workflow-lint.yml` (7 variants: some hardcoded ubuntu-latest instead of
-# the CI_RUNS_ON lever, some missing -color). Callers keep only their trigger (`on:`) — which
-# legitimately varies (public push+PR / private PR-only / superproject tag cut) — and a 3-line job
-# that `uses:` this workflow.
+# Shared lint gate for every CodeRoast repo, as a reusable workflow. Base job = actionlint over the
+# caller's workflows (replaces the copy-pasted-and-drifted per-repo workflow-lint.yml). It also hosts
+# the workspace's cross-repo static gates as OPT-IN toggles (default off), so the superproject gets
+# ONE "Lint" job — actionlint + wall-clock + module-conformance + RNG — instead of four workflow files,
+# each independently activable on demand.
 #
-# actionlint lints the caller repo's workflows (checkout defaults to the caller). It auto-runs
-# shellcheck on embedded run: blocks when shellcheck is on PATH.
+# The cross-repo gates are superproject-only: each runs a superproject `scripts/*.py` and clones the
+# workspace package repos into one tree (clone_repos.sh + SUBMODULE_CHECKOUT_TOKEN). The domain logic
+# lives in the superproject; this workflow only orchestrates cloning + running them when toggled. A
+# single package repo leaves these off (it has neither the scripts nor the whole workspace).
 
 on:
   workflow_call:
+    inputs:
+      actionlint:
+        description: 'Run actionlint over the caller repo workflows.'
+        type: boolean
+        required: false
+        default: true
+      wallclock:
+        description: 'Run the wall-clock determinism gate (superproject scripts/wallclock_lint.py; needs clone-repos + token).'
+        type: boolean
+        required: false
+        default: false
+      module-conformance:
+        description: 'Run the C++ modules conformance gate (superproject scripts/module_conformance_lint.py; needs clone-repos + token).'
+        type: boolean
+        required: false
+        default: false
+      rng:
+        description: 'Run the RNG determinism gate (superproject scripts/random_determinism_lint.py; needs clone-repos + token).'
+        type: boolean
+        required: false
+        default: false
+      clone-repos:
+        description: 'Space-separated workspace package repos to clone before the cross-repo gates (the superset the enabled gates need). Empty = no cloning.'
+        type: string
+        required: false
+        default: ''
+      clone-ref:
+        description: 'Ref to clone the package repos at. Empty resolves to the release tag on a tag build, else main.'
+        type: string
+        required: false
+        default: ''
+    secrets:
+      SUBMODULE_CHECKOUT_TOKEN:
+        description: 'READ-ONLY (Contents:read) PAT over the package repos, for the cross-repo gates. Required only if clone-repos is set.'
+        required: false
 
 permissions:
   contents: read
 
+concurrency:
+  group: coderoast-lint-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  actionlint:
+  lint:
     runs-on: ${{ vars.CI_RUNS_ON || 'ubuntu-latest' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+          # Don't persist the repo-scoped GITHUB_TOKEN as a git auth header — it would shadow
+          # SUBMODULE_CHECKOUT_TOKEN on the cross-repo clones below. Harmless for actionlint-only runs.
+          persist-credentials: false
 
       - name: Install actionlint
+        if: ${{ inputs.actionlint }}
         run: |
           curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash | bash
 
       - name: Run actionlint
+        if: ${{ inputs.actionlint }}
         run: |
           ./actionlint -color
+
+      - name: Clone workspace package repos (for the cross-repo gates)
+        if: ${{ inputs.clone-repos != '' }}
+        env:
+          SUBMODULE_TOKEN: ${{ secrets.SUBMODULE_CHECKOUT_TOKEN }}
+          CLONE_REPOS: ${{ inputs.clone-repos }}
+          CLONE_REF: ${{ inputs.clone-ref != '' && inputs.clone-ref || (github.ref_type == 'tag' && github.ref_name) || 'main' }}
+        run: |
+          # shellcheck disable=SC2086  # CLONE_REPOS is intentionally word-split into repo args
+          bash scripts/clone_repos.sh "$CLONE_REF" $CLONE_REPOS
+
+      - name: Wall-clock determinism gate
+        if: ${{ inputs.wallclock }}
+        run: |
+          python3 scripts/wallclock_lint.py --selftest   # the gate must have teeth
+          python3 scripts/wallclock_lint.py
+
+      - name: C++ modules conformance gate
+        if: ${{ inputs.module-conformance }}
+        run: |
+          python3 scripts/module_conformance_lint.py --selftest   # the rule set must fire on synthetic violations
+          python3 scripts/module_conformance_lint.py .
+
+      - name: RNG determinism gate
+        if: ${{ inputs.rng }}
+        run: |
+          python3 scripts/random_determinism_lint.py --selftest   # the pattern set must have teeth
+          python3 scripts/random_determinism_lint.py
