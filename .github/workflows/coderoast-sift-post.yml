@@ -1,32 +1,35 @@
 name: CodeRoast Sift post
 
-# The privileged half (2 of 2) of the fork-safe Sift dogfood. A PUBLIC repo's ci.yml runs
-# `sift-mode: public` → the CI job renders the comment to the `sift-comment` artifact (unprivileged,
-# read-only, fork-safe even on fork-controlled code). This reusable workflow — called from a repo's
-# thin sift-post.yml on `workflow_run: [CI]` — does the ONE privileged thing: post the sticky comment
-# from that trusted, pre-rendered artifact.
+# The privileged half of the fork-safe Sift dogfood, now a JOB the caller chains after its `ci` job
+# (`needs: ci`, PR-only): the `ci` build renders the comment to the `sift-comment` artifact under a
+# READ-ONLY token (fork-safe even on fork-controlled code); THIS job does the ONE privileged thing —
+# post the sticky comment from that trusted, pre-rendered artifact of the SAME run.
 #
-# ⛔ FORBIDDEN in this job (it holds pull-requests: write in the BASE-repo context): actions/checkout of
-#    the PR head, or ANY build / compile / test / npm / make step. Running fork-controlled code here is
-#    remote code execution + secret exfiltration. It consumes ONLY the pre-rendered artifact — nothing
-#    else. (sift-action's poster enforces head_sha match + size caps.) Keep the build in ci.yml's
-#    read-only render; keep the write here. Never cross the streams.
+# ⛔ FORBIDDEN in this job (it holds pull-requests: write): actions/checkout of the PR head, or ANY
+#    build / compile / test / npm / make step. It runs NO fork-controlled code — it consumes ONLY the
+#    pre-rendered artifact. Keep the build in the read-only `ci` render; keep the write here. Never
+#    cross the streams. (sift-action's poster enforces head_sha match + size caps.)
 
 on:
   workflow_call:
+    inputs:
+      run-id:
+        description: 'The run whose sift-comment artifact to post — the caller passes github.run_id (same-run post).'
+        required: true
+        type: string
 
 permissions:
   pull-requests: write   # post/update the sticky comment — the ONLY write this needs
-  actions: read          # download the triggering run's rendered artifact
+  actions: read          # download the run's rendered artifact
 
 jobs:
   post:
     runs-on: ${{ vars.CI_RUNS_ON || 'ubuntu-latest' }}
     steps:
       # NO actions/checkout, NO build (see FORBIDDEN). `post` mode downloads the sift-comment artifact
-      # from the triggering run and upserts the sticky comment — nothing else.
+      # from the run and upserts the sticky comment — nothing else.
       - name: Post the pre-rendered Sift comment
         uses: CodeRoasted/sift-action@v1
         with:
           mode: post
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ inputs.run-id }}
