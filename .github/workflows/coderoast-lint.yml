@@ -1,0 +1,31 @@
+name: CodeRoast Lint
+
+# Shared actionlint gate for every CodeRoast repo, as a reusable workflow. Replaces the
+# copy-pasted-and-drifted `workflow-lint.yml` (7 variants: some hardcoded ubuntu-latest instead of
+# the CI_RUNS_ON lever, some missing -color). Callers keep only their trigger (`on:`) — which
+# legitimately varies (public push+PR / private PR-only / superproject tag cut) — and a 3-line job
+# that `uses:` this workflow.
+#
+# actionlint lints the caller repo's workflows (checkout defaults to the caller). It auto-runs
+# shellcheck on embedded run: blocks when shellcheck is on PATH.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    runs-on: ${{ vars.CI_RUNS_ON || 'ubuntu-latest' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install actionlint
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash | bash
+
+      - name: Run actionlint
+        run: |
+          ./actionlint -color
