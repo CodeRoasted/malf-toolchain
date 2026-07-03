@@ -1,0 +1,96 @@
+name: 'Publish Benchmark'
+description: |
+  Measure ONE package's benchmark suite fresh on the release runner and attach the raw
+  google-benchmark JSON as an asset on the package's OWN GitHub Release. The Topic-H
+  benchmark-evidence producer: each engine measures itself at its tag and publishes its
+  numbers; the superproject's aggregation job later merges every package's asset into the
+  public coderoast-hub (normalizing / scrubbing at that private->public boundary).
+
+  Runs `malf bench <subdir> --repetitions 5` (median + cv aggregates — variance-aware) with
+  the workspace pinned to the caller's single-package checkout: MALF_AUTO_WORKSPACE_DEPS=0
+  forces first-party deps to resolve from the conan cache, so the CALLER must have vendored
+  them first (the ci_fetch_conan_package pattern) — this action does NOT vendor deps. It also
+  assumes setup-gcc153 + setup-build-env already ran (CONAN_HOME + the profile are staged).
+
+  Integrity: a run captured with CPU frequency scaling ENABLED is REJECTED before upload — a
+  throttled / variable measurement must never become published evidence. Pin the runner's
+  governor to 'performance' (disable scaling).
+
+inputs:
+  label:
+    description: 'Hub-facing package identifier; the asset is uploaded as `<label>-benchmark.json`.'
+    required: true
+  tag:
+    description: 'The package release tag (vX.Y.Z) whose Release receives the asset.'
+    required: true
+  subdir:
+    description: 'malf bench target subdir (e.g. `core`, `detection`); empty for a single-package repo.'
+    required: false
+    default: ''
+  profile:
+    description: 'Conan profile name in `$CONAN_HOME/profiles` to build with.'
+    required: false
+    default: 'linux-gcc15-release'
+  token:
+    description: 'Token with contents:write on THIS package repo (its own GITHUB_TOKEN) for the Release upload.'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Measure ${{ inputs.label }} (malf bench, fresh, variance-aware)
+      shell: bash
+      env:
+        SUBDIR: ${{ inputs.subdir }}
+        PROFILE: ${{ inputs.profile }}
+        LABEL: ${{ inputs.label }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        # The malf driver lives at the root of THIS action's repo (malf-toolchain).
+        MALF="$(cd "$ACTION_PATH/../../.." && pwd)/malf"
+        [ -x "$MALF" ] || { echo "::error::malf driver not found/executable at $MALF"; exit 1; }
+        out="$RUNNER_TEMP/${LABEL}-benchmark.json"
+        # Pin the workspace to the caller's checkout and force deps from the conan cache
+        # (no sibling sources in a single-package checkout). The trailing `-- --benchmark_out`
+        # overrides malf's own per-exe path (last flag wins), so we capture to a known file.
+        args=(bench)
+        [ -n "$SUBDIR" ] && args+=("$SUBDIR")
+        args+=(--profile "$PROFILE" --repetitions 5 -- \
+               --benchmark_out="$out" --benchmark_out_format=json)
+        MALF_AUTO_WORKSPACE_DEPS=0 MALF_WORKSPACE_ROOT="$GITHUB_WORKSPACE" \
+          "$MALF" "${args[@]}"
+        [ -f "$out" ] || { echo "::error::no benchmark JSON produced at $out"; exit 1; }
+        echo "BENCH_OUT=$out" >> "$GITHUB_ENV"
+
+    - name: Reject a throttled capture (CPU scaling must be disabled)
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 - "$BENCH_OUT" <<'PY'
+        import json, sys
+        ctx = json.load(open(sys.argv[1])).get("context", {})
+        if ctx.get("cpu_scaling_enabled"):
+            print("::error::CPU frequency scaling was ENABLED during the benchmark — refusing to "
+                  "publish a throttled/variable measurement. Pin the runner governor to "
+                  "'performance' (disable scaling), then re-run.")
+            sys.exit(1)
+        print("cpu scaling disabled — measurement admissible")
+        PY
+
+    - name: Attach ${{ inputs.label }} benchmark to its Release
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        TAG: ${{ inputs.tag }}
+        LABEL: ${{ inputs.label }}
+      run: |
+        set -euo pipefail
+        asset="$RUNNER_TEMP/${LABEL}-benchmark.json"
+        # The publish job (this workflow's dependency) created the Release; ensure it exists
+        # so a manual re-run without the tarball step still lands the asset.
+        gh release view "$TAG" >/dev/null 2>&1 \
+          || gh release create "$TAG" --title "$TAG" \
+               --notes "Benchmark evidence attached by CI for $TAG."
+        gh release upload "$TAG" "$asset" --clobber
+        echo "attached ${LABEL}-benchmark.json to Release $TAG"
