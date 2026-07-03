@@ -58,7 +58,12 @@ runs:
         [ -n "$SUBDIR" ] && args+=("$SUBDIR")
         args+=(--profile "$PROFILE" --repetitions 5 -- \
                --benchmark_out="$out" --benchmark_out_format=json)
-        MALF_AUTO_WORKSPACE_DEPS=0 MALF_WORKSPACE_ROOT="$GITHUB_WORKSPACE" \
+        # MALF_DEFAULT_PROFILE=$PROFILE makes this profile malf's "default", so its cache-key
+        # is empty (_malf_profile_key) and malf builds in the BASE conan cache — the same
+        # $CONAN_HOME the caller's `ci_fetch_conan_package` vendored first-party deps into. Without
+        # this, malf would build in a per-profile KEYED sub-cache and never see the vendored deps.
+        # MALF_AUTO_WORKSPACE_DEPS=0 keeps it from hunting sibling editables (none in a single-pkg checkout).
+        MALF_DEFAULT_PROFILE="$PROFILE" MALF_AUTO_WORKSPACE_DEPS=0 MALF_WORKSPACE_ROOT="$GITHUB_WORKSPACE" \
           "$MALF" "${args[@]}"
         [ -f "$out" ] || { echo "::error::no benchmark JSON produced at $out"; exit 1; }
         echo "BENCH_OUT=$out" >> "$GITHUB_ENV"

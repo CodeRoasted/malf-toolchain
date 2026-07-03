@@ -31,7 +31,11 @@ MALF_WORKSPACE_ROOT="${MALF_WORKSPACE_ROOT:-$(cd "$MALF_DIR/.." && pwd)}"
 # The dev-default toolchain (founder 2026-06-04, the clang→libc++ flip). Single
 # source of truth — the profile fallback, the cache-key arm, and the build-dir
 # naming below all derive from it.
-MALF_DEFAULT_PROFILE="linux-clang21-libcxx-release"
+# Env-overridable so a single-profile context (e.g. a CI benchmark job that vendored its
+# first-party deps into the BASE cache) can make its profile THE default — which makes
+# _malf_profile_key return "" (no keyed sub-cache), so the build resolves those vendored
+# deps from the base cache instead of an empty keyed one. Unset → the dev default below.
+MALF_DEFAULT_PROFILE="${MALF_DEFAULT_PROFILE:-linux-clang21-libcxx-release}"
 MALF_AUTO_WORKSPACE_DEPS="${MALF_AUTO_WORKSPACE_DEPS:-1}"
 
 # ─── Cache resolution ────────────────────────────────────────────────────────
