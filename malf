@@ -515,6 +515,13 @@ _malf_build_editable_package() {
     local pkg_dir="$1"
     local build_dir pkg_ref user_presets_backup
     pkg_ref="$(_malf_pkg_ref "$pkg_dir/conanfile.py")"
+    # Content-only packages (a conanfile but no CMakeLists.txt — e.g. a scenario/data corpus that
+    # ships files via cpp_info.resdirs) are NOT CMake projects. Consumers read them straight from the
+    # editable layout, so there is nothing to configure or build. Skip the CMake build for them.
+    if [[ ! -f "$pkg_dir/CMakeLists.txt" ]]; then
+        echo "malf: editable $pkg_ref is content-only (no CMakeLists.txt) — nothing to build"
+        return 0
+    fi
     build_dir="$(_malf_editable_build_dir "$pkg_dir")"
     mkdir -p "$build_dir"
 
