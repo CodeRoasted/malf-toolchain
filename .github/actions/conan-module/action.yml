@@ -22,6 +22,10 @@ inputs:
     description: Conan profile name in `$CONAN_HOME/profiles` to build with.
     required: false
     default: 'linux-gcc15-release'
+  cmake-args:
+    description: "Extra flags for the test-build configure, e.g. `-DPKG_BUILD_TESTS=ON` — for packages that gate their unit tests behind a flag. Word-split into args."
+    required: false
+    default: ''
 
 runs:
   using: composite
@@ -33,4 +37,5 @@ runs:
         TEST: ${{ inputs.test }}
         CREATE: ${{ inputs.create }}
         PROFILE_NAME: ${{ inputs.profile }}
-      run: bash "$GITHUB_ACTION_PATH/conan_module.sh" "$MODULE" "$TEST" "$CREATE" "$PROFILE_NAME"
+        CMAKE_ARGS: ${{ inputs.cmake-args }}
+      run: bash "$GITHUB_ACTION_PATH/conan_module.sh" "$MODULE" "$TEST" "$CREATE" "$PROFILE_NAME" "$CMAKE_ARGS"

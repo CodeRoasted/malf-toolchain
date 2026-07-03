@@ -25,10 +25,12 @@ inputs:
   modules:
     description: |
       Newline-separated modules to build in order, one per row:
-        <module> [test] [create]
+        <module> [test] [create] [cmake-args...]
       module is a path relative to the repo root (`core`, `.`, `infra/redis`, `sift-cli`). `test` and
       `create` default to `true`; set either to `false` to skip that phase (e.g. leaf binaries build
-      + test but do not `conan create`: `sift-cli true false`). `#` starts a comment.
+      + test but do not `conan create`: `sift-cli true false`). Any fields AFTER create are extra cmake
+      configure flags for the test build, e.g. `core true true -DPKG_BUILD_TESTS=ON` (for packages that
+      gate their unit tests behind a flag). `#` starts a comment.
     required: true
   extra-apt:
     description: 'Extra apt packages for setup-build-env (e.g. "libpq-dev redis-tools postgresql-client").'
@@ -97,7 +99,9 @@ runs:
           set -- $row
           [ "$#" -ge 1 ] || continue
           module="$1"; test="${2:-true}"; create="${3:-true}"
-          echo "::group::coderoast-ci: module $module (test=$test create=$create)"
-          bash "$CONAN_MODULE" "$module" "$test" "$create" "$PROFILE_NAME"
+          shift $(( $# < 3 ? $# : 3 ))   # any remaining fields are extra cmake configure flags
+          cmake_args="$*"
+          echo "::group::coderoast-ci: module $module (test=$test create=$create${cmake_args:+ cmake:$cmake_args})"
+          bash "$CONAN_MODULE" "$module" "$test" "$create" "$PROFILE_NAME" "$cmake_args"
           echo "::endgroup::"
         done <<< "$MODULES"
