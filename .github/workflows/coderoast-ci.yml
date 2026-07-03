@@ -31,11 +31,14 @@ on:
         type: string
         required: false
         default: ''
-      sift:
-        description: 'Run the advisory Sift dogfood step. Set false for a repo that seeds its Sift baseline elsewhere (e.g. insight-canon via sift-build.yml).'
-        type: boolean
+      sift-mode:
+        description: |
+          private (diff + post the comment in CI; for PRIVATE/no-fork repos) | public (diff + render the
+          `sift-comment` artifact for the coderoast-sift-post workflow to post — fork-safe, for PUBLIC
+          repos) | off (no Sift). Public repos also add a thin sift-post.yml that calls coderoast-sift-post.
+        type: string
         required: false
-        default: true
+        default: 'private'
     secrets:
       CR_RELEASE_TOKEN:
         description: 'Fine-grained PAT (Contents:read) for PRIVATE-repo release reads. Required only if any vendor row is `private`. Pass via `secrets: inherit`.'
@@ -54,9 +57,10 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           release-token: ${{ secrets.CR_RELEASE_TOKEN }}
 
-      - name: Sift dogfood — standard sift-action integration (advisory; never fails the build)
-        if: ${{ always() && inputs.sift }}
+      - name: Sift dogfood (advisory; never fails the build)
+        if: ${{ always() && inputs.sift-mode != 'off' }}
         continue-on-error: true    # the advisory guarantee lives here, at the job-step boundary
         uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-ci-sift@main
         with:
+          mode: ${{ inputs.sift-mode == 'public' && 'render' || 'comment' }}
           build-status: ${{ job.status == 'success' && 'green' || 'red' }}

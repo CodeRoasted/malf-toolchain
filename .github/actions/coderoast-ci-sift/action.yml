@@ -1,24 +1,25 @@
 name: 'CodeRoast Sift dogfood'
 description: |
-  The shared Sift dogfood tail for every CodeRoast CI job — deliberately the SAME integration an
-  external Sift user writes (the published `sift-action@v1` with standard inputs), so our dogfood
-  exercises the real customer path rather than bespoke internal wiring. Add it as the LAST step of
-  the build job, invoked with `if: always()` + `continue-on-error: true` (see below).
+  The shared Sift dogfood tail for every CodeRoast CI job — the SAME integration an external Sift user
+  writes (the published `sift-action@v1`). Two modes, one switch:
 
-  Fork-safe: the diff step is skipped on fork PRs (a read-only token can't post the comment; the
-  `workflow_run` companion covers those). That condition is always true on PRIVATE repos (no forks)
-  and on push/dispatch, so it fits every repo with no per-repo variance.
+  - `comment` (private / same-repo): diff the build log AND post the sticky comment, in the CI job.
+    Skipped on fork PRs (a read-only token can't post) — a no-op on PRIVATE repos (no forks). This is
+    the simple path.
+  - `render` (public / fork-safe): diff + render the comment body to the `sift-comment` artifact,
+    posting NOTHING. Runs on ALL PRs incl forks (read-only, so it's safe even on fork-controlled code);
+    the privileged `coderoast-sift-post` workflow (`workflow_run`) posts the artifact afterwards.
 
   ADVISORY GUARANTEE — the caller MUST set `continue-on-error: true` on the step that invokes this
-  action. `continue-on-error` on a step *inside* a composite is not honoured, so the guarantee that a
-  Sift problem can never fail the build is enforced at the caller boundary; the inner steps use
-  `if: always()` only for ordering.
-
-  Optional narrative dogfood: pass `courtesy-endpoint` (+ `courtesy-token`) to ALSO run the hosted
-  `--explain` pass — that is CodeRoast-internal infra, NOT part of a normal user's integration, so it
-  is off unless the endpoint is supplied. Omit both for the pure standard integration.
+  action (composite-inner `continue-on-error` is not honoured); inner steps use `if: always()` only for
+  ordering. Optional `courtesy-endpoint`/`courtesy-token` add the hosted `--explain` pass (comment mode
+  only; off unless supplied).
 
 inputs:
+  mode:
+    description: 'comment (diff + post, private/same-repo) | render (diff + upload the comment artifact for coderoast-sift-post, public/fork-safe).'
+    required: false
+    default: 'comment'
   build-status:
     description: "green|red for the build being diffed — pass e.g. job.status == 'success' && 'green' || 'red'."
     required: true
@@ -27,7 +28,7 @@ inputs:
     required: false
     default: 'build.log'
   commit-comment:
-    description: 'sift-action commit-comment mode (regression|off|always).'
+    description: 'sift-action commit-comment mode (regression|off|always). comment mode only.'
     required: false
     default: 'regression'
   fail-on:
@@ -35,19 +36,20 @@ inputs:
     required: false
     default: 'none'
   courtesy-endpoint:
-    description: 'Optional hosted --explain endpoint (e.g. vars.COURTESY_LLM_ENDPOINT). Omit to skip the narrative dogfood.'
+    description: 'Optional hosted --explain endpoint (comment mode). Omit to skip the narrative dogfood.'
     required: false
     default: ''
   courtesy-token:
-    description: 'Optional token for the courtesy endpoint (e.g. secrets.COURTESY_CI_TOKEN).'
+    description: 'Optional token for the courtesy endpoint.'
     required: false
     default: ''
 
 runs:
   using: composite
   steps:
-    - name: Sift — structural diff of this run's build+test log (advisory)
-      if: ${{ always() && github.event.pull_request.head.repo.fork != true }}
+    # ── comment mode: diff + post directly (skipped on fork PRs; no-op on private repos) ──
+    - name: Sift — structural diff + comment (advisory)
+      if: ${{ inputs.mode == 'comment' && always() && github.event.pull_request.head.repo.fork != true }}
       id: sift
       uses: CodeRoasted/sift-action@v1
       with:
@@ -55,14 +57,30 @@ runs:
         fail-on: ${{ inputs.fail-on }}
         commit-comment: ${{ inputs.commit-comment }}
         build-status: ${{ inputs.build-status }}
-        # Diff-only: the narrative comes from the optional courtesy endpoint below (ADR 0017 §5),
-        # keeping the Action itself zero-credential (§3.6) — exactly the standard user integration.
         explain: false
 
-    - name: Dogfood --explain via the courtesy endpoint (optional CodeRoast infra; advisory)
-      if: ${{ always() && inputs.courtesy-endpoint != '' && github.event.pull_request.head.repo.fork != true }}
+    - name: Dogfood --explain via the courtesy endpoint (optional CodeRoast infra; comment mode)
+      if: ${{ inputs.mode == 'comment' && always() && inputs.courtesy-endpoint != '' && github.event.pull_request.head.repo.fork != true }}
       uses: CodeRoasted/malf-toolchain/.github/actions/sift-courtesy-dogfood@main
       with:
         endpoint: ${{ inputs.courtesy-endpoint }}
         token: ${{ inputs.courtesy-token }}
         report: ${{ steps.sift.outputs.report-path }}
+
+    # ── render mode: diff + render to an artifact, NO post (fork-safe; poster comes later) ──
+    - name: Sift — structural diff + render (fork-safe; posts nothing)
+      if: ${{ inputs.mode == 'render' && always() }}
+      uses: CodeRoasted/sift-action@v1
+      with:
+        log: ${{ inputs.log }}
+        mode: render
+        build-status: ${{ inputs.build-status }}
+
+    - name: Upload the rendered comment (coderoast-sift-post posts it)
+      # PRs only — on a push:main run the render step SEEDS the baseline (no sift-comment/ to upload).
+      if: ${{ inputs.mode == 'render' && always() && github.event_name == 'pull_request' }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: sift-comment
+        path: ${{ runner.temp }}/sift-comment/
+        if-no-files-found: error
