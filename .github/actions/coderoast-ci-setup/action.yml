@@ -1,0 +1,90 @@
+name: 'CodeRoast CI setup'
+description: |
+  The shared setup half of every CodeRoast C++ CI job, as ONE step: the gcc-15.3 toolchain + the
+  canonical build env (apt / CMake 4.3.x / Conan / dep-binary cache / profile) + the cross-repo
+  Conan vendor loop (driven by a data manifest) + a fresh build.log for the Sift dogfood.
+
+  Kills the copy-pasted setup+vendor boilerplate — and the three-way-drifted
+  `ci_fetch_conan_package.sh` — that previously lived in every consumer repo. The fetch script is
+  single-sourced here and shipped with the action; no repo copies it.
+
+  Run as the FIRST job step after `actions/checkout` (with fetch-depth: 0). The caller then adds
+  its own module build steps (via the `conan-module` action, or inline `conan create`) and its Sift
+  dogfood tail — both of which legitimately vary per repo (module list; Sift fork-guard/courtesy for
+  PUBLIC vs PRIVATE), so they stay explicit in the caller rather than behind a leaky abstraction.
+
+inputs:
+  vendor:
+    description: |
+      Newline-separated cross-repo Conan deps to restore before the build, one per row:
+        <pkg> <version> <owner/repo> <public|private> [release-tag]
+      `public` deps resolve with `github-token` (the built-in Actions GITHUB_TOKEN is enough);
+      `private` deps use `release-token`. release-tag defaults to v<version>. `#` starts a comment.
+      Blank / omitted = no vendoring (a tower-root repo such as canon / ipc / security).
+    required: false
+    default: ''
+  extra-apt:
+    description: 'Extra apt packages for setup-build-env (e.g. "libpq-dev redis-tools postgresql-client").'
+    required: false
+    default: ''
+  github-token:
+    description: 'Token for PUBLIC-repo release reads — pass ${{ secrets.GITHUB_TOKEN }}. Required only if any vendor row is `public`.'
+    required: false
+    default: ''
+  release-token:
+    description: 'Token for PRIVATE-repo release reads — pass ${{ secrets.CR_RELEASE_TOKEN }}. Required only if any vendor row is `private`.'
+    required: false
+    default: ''
+  profile:
+    description: 'Conan profile name (in malf-toolchain profiles/) to install and build with.'
+    required: false
+    default: 'linux-gcc15-release'
+
+runs:
+  using: composite
+  steps:
+    - name: Provision gcc-15.3 toolchain (PR124309 fix; replaces PPA gcc-15 = 15.2)
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-gcc153@main
+
+    - name: Setup build env (apt + CMake 4.3.x + Conan + dep cache + canonical profile)
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-env@main
+      with:
+        extra-apt: ${{ inputs.extra-apt }}
+        profile: ${{ inputs.profile }}
+
+    - name: Vendor cross-repo Conan deps + start build.log capture
+      shell: bash
+      env:
+        VENDOR: ${{ inputs.vendor }}
+        GH_PUBLIC_TOKEN: ${{ inputs.github-token }}
+        GH_RELEASE_TOKEN: ${{ inputs.release-token }}
+        CIFETCH: ${{ github.action_path }}/ci_fetch_conan_package.sh
+      run: |
+        set -euo pipefail
+        # Restore each declared cross-repo dep from its GitHub Release, choosing the token by declared
+        # visibility (public -> GITHUB_TOKEN; private -> CR_RELEASE_TOKEN). The fetch script is
+        # single-sourced with this action (no per-repo copy) and is itself idempotent.
+        while IFS= read -r row; do
+          row="${row%%#*}"                                 # strip trailing comments
+          # shellcheck disable=SC2086                       # intentional word-split of the manifest row
+          set -- $row
+          [ "$#" -ge 1 ] || continue                       # skip blank / comment-only lines
+          if [ "$#" -lt 4 ]; then
+            echo "::error::vendor row needs >=4 fields '<pkg> <ver> <owner/repo> <public|private> [tag]', got: $row"
+            exit 1
+          fi
+          pkg="$1"; ver="$2"; repo="$3"; vis="$4"; tag="${5:-}"
+          case "$vis" in
+            public)  tok="$GH_PUBLIC_TOKEN" ;;
+            private) tok="$GH_RELEASE_TOKEN" ;;
+            *) echo "::error::vendor row '$pkg' has bad visibility '$vis' (want public|private)"; exit 1 ;;
+          esac
+          if [ -z "$tok" ]; then
+            echo "::error::vendor row '$pkg' is '$vis' but coderoast-ci-setup got no ${vis}-token"; exit 1
+          fi
+          echo "coderoast-ci-setup: vendoring $pkg/$ver from $repo ($vis)"
+          GH_TOKEN="$tok" bash "$CIFETCH" "$pkg" "$ver" "$repo" ${tag:+"$tag"}
+        done <<< "$VENDOR"
+        # Fresh build.log AFTER vendoring so the Sift dogfood diffs only the build+test output, not
+        # the vendor download noise.
+        : > "$GITHUB_WORKSPACE/build.log"

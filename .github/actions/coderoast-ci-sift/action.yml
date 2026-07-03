@@ -1,0 +1,68 @@
+name: 'CodeRoast Sift dogfood'
+description: |
+  The shared Sift dogfood tail for every CodeRoast CI job — deliberately the SAME integration an
+  external Sift user writes (the published `sift-action@v1` with standard inputs), so our dogfood
+  exercises the real customer path rather than bespoke internal wiring. Add it as the LAST step of
+  the build job, invoked with `if: always()` + `continue-on-error: true` (see below).
+
+  Fork-safe: the diff step is skipped on fork PRs (a read-only token can't post the comment; the
+  `workflow_run` companion covers those). That condition is always true on PRIVATE repos (no forks)
+  and on push/dispatch, so it fits every repo with no per-repo variance.
+
+  ADVISORY GUARANTEE — the caller MUST set `continue-on-error: true` on the step that invokes this
+  action. `continue-on-error` on a step *inside* a composite is not honoured, so the guarantee that a
+  Sift problem can never fail the build is enforced at the caller boundary; the inner steps use
+  `if: always()` only for ordering.
+
+  Optional narrative dogfood: pass `courtesy-endpoint` (+ `courtesy-token`) to ALSO run the hosted
+  `--explain` pass — that is CodeRoast-internal infra, NOT part of a normal user's integration, so it
+  is off unless the endpoint is supplied. Omit both for the pure standard integration.
+
+inputs:
+  build-status:
+    description: "green|red for the build being diffed — pass ${{ job.status == 'success' && 'green' || 'red' }}."
+    required: true
+  log:
+    description: 'Build-log file Sift diffs.'
+    required: false
+    default: 'build.log'
+  commit-comment:
+    description: 'sift-action commit-comment mode (regression|off|always).'
+    required: false
+    default: 'regression'
+  fail-on:
+    description: 'sift-action fail-on threshold. Advisory dogfood keeps this none.'
+    required: false
+    default: 'none'
+  courtesy-endpoint:
+    description: 'Optional hosted --explain endpoint (${{ vars.COURTESY_LLM_ENDPOINT }}). Omit to skip the narrative dogfood.'
+    required: false
+    default: ''
+  courtesy-token:
+    description: 'Optional token for the courtesy endpoint (${{ secrets.COURTESY_CI_TOKEN }}).'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Sift — structural diff of this run's build+test log (advisory)
+      if: ${{ always() && github.event.pull_request.head.repo.fork != true }}
+      id: sift
+      uses: CodeRoasted/sift-action@v1
+      with:
+        log: ${{ inputs.log }}
+        fail-on: ${{ inputs.fail-on }}
+        commit-comment: ${{ inputs.commit-comment }}
+        build-status: ${{ inputs.build-status }}
+        # Diff-only: the narrative comes from the optional courtesy endpoint below (ADR 0017 §5),
+        # keeping the Action itself zero-credential (§3.6) — exactly the standard user integration.
+        explain: false
+
+    - name: Dogfood --explain via the courtesy endpoint (optional CodeRoast infra; advisory)
+      if: ${{ always() && inputs.courtesy-endpoint != '' && github.event.pull_request.head.repo.fork != true }}
+      uses: CodeRoasted/malf-toolchain/.github/actions/sift-courtesy-dogfood@main
+      with:
+        endpoint: ${{ inputs.courtesy-endpoint }}
+        token: ${{ inputs.courtesy-token }}
+        report: ${{ steps.sift.outputs.report-path }}
