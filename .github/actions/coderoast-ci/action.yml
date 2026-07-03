@@ -36,11 +36,11 @@ inputs:
     required: false
     default: ''
   github-token:
-    description: 'Token for PUBLIC-repo release reads — pass ${{ secrets.GITHUB_TOKEN }}. Required only if any vendor row is `public`.'
+    description: 'Token for PUBLIC-repo release reads — pass secrets.GITHUB_TOKEN. Required only if any vendor row is `public`.'
     required: false
     default: ''
   release-token:
-    description: 'Token for PRIVATE-repo release reads — pass ${{ secrets.CR_RELEASE_TOKEN }}. Required only if any vendor row is `private`.'
+    description: 'Token for PRIVATE-repo release reads — pass secrets.CR_RELEASE_TOKEN. Required only if any vendor row is `private`.'
     required: false
     default: ''
   fetch-depth:

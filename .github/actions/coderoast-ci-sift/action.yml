@@ -20,7 +20,7 @@ description: |
 
 inputs:
   build-status:
-    description: "green|red for the build being diffed — pass ${{ job.status == 'success' && 'green' || 'red' }}."
+    description: "green|red for the build being diffed — pass e.g. job.status == 'success' && 'green' || 'red'."
     required: true
   log:
     description: 'Build-log file Sift diffs.'
@@ -35,11 +35,11 @@ inputs:
     required: false
     default: 'none'
   courtesy-endpoint:
-    description: 'Optional hosted --explain endpoint (${{ vars.COURTESY_LLM_ENDPOINT }}). Omit to skip the narrative dogfood.'
+    description: 'Optional hosted --explain endpoint (e.g. vars.COURTESY_LLM_ENDPOINT). Omit to skip the narrative dogfood.'
     required: false
     default: ''
   courtesy-token:
-    description: 'Optional token for the courtesy endpoint (${{ secrets.COURTESY_CI_TOKEN }}).'
+    description: 'Optional token for the courtesy endpoint (e.g. secrets.COURTESY_CI_TOKEN).'
     required: false
     default: ''
 
