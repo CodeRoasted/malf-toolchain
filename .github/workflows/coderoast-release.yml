@@ -53,7 +53,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  publish:
     runs-on: ${{ vars.CI_RUNS_ON || 'ubuntu-latest' }}
     permissions:
       contents: write   # create / upload GitHub Releases

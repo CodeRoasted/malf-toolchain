@@ -30,7 +30,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint:
+  checks:
     runs-on: ${{ vars.CI_RUNS_ON || 'ubuntu-latest' }}
     steps:
       - name: Checkout repository
