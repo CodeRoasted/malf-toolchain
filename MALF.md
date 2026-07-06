@@ -14,34 +14,66 @@ ln -sf /path/to/coderoast/malf/malf ~/.local/bin/malf
 
 ## Usage
 
-Run `malf` from any directory that contains a `conanfile.py` (or a parent of subdirs that contain one).
+Run `malf` from any directory that contains a `conanfile.py`, or from any parent of dirs that contain one (a repo root, the workspace root).
 
 ```
-malf build   [subdir] [--debug|--release]
-malf test    [subdir] [--debug|--release]
+malf build   [target] [--debug|--release]
+malf test    [target] [--debug|--release] [--verbose] [--filter PATTERN]
 malf lint    [--all-files] [-c|--console]
 malf format  [--check]
 malf commands
 malf compile-commands
-malf bench   [subdir] [--quick] [--filter REGEX] [--compare] [--repetitions N] [--threshold F] [--debug|--release]
-malf clean   [build|conan|all]
+malf bench   [target] [--quick] [--filter REGEX] [--compare] [--repetitions N] [--threshold F] [--debug|--release]
+malf clean   [build|conan|editables|stale|all]
 malf run     <exe-name> [args...]
 ```
+
+### Verbs — one compile surface
+
+`build` compiles **everything** for the target: the package, its tests, and its
+benches. `test` and `bench` run (`ctest` / the benchmark executables) on top of
+the **same incremental build** — the verbs differ only in what they run, never
+in what they compile, so a test- or bench-only TU can't rot unseen and first
+fail in the release pipeline (the 1.7.2 drift-at-tag class).
+
+### Targets — packages under the invocation point
+
+* `[target]` omitted → **every package under the current dir, dependency-ordered**:
+  a multi-package repo root sweeps the whole repo, the workspace root sweeps the
+  whole workspace, a mono-package root degenerates to the single package. Each
+  member runs as its own `malf <verb> <pkg>` process — the exact `&&`-chain
+  semantics, first failure stops the sweep.
+* `[target]` = a package dir → exactly that package (also the escape hatch for a
+  repo whose *root* is itself a package with sibling sub-packages, e.g.
+  `malf build .` at `insight-eidos`).
+* Content-only packages (a `conanfile.py` but no `CMakeLists.txt` — umbrella
+  metapackages, scenario corpora) are skipped with a note.
+
+### Build trees — package-anchored
+
+Every build tree lives at `<pkg>/build-<profile-key>` (`build-clang21-libcxx-release/`
+(the dev default), `build-gcc15-release/`, `build-clang21-asan/`, …) — anchored at
+the **package**, never the invocation CWD, and always profile-named. The target
+build, the editable-dep build, and a subfolder invocation all share **one tree per
+(package, profile)**: a bare `build/` is never created, an ASan tree can never
+clobber a release one, and the old "cd into a package subdir → second,
+inconsistent build tree that links a stale dependency" footgun is structurally
+gone. The merged clangd DB lands at the repo root's default-leg tree
+(`<repo>/build-clang21-libcxx-release/compile_commands.json` — what `.clangd` reads).
 
 ### Commands
 
 | Command | Description |
 |---|---|
-| `build` | bootstrap local workspace package deps, `conan install`, configure, then compile into `build/[subdir]` |
+| `build` | bootstrap local workspace package deps, `conan install`, configure, then compile package + tests + benches into `<pkg>/build-<key>/` |
 | `test` | same build flow, then `ctest` |
+| `bench` | same build flow, then run benchmark executables, output JSON to `bench_results/` (plain runs update `baseline.json`) |
+| `bench --compare` | variance-aware regression gate vs `baseline.json` (`bench_compare.py`): runs 5 repetitions by default, compares MEDIANS, and widens the `--threshold` floor (default ±10%) to 3×cv per bench — so honestly-noisy benches (the ±40–90pt pipeline swings) no longer false-positive while tight benches keep the floor |
 | `lint` | clang-tidy on git-changed files (or `--all-files`) |
 | `format` | clang-format all C++ files in-place |
-| `commands` / `compile-commands` | merge all `compile_commands.json` under `build/` |
-| — | build trees are ALWAYS profile-named: `build-clang21-libcxx-release/` (the dev default), `build-gcc15-release/`, `build-clang21-asan/`, … — a bare `build/` is never created, so a tree always self-documents its toolchain (`.clangd` reads the default leg's root DB) |
-| `bench` | build + run benchmark executables, output JSON to `bench_results/` (plain runs update `baseline.json`) |
-| `bench --compare` | variance-aware regression gate vs `baseline.json` (`bench_compare.py`): runs 5 repetitions by default, compares MEDIANS, and widens the `--threshold` floor (default ±10%) to 3×cv per bench — so honestly-noisy benches (the ±40–90pt pipeline swings) no longer false-positive while tight benches keep the floor |
-| `clean` | remove `build/` and/or local Conan cache packages |
-| `run` | execute a binary from the build tree |
+| `commands` / `compile-commands` | configure every member package (+ its `test_package`) and merge all `compile_commands.json` into the repo root's default-leg DB |
+| `clean` | remove build trees (CWD + every member package) and/or local Conan cache packages |
+| `run` | execute a binary from any member package's build tree |
 
 ### Cache discovery
 
@@ -51,7 +83,7 @@ malf run     <exe-name> [args...]
 
 ### Workspace bootstrap
 
-`build`, `test`, and `bench` automatically `conan create` sibling workspace packages whose exact `name/version` refs are required by the target recipe. Override the scan root with `MALF_WORKSPACE_ROOT` or disable it with `MALF_AUTO_WORKSPACE_DEPS=0`.
+`build`, `test`, and `bench` automatically register sibling workspace packages whose exact `name/version` refs are required by the target recipe as Conan editables, and build them in dependency order into their own package-anchored trees. Override the scan root with `MALF_WORKSPACE_ROOT` or disable it with `MALF_AUTO_WORKSPACE_DEPS=0`. (The recipe-graph queries live in `malf_graph.py` — one AST parser for deps / whole-workspace / member enumeration.)
 
 Any `scripts/conan_hooks/hook_*.py` files found under `MALF_WORKSPACE_ROOT` are copied into `CONAN_HOME/extensions/hooks` and activated automatically — the mechanism for applying any repo-local Conan source/build patch without manual Conan cache setup. (No such hooks ship today.)
 
@@ -62,16 +94,15 @@ export MALF_WORKSPACE_ROOT="$HOME/workspace/coderoast"
 
 ### Compile commands
 
-`build` and `test` now configure with `CMAKE_EXPORT_COMPILE_COMMANDS=ON`, so each target build directory gets its own `compile_commands.json` automatically.
+`build`, `test`, and `bench` configure with `CMAKE_EXPORT_COMPILE_COMMANDS=ON`, so each package build tree gets its own `compile_commands.json` automatically — and every build folds it into the repo root's merged default-leg DB (`<repo>/build-clang21-libcxx-release/compile_commands.json`, what `.clangd` reads), wherever the build was invoked from.
 
-Use `commands` or `compile-commands` only when you want a merged database at `build/compile_commands.json`, for example:
-- you built multiple packages from the same repo root
+Use `commands` or `compile-commands` only when you want that merged DB rebuilt from scratch, for example:
 - you want `test_package` entries merged in for IDE navigation
-- your editor is pinned to a single root `build/compile_commands.json`
+- the merged DB carries stale entries from deleted/renamed packages
 
 ### Conan profile
 
-Profile `linux-gcc15-release` is resolved from `malf/profiles/` (copied into `$CONAN_HOME/profiles/` on every run so an edit always propagates). Override the name with `MALF_PROFILE_NAME`.
+The dev-default profile `linux-clang21-libcxx-release` (and any `--profile <name>` selection) is resolved from `malf/profiles/` (copied into `$CONAN_HOME/profiles/` on every run so an edit always propagates). Override the default with `MALF_DEFAULT_PROFILE` or the active name with `MALF_PROFILE_NAME`; `malf profiles` lists the registry.
 
 ## Self-hosted CI runner (unmetered minutes)
 

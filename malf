@@ -14,14 +14,28 @@
 #   malf run     <exe-name>
 #   malf editables [list|sync]
 #
+# Verb semantics:
+#   `build` compiles EVERYTHING — package + tests + benches (one compile
+#   surface; a bench-only TU can't rot unseen). `test` runs ctest and `bench`
+#   runs the bench executables, each on top of the same incremental build.
+#
+# Targets:
+#   No arg = every package under the current dir, dependency-ordered (a
+#   mono-package root degenerates to the single package). An explicit arg
+#   naming a package dir = exactly that package. Build trees are package-
+#   anchored (<pkg>/build-<profile-key>) — the same tree whether the package
+#   is the target, a sibling's editable dep, or built from its own subfolder,
+#   from any invocation directory.
+#
 # Workspace Dependencies:
 #   Workspace packages are automatically registered as Conan editables and
 #   built in dependency order. This keeps local builds fast and incremental.
-#   CMakeDeps resolves concrete library files from each dependency's build/
-#   directory, and header paths from each package's api/ directory.
-#   
-# Run from any directory that contains a conanfile.py (or a parent of
-# subdirs that contain one).
+#   CMakeDeps resolves concrete library files from each dependency's
+#   package-anchored build tree, and header paths from each package's api/
+#   directory.
+#
+# Run from any directory that contains a conanfile.py (or any parent of
+# dirs that contain one).
 
 set -euo pipefail
 
@@ -205,225 +219,116 @@ get=lambda k:next(n.value.value for n in nodes if isinstance(n,ast.Assign) and a
 print(get("name")+"/"+get("version"))' "$conanfile"
 }
 
+# All three recipe-graph queries live in malf_graph.py (one AST recipe parser,
+# no conan invocation): `deps` = a target's transitive workspace requires in
+# dependency order (+ the target's own test_requires as non-transitive roots);
+# `all` = every workspace recipe (what `editables sync` re-registers);
+# `members` = every recipe under a dir, topo-sorted member-to-member (the
+# no-arg multi-package sweep order).
 _malf_workspace_dep_entries() {
     local target="$1"
     local include_test_requires="${2:-1}"
-    python3 - "$MALF_WORKSPACE_ROOT" "$target" "$include_test_requires" <<'PY'
-import ast
-import pathlib
-import sys
-
-workspace = pathlib.Path(sys.argv[1]).resolve()
-target_dir = pathlib.Path(sys.argv[2]).resolve()
-include_test_requires = sys.argv[3] != "0"
-ignore_parts = {".conan2", ".git", ".venv", "node_modules", "test_package"}
-
-
-def should_skip(path: pathlib.Path) -> bool:
-    # "build" + every profile-named tree (build-gcc15-release, build-clang21-…).
-    return any(part in ignore_parts or part == "build" or part.startswith("build-")
-               for part in path.parts)
-
-
-def recipe_info(conanfile: pathlib.Path):
-    tree = ast.parse(conanfile.read_text(), filename=str(conanfile))
-    nodes = list(tree.body)
-    for item in tree.body:
-        if isinstance(item, ast.ClassDef):
-            nodes.extend(item.body)
-
-    name = None
-    version = None
-    for node in nodes:
-        if not isinstance(node, ast.Assign):
-            continue
-        if not isinstance(node.value, ast.Constant) or not isinstance(node.value.value, str):
-            continue
-        for target in node.targets:
-            if not isinstance(target, ast.Name):
-                continue
-            if target.id == "name":
-                name = node.value.value
-            elif target.id == "version":
-                version = node.value.value
-
-    # Regular requires propagate to consumers; test_requires do not (conan's
-    # `test` trait), so we bucket them separately — the dep walk follows regular
-    # requires transitively but pulls a package's test_requires only for the
-    # build target itself (see visit() below). A test_requires-only editable
-    # (e.g. the playground's insight_diff) is otherwise never rebuilt, so the
-    # integration gate silently links a stale upstream.
-    requires = []
-    test_requires = []
-
-    def add(kind, value):
-        (test_requires if kind == "test_requires" else requires).append(value)
-
-    # 1. Class variable: requires/test_requires = "pkg/1.0" or ["pkg1/1.0", ...]
-    for node in nodes:
-        if not isinstance(node, ast.Assign):
-            continue
-        for target in node.targets:
-            if not isinstance(target, ast.Name) or target.id not in ("requires", "test_requires"):
-                continue
-            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-                add(target.id, node.value.value)
-            elif isinstance(node.value, ast.List):
-                for elt in node.value.elts:
-                    if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
-                        add(target.id, elt.value)
-
-    # 2. Method calls: self.requires("pkg/1.0") / self.test_requires("pkg/1.0")
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        if not isinstance(node.func, ast.Attribute) or node.func.attr not in ("requires", "test_requires"):
-            continue
-        if not node.args:
-            continue
-        arg = node.args[0]
-        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-            add(node.func.attr, arg.value)
-
-    return name, version, requires, test_requires
-
-
-recipes = {}
-for conanfile in workspace.rglob("conanfile.py"):
-    if should_skip(conanfile):
-        continue
-    name, version, requires, test_requires = recipe_info(conanfile)
-    if not name or not version:
-        continue
-    ref = f"{name}/{version}"
-    recipes[ref] = {
-        "dir": str(conanfile.parent.resolve()),
-        "requires": requires,
-        "test_requires": test_requires,
-    }
-
-target_info = recipe_info(target_dir / "conanfile.py")
-target_ref = f"{target_info[0]}/{target_info[1]}"
-order = []
-seen = set()
-visiting = set()
-
-
-def visit(ref: str, is_target: bool = False):
-    if ref in seen or ref in visiting:
-        return
-    visiting.add(ref)
-    recipe = recipes.get(ref)
-    if recipe:
-        # Follow regular requires transitively. The target's test_requires are
-        # added as extra roots (when enabled) but are NOT transitive — a
-        # dependency's test_requires belong to *its* test build, not ours.
-        deps = list(recipe["requires"])
-        if is_target and include_test_requires:
-            deps += recipe["test_requires"]
-        for dep in deps:
-            if dep in recipes:
-                visit(dep)
-        if ref != target_ref:
-            order.append((ref, recipe["dir"]))
-    visiting.remove(ref)
-    seen.add(ref)
-
-
-visit(target_ref, is_target=True)
-for ref, directory in order:
-    print(f"{ref}\t{directory}")
-PY
+    python3 "$MALF_DIR/malf_graph.py" deps "$MALF_WORKSPACE_ROOT" "$target" "$include_test_requires"
 }
 
 _malf_workspace_packages() {
-    # Emit "name/version<TAB>dir" for every workspace recipe, regardless of the
-    # dependency graph. Unlike _malf_workspace_dep_entries (which is scoped to a
-    # single build target's deps), this enumerates the whole workspace — it is
-    # what `editables sync` re-registers so a coordinated version bump propagates
-    # to the editable registry in one pass.
-    python3 - "$MALF_WORKSPACE_ROOT" <<'PY'
-import ast
-import pathlib
-import sys
+    python3 "$MALF_DIR/malf_graph.py" all "$MALF_WORKSPACE_ROOT"
+}
 
-workspace = pathlib.Path(sys.argv[1]).resolve()
-ignore_parts = {".conan2", ".git", ".venv", "node_modules", "test_package"}
+_malf_member_packages() {
+    python3 "$MALF_DIR/malf_graph.py" members "$1"
+}
 
-
-def should_skip(path: pathlib.Path) -> bool:
-    # "build" + every profile-named tree (build-gcc15-release, build-clang21-…).
-    return any(part in ignore_parts or part == "build" or part.startswith("build-")
-               for part in path.parts)
-
-
-def recipe_ref(conanfile: pathlib.Path):
-    tree = ast.parse(conanfile.read_text(), filename=str(conanfile))
-    nodes = list(tree.body)
-    for item in tree.body:
-        if isinstance(item, ast.ClassDef):
-            nodes.extend(item.body)
-    name = version = None
-    for node in nodes:
-        if not isinstance(node, ast.Assign):
-            continue
-        if not isinstance(node.value, ast.Constant) or not isinstance(node.value.value, str):
-            continue
-        for target in node.targets:
-            if not isinstance(target, ast.Name):
-                continue
-            if target.id == "name":
-                name = node.value.value
-            elif target.id == "version":
-                version = node.value.value
-    return name, version
-
-
-for conanfile in sorted(workspace.rglob("conanfile.py")):
-    if should_skip(conanfile):
-        continue
-    name, version = recipe_ref(conanfile)
-    if not name or not version:
-        continue
-    print(f"{name}/{version}\t{conanfile.parent.resolve()}")
-PY
+_malf_resolve_dir() {
+    # Resolve an optional subdir arg to an absolute directory (no conanfile
+    # requirement — the caller decides whether it needs a package or a sweep root).
+    local arg="${1:-}"
+    if [[ -z "$arg" ]]; then
+        echo "$CWD"
+    elif [[ -d "$CWD/$arg" ]]; then
+        echo "$(cd "$CWD/$arg" && pwd)"
+    elif [[ -d "$arg" ]]; then
+        echo "$(cd "$arg" && pwd)"
+    else
+        echo "malf: error: '$arg' is not a directory" >&2; exit 1
+    fi
 }
 
 _malf_resolve_target() {
     # Given an optional subdir arg, return the absolute path to the dir
     # containing a conanfile.py. Errors if none found.
-    local arg="${1:-}"
     local target
-    if [[ -n "$arg" ]]; then
-        if [[ -d "$CWD/$arg" ]]; then
-            target="$CWD/$arg"
-        elif [[ -d "$arg" ]]; then
-            target="$(cd "$arg" && pwd)"
-        else
-            echo "malf: error: '$arg' is not a directory" >&2; exit 1
-        fi
-    else
-        target="$CWD"
-    fi
+    target="$(_malf_resolve_dir "${1:-}")" || exit 1
     if [[ ! -f "$target/conanfile.py" ]]; then
         echo "malf: error: no conanfile.py found in $target" >&2; exit 1
     fi
     echo "$target"
 }
 
-_malf_build_dir() {
-    local target="$1"
-    # build-<key>/<rel-of-target> under CWD — ALWAYS profile-named (the default leg
-    # included), so an ASan tree never clobbers the release one and a bare build/
-    # can never masquerade as "whichever toolchain built last".
-    local key bdir rel
-    key="$(_malf_build_key)"; bdir="build-$key"
-    rel="$(realpath --relative-to="$CWD" "$target" 2>/dev/null || echo ".")"
-    if [[ "$rel" == "." ]]; then
-        echo "$CWD/$bdir"
-    else
-        echo "$CWD/$bdir/$rel"
+# Resolve the verb's target — ONE package (sets MALF_TARGET, returns) or a
+# dependency-ordered SWEEP over every package under the resolved dir (runs
+# `malf <verb> <member> <flags…>` per member — the exact `&&`-chain semantics,
+# each member a fresh process so no profile/cache/config state bleeds — and
+# exits with the sweep's status).
+#
+# The rule, invocation-point-based:
+#   * explicit arg naming a package dir (has conanfile.py)  -> that package only,
+#     even when sub-recipes exist below it (the precise escape hatch, e.g.
+#     `malf build .` at a root-package multi-package repo);
+#   * anything else (no arg, or an arg dir without a recipe) -> sweep every
+#     recipe under the dir, topo-ordered (a root-dir recipe is a member too);
+#     a single found recipe degenerates to the plain single-package build.
+# So a mono-package repo root, a leaf package subfolder, and `malf <verb> <pkg>`
+# all behave identically — a subfolder never knows (or cares) that it sits in a
+# multi-package repo, and no-arg at a multi-package root builds the whole repo.
+_malf_resolve_target_or_sweep() {
+    local verb="$1" arg="$2"; shift 2
+    local root
+    root="$(_malf_resolve_dir "$arg")" || exit 1
+    if [[ -n "$arg" && -f "$root/conanfile.py" ]]; then
+        MALF_TARGET="$root"; return 0
     fi
+    local members=() entry ref dir
+    while IFS=$'\t' read -r ref dir; do
+        [[ -n "$ref" && -n "$dir" ]] && members+=("$dir")
+    done < <(_malf_member_packages "$root")
+    if [[ ${#members[@]} -eq 0 ]]; then
+        if [[ -f "$root/conanfile.py" ]]; then
+            # A recipe malf_graph could not parse a ref from — let the single-target
+            # path surface the real error rather than claiming "no conanfile".
+            MALF_TARGET="$root"; return 0
+        fi
+        echo "malf: error: no conanfile.py found in (or under) $root" >&2; exit 1
+    fi
+    if [[ ${#members[@]} -eq 1 ]]; then
+        MALF_TARGET="${members[0]}"; return 0
+    fi
+    echo "=== malf $verb: ${#members[@]} packages under $root (dependency order) ==="
+    local i=0 member label
+    for member in "${members[@]}"; do
+        i=$((i+1))
+        label="${member#"$root"/}"; [[ "$member" == "$root" ]] && label="."
+        echo "── malf $verb [$i/${#members[@]}] $label ──"
+        if ! MALF_SWEEP=1 "$MALF_DIR/malf" "$verb" "$member" "$@"; then
+            echo "malf $verb: sweep FAILED at $label ($((i-1))/${#members[@]} completed)" >&2
+            exit 1
+        fi
+    done
+    echo "=== malf $verb: all ${#members[@]} packages done ==="
+    exit 0
+}
+
+_malf_build_dir() {
+    # <pkg>/build-<key> — anchored at the PACKAGE, never the invocation CWD, and
+    # ALWAYS profile-named (the default leg included), so an ASan tree never
+    # clobbers the release one and a bare build/ can never masquerade as
+    # "whichever toolchain built last". This is the SAME tree
+    # _malf_editable_build_dir resolves (MALF_EDITABLE_BUILD_DIR == build-<key>):
+    # one build tree per (package, profile), whether the package is built as the
+    # target, as a sibling's editable dep, or from inside its own subfolder —
+    # the root fix for the old "cd into a subdir -> second, inconsistent build
+    # tree that links a stale dependency" footgun.
+    echo "$1/build-$(_malf_build_key)"
 }
 
 _malf_preset() {
@@ -664,17 +569,25 @@ _malf_configure_and_build() {
     cmake --build "$build_dir" -j"$jobs"
 }
 
+_malf_repo_root() {
+    # The repo root a package belongs to (where .clangd + the merged compile DB
+    # live): the package's git toplevel — invocation-CWD-independent, so a
+    # subfolder build feeds the same editor DB a repo-root build does. Falls
+    # back to the package dir itself outside any git checkout.
+    git -C "$1" rev-parse --show-toplevel 2>/dev/null || echo "$1"
+}
+
 _malf_merge_compile_commands() {
     # Fold the just-built package's compile_commands.json into the root DB that
     # .clangd reads (CompilationDatabase: build-clang21-libcxx-release — the DEFAULT
-    # leg's named build root; .clangd is static, so it tracks the dev default).
-    # This keeps the editor's index in step with the incremental build WITHOUT the
-    # full `malf commands` workspace walk: one file merge, no reconfigure. Entries
-    # are keyed by source file — the freshly built package's entries replace any
-    # stale entry for the same file, while entries contributed by *other* packages
-    # already in the root DB are preserved (multi-package repos).
-    local build_dir="$1"
-    local root_db="$(_malf_default_build_root "$CWD")/compile_commands.json"
+    # leg's named build root of the package's REPO; .clangd is static, so it tracks
+    # the dev default). This keeps the editor's index in step with the incremental
+    # build WITHOUT the full `malf commands` workspace walk: one file merge, no
+    # reconfigure. Entries are keyed by source file — the freshly built package's
+    # entries replace any stale entry for the same file, while entries contributed
+    # by *other* packages already in the root DB are preserved (multi-package repos).
+    local build_dir="$1" target="$2"
+    local root_db="$(_malf_default_build_root "$(_malf_repo_root "$target")")/compile_commands.json"
     local pkg_db="$build_dir/compile_commands.json"
     # Building the repo root itself: cmake already wrote the root DB in place.
     [[ "$(realpath -m "$pkg_db")" == "$(realpath -m "$root_db")" ]] && return 0
@@ -712,129 +625,126 @@ PY
 
 # ─── Commands ────────────────────────────────────────────────────────────────
 
+# The ONE compile flow all three verbs share: conan install + configure + build
+# with the FULL target surface ON — package + tests + benches ("malf build
+# compiles everything"). The verbs differ only in what they RUN afterwards
+# (test -> ctest, bench -> the bench executables), never in what they compile —
+# so a TU that only a test or bench pulls in can no longer slip past the desk
+# and first fail in the release pipeline (the 1.7.2 drift-at-tag class).
+# Content-only packages (a conanfile but no CMakeLists.txt — umbrella
+# metapackages, scenario/data corpora) have nothing to compile: return 0 with
+# a note, and the caller skips its run phase too.
+_malf_build_flow() {
+    local target="$1"
+    if [[ ! -f "$target/CMakeLists.txt" ]]; then
+        echo "malf: $(_malf_pkg_ref "$target/conanfile.py") is content-only (no CMakeLists.txt) — nothing to compile"
+        return 0
+    fi
+    local build_dir
+    build_dir="$(_malf_build_dir "$target")"
+    mkdir -p "$build_dir"
+
+    _malf_bootstrap_workspace_deps "$target"
+
+    local user_presets_backup rc=0
+    user_presets_backup="$(_malf_backup_user_presets "$target")"
+    # Conan writes CMakeUserPresets.json to the source dir with multiple includes,
+    # causing "Duplicate preset" errors. Rewrite it to include only the local build dir.
+    # shellcheck disable=SC2046
+    if conan install "$target" \
+        --output-folder="$build_dir" \
+        $(_malf_conan_install_args); then
+        _malf_write_user_presets "$target" "$build_dir"
+        local cmake_args=()
+        mapfile -t cmake_args < <(_malf_cmake_feature_args "$target" ON ON)
+        _malf_configure_and_build "$target" "$build_dir" "${cmake_args[@]}" || rc=1
+    else
+        rc=1
+    fi
+    if [[ $rc -ne 0 ]]; then
+        _malf_restore_user_presets "$target" "$user_presets_backup"
+        return 1
+    fi
+    [[ -n "$user_presets_backup" ]] && rm -f "$user_presets_backup"
+    _malf_merge_compile_commands "$build_dir" "$target"
+}
+
 cmd_build() {
-    local subdir=""
-    local user_presets_backup=""
+    local subdir="" fwd=()
     MALF_CONFIG="Debug"
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --debug)   MALF_CONFIG="Debug" ;;
-            --release) MALF_CONFIG="Release" ;;
+            --debug)   MALF_CONFIG="Debug"; fwd+=("$1") ;;
+            --release) MALF_CONFIG="Release"; fwd+=("$1") ;;
             # Select any registry profile (malf/profiles/<name>): build type + clean
             # build-context for sanitizers are derived from the profile.
-            --profile) shift; _malf_apply_profile "$1" ;;
+            --profile) fwd+=("$1" "$2"); shift; _malf_apply_profile "$1" ;;
             # Sugar: ASan/UBSan(+libFuzzer-via-target) gate profile (canon→eidos parse path).
-            --asan)    _malf_apply_profile "$MALF_ASAN_PROFILE" ;;
+            --asan)    _malf_apply_profile "$MALF_ASAN_PROFILE"; fwd+=("$1") ;;
             *) subdir="$1" ;;
         esac
         shift
     done
 
+    _malf_resolve_target_or_sweep build "$subdir" "${fwd[@]}"
+    local target="$MALF_TARGET"
+
     _malf_use_keyed_cache
 
-    local target build_dir
-    target="$(_malf_resolve_target "$subdir")"
-    build_dir="$(_malf_build_dir "$target")"
-    mkdir -p "$build_dir"
-
     echo "=== malf build: $target ($MALF_CONFIG${MALF_PROFILE_NAME:+, $MALF_PROFILE_NAME}) ==="
-
-    _malf_bootstrap_workspace_deps "$target" 0
-
-    user_presets_backup="$(_malf_backup_user_presets "$target")"
-    trap '_malf_restore_user_presets "$target" "$user_presets_backup"' RETURN
-
-    # shellcheck disable=SC2046
-    conan install "$target" \
-        --output-folder="$build_dir" \
-        $(_malf_conan_install_args)
-
-    # Conan writes CMakeUserPresets.json to the source dir with multiple includes,
-    # causing "Duplicate preset" errors. Rewrite it to include only the local build dir.
-    _malf_write_user_presets "$target" "$build_dir"
-
-    local cmake_args=()
-    mapfile -t cmake_args < <(_malf_cmake_feature_args "$target" OFF OFF)
-    _malf_configure_and_build "$target" "$build_dir" "${cmake_args[@]}"
-    trap - RETURN
-    [[ -n "$user_presets_backup" ]] && rm -f "$user_presets_backup"
-
-    _malf_merge_compile_commands "$build_dir"
-
-    echo "=== done: $build_dir ==="
+    _malf_build_flow "$target"
+    echo "=== done: $(_malf_build_dir "$target") ==="
 }
 
 cmd_test() {
-    local subdir=""
-    local user_presets_backup=""
+    local subdir="" fwd=()
     local gtest_filter=""
     local verbose=false
     MALF_CONFIG="Debug"
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --debug)   MALF_CONFIG="Debug" ;;
-            --release) MALF_CONFIG="Release" ;;
-            --profile) shift; _malf_apply_profile "$1" ;;
-            --asan)    _malf_apply_profile "$MALF_ASAN_PROFILE" ;;
-            --verbose) verbose=true ;;
+            --debug)   MALF_CONFIG="Debug"; fwd+=("$1") ;;
+            --release) MALF_CONFIG="Release"; fwd+=("$1") ;;
+            --profile) fwd+=("$1" "$2"); shift; _malf_apply_profile "$1" ;;
+            --asan)    _malf_apply_profile "$MALF_ASAN_PROFILE"; fwd+=("$1") ;;
+            --verbose) verbose=true; fwd+=("$1") ;;
             --filter)
                 shift
                 [[ $# -gt 0 ]] || { echo "malf test: --filter requires a pattern" >&2; exit 1; }
-                gtest_filter="$1"
+                gtest_filter="$1"; fwd+=(--filter "$1")
                 ;;
             *) subdir="$1" ;;
         esac
         shift
     done
 
-    _malf_use_keyed_cache
+    _malf_resolve_target_or_sweep test "$subdir" "${fwd[@]}"
+    local target="$MALF_TARGET"
 
-    local target build_dir
-    target="$(_malf_resolve_target "$subdir")"
-    build_dir="$(_malf_build_dir "$target")"
+    _malf_use_keyed_cache
 
     # End-to-end packages whose tests rely on optimized producer code paths
     # cannot meaningfully run under -O0/Debug (throughput drops 10–30x and
     # the in-test drain watchdog times out before the scenario completes).
     # Force such packages to Release so `malf test` produces meaningful
     # results regardless of MALF_CONFIG.
-    local target_basename
-    target_basename="$(basename "$target")"
-    case "$target_basename" in
-        insight-playground)
+    case "$(basename "$target")" in
+        insight-e2e)
             if [[ "$MALF_CONFIG" != "Release" ]]; then
-                echo "malf test: $target_basename requires Release (e2e throughput-sensitive); overriding MALF_CONFIG=$MALF_CONFIG -> Release" >&2
+                echo "malf test: insight-e2e requires Release (e2e throughput-sensitive); overriding MALF_CONFIG=$MALF_CONFIG -> Release" >&2
                 MALF_CONFIG="Release"
-                build_dir="$(_malf_build_dir "$target")"
             fi
             ;;
     esac
 
     echo "=== malf test: $target ($MALF_CONFIG) ==="
 
-    _malf_bootstrap_workspace_deps "$target"
+    _malf_build_flow "$target"
 
-    user_presets_backup="$(_malf_backup_user_presets "$target")"
-    trap '_malf_restore_user_presets "$target" "$user_presets_backup"' RETURN
-
-    # shellcheck disable=SC2046
-    conan install "$target" \
-        --output-folder="$build_dir" \
-        $(_malf_conan_install_args)
-
-    # Conan writes CMakeUserPresets.json to the source dir with multiple includes,
-    # causing "Duplicate preset" errors. Rewrite it to include only the local build dir.
-    _malf_write_user_presets "$target" "$build_dir"
-
-    local cmake_args=()
-    mapfile -t cmake_args < <(_malf_cmake_feature_args "$target" ON OFF)
-    _malf_configure_and_build "$target" "$build_dir" "${cmake_args[@]}"
-    trap - RETURN
-    [[ -n "$user_presets_backup" ]] && rm -f "$user_presets_backup"
-
-    _malf_merge_compile_commands "$build_dir"
-
-    local ctest_args=(--test-dir "$build_dir" --output-on-failure)
+    if [[ ! -f "$target/CMakeLists.txt" ]]; then
+        return 0   # content-only: nothing to run either
+    fi
+    local ctest_args=(--test-dir "$(_malf_build_dir "$target")" --output-on-failure)
     $verbose && ctest_args+=(--verbose)
     [[ -n "$gtest_filter" ]] && ctest_args+=(-R "$gtest_filter")
     ctest "${ctest_args[@]}"
@@ -1164,10 +1074,9 @@ for r in re.findall(r\"(?:test_)?requires\\s*\\(\\s*['\\\"]([^'\\\"]+)['\\\"]\\s
     local tp_toolchain="$tp_build/conan_toolchain.cmake"
     [[ -f "$tp_toolchain" ]] || return 0
     # The tested module package ships its native config (FILE_SET CXX_MODULES) into the dir
-    # malf JUST configured it in — the PARENT of tp_build (= _malf_build_dir "$subdir"). For a
-    # MULTI-package repo that dir ($CWD/build[-key]/<rel>) differs from the editable build dir
-    # the recipe's builddir resolves to ($pkg/build[-key]), so find_package(<pkg>) misses it.
-    # Point it at the real config dir; single-package repos already coincide (harmless redundancy).
+    # malf JUST configured it in — the PARENT of tp_build (= _malf_build_dir "$subdir", the
+    # package-anchored tree, which IS the editable build dir the recipe's builddir resolves
+    # to). Point CMAKE_PREFIX_PATH at it so find_package(<pkg>) hits the fresh config.
     local main_build_dir; main_build_dir="$(dirname "$tp_build")"
     echo "malf commands: configuring $(basename "$subdir")/test_package"
     if ! ( source "$tp_build/conanbuild.sh" 2>/dev/null
@@ -1185,28 +1094,34 @@ for r in re.findall(r\"(?:test_)?requires\\s*\\(\\s*['\\\"]([^'\\\"]+)['\\\"]\\s
 }
 
 _malf_merge_db_tree() {
-    # Merge every compile_commands.json under the build root into
+    # Merge every compile_commands.json under the given build dirs into
     # <build_root>/compile_commands.json (what .clangd's CompilationDatabase
     # points at). Structure-agnostic.
-    local build_root="$1"
+    local build_root="$1"; shift
     local root_db="$build_root/compile_commands.json"
-    python3 - "$build_root" "$root_db" << 'PY'
+    python3 - "$root_db" "$@" << 'PY'
 import json, sys
 from pathlib import Path
 
-build_dir   = Path(sys.argv[1]).resolve()
-root_output = Path(sys.argv[2]).resolve()
+root_output = Path(sys.argv[1]).resolve()
+scan_dirs   = [Path(p) for p in sys.argv[2:]]
 
-# A single-package repo configures into build/ itself, so its DB IS root_output —
-# read it first so those entries survive. Multi-package repos configure into
-# build/<pkg>/ and root_output was cleared before the walk, so it is absent here.
-dbs_pre = [root_output] if root_output.exists() else []
-dbs_sub = sorted(p.resolve() for p in build_dir.rglob("compile_commands.json")
-                 if p.resolve() != root_output)
-dbs = dbs_pre + dbs_sub
+# A single-package repo configures into its own build dir, so its DB IS
+# root_output — read it first so those entries survive (it was cleared before
+# the walk for multi-package repos, so it is absent there).
+dbs, seen_paths = [], set()
+if root_output.exists():
+    seen_paths.add(root_output)
+    dbs.append(root_output)
+for scan_dir in scan_dirs:
+    for found in sorted(scan_dir.rglob("compile_commands.json")):
+        found = found.resolve()
+        if found not in seen_paths:
+            seen_paths.add(found)
+            dbs.append(found)
 
 if not dbs:
-    raise SystemExit(f"malf commands: no compile_commands.json under {build_dir} "
+    raise SystemExit(f"malf commands: no compile_commands.json under {', '.join(map(str, scan_dirs))} "
                      "(did every configure fail?)")
 
 merged, seen = [], set()
@@ -1231,28 +1146,43 @@ PY
 cmd_compile_commands() {
     # Generate the repo-level compile_commands.json that .clangd reads
     # (CompilationDatabase: build-clang21-libcxx-release — the default leg's named
-    # build root). A repo is just a LIST of package dirs — the root
-    # if it has a conanfile.py, else every subdir with one — so there is NO single-
+    # build root at the repo root). A repo is just a LIST of package dirs (the
+    # member enumeration — a root recipe is a member too), so there is NO single-
     # vs-multi branch: each package is conan-installed, configured via its conan
     # preset (the SAME compiler/flags `malf build` uses), its test_package is
-    # configured, and every emitted DB under build/ is merged. Debug config so test
+    # configured, and every emitted DB is merged. Debug config so test
     # targets match `malf build` / `malf test`.
     local build_root; build_root="$(_malf_build_dir "$CWD")"
     MALF_CONFIG="Debug"
     mkdir -p "$build_root"
     # Rebuild the editor DB from scratch: clear the merged output so a single-package
-    # repo's own DB (which lands at build/compile_commands.json) is the only copy the
+    # repo's own DB (whose build dir IS the merge root) is the only copy the
     # merge reads back in (no stale entries from a previous run).
     rm -f "$build_root/compile_commands.json"
 
-    while IFS= read -r pkg_conanfile; do
+    local members=() _ref _dir
+    while IFS=$'\t' read -r _ref _dir; do
+        [[ -n "$_ref" && -n "$_dir" ]] && members+=("$_dir")
+    done < <(_malf_member_packages "$CWD")
+    if [[ ${#members[@]} -eq 0 ]]; then
+        echo "malf commands: no conanfile.py found under $CWD" >&2; exit 1
+    fi
+
+    local db_dirs=("$build_root")
+    local pkg_dir
+    for pkg_dir in "${members[@]}"; do
         local subdir subdir_name subdir_build
-        subdir="$(dirname "$pkg_conanfile")"
+        subdir="$pkg_dir"
         subdir_name="$(basename "$subdir")"
-        # Canonical build dir, mirroring `malf build <subdir>` — always under the
-        # root build/ tree (root -> build/, subdir -> build/<subdir>). Editable
-        # builds in <pkg>/build/ are intentionally NOT used (may be stale / tests=OFF).
+        # Content-only packages (no CMakeLists.txt anywhere) have no TUs to index.
+        if [[ ! -f "$subdir/CMakeLists.txt" && ! -f "$subdir/test_package/CMakeLists.txt" ]]; then
+            echo "malf commands: $subdir_name is content-only — skipped"
+            continue
+        fi
+        # Canonical build dir, mirroring `malf build` — package-anchored
+        # (<pkg>/build-<key>), the ONE tree per (package, profile).
         subdir_build="$(_malf_build_dir "$subdir")"
+        db_dirs+=("$subdir_build")
 
         # conan install if this build dir has no toolchain/preset yet, so deps
         # (including test_requires like gtest) are present before cmake configures.
@@ -1300,71 +1230,48 @@ cmd_compile_commands() {
                 "${cmake_feature_args[@]}" 2>&1 | tail -1 || \
                 echo "malf commands: warning: cmake configure failed for $subdir_name (continuing)"
         fi
-    done < <(
-        if [[ -f "$CWD/conanfile.py" ]]; then
-            echo "$CWD/conanfile.py"
-        else
-            find "$CWD" -maxdepth 3 -name "conanfile.py" \
-                -not -path "*/test_package/*" -not -path "*/.conan2/*" -not -path "*/build*/*" \
-                | sort
-        fi
-    )
+    done
 
-    _malf_merge_db_tree "$build_root"
+    _malf_merge_db_tree "$build_root" "${db_dirs[@]}"
 }
 
 cmd_bench() {
     local subdir="" quick=false filter="" compare=false threshold="0.10" baseline="" extra=()
-    local repetitions=""
-    local user_presets_backup=""
+    local repetitions="" fwd=()
     MALF_CONFIG="Release"
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --compare)   compare=true ;;
-            --threshold) threshold="$2"; shift ;;
-            --baseline)  baseline="$2"; shift ;;
-            --repetitions) repetitions="$2"; shift ;;
-            --quick)     quick=true ;;
-            --filter)    filter="$2"; shift ;;
-            --debug)     MALF_CONFIG="Debug" ;;
-            --release)   MALF_CONFIG="Release" ;;
-            --profile)   shift; _malf_apply_profile "$1" ;;
-            --asan)      _malf_apply_profile "$MALF_ASAN_PROFILE" ;;
-            --)          shift; extra+=("$@"); break ;;
-            -*)          extra+=("$1") ;;
+            --compare)   compare=true; fwd+=("$1") ;;
+            --threshold) threshold="$2"; fwd+=("$1" "$2"); shift ;;
+            --baseline)  baseline="$2"; fwd+=("$1" "$2"); shift ;;
+            --repetitions) repetitions="$2"; fwd+=("$1" "$2"); shift ;;
+            --quick)     quick=true; fwd+=("$1") ;;
+            --filter)    filter="$2"; fwd+=("$1" "$2"); shift ;;
+            --debug)     MALF_CONFIG="Debug"; fwd+=("$1") ;;
+            --release)   MALF_CONFIG="Release"; fwd+=("$1") ;;
+            --profile)   fwd+=("$1" "$2"); shift; _malf_apply_profile "$1" ;;
+            --asan)      _malf_apply_profile "$MALF_ASAN_PROFILE"; fwd+=("$1") ;;
+            --)          shift; extra+=("$@"); fwd+=(-- "$@"); break ;;
+            -*)          extra+=("$1"); fwd+=("$1") ;;
             *)           subdir="$1" ;;
         esac
         shift
     done
 
-    _malf_use_keyed_cache
+    _malf_resolve_target_or_sweep bench "$subdir" "${fwd[@]}"
+    local target="$MALF_TARGET"
 
-    local target build_dir
-    target="$(_malf_resolve_target "$subdir")"
-    build_dir="$(_malf_build_dir "$target")"
+    _malf_use_keyed_cache
 
     echo "=== malf bench: $target ($MALF_CONFIG) ==="
 
-    _malf_bootstrap_workspace_deps "$target"
+    _malf_build_flow "$target"
 
-    user_presets_backup="$(_malf_backup_user_presets "$target")"
-    trap '_malf_restore_user_presets "$target" "$user_presets_backup"' RETURN
-
-    # install + configure + build
-    # shellcheck disable=SC2046
-    conan install "$target" \
-        --output-folder="$build_dir" \
-        $(_malf_conan_install_args)
-
-    # Conan writes CMakeUserPresets.json to the source dir with multiple includes,
-    # causing "Duplicate preset" errors. Rewrite it to include only the local build dir.
-    _malf_write_user_presets "$target" "$build_dir"
-
-    local cmake_args=()
-    mapfile -t cmake_args < <(_malf_cmake_feature_args "$target" OFF ON)
-    _malf_configure_and_build "$target" "$build_dir" "${cmake_args[@]}"
-    trap - RETURN
-    [[ -n "$user_presets_backup" ]] && rm -f "$user_presets_backup"
+    if [[ ! -f "$target/CMakeLists.txt" ]]; then
+        return 0   # content-only: nothing to run either
+    fi
+    local build_dir
+    build_dir="$(_malf_build_dir "$target")"
 
     # Find bench executables (*_bench or *bench*)
     local bench_exes=()
@@ -1375,6 +1282,12 @@ cmd_bench() {
     )
 
     if [[ ${#bench_exes[@]} -eq 0 ]]; then
+        # In a multi-package sweep a benchless package is normal — skip it.
+        # An EXPLICIT `malf bench <pkg>` stays a hard error (you asked for benches).
+        if [[ "${MALF_SWEEP:-0}" == "1" ]]; then
+            echo "malf bench: no benchmark executables in $(basename "$target") — skipped"
+            return 0
+        fi
         echo "malf bench: no benchmark executables found in $build_dir" >&2; exit 1
     fi
 
@@ -1593,14 +1506,31 @@ PY
     [[ $failed -eq 0 ]]
 }
 
+# CWD + every member package dir under it — where package-anchored build trees
+# (and the repo root's merged clangd DB) live. `clean build` and `run` walk these.
+_malf_build_tree_roots() {
+    echo "$CWD"
+    local _ref _dir
+    while IFS=$'\t' read -r _ref _dir; do
+        [[ -n "$_dir" && "$_dir" != "$CWD" ]] && echo "$_dir"
+    done < <(_malf_member_packages "$CWD")
+}
+
+_malf_clean_build_trees() {
+    local dir
+    while IFS= read -r dir; do
+        rm -rf "$dir"/build "$dir"/build-*
+    done < <(_malf_build_tree_roots)
+}
+
 cmd_clean() {
     local target="${1:-all}"
     case "$target" in
-        build)     rm -rf "$CWD"/build "$CWD"/build-* ;;
+        build)     _malf_clean_build_trees ;;
         conan)     rm -rf "$MALF_CONAN_HOME_BASE"/p "$MALF_CONAN_HOME_BASE"/*/p ;;
         editables) _malf_editables_clear ;;
         stale)     _malf_clean_stale; return $? ;;
-        all)       rm -rf "$CWD"/build "$CWD"/build-* "$MALF_CONAN_HOME_BASE"/p "$MALF_CONAN_HOME_BASE"/*/p && _malf_editables_clear ;;
+        all)       _malf_clean_build_trees && rm -rf "$MALF_CONAN_HOME_BASE"/p "$MALF_CONAN_HOME_BASE"/*/p && _malf_editables_clear ;;
         *)         echo "malf clean: unknown target '$target' (build|conan|editables|stale|all)" >&2; exit 1 ;;
     esac
     echo "malf clean: $target done"
@@ -1609,11 +1539,14 @@ cmd_clean() {
 cmd_run() {
     local exe_name="${1:-}"
     [[ -n "$exe_name" ]] || { echo "malf run: specify an executable name" >&2; exit 1; }
-    local found
-    found="$(find "$CWD"/build "$CWD"/build-* -type f -executable -name "$exe_name" \
-        -not -name "*.sh" 2>/dev/null | head -1)"
+    local found="" dir
+    while IFS= read -r dir; do
+        found="$(find "$dir"/build "$dir"/build-* -type f -executable -name "$exe_name" \
+            -not -name "*.sh" 2>/dev/null | head -1)"
+        [[ -n "$found" ]] && break
+    done < <(_malf_build_tree_roots)
     if [[ -z "$found" ]]; then
-        echo "malf run: '$exe_name' not found under $CWD/build*" >&2; exit 1
+        echo "malf run: '$exe_name' not found in any package build tree under $CWD" >&2; exit 1
     fi
     echo "malf run: $found"
     exec "$found" "${@:2}"
@@ -1624,12 +1557,12 @@ cmd_help() {
 malf — coderoast build system
 
 Commands:
-    build   [subdir] [--debug|--release|--asan|--profile <name>]
-    test    [subdir] [--debug|--release|--asan|--profile <name>] [--verbose] [--filter PATTERN]
+    build   [target] [--debug|--release|--asan|--profile <name>]
+    test    [target] [--debug|--release|--asan|--profile <name>] [--verbose] [--filter PATTERN]
     lint    [--all-files] [-c|--console]
     format  [--check]
     commands | compile-commands
-    bench   [subdir] [--quick] [--filter REGEX] [--debug|--release|--asan|--profile <name>] [--compare] [--threshold N] [--baseline path]
+    bench   [target] [--quick] [--filter REGEX] [--debug|--release|--asan|--profile <name>] [--compare] [--threshold N] [--baseline path]
     clean   [build|conan|editables|stale|all]
                                    stale = surgically prune old-version/ghost first-party packages
                                    from every cache (base + keyed + stray ~/.conan2); third-party
@@ -1647,6 +1580,20 @@ Commands:
     run     <exe-name> [args...]
     bin-dir [subdir] [--asan|--profile <name>]   print the build-type-keyed build dir for a target
 
+Verbs (one compile surface):
+    `build` compiles EVERYTHING — the package + its tests + its benches.
+    `test` and `bench` run (ctest / the bench executables) on top of the same
+    incremental build, so what runs is always what you just built.
+
+Targets:
+    [target] omitted     every package under the current dir, DEPENDENCY-ORDERED
+                         (mono-package root = the single package; a multi-package
+                         repo root or the workspace root = the whole set)
+    [target] = pkg dir   exactly that package (also from inside the dir itself —
+                         a package subfolder behaves like a mono-package repo)
+    Build trees are package-anchored: <pkg>/build-<profile-key> — ONE tree per
+    (package, profile) whether built as target, editable dep, or from a subfolder.
+
 Build profiles (--profile <name>, registry in malf/profiles/):
     --profile selects any registry profile; build type + a clean build-context for
     sanitizer profiles are derived from the profile. `--asan` is sugar for the ASan
@@ -1656,10 +1603,10 @@ Cache:
     Local  : MALF_WORKSPACE_ROOT/.conan2  (or CONAN_HOME)
 
 Local dev dependency bootstrap:
-    build/test register sibling workspace packages as Conan editables, then
+    build/test/bench register sibling workspace packages as Conan editables, then
     run conan install + CMake/Ninja for those editable deps in dependency
     order. This keeps rebuilds incremental and lets CMakeDeps find libraries
-    from each dependency's build/ directory.
+    from each dependency's package-anchored build tree.
     Override the scan root with MALF_WORKSPACE_ROOT or disable with MALF_AUTO_WORKSPACE_DEPS=0.
 
 Editables:
