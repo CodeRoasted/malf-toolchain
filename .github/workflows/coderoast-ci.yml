@@ -39,6 +39,21 @@ on:
         type: string
         required: false
         default: 'private'
+      sift-job:
+        description: 'Sift baseline lineage name for this job (folds into sift-baseline-main-<job> / sift-baseline-<job>-pr-<n>).'
+        type: string
+        required: false
+        default: 'build'
+      sift-baseline:
+        description: 'Override the Sift vs-main baseline SOURCE (sift-action grammar). Empty = the named main baseline artifact — you stay King of the baseline.'
+        type: string
+        required: false
+        default: ''
+      sift-pr-vs-previous:
+        description: 'PRs: also diff against the PR''s own previous run (tagged comment, quiet unless significant). true|false.'
+        type: string
+        required: false
+        default: 'true'
     secrets:
       CR_RELEASE_TOKEN:
         description: 'Fine-grained PAT (Contents:read) for PRIVATE-repo release reads. Required only if any vendor row is `private`. Pass via `secrets: inherit`.'
@@ -64,3 +79,6 @@ jobs:
         with:
           mode: ${{ inputs.sift-mode == 'public' && 'render' || 'comment' }}
           build-status: ${{ job.status == 'success' && 'green' || 'red' }}
+          job: ${{ inputs.sift-job }}
+          baseline: ${{ inputs.sift-baseline }}
+          pr-vs-previous: ${{ inputs.sift-pr-vs-previous }}

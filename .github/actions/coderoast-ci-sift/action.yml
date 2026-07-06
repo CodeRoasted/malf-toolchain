@@ -1,14 +1,26 @@
 name: 'CodeRoast Sift dogfood'
 description: |
   The shared Sift dogfood tail for every CodeRoast CI job — the SAME integration an external Sift user
-  writes (the published `sift-action@v1`). Two modes, one switch:
+  writes (the published `sift-action@v1`), wired to the canonical NAMED-baseline topology
+  (sift-action examples/baselines/ci.yml — "the user is King of the baseline"):
 
-  - `comment` (private / same-repo): diff the build log AND post the sticky comment, in the CI job.
-    Skipped on fork PRs (a read-only token can't post) — a no-op on PRIVATE repos (no forks). This is
-    the simple path.
+  - push to main / tag on main: diff vs the named main baseline (`sift-baseline-main-<job>`), then
+    re-seed it (green-gated — a red build never overwrites the last green).
+  - PR: diff vs the main baseline (the headline sticky comment) AND, opt-out via `pr-vs-previous`,
+    vs the PR's OWN previous run (its own tagged comment, quiet unless significant); then seed the
+    per-PR baseline (`sift-baseline-<job>-pr-<n>`) for the next push.
+
+  Named baselines resolve repo-wide by artifact name, so tag builds (no branch) and PRs (never ran on
+  main) both diff against main's last green — provided SOMETHING seeds the main name (the repo's CI
+  must also run on push:main / tags for the seeding legs to exist).
+
+  Two transport modes, one switch:
+  - `comment` (private / same-repo): diff AND post the sticky comment(s), in the CI job. Skipped on
+    fork PRs (a read-only token can't post) — a no-op on PRIVATE repos (no forks).
   - `render` (public / fork-safe): diff + render the comment body to the `sift-comment` artifact,
-    posting NOTHING. Runs on ALL PRs incl forks (read-only, so it's safe even on fork-controlled code);
-    the privileged `coderoast-sift-post` workflow (`workflow_run`) posts the artifact afterwards.
+    posting NOTHING; the privileged `coderoast-sift-post` workflow (`workflow_run`) posts it. Render
+    keeps a SINGLE diff (vs main) — the render dir holds one body, so the vs-previous nicety is
+    comment-mode only.
 
   ADVISORY GUARANTEE — the caller MUST set `continue-on-error: true` on the step that invokes this
   action (composite-inner `continue-on-error` is not honoured); inner steps use `if: always()` only for
@@ -27,6 +39,24 @@ inputs:
     description: 'Build-log file Sift diffs.'
     required: false
     default: 'build.log'
+  job:
+    description: >-
+      Baseline lineage name for this build job — folds into the named-baseline artifacts
+      (`sift-baseline-main-<job>`, `sift-baseline-<job>-pr-<n>`). Give each job of a multi-job
+      pipeline its own value.
+    required: false
+    default: 'build'
+  baseline:
+    description: >-
+      Override the vs-main baseline SOURCE (sift-action grammar: auto | branch=<name> |
+      artifact=<name> | path=<file> | none). Empty (default) = the named main baseline
+      `artifact=sift-baseline-main-<job>` — the caller stays King of the baseline.
+    required: false
+    default: ''
+  pr-vs-previous:
+    description: 'PRs (comment mode): ALSO diff this build against the PR''s own previous run — its own tagged comment, quiet unless significant. true|false.'
+    required: false
+    default: 'true'
   commit-comment:
     description: 'sift-action commit-comment mode (regression|off|always). comment mode only.'
     required: false
@@ -47,15 +77,54 @@ inputs:
 runs:
   using: composite
   steps:
-    # ── comment mode: diff + post directly (skipped on fork PRs; no-op on private repos) ──
-    - name: Sift — structural diff + comment (advisory)
-      if: ${{ inputs.mode == 'comment' && always() && github.event.pull_request.head.repo.fork != true }}
+    # The one source expression, resolved once: caller override, else the named main baseline.
+    - name: Resolve the baseline source
+      id: source
+      shell: bash
+      env:
+        OVERRIDE: ${{ inputs.baseline }}
+        JOB: ${{ inputs.job }}
+      run: |
+        echo "baseline=${OVERRIDE:-artifact=sift-baseline-main-$JOB}" >> "$GITHUB_OUTPUT"
+
+    # ── comment mode · push/tag: diff vs the main baseline, then re-seed it (green-gated) ──
+    - name: Sift — vs main baseline + re-seed (push/tag)
+      if: ${{ inputs.mode == 'comment' && always() && github.event_name != 'pull_request' }}
+      id: sift-push
+      uses: CodeRoasted/sift-action@v1
+      with:
+        log: ${{ inputs.log }}
+        baseline: ${{ steps.source.outputs.baseline }}
+        baseline-name: sift-baseline-main-${{ inputs.job }}
+        fail-on: ${{ inputs.fail-on }}
+        commit-comment: ${{ inputs.commit-comment }}
+        build-status: ${{ inputs.build-status }}
+        explain: false
+
+    # ── comment mode · PR: ① vs the main baseline (the headline sticky comment) ──
+    - name: Sift — vs main baseline (PR)
+      if: ${{ inputs.mode == 'comment' && always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork != true }}
       id: sift
       uses: CodeRoasted/sift-action@v1
       with:
         log: ${{ inputs.log }}
+        baseline: ${{ steps.source.outputs.baseline }}
+        publish-baseline: never   # the vs-previous step below owns this PR's seeding
         fail-on: ${{ inputs.fail-on }}
         commit-comment: ${{ inputs.commit-comment }}
+        build-status: ${{ inputs.build-status }}
+        explain: false
+
+    # ── comment mode · PR: ② vs this PR's previous run, then seed the per-PR baseline ──
+    - name: Sift — vs previous run of this PR
+      if: ${{ inputs.mode == 'comment' && always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork != true && inputs.pr-vs-previous == 'true' }}
+      uses: CodeRoasted/sift-action@v1
+      with:
+        log: ${{ inputs.log }}
+        baseline: artifact=sift-baseline-${{ inputs.job }}-pr-${{ github.event.number }}
+        baseline-name: sift-baseline-${{ inputs.job }}-pr-${{ github.event.number }}
+        comment-tag: vs-previous-run
+        pr-comment: significant   # quiet unless something moved since the last push
         build-status: ${{ inputs.build-status }}
         explain: false
 
@@ -65,15 +134,19 @@ runs:
       with:
         endpoint: ${{ inputs.courtesy-endpoint }}
         token: ${{ inputs.courtesy-token }}
-        report: ${{ steps.sift.outputs.report-path }}
+        report: ${{ steps.sift.outputs.report-path || steps.sift-push.outputs.report-path }}
 
-    # ── render mode: diff + render to an artifact, NO post (fork-safe; poster comes later) ──
+    # ── render mode: diff + render to an artifact, NO post (fork-safe; the poster follows) ──
+    # Single diff (vs main): the render dir holds one body. On a push:main render run this
+    # ALSO re-seeds the main baseline (green-gated), same as comment mode.
     - name: Sift — structural diff + render (fork-safe; posts nothing)
       if: ${{ inputs.mode == 'render' && always() }}
       uses: CodeRoasted/sift-action@v1
       with:
         log: ${{ inputs.log }}
         mode: render
+        baseline: ${{ steps.source.outputs.baseline }}
+        baseline-name: ${{ github.event_name == 'pull_request' && format('sift-baseline-{0}-pr-{1}', inputs.job, github.event.number) || format('sift-baseline-main-{0}', inputs.job) }}
         build-status: ${{ inputs.build-status }}
 
     - name: Upload the rendered comment (coderoast-sift-post posts it)
