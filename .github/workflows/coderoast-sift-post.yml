@@ -17,6 +17,11 @@ on:
         description: 'The run whose sift-comment artifact to post — the caller passes github.run_id (same-run post).'
         required: true
         type: string
+      runs-on:
+        description: 'Runner label for the post job. Defaults to hosted ubuntu-latest. PUBLIC callers MUST omit it — a self-hosted runner reachable from a public repo fork PR is an RCE. PRIVATE callers pass vars.CI_RUNS_ON (fallback ubuntu-latest) to route to the self-hosted fleet.'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
 
 permissions:
   pull-requests: write   # post/update the sticky comment — the ONLY write this needs
@@ -24,7 +29,7 @@ permissions:
 
 jobs:
   post:
-    runs-on: ${{ vars.CI_RUNS_ON || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runs-on }}
     steps:
       # NO actions/checkout, NO build (see FORBIDDEN). `post` mode downloads the sift-comment artifact
       # from the run and upserts the sticky comment — nothing else.

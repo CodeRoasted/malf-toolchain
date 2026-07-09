@@ -21,6 +21,11 @@ on:
         type: boolean
         required: false
         default: true
+      runs-on:
+        description: 'Runner label for the checks job. Defaults to hosted ubuntu-latest. PUBLIC callers MUST omit it — a self-hosted runner reachable from a public repo fork PR is an RCE. PRIVATE callers pass vars.CI_RUNS_ON (fallback ubuntu-latest) to route to the self-hosted fleet.'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
 
 permissions:
   contents: read
@@ -31,7 +36,7 @@ concurrency:
 
 jobs:
   checks:
-    runs-on: ${{ vars.CI_RUNS_ON || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runs-on }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5

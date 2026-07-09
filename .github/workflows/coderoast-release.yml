@@ -42,6 +42,11 @@ on:
         type: string
         required: false
         default: 'linux-gcc15-release'
+      runs-on:
+        description: 'Runner label for the publish job. Defaults to hosted ubuntu-latest. PUBLIC callers MUST omit it — a self-hosted runner reachable from a public repo fork PR is an RCE. PRIVATE callers pass vars.CI_RUNS_ON (fallback ubuntu-latest) to route to the self-hosted fleet.'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
     secrets:
       CR_RELEASE_TOKEN:
         description: 'PAT (Contents:read) for PRIVATE-repo vendor deps. Required only if any vendor row is `private`.'
@@ -54,7 +59,7 @@ concurrency:
 
 jobs:
   publish:
-    runs-on: ${{ vars.CI_RUNS_ON || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runs-on }}
     permissions:
       contents: write   # create / upload GitHub Releases
     env:
