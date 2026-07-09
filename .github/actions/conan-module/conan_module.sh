@@ -128,29 +128,37 @@ diagnose_crash() {
 }
 
 if [ "$TEST" = "true" ]; then
-  # Build + test in a pipe to tee (pipefail propagates a build/test failure past tee). ulimit lets a
-  # crashing test drop a core so diagnose_crash can post-mortem it — the only reliable capture for a
-  # *flaky* crash (attaching gdb serialises signals and routinely masks the race; a natural-run core
-  # does not). core_pattern is runner-owned (no passwordless sudo); the diagnostic handles both cwd
-  # cores and systemd-coredump.
-  if {
-        ulimit -c unlimited 2>/dev/null || true
-        conan install "$MODULE" \
-          --output-folder="build/$MODULE" \
-          --build=missing \
-          --profile:host="$PROFILE" \
-          --profile:build="$PROFILE" \
-          -s build_type=Release
-        # shellcheck disable=SC2086  # CMAKE_ARGS is intentionally word-split into separate -D flags
-        cmake --preset conan-release -S "$MODULE" -B "build/$MODULE" $CMAKE_ARGS
-        cmake --build "build/$MODULE"
-        # Robust test detection: some modules emit Testing/ but not a top-level CTestTestfile.cmake.
-        if [[ -d "build/$MODULE/Testing" || -f "build/$MODULE/CTestTestfile.cmake" ]]; then
-          ctest --test-dir "build/$MODULE" --output-on-failure
-        fi
-      } 2>&1 | tee -a "$LOG"; then
-    :
-  else
+  # Build + test in a SUBSHELL with `set -e` active, run as a plain pipeline statement (NOT an `if`
+  # condition). Putting the group in an `if`/`&&`/`||` condition DISABLES `set -e` inside it, so an
+  # early failure (conan install unresolved dep, cmake configure, compile) would NOT abort — execution
+  # falls through to the trailing `if … ctest; fi`, which returns 0 when the build dir is absent (the
+  # install failed → no Testing/), and the whole group exits 0, silently GREENING a failed build. That
+  # exact hole let a missing transitive dep pass `ci` green and only fail at publish. `set -e` in the
+  # subshell aborts on the first failing step; PIPESTATUS[0] reads its status past `tee`. ulimit lets a
+  # crashing test drop a core for diagnose_crash — the only reliable capture for a *flaky* crash
+  # (attaching gdb serialises signals and routinely masks the race; a natural-run core does not).
+  # core_pattern is runner-owned (no passwordless sudo); the diagnostic handles cwd + systemd cores.
+  set +e
+  (
+    set -e
+    ulimit -c unlimited 2>/dev/null || true
+    conan install "$MODULE" \
+      --output-folder="build/$MODULE" \
+      --build=missing \
+      --profile:host="$PROFILE" \
+      --profile:build="$PROFILE" \
+      -s build_type=Release
+    # shellcheck disable=SC2086  # CMAKE_ARGS is intentionally word-split into separate -D flags
+    cmake --preset conan-release -S "$MODULE" -B "build/$MODULE" $CMAKE_ARGS
+    cmake --build "build/$MODULE"
+    # Robust test detection: some modules emit Testing/ but not a top-level CTestTestfile.cmake.
+    if [[ -d "build/$MODULE/Testing" || -f "build/$MODULE/CTestTestfile.cmake" ]]; then
+      ctest --test-dir "build/$MODULE" --output-on-failure
+    fi
+  ) 2>&1 | tee -a "$LOG"
+  build_status=${PIPESTATUS[0]}
+  set -e
+  if [ "$build_status" -ne 0 ]; then
     diagnose_crash || true
     exit 1
   fi
