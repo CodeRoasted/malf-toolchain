@@ -79,11 +79,16 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
-        # The profile lives ONCE in this toolchain repo (no per-repo vendored copy). Stage it into
-        # the workspace under .malf-toolchain/ so the cache key below can hash it (hashFiles is
-        # workspace-relative), then it is installed into $CONAN_HOME/profiles in the step after cache.
+        # The profile + global.conf live ONCE in this toolchain repo (no per-repo vendored copy).
+        # Stage both into the workspace under .malf-toolchain/ so the cache key below hashes them
+        # (hashFiles is workspace-relative); they are installed into $CONAN_HOME in the step after
+        # cache. global.conf carries the package_id policy — hashing it means a policy change (e.g.
+        # a package_id mode) BUSTS the binary cache (its package_ids are recomputed anyway), and the
+        # post-cache install below OVERWRITES a stale cached copy. Without this a PERSISTENT/restored
+        # conan home shadows the policy forever (the stale-binary ABI-skew segfault, bugs.md 2026-07-10).
         mkdir -p "$GITHUB_WORKSPACE/.malf-toolchain"
         cp "$ACTION_PATH/../../../profiles/$PROFILE" "$GITHUB_WORKSPACE/.malf-toolchain/$PROFILE"
+        cp "$ACTION_PATH/../../../global.conf" "$GITHUB_WORKSPACE/.malf-toolchain/global.conf"
 
     - name: Cache conan dep binaries (keyed on the dep set + the gcc-15.3 profile)
       uses: actions/cache@v5
@@ -93,7 +98,7 @@ runs:
         restore-keys: |
           conan-gcc153-${{ runner.os }}-
 
-    - name: Install the conan profile into $CONAN_HOME
+    - name: Install the conan profile + global.conf into $CONAN_HOME
       shell: bash
       env:
         PROFILE: ${{ inputs.profile }}
@@ -101,3 +106,7 @@ runs:
         set -euo pipefail
         mkdir -p "$CONAN_HOME/profiles"
         cp "$GITHUB_WORKSPACE/.malf-toolchain/$PROFILE" "$CONAN_HOME/profiles/$PROFILE"
+        # OVERWRITE global.conf from the source of truth — a cache-restored home may carry a stale
+        # copy (seeded before the current policy). This is the CI counterpart of the malf script's
+        # _malf_sync_global_conf; the package_id policy must always match the in-tree global.conf.
+        cp "$GITHUB_WORKSPACE/.malf-toolchain/global.conf" "$CONAN_HOME/global.conf"

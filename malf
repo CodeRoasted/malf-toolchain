@@ -158,6 +158,19 @@ _malf_default_build_root() {
     echo "$1/build-${MALF_DEFAULT_PROFILE#linux-}"
 }
 
+# Sync the in-tree global.conf (the source of truth) into the active CONAN_HOME, OVERWRITING when it
+# differs. The profiles + hooks already re-seed every run; global.conf must too — a PERSISTENT conan
+# home (the self-hosted runner) that was seeded once would otherwise SHADOW a policy change forever
+# (a `package_id` mode change silently never applied → stale-binary ABI skew, superproject bugs.md
+# 2026-07-10). cmp -s keeps it a no-op when already in sync.
+_malf_sync_global_conf() {
+    [[ -f "$MALF_DIR/global.conf" ]] || return 0
+    mkdir -p "$CONAN_HOME"
+    if [[ ! -f "$CONAN_HOME/global.conf" ]] || ! cmp -s "$MALF_DIR/global.conf" "$CONAN_HOME/global.conf"; then
+        cp "$MALF_DIR/global.conf" "$CONAN_HOME/global.conf"
+    fi
+}
+
 # Point CONAN_HOME at a build-type-keyed SUBDIR of the base, then re-seed global.conf + hooks +
 # re-resolve the profiles into it. No-op for the default profile (key == "") — the load-time base
 # seed stands. Call AFTER the profile is resolved (post arg-parse), BEFORE conan install.
@@ -166,7 +179,7 @@ _malf_use_keyed_cache() {
     [[ -z "$key" ]] && return 0
     export CONAN_HOME="$MALF_CONAN_HOME_BASE/$key"
     mkdir -p "$CONAN_HOME/profiles"
-    [[ ! -f "$CONAN_HOME/global.conf" && -f "$MALF_DIR/global.conf" ]] && cp "$MALF_DIR/global.conf" "$CONAN_HOME/global.conf"
+    _malf_sync_global_conf
     # re-resolve the host + clean-build-context profiles INTO the keyed cache (paths live under
     # CONAN_HOME/profiles); preserve any explicit --debug/--release the caller set.
     local _saved_config="$MALF_CONFIG"
@@ -188,11 +201,8 @@ MALF_BUILD_PROFILE="${MALF_BUILD_PROFILE:-$MALF_PROFILE}"
 MALF_ASAN_PROFILE="${MALF_ASAN_PROFILE:-linux-clang21-asan}"
 
 # ─── Conan global.conf / hooks ───────────────────────────────────────────────
-# Seed the local cache's global.conf from malf dir if it doesn't exist yet.
-if [[ ! -f "$CONAN_HOME/global.conf" && -f "$MALF_DIR/global.conf" ]]; then
-    mkdir -p "$CONAN_HOME"
-    cp "$MALF_DIR/global.conf" "$CONAN_HOME/global.conf"
-fi
+# Sync the local cache's global.conf from the in-tree source of truth (overwrite-if-different).
+_malf_sync_global_conf
 
 _malf_install_workspace_hooks() {
     local hooks_dir="$CONAN_HOME/extensions/hooks"
@@ -1793,7 +1803,7 @@ cmd_cut_verify() {
     # ── Dedicated, editable-free clean-export cache (see header) ──────────────
     export CONAN_HOME="${MALF_CUT_VERIFY_CONAN_HOME:-$MALF_CONAN_HOME_BASE/cut-verify}"
     mkdir -p "$CONAN_HOME/profiles"
-    [[ ! -f "$CONAN_HOME/global.conf" && -f "$MALF_DIR/global.conf" ]] && cp "$MALF_DIR/global.conf" "$CONAN_HOME/global.conf"
+    _malf_sync_global_conf
     _malf_apply_profile "$MALF_PROFILE_NAME"      # re-resolve the profile INTO this cache
     _malf_install_workspace_hooks
     rm -f "$CONAN_HOME/editable_packages.json"    # CLEAN-EXPORT invariant: no editables
