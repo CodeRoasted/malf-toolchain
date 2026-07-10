@@ -5,7 +5,7 @@ description: |
   (sift-action examples/baselines/ci.yml — "the user is King of the baseline"):
 
   - push to main / tag on main: diff vs the named main baseline (`sift-baseline-main-<job>`), then
-    re-seed it (green-gated — a red build never overwrites the last green).
+    re-seed it (verdict-gated, four-class — a FAILURE/UNSTABLE/ABORTED build never overwrites the last good).
   - PR: diff vs the main baseline (the headline sticky comment) AND, opt-out via `pr-vs-previous`,
     vs the PR's OWN previous run (its own tagged comment, quiet unless significant); then seed the
     per-PR baseline (`sift-baseline-<job>-pr-<n>`) for the next push.
@@ -32,8 +32,13 @@ inputs:
     description: 'comment (diff + post, private/same-repo) | render (diff + upload the comment artifact for coderoast-sift-post, public/fork-safe).'
     required: false
     default: 'comment'
-  build-status:
-    description: "green|red for the build being diffed — pass e.g. job.status == 'success' && 'green' || 'red'."
+  changed-outcome:
+    description: >-
+      The build's NATIVE CI verdict token, forwarded verbatim to the engine (ADR 0025 —
+      four-class: UNSTABLE never folds to failure). Pass the job.status context value from the
+      dogfood tail (the job's own status IS GitHub's native token at that point). NOTE: no
+      literal expression syntax in this description — expressions in descriptions abort
+      action-load.
     required: true
   log:
     description: 'Build-log file Sift diffs.'
@@ -98,7 +103,7 @@ runs:
         baseline-name: sift-baseline-main-${{ inputs.job }}
         fail-on: ${{ inputs.fail-on }}
         commit-comment: ${{ inputs.commit-comment }}
-        build-status: ${{ inputs.build-status }}
+        changed-outcome: ${{ inputs.changed-outcome }}
         explain: false
 
     # ── comment mode · PR: ① vs the main baseline (the headline sticky comment) ──
@@ -112,7 +117,7 @@ runs:
         publish-baseline: never   # the vs-previous step below owns this PR's seeding
         fail-on: ${{ inputs.fail-on }}
         commit-comment: ${{ inputs.commit-comment }}
-        build-status: ${{ inputs.build-status }}
+        changed-outcome: ${{ inputs.changed-outcome }}
         explain: false
 
     # ── comment mode · PR: ② vs this PR's previous run, then seed the per-PR baseline ──
@@ -125,7 +130,7 @@ runs:
         baseline-name: sift-baseline-${{ inputs.job }}-pr-${{ github.event.number }}
         comment-tag: vs-previous-run
         pr-comment: significant   # quiet unless something moved since the last push
-        build-status: ${{ inputs.build-status }}
+        changed-outcome: ${{ inputs.changed-outcome }}
         explain: false
 
     - name: Dogfood --explain via the courtesy endpoint (optional CodeRoast infra; comment mode)
@@ -147,7 +152,7 @@ runs:
         mode: render
         baseline: ${{ steps.source.outputs.baseline }}
         baseline-name: ${{ github.event_name == 'pull_request' && format('sift-baseline-{0}-pr-{1}', inputs.job, github.event.number) || format('sift-baseline-main-{0}', inputs.job) }}
-        build-status: ${{ inputs.build-status }}
+        changed-outcome: ${{ inputs.changed-outcome }}
 
     - name: Upload the rendered comment (coderoast-sift-post posts it)
       # PRs only — on a push:main run the render step SEEDS the baseline (no sift-comment/ to upload).

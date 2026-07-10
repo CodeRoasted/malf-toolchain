@@ -83,7 +83,7 @@ jobs:
         uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-ci-sift@main
         with:
           mode: ${{ inputs.sift-mode == 'public' && 'render' || 'comment' }}
-          build-status: ${{ job.status == 'success' && 'green' || 'red' }}
+          changed-outcome: ${{ job.status }}   # the NATIVE token — the engine maps it four-class (ADR 0025)
           job: ${{ inputs.sift-job }}
           baseline: ${{ inputs.sift-baseline }}
           pr-vs-previous: ${{ inputs.sift-pr-vs-previous }}
