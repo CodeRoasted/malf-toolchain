@@ -111,10 +111,15 @@ _malf_apply_profile() {
         MALF_BUILD_PROFILE="$MALF_PROFILE"
         MALF_IS_SANITIZER=0
     fi
-    # Export the profile-named editable subdir so recipe layouts resolve a dep's
-    # lib from its OWN profile's build dir (matches _malf_editable_build_dir).
-    # ALWAYS named — the default leg included (build-clang21-libcxx-release).
-    export MALF_EDITABLE_BUILD_DIR="build-$(_malf_build_key)"
+    # The profile-named editable subdir, for malf's OWN build-dir logic (_malf_editable_build_dir /
+    # _malf_build_dir). NOT exported: a recipe's package_info reads this env unconditionally, so a
+    # CROSS-REPO CACHED dep (no editable build tree) would prepend a BOGUS build-<key> path that
+    # becomes <pkg>_DIR and shadows its packaged lib/cmake config → find_package fails (the release
+    # benchmark: editable target + cached cross-repo deps, bugs.md 2026-07-10). Keeping it un-exported
+    # means conan never sees it → recipe LAYOUTS fall back to the profile's user.malf:editable_build_dir
+    # conf (same value, every profile carries it) for the editable case, and cached deps get the clean
+    # lib/cmake path. Matches the cut-verify `unset MALF_EDITABLE_BUILD_DIR` discipline.
+    MALF_EDITABLE_BUILD_DIR="build-$(_malf_build_key)"
 }
 
 # ─── Build-type isolation ([[malf-build-type-isolation]]) ─────────────────────
@@ -189,9 +194,10 @@ _malf_use_keyed_cache() {
 }
 MALF_PROFILE="$(_malf_profile_path)"
 MALF_PROFILE_NAME="$(basename "$MALF_PROFILE")"
-# Editable layouts read this env at conan time; the default path never goes through
-# _malf_apply_profile (which re-exports it for --profile runs), so seed it here.
-export MALF_EDITABLE_BUILD_DIR="build-$(_malf_build_key)"
+# Seed the default-path value (the default profile never goes through _malf_apply_profile). NOT
+# exported — see _malf_apply_profile: conan must not inherit this (cached cross-repo deps' package_info
+# would prepend a bogus build-<key> path → find_package fails); recipe layouts use the profile conf.
+MALF_EDITABLE_BUILD_DIR="build-$(_malf_build_key)"
 # Build-context profile (the tools that DO the building — m4, autoconf, cmake). Defaults
 # to the host profile; --asan points it at a NORMAL profile so sanitizer flags never
 # instrument build tools (an ASan-built m4 breaks libcurl/autotools autoreconf).
