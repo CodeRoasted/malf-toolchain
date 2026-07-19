@@ -1884,6 +1884,16 @@ cmd_cut_verify() {
 }
 
 # ─── Dispatch ────────────────────────────────────────────────────────────────
+
+# Test seam. `source`-ing malf with MALF_SOURCE_ONLY=1 stops HERE, so the pure helpers
+# (_malf_profile_key, _malf_build_key, …) can be exercised without dispatching a command.
+# Placed at the dispatch boundary rather than the top of the file so everything a test
+# might call is already defined — the guard skips the ACTION, never the definitions.
+# Nothing else reads this variable; it is inert in every real invocation.
+if [[ -n "${MALF_SOURCE_ONLY:-}" ]]; then
+    return 0 2>/dev/null || exit 0
+fi
+
 COMMAND="${1:-help}"
 shift || true
 

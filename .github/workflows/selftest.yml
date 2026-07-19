@@ -1,0 +1,42 @@
+name: Selftest
+
+# malf-toolchain's FIRST self-CI. Every other workflow here is a REUSABLE one that other
+# repos call; nothing ever tested this repo's own contents. That is a sharp gap, because
+# `malf` is ~1900 lines of bash that every C++ build in the workspace runs through: a
+# syntax error or a dangling dispatch arm here breaks every repo at once, and bash finds
+# neither until the offending line executes.
+#
+# Deliberately a FLOOR, not coverage — syntax, dispatch integrity, and the profile/build
+# key truth table (which decide which conan cache a build reads and which build-<key>/ tree
+# it writes; getting those wrong is silent, not loud). See tests/test_malf.sh for why each
+# check earns its place.
+#
+# Hosted `ubuntu-latest`: this repo is PUBLIC, and the job needs no secret, no toolchain,
+# no network and no build — it is bash + python3 -m py_compile, and runs in seconds.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: malf-selftest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: malf selftest (syntax + dispatch integrity + profile/build keys)
+        run: bash tests/test_malf.sh
