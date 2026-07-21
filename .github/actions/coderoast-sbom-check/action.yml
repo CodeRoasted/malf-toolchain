@@ -1,0 +1,58 @@
+name: 'CodeRoast SBOM freshness'
+description: >-
+  Re-derive a published CycloneDX SBOM from the RESOLVED conan graph and fail if the committed
+  file has drifted. The SBOM is a projection of the graph, not a claim maintained beside it.
+
+# Why this is a GATE and not a nicety (adr/0038):
+# sbom-cve.yml scans the committed SBOM, so that file's accuracy is the CEILING on our CVE
+# detection — a component it omits is a component no scanner ever looks at. Hand-maintained, it
+# drifted three minors unnoticed: on 2026-07-21 it still named the four pre-adr/0019 packages
+# (insight_detection / insight_explain / insight_engine / insight_diff, none of which exist),
+# pinned first-party at 1.5.4 against an actual 1.8.3, and omitted insight_llm plus the three
+# insight_semantic_* packages. It is now DERIVED by malf/sbom_gen.py; this action is what keeps
+# derived and committed identical.
+#
+# Homed as a composite in malf-toolchain, NOT as an inline run: step in a consumer workflow,
+# because the checker and the lockfile both live in THIS repo and `github.action_path` is what
+# reaches them. A consumer has no malf/ in its workspace (the composites arrive as actions, not
+# as a checkout), so an inline step would reference files that are not there.
+#
+# Run it where the graph is already materialised — i.e. after the package it describes has been
+# built. --check re-resolves the conan graph, so putting it in the deliberately cheap, no-build
+# sbom-cve.yml would turn that scan into a full dependency resolution.
+
+inputs:
+  package-dir:
+    description: 'Path (relative to the workspace) of the package whose graph is resolved.'
+    required: true
+  sbom-path:
+    description: 'Path (relative to the workspace) of the committed CycloneDX SBOM to verify.'
+    required: true
+  profile:
+    description: 'Conan profile name, resolved inside CONAN_HOME/profiles.'
+    required: false
+    default: 'linux-gcc15-release'
+
+runs:
+  using: composite
+  steps:
+    - name: SBOM must match the resolved graph
+      shell: bash
+      env:
+        PACKAGE_DIR: ${{ inputs.package-dir }}
+        SBOM_PATH: ${{ inputs.sbom-path }}
+        PROFILE_NAME: ${{ inputs.profile }}
+        MALF_ROOT: ${{ github.action_path }}/../../..
+      run: |
+        set -euo pipefail
+        lockfile="$MALF_ROOT/conan.lock"
+        args=()
+        # Resolve under the same lockfile the build used, so a drift report can never be an
+        # artefact of this step resolving a DIFFERENT graph than the one that was compiled.
+        [ -f "$lockfile" ] && args+=(--lockfile "$lockfile")
+        python3 "$MALF_ROOT/sbom_gen.py" \
+          --root "$GITHUB_WORKSPACE/$PACKAGE_DIR" \
+          --profile "$CONAN_HOME/profiles/$PROFILE_NAME" \
+          --out "$GITHUB_WORKSPACE/$SBOM_PATH" \
+          "${args[@]}" \
+          --check

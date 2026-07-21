@@ -26,6 +26,23 @@ PROFILE="$CONAN_HOME/profiles/$PROFILE_NAME"
 CMAKE_ARGS="${5:-}"   # extra -D flags for the test-build configure; intentionally word-split below
 LOG="$GITHUB_WORKSPACE/build.log"
 
+# Lockfile args (adr/0038), shared by the install and create phases below so the two can never
+# disagree about which graph they resolved. Third-party recipes require by RANGE
+# (clickhouse-cpp -> lz4/[>=1.9.4 <2], libcurl -> openssl/[>=3 <4]) and conan resolves a range
+# against whatever is reachable at that moment — so without this, two legs of one release can
+# legitimately resolve different dependency versions, and the 5-leg golden compare reds with no
+# diagnosable cause. Absent lockfile => empty array => previous behaviour exactly, so an older
+# caller ref that predates malf/conan.lock still builds.
+LOCKFILE_ARGS=()
+if [ -n "${MALF_LOCKFILE:-}" ] && [ -f "$MALF_LOCKFILE" ]; then
+  LOCKFILE_ARGS+=("--lockfile=$MALF_LOCKFILE")
+  # See the action for why this defaults to partial (pin now, gate later).
+  [ "${MALF_LOCKFILE_PARTIAL:-1}" = "1" ] && LOCKFILE_ARGS+=("--lockfile-partial")
+  echo "conan_module: using lockfile $MALF_LOCKFILE ${LOCKFILE_ARGS[*]}"
+else
+  echo "conan_module: no lockfile (MALF_LOCKFILE=${MALF_LOCKFILE:-unset}) — resolving live"
+fi
+
 # On a failed test phase, capture a backtrace for whatever crashed — at ANY phase: startup (e.g.
 # SIGILL from a library auto-dispatching CPU features beyond the -march baseline), the test body, or
 # *teardown* (a static-destruction / shutdown race that traps after the test already reported PASSED).
@@ -147,6 +164,7 @@ if [ "$TEST" = "true" ]; then
       --build=missing \
       --profile:host="$PROFILE" \
       --profile:build="$PROFILE" \
+      "${LOCKFILE_ARGS[@]}" \
       -s build_type=Release
     # shellcheck disable=SC2086  # CMAKE_ARGS is intentionally word-split into separate -D flags
     cmake --preset conan-release -S "$MODULE" -B "build/$MODULE" $CMAKE_ARGS
@@ -170,6 +188,7 @@ if [ "$CREATE" = "true" ]; then
       --build=missing \
       --build-test=missing \
       --profile:host="$PROFILE" \
-      --profile:build="$PROFILE"
+      --profile:build="$PROFILE" \
+      "${LOCKFILE_ARGS[@]}"
   } 2>&1 | tee -a "$LOG"
 fi

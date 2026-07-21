@@ -87,6 +87,22 @@ runs:
         MODULES: ${{ inputs.modules }}
         PROFILE_NAME: ${{ inputs.profile }}
         CONAN_MODULE: ${{ github.action_path }}/../conan-module/conan_module.sh
+        # Lockfile for the CI graph (adr/0038). NOTE this path does NOT go through malf —
+        # conan_module.sh drives raw `conan install`/`conan create` — so MALF_LOCKFILE_STRICT
+        # would be inert here; the script consumes these two variables instead. Every repo
+        # reaches this action (directly, or via the coderoast-ci.yml reusable workflow), so
+        # this is the ONE place they are set: a per-repo copy is the
+        # [[ci-vendoring-baseline-drift]] failure by construction.
+        MALF_LOCKFILE: ${{ github.action_path }}/../../../conan.lock
+        # PIN now, GATE later — deliberate. Partial pins every ref the lockfile knows (the
+        # primary value: no silent drift between legs) while still allowing a ref the lockfile
+        # has not seen, so this can only make CI more reproducible, never newly red. Strict
+        # (`0`) additionally makes "a dependency entered UNLOCKED" a hard failure — but the CI
+        # graph is `conan create` against real cache packages, whereas the desk is editables,
+        # and that difference is precisely what cannot be rehearsed locally. Since there is no
+        # `push: [main]`, a first strict failure would land at a TAG. Flip to '0' after one
+        # observed-green cut.
+        MALF_LOCKFILE_PARTIAL: '1'
       run: |
         set -euo pipefail
         # Build each declared module in order through the single-sourced per-module logic (shared with
