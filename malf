@@ -394,12 +394,40 @@ _malf_preset() {
     esac
 }
 
+# Workspace lockfile args. The lockfile lives in the MALF repo, not the superproject —
+# CI checks out CodeRoasted/malf-toolchain into malf/ (see insight-eidos golden.yaml /
+# release.yaml) and never checks out the superproject, so malf/ is the only tree that
+# reaches BOTH the desk and every CI leg. Same reasoning that puts global.conf + profiles
+# here. Absent file => no args, so a checkout without it still builds.
+#
+# WHY: third-party recipes require by RANGE (clickhouse-cpp -> lz4/[>=1.9.4 <2],
+# libcurl -> openssl/[>=3 <4], zlib/[>=1.2.11 <2]) and conan resolves a range against the
+# MUTABLE LOCAL CACHE unless --update. So the same recipe resolves differently depending on
+# cache state: measured 2026-07-21, coderoast_infra_clickhouse standalone took lz4/1.10.0
+# while coderoast_server — which LINKS it — took lz4/1.9.4. The openssl twin of that split
+# failed loudly (version conflict, server offline); the lz4 one is silent. The lockfile makes
+# the resolved graph a committed fact instead of a function of when you built.
+#
+# --lockfile-partial is deliberate for the DESK: the lockfile then PINS what it knows and
+# lets a genuinely new dependency resolve, so adding a require does not brick every build
+# until someone refreshes (that is how a lockfile gets disabled in practice). It means the
+# desk lockfile pins rather than GATES. Set MALF_LOCKFILE_STRICT=1 (CI / release legs) to
+# drop --lockfile-partial, turning "a dependency entered unlocked" into a hard red where a
+# red is cheap and attributable.
+_malf_lockfile_args() {
+    [[ -f "$MALF_DIR/conan.lock" ]] || return 0
+    echo "--lockfile=$MALF_DIR/conan.lock"
+    [[ -n "${MALF_LOCKFILE_STRICT:-}" ]] || echo "--lockfile-partial"
+}
+
 _malf_conan_install_args() {
     local build_type="${MALF_CONFIG:-Release}"
+    # shellcheck disable=SC2046
     echo "--build=missing" \
          "--profile:host=$MALF_PROFILE" \
          "--profile:build=$MALF_BUILD_PROFILE" \
-         "-s" "build_type=$build_type"
+         "-s" "build_type=$build_type" \
+         $(_malf_lockfile_args)
 }
 
 _malf_editable_add() {
@@ -1509,6 +1537,111 @@ cmd_editables() {
     esac
 }
 
+# Regenerate malf/conan.lock by ACCUMULATING every workspace root into one lockfile
+# (`conan lock create` chained --lockfile in / --lockfile-out). One file serves every
+# profile: measured 2026-07-21, the clang-21 and gcc-15 lockfiles for coderoast_server are
+# byte-identical (44 requires / 12 build_requires), because `requires` is profile-independent
+# — so per-profile lockfiles would be 9 copies of one fact.
+#
+# First-party editables land WITHOUT a recipe revision, i.e. they float and are resolved from
+# the editable registry, so first-party churn never touches this file. Only third-party is
+# pinned — which is the whole point.
+#
+# By default this locks WHAT WE CURRENTLY BUILD (no --update), so regenerating on a green
+# tree is behaviour-neutral and any later red is attributable to the change that caused it.
+# `--update` resolves ranges against the REMOTES instead (newest), which is how you take
+# upstream movement deliberately — expect a reviewable diff, and re-run the gates.
+# Every SBOM the workspace publishes, as "<package dir>|<sbom path>". These are DERIVED
+# artifacts (malf/sbom_gen.py projects the resolved conan graph) — the hand-maintained
+# predecessor drifted three minors before anyone noticed, and since sbom-cve.yml scans the
+# file, its accuracy is the ceiling on our CVE detection.
+_MALF_SBOM_TARGETS=(
+    "insight-eidos/sift-cli|insight-eidos/sift-cli/sbom.cdx.json"
+)
+
+# `malf sbom` regenerates them; `malf sbom --check` fails if one is stale against the graph,
+# which is the form a CI/release leg wants.
+cmd_sbom() {
+    local check="" rc=0 entry pkg out
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --check) check="--check" ;;
+            *) echo "malf sbom: unknown option $1 (--check)" >&2; exit 1 ;;
+        esac
+        shift
+    done
+    for entry in "${_MALF_SBOM_TARGETS[@]}"; do
+        pkg="${entry%%|*}"; out="${entry##*|}"
+        python3 "$MALF_DIR/sbom_gen.py" \
+            --root "$MALF_WORKSPACE_ROOT/$pkg" \
+            --profile "$MALF_PROFILE" \
+            --lockfile "$MALF_DIR/conan.lock" \
+            --out "$MALF_WORKSPACE_ROOT/$out" \
+            ${check:+$check} || rc=1
+    done
+    return $rc
+}
+
+cmd_lock() {
+    local update="" root
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --update) update="--update" ;;
+            *) echo "malf lock: unknown option $1 (--update)" >&2; exit 1 ;;
+        esac
+        shift
+    done
+
+    local out tmp ok=0 fail=0 failed=()
+    out="$MALF_DIR/conan.lock"
+    tmp="$(mktemp)"; rm -f "$tmp"
+
+    echo "=== malf lock: accumulating every root${update:+ (--update: resolving ranges from REMOTES)} ==="
+    # Reuse the SAME enumeration `editables sync` uses — a second recipe-discovery path here
+    # would drift from it the first time a package is added.
+    while IFS= read -r root; do
+        local args=(--profile:all="$MALF_PROFILE" --lockfile-out="$tmp")
+        [[ -f "$tmp" ]] && args+=(--lockfile="$tmp")
+        [[ -n "$update" ]] && args+=("$update")
+        if conan lock create "$root" "${args[@]}" >/dev/null 2>&1; then
+            ok=$((ok + 1)); printf '  ok    %s\n' "${root#"$MALF_WORKSPACE_ROOT"/}"
+        else
+            fail=$((fail + 1)); failed+=("${root#"$MALF_WORKSPACE_ROOT"/}")
+            printf '  FAIL  %s\n' "${root#"$MALF_WORKSPACE_ROOT"/}"
+        fi
+    done < <(_malf_workspace_packages | cut -f2)
+
+    # A root that fails to resolve is NOT a partial success: its third-party edges would be
+    # silently absent from the lockfile, and an absent entry resolves freely — the exact drift
+    # the lockfile exists to stop. Refuse to install a lockfile that does not cover the tree.
+    if [[ $fail -gt 0 ]]; then
+        echo "malf lock: $fail root(s) failed to resolve — lockfile NOT written:" >&2
+        printf '  - %s\n' "${failed[@]}" >&2
+        rm -f "$tmp"
+        return 1
+    fi
+    mv "$tmp" "$out"
+    echo "=== malf lock: $ok root(s) -> $out ==="
+    python3 - "$out" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+req = d.get("requires", [])
+pinned = [r for r in req if "#" in r]
+print(f"    requires        {len(req):>3}  ({len(pinned)} third-party pinned, "
+      f"{len(req) - len(pinned)} first-party floating)")
+print(f"    build_requires  {len(d.get('build_requires', [])):>3}  (all third-party pinned)")
+multi = {}
+for r in req + d.get("build_requires", []):
+    multi.setdefault(r.split("/")[0], set()).add(r.split("#")[0])
+multi = {k: sorted(v) for k, v in multi.items() if len(v) > 1}
+if multi:
+    print("    NOTE — pinned at MULTIPLE versions (two roots disagree; a link-time skew "
+          "hazard, not a lockfile error):")
+    for k, v in sorted(multi.items()):
+        print(f"      {k}: {', '.join(v)}")
+PY
+}
+
 # Surgically remove STALE first-party conan packages: old-version (and ghost/renamed)
 # binaries of CodeRoast-owned packages left in the cache after a coordinated version bump.
 # They are INERT for malf builds — editables shadow every first-party ref at the current
@@ -2006,6 +2139,8 @@ case "$COMMAND" in
     profiles)         cmd_profiles ;;
     bump)             cmd_bump "$@" ;;
     cut-verify)       cmd_cut_verify "$@" ;;
+    lock)             cmd_lock "$@" ;;
+    sbom)             cmd_sbom "$@" ;;
     run)              cmd_run "$@" ;;
     bin-dir)          cmd_bin_dir "$@" ;;
     help|-h|--help)   cmd_help ;;

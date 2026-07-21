@@ -186,5 +186,22 @@ check "intent_library_codegen --selftest" \
       "ok" "$([[ $selftest_status -eq 0 ]] && echo ok || echo "failed: $(tail -3 <<< "$selftest_output")")"
 
 echo
+
+echo "[7c] sbom_gen carries its own derivation proof (--selftest)"
+
+# sbom_gen projects the resolved conan graph into the SBOM that sbom-cve.yml scans, so its
+# accuracy is the CEILING on our CVE detection — a component it drops is a component no
+# scanner ever looks at. The selftest is offline (no conan, no network) and targets the
+# failure modes that produce a WRONG SBOM rather than a crash: the host/test/build filter,
+# node dedupe (the first cut emitted glaze 4x, once per consumer), the CPE vendor+product
+# mapping (a wrong vendor string silently matches nothing in NVD), and the refusal to invent
+# a CPE for an unmapped package. It also pins that dedupe is by name/VERSION, so a genuine
+# two-version split still surfaces as two rows instead of collapsing to one false answer.
+sbom_selftest_output="$(python3 "$MALF_ROOT/sbom_gen.py" --selftest 2>&1)"
+sbom_selftest_status=$?
+check "sbom_gen --selftest" \
+      "ok" "$([[ $sbom_selftest_status -eq 0 ]] && echo ok || echo "failed: $(tail -3 <<< "$sbom_selftest_output")")"
+
+echo
 echo "malf selftest: $pass_count passed, $fail_count failed"
 [[ $fail_count -eq 0 ]] || exit 1
