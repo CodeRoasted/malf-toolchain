@@ -52,6 +52,33 @@ MALF_WORKSPACE_ROOT="${MALF_WORKSPACE_ROOT:-$(cd "$MALF_DIR/.." && pwd)}"
 MALF_DEFAULT_PROFILE="${MALF_DEFAULT_PROFILE:-linux-clang21-libcxx-release}"
 MALF_AUTO_WORKSPACE_DEPS="${MALF_AUTO_WORKSPACE_DEPS:-1}"
 
+# ─── format guards ───────────────────────────────────────────────────────────
+# clang-format's peak memory scales at several HUNDRED times its input size
+# (measured, clang-format-21: a 1.3 MB file peaks at 1.27 GB RSS, 5.4 MB at
+# 2.52 GB, 10.8 MB aborts past an 8 GB cap, 27 MB does not finish in 2 min).
+# So ONE stray large file carrying a source extension — a vendored blob, a
+# generated table, a dumped model — exhausts the box. Under WSL that does not
+# OOM-kill a single process: the kernel thrashes the swap file until the whole
+# distro dies, taking the session with it (founder, 2026-07-21).
+# Two independent guards, because either alone leaves a hole:
+#   size cap — keeps pathological inputs out of clang-format entirely
+#   address-space cap — bounds the damage when a *small* file formats badly
+# The largest real source file in this workspace is ~99 KB, so the size cap
+# sits ~20x above anything hand-written; the address-space cap sits far above
+# any legitimate need but far below the RAM whose exhaustion kills the box.
+MALF_FORMAT_MAX_FILE_KB="${MALF_FORMAT_MAX_FILE_KB:-2048}"
+MALF_FORMAT_MEM_LIMIT_KB="${MALF_FORMAT_MEM_LIMIT_KB:-4194304}"
+# Files per clang-format process. Bounds the blast radius of a pathological
+# file to its own batch instead of the whole run; ~15 processes for this
+# workspace's 713 files, so the startup cost is noise.
+MALF_FORMAT_BATCH_SIZE="${MALF_FORMAT_BATCH_SIZE:-50}"
+# Directory BASENAMES (glob-matched) pruned from the format walk. Pruned, not
+# filtered: a `-not -path` test still descends into and stats every entry
+# beneath the directory it claims to exclude. Add project-specific dirs via
+# MALF_FORMAT_EXCLUDE_EXTRA rather than editing this baseline.
+MALF_FORMAT_EXCLUDE_DIRS="${MALF_FORMAT_EXCLUDE_DIRS:-build build-* .conan2 .cache .git data node_modules .venv venv third_party vendor _deps}"
+MALF_FORMAT_EXCLUDE_EXTRA="${MALF_FORMAT_EXCLUDE_EXTRA:-}"
+
 # ─── Cache resolution ────────────────────────────────────────────────────────
 # Local cache: workspace-shared .conan2 by default so sibling repos reuse the
 # same internal and third-party packages. Override with CONAN_HOME when you
@@ -1005,16 +1032,42 @@ cmd_format() {
         echo "malf format: copied .clang-format from malf dir"
     fi
 
+    # Prune list → find args. `-name` glob-matches, so `build-*` works as written.
+    local -a prune_args=()
+    local dir_pattern
+    for dir_pattern in $MALF_FORMAT_EXCLUDE_DIRS $MALF_FORMAT_EXCLUDE_EXTRA; do
+        prune_args+=(-name "$dir_pattern" -o)
+    done
+    unset "prune_args[$((${#prune_args[@]} - 1))]"   # drop the trailing -o
+
+    local -a source_globs=(
+        -name "*.cpp" -o -name "*.cxx" -o -name "*.cc"
+        -o -name "*.h" -o -name "*.hpp" -o -name "*.cppm"
+    )
+
+    # A skipped file must be REPORTED, never silently dropped — a silent cap
+    # reads as "formatted everything" when it did not. `! -size -Nk` is the
+    # exact complement of the `-size -Nk` filter below, so nothing falls in a gap.
+    local oversized
+    oversized="$(find "$CWD" \
+        \( -type d \( "${prune_args[@]}" \) -prune \) -o \
+        \( -type f \( "${source_globs[@]}" \) ! -size "-${MALF_FORMAT_MAX_FILE_KB}k" \
+           -printf '  %p (%s bytes)\n' \))"
+    if [[ -n "$oversized" ]]; then
+        echo "malf format: SKIPPED ${MALF_FORMAT_MAX_FILE_KB}KB+ file(s) — clang-format needs ~500x a file's size in RAM:" >&2
+        echo "$oversized" >&2
+        echo "malf format: these are not formatted. Exclude their directory (MALF_FORMAT_EXCLUDE_EXTRA) if they are not source." >&2
+    fi
+
+    # `ulimit -v` applies to the clang-format child, so an overrun aborts the
+    # formatter instead of the machine. Batched (-n) so one pathological file
+    # cannot cost the whole run, and so the surviving output names the culprit.
     find "$CWD" \
-        -not -path "*/build/*" \
-        -not -path "*/build-*/*" \
-        -not -path "*/.conan2/*" \
-        -not -path "*/data/*" \
-        -not -path "*/.cache/*" \
-        \( -name "*.cpp" -o -name "*.cxx" -o -name "*.cc" \
-           -o -name "*.h"  -o -name "*.hpp" -o -name "*.cppm" \) \
-        -type f -print0 \
-    | xargs -0 "$clang_format_bin" "${format_args[@]}"
+        \( -type d \( "${prune_args[@]}" \) -prune \) -o \
+        \( -type f \( "${source_globs[@]}" \) -size "-${MALF_FORMAT_MAX_FILE_KB}k" -print0 \) \
+    | xargs -0 -r -n "$MALF_FORMAT_BATCH_SIZE" \
+        bash -c 'ulimit -v "$0"; exec "$@"' \
+        "$MALF_FORMAT_MEM_LIMIT_KB" "$clang_format_bin" "${format_args[@]}"
 }
 
 _malf_resolve_preset() {
@@ -1576,7 +1629,12 @@ Commands:
     build   [target] [--debug|--release|--asan|--profile <name>]
     test    [target] [--debug|--release|--asan|--profile <name>] [--verbose] [--filter PATTERN]
     lint    [--all-files] [-c|--console]
-    format  [--check]
+    format  [--check]          guarded: files over MALF_FORMAT_MAX_FILE_KB (2048) are skipped and
+                               reported, and each clang-format process is capped at
+                               MALF_FORMAT_MEM_LIMIT_KB (4 GB) of address space — clang-format
+                               needs ~500x a file's size in RAM, so one stray blob with a source
+                               extension can otherwise take the whole machine down. Prune extra
+                               directories with MALF_FORMAT_EXCLUDE_EXTRA="dir1 dir2".
     commands | compile-commands
     bench   [target] [--quick] [--filter REGEX] [--debug|--release|--asan|--profile <name>] [--compare] [--threshold N] [--baseline path]
     clean   [build|conan|editables|stale|all]
