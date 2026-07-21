@@ -173,5 +173,18 @@ for py in "$MALF_ROOT"/*.py; do
 done
 
 echo
+
+echo "[7b] intent_library_codegen carries its own fence proof (--selftest)"
+
+# The codegen tool is the public half of the LogCraft Intent-library soundness fence
+# (teeth 1-4 + the canonicalize-then-hash determinism MUSTs). Unlike the parse-only
+# smoke above, its selftest FALSIFIES every fence predicate on synthetic fixtures —
+# so a fence regression fails here, in the tool's own repo, before any consumer build.
+selftest_output="$(python3 "$MALF_ROOT/intent_library_codegen.py" --selftest 2>&1)"
+selftest_status=$?
+check "intent_library_codegen --selftest" \
+      "ok" "$([[ $selftest_status -eq 0 ]] && echo ok || echo "failed: $(tail -3 <<< "$selftest_output")")"
+
+echo
 echo "malf selftest: $pass_count passed, $fail_count failed"
 [[ $fail_count -eq 0 ]] || exit 1
