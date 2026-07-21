@@ -1823,6 +1823,19 @@ Commands:
                                    release:true package (packages.yml), dep order, clean export —
                                    catches conan-create-only drift (test_package / sibling) before
                                    the tag. --list prints the canonical released set and exits.
+    lock    [--update]             regenerate malf/conan.lock by accumulating EVERY workspace
+                                   root into one lockfile (one file serves all profiles —
+                                   `requires` is profile-independent). Third-party is pinned by
+                                   recipe revision, first-party editables float. Default locks
+                                   what we CURRENTLY build, so it is behaviour-neutral; --update
+                                   re-resolves ranges from the REMOTES (deliberate upstream
+                                   movement — expect a diff, re-run the gates).
+                                   Builds pass --lockfile automatically when the file exists;
+                                   MALF_LOCKFILE_STRICT=1 drops --lockfile-partial so an
+                                   unlocked dependency is a hard error (CI / release legs).
+    sbom    [--check]              regenerate each published CycloneDX SBOM from the RESOLVED
+                                   conan graph (malf/sbom_gen.py). --check writes nothing and
+                                   fails if a committed SBOM has drifted from the graph.
     run     <exe-name> [args...]
     bin-dir [subdir] [--asan|--profile <name>]   print the build-type-keyed build dir for a target
 
