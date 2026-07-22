@@ -1382,9 +1382,31 @@ cmd_compile_commands() {
     _malf_merge_db_tree "$build_root" "${db_dirs[@]}"
 }
 
+# Does this package DECLARE a benchmark target? Answered from SOURCE, before any build.
+#
+# `malf bench` used to answer it from the build OUTPUT — build the package, then look for a
+# *bench* executable and skip if none. Correct, and it pays a full compile for every benchless
+# package in a sweep (llm, fuzz, insight-mcp, sift-cli today) purely to learn there was nothing
+# to run. That was most of the sweep's marginal cost.
+#
+# The predicate is the same one the output check applies, evaluated one step earlier: a bench
+# executable exists iff some CMakeLists declares an `add_executable(<...>bench...)`. Validated
+# against every workspace package before being trusted, and the direction matters — a false
+# POSITIVE only costs the build we already paid, while a false NEGATIVE would silently drop a
+# package's benchmarks. Measured: zero false negatives (every package producing bench exes is
+# detected), and the only "extra" hits are real declarations whose build dir simply had not been
+# built with benchmarks on. The output check below is KEPT as the belt: this is a fast-path skip,
+# never the sole authority.
+_malf_pkg_declares_bench() {
+    local target="$1"
+    find "$target" -name CMakeLists.txt -not -path '*/build*' -not -path '*/.conan2/*' 2>/dev/null \
+        | xargs -r rg -l -i 'add_executable\s*\(\s*[A-Za-z0-9_]*bench' 2>/dev/null \
+        | head -1 | grep -q .
+}
+
 cmd_bench() {
     local subdir="" quick=false filter="" compare=false threshold="0.10" baseline="" extra=()
-    local repetitions="" fwd=()
+    local repetitions="" fwd=() no_build=false
     MALF_CONFIG="Release"
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -1393,6 +1415,11 @@ cmd_bench() {
             --baseline)  baseline="$2"; fwd+=("$1" "$2"); shift ;;
             --repetitions) repetitions="$2"; fwd+=("$1" "$2"); shift ;;
             --quick)     quick=true; fwd+=("$1") ;;
+            # Run the benches that are already built; do NOT compile first. Exists so a caller can
+            # separate the two phases — notably the CI deadlock watchdog, which must time the RUN
+            # only. Wrapping `malf bench` whole makes the watchdog's budget track COMPILE time, so
+            # a slow build reports a "presumed DEADLOCK" that never happened.
+            --no-build)  no_build=true; fwd+=("$1") ;;
             --filter)    filter="$2"; fwd+=("$1" "$2"); shift ;;
             --debug)     MALF_CONFIG="Debug"; fwd+=("$1") ;;
             --release)   MALF_CONFIG="Release"; fwd+=("$1") ;;
@@ -1408,11 +1435,23 @@ cmd_bench() {
     _malf_resolve_target_or_sweep bench "$subdir" "${fwd[@]}"
     local target="$MALF_TARGET"
 
+    # Sweep fast path: skip a benchless package BEFORE paying for its build. Sweep only —
+    # an explicit `malf bench <pkg>` must still reach the hard error below, because you asked
+    # for benches by name and silence would be the wrong answer.
+    if [[ "${MALF_SWEEP:-0}" == "1" ]] && ! _malf_pkg_declares_bench "$target"; then
+        echo "malf bench: $(basename "$target") declares no benchmark target — skipped (not built)"
+        return 0
+    fi
+
     _malf_use_keyed_cache
 
     echo "=== malf bench: $target ($MALF_CONFIG) ==="
 
-    _malf_build_flow "$target"
+    if [[ "$no_build" == true ]]; then
+        echo "malf bench: --no-build — running the benches already present in the build tree"
+    else
+        _malf_build_flow "$target"
+    fi
 
     if [[ ! -f "$target/CMakeLists.txt" ]]; then
         return 0   # content-only: nothing to run either

@@ -73,6 +73,21 @@ runs:
         # checkout and keep resolving from the vendored cache. The old =0 assumed single-package repos
         # (deps always vendored) and broke multi-package benches, whose siblings at the tag cannot be
         # vendored (their release doesn't exist yet — it is being cut).
+        # BUILD FIRST, OUTSIDE the watchdog. The watchdog's budget is a DEADLOCK budget — "no
+        # benchmark should take longer than this to RUN". Wrapping `malf bench` whole made it cover
+        # the compile too, so the timeout tracked build time: a cold cache or a slower runner
+        # reports a "presumed DEADLOCK" for a build that was merely slow, and the budget has to be
+        # re-tuned every time compilation cost moves. Separating the phases makes TIMEOUT mean one
+        # thing again, and it never needs re-tuning for build reasons.
+        build_args=(build)
+        [ -n "$SUBDIR" ] && build_args+=("$SUBDIR")
+        build_args+=(--profile "$PROFILE")
+        env MALF_DEFAULT_PROFILE="$PROFILE" MALF_AUTO_WORKSPACE_DEPS=1 MALF_WORKSPACE_ROOT="$GITHUB_WORKSPACE" \
+          "$MALF" "${build_args[@]}"
+
+        # Then RUN under the watchdog, with --no-build so the compile cannot re-enter the timed
+        # region (malf would otherwise re-run its incremental build flow inside it).
+        args+=(--no-build)
         bash "$ACTION_PATH/bench_watchdog.sh" "$TIMEOUT" -- \
           env MALF_DEFAULT_PROFILE="$PROFILE" MALF_AUTO_WORKSPACE_DEPS=1 MALF_WORKSPACE_ROOT="$GITHUB_WORKSPACE" \
             "$MALF" "${args[@]}"
