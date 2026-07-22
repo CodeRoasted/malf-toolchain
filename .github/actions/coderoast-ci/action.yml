@@ -103,6 +103,13 @@ runs:
         # `push: [main]`, a first strict failure would land at a TAG. Flip to '0' after one
         # observed-green cut.
         MALF_LOCKFILE_PARTIAL: '1'
+        # Build-time codegen reachability, same seam and same reason as the lockfile above:
+        # this path does not go through malf, so malf's own export never reaches it.
+        # logcraft/core's CMake FATALs unless it can find intent_library_codegen.py, and its
+        # fallback -- the sibling <workspace>/malf -- is unreachable under `conan create`,
+        # which builds from sources exported into the conan cache. Without this, every CI
+        # `conan create` of logcraft_core dies at configure with the tool "not found".
+        MALF_TOOLCHAIN_DIR: ${{ github.action_path }}/../../..
       run: |
         set -euo pipefail
         # Build each declared module in order through the single-sourced per-module logic (shared with
