@@ -1,0 +1,63 @@
+# linux-clang22-libcxx-release — clang-22 + libc++-22 + Release. MEASUREMENT profile, not a leg.
+#
+# Purpose: A/B clang-21 vs clang-22 on the concurrent-build ICE (bugs.md 2026-07-22) and on build
+# throughput. Wired into no gate, no determinism leg, no CI workflow — adopting clang-22 is an open
+# decision, and a profile no gate consumes cannot silently become load-bearing.
+#
+# ── TOOLCHAIN IS ROOTLESS ─────────────────────────────────────────────────────────────────────
+# sudo needs the Founder's password here, so clang-22 is unpacked from the apt.llvm.org debs with
+# `dpkg-deb -x` into a scratch prefix and reached through shims. The shims are load-bearing:
+#   * `-B <prefix>/lib` is the ONLY knob that moves `-print-file-name`, which is how CMake finds
+#     `libc++.modules.json` for CXX_MODULE_STD. WITHOUT IT clang-22 silently compiles the SYSTEM
+#     libc++-21's std.cppm — a mixed-stdlib build that COMPILES AND RUNS, so it must be closed at
+#     the driver rather than by convention.
+#   * link-only flags (-L / -Wl,-rpath) are injected ONLY when linking. Adding them to a
+#     compile-only invocation makes clang emit "argument unused during compilation", and any probe
+#     built with -Werror=unused-command-line-argument then fails — meson reported exactly that as
+#     "C compiler does not support C99", one grep away from a misfiled toolchain verdict.
+#   * clang-scan-deps must sit BESIDE the shim; CMake resolves it relative to the compiler.
+#
+# ── BUILD CONTEXT MUST BE gcc ─────────────────────────────────────────────────────────────────
+# pkgconf 2.5.1 cannot compile under clang -std=c99 with glibc >= 2.38 (bsdstubs.c redefines
+# strlcpy/strlcat/strndup, which glibc now declares). Export
+# MALF_BUILD_PROFILE=<...>/malf/profiles/linux-gcc15-release — honoured since malf 11e74d6.
+#
+# ── WHY -Wno-error=unused-result IS HERE — A MEASUREMENT ARTIFACT, NOT A VERDICT ──────────────
+# libc++-22 tripled its [[nodiscard]] surface: 808 occurrences / 216 files -> 2757 / 307, <future>
+# alone 2 -> 25. That is clang-22 doing its JOB — richer diagnostics are a reason to want it, not a
+# cost of it. A discarded `future::get()` is exactly the kind of thing worth being told about.
+#
+# The flag is here for ONE narrow reason: the ICE A/B is only valid if both arms compile the SAME
+# translation units, and clang-21 lacks these annotations entirely. Third-party trantor (a drogon
+# dep) does `fut.get();` in TaskQueue.h:52 and builds with ITS OWN -Werror, so without this the
+# coderoast_server package drops out of the clang-22 arm and that arm silently does less work —
+# which would depress its crash rate for a reason having nothing to do with the compiler.
+# Downgrading the error restores comparability; it hides nothing about clang-22's fitness.
+#
+# On ADOPTION this flag is not needed workspace-wide. The blocker is trantor's own -Werror (a
+# third-party packaging quirk, fixable with a per-package conan conf); the one first-party site,
+# coderoast-server/server/tests/engine/test_engine_websocket.cpp:253, is a test doing `future.get();`
+# to await completion — a (void)-cast there is the honest fix, and the new warning is welcome.
+#
+# Flags otherwise MIRROR linux-clang21-libcxx-release (-O3 -march=x86-64-v2, gnu23, libc++) so the
+# A/B measures the COMPILER and nothing else. `-lc++abi` is the one addition: the unpacked libc++
+# does not pull its own abi library the way the apt-installed one does.
+[settings]
+arch=x86_64
+build_type=Release
+compiler=clang
+compiler.version=22
+compiler.cppstd=gnu23
+compiler.libcxx=libc++
+os=Linux
+
+[buildenv]
+CC=/tmp/claude-1000/-home-windows-workspace-coderoast/63d0d68a-7d71-49a4-a891-df15740da8d0/scratchpad/bin/clang-22
+CXX=/tmp/claude-1000/-home-windows-workspace-coderoast/63d0d68a-7d71-49a4-a891-df15740da8d0/scratchpad/bin/clang++-22
+
+[conf]
+tools.build:cflags=["-O3", "-march=x86-64-v2"]
+tools.build:cxxflags=["-O3", "-march=x86-64-v2", "-stdlib=libc++", "-Wno-error=unused-result"]
+tools.build:exelinkflags=["-stdlib=libc++", "-lc++abi"]
+tools.build:sharedlinkflags=["-stdlib=libc++", "-lc++abi"]
+user.malf:editable_build_dir=build-clang22-libcxx-release
