@@ -158,7 +158,15 @@ _malf_apply_profile() {
         MALF_BUILD_PROFILE="$(MALF_PROFILE_NAME="${MALF_CLEAN_BUILD_PROFILE:-linux-gcc15-release}" _malf_profile_path)"
         MALF_IS_SANITIZER=1
     else
-        MALF_BUILD_PROFILE="$MALF_PROFILE"
+        # An EXPLICIT MALF_BUILD_PROFILE wins. Sanitizers are not the only reason the tool
+        # context must differ from the host one: a NEW/UNRELEASED host toolchain has to build
+        # the whole tool closure too, and a build tool can simply fail under it for reasons
+        # that say nothing about the target. Measured 2026-07-22: pkgconf 2.5.1 cannot compile
+        # under clang -std=c99 with glibc >= 2.38 — bsdstubs.c redefines strlcpy/strlcat/strndup
+        # as static, which glibc now declares — so evaluating a candidate compiler died on a
+        # BUILD TOOL before reaching a single line of first-party code. Without this override the
+        # only escape was a sanitizer flag the profile must not carry.
+        MALF_BUILD_PROFILE="${MALF_BUILD_PROFILE:-$MALF_PROFILE}"
         MALF_IS_SANITIZER=0
     fi
     # The profile-named editable subdir, for malf's OWN build-dir logic (_malf_editable_build_dir /
