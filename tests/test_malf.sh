@@ -203,5 +203,77 @@ check "sbom_gen --selftest" \
       "ok" "$([[ $sbom_selftest_status -eq 0 ]] && echo ok || echo "failed: $(tail -3 <<< "$sbom_selftest_output")")"
 
 echo
+
+echo "[7d] _malf_with_build_lock serializes concurrent runs on ONE build tree"
+
+# Two malf runs started from different repo roots resolve the same conan editables and so run
+# ninja in the SAME build dir, writing the same module BMIs. ninja takes no lock; without one in
+# malf the loser reads a half-written BMI, which surfaces as a clang ICE in
+# ASTReader::FindExternalVisibleDeclsByName or "malformed or corrupted precompiled file"
+# (bugs.md 2026-07-22). The lock is therefore load-bearing, and these are its four properties.
+lock_tmp="$(mktemp -d)"
+trap 'rm -rf "$lock_tmp"' EXIT
+# Extract the function under test from malf itself, so this tests the SHIPPED code, not a copy.
+lock_fn="$(sed -n '/^_malf_with_build_lock() {/,/^}/p' "$MALF_BIN")"
+cat > "$lock_tmp/probe.sh" <<PROBE
+#!/usr/bin/env bash
+set -euo pipefail
+$lock_fn
+critical() {
+    # Deliberately NON-atomic read-modify-write, so an interleaving is detectable rather than
+    # merely improbable: without the lock the updates collide and the counter loses increments.
+    local v; v="\$(cat "\$1/counter")"
+    sleep 0.2
+    echo \$((v + 1)) > "\$1/counter"
+}
+_malf_with_build_lock "\$1" critical "\$1"
+PROBE
+chmod +x "$lock_tmp/probe.sh"
+
+# (a) mutual exclusion: 6 concurrent runs on one tree must produce exactly 6 increments.
+mkdir -p "$lock_tmp/tree"; echo 0 > "$lock_tmp/tree/counter"
+for _ in 1 2 3 4 5 6; do "$lock_tmp/probe.sh" "$lock_tmp/tree" 2>/dev/null & done; wait
+check "build lock — 6 concurrent runs on one tree do not interleave" \
+      "6" "$(cat "$lock_tmp/tree/counter")"
+
+# (b) the ANTI-VACUITY leg: the same probe WITHOUT the lock must lose updates. If this ever
+# reports 6 the probe has stopped being able to detect a race, and (a) proves nothing.
+echo 0 > "$lock_tmp/tree/counter"
+for _ in 1 2 3 4 5 6; do MALF_BUILD_LOCK=0 "$lock_tmp/probe.sh" "$lock_tmp/tree" 2>/dev/null & done; wait
+check "build lock — opt-out DOES race (proves the probe can fail)" \
+      "raced" "$([[ "$(cat "$lock_tmp/tree/counter")" -lt 6 ]] && echo raced || echo "no-race: $(cat "$lock_tmp/tree/counter")")"
+
+# (c) stderr must SURVIVE the lock. `exec {fd}>file 2>/dev/null` would apply the redirection to
+# the SHELL and silence every later compiler diagnostic — a silent-failure regression that no
+# other check here would catch, because the build would still succeed and still look clean.
+cat > "$lock_tmp/err.sh" <<PROBE
+#!/usr/bin/env bash
+set -euo pipefail
+$lock_fn
+emit() { echo "DIAGNOSTIC" >&2; }
+_malf_with_build_lock "\$1" emit
+echo "AFTER" >&2
+PROBE
+chmod +x "$lock_tmp/err.sh"
+mkdir -p "$lock_tmp/errtree"
+check "build lock — stderr survives (no shell-wide 2>/dev/null)" \
+      "DIAGNOSTIC AFTER" \
+      "$("$lock_tmp/err.sh" "$lock_tmp/errtree" 2>&1 >/dev/null | tr '\n' ' ' | sed 's/ $//')"
+
+# (d) the exit code of the guarded command must propagate, or a failed build reads as success.
+cat > "$lock_tmp/rc.sh" <<PROBE
+#!/usr/bin/env bash
+set -euo pipefail
+$lock_fn
+boom() { return 7; }
+rc=0; _malf_with_build_lock "\$1" boom || rc=\$?
+echo "\$rc"
+PROBE
+chmod +x "$lock_tmp/rc.sh"
+mkdir -p "$lock_tmp/rctree"
+check "build lock — guarded command's exit code propagates" \
+      "7" "$("$lock_tmp/rc.sh" "$lock_tmp/rctree" 2>/dev/null)"
+
+echo
 echo "malf selftest: $pass_count passed, $fail_count failed"
 [[ $fail_count -eq 0 ]] || exit 1

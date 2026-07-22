@@ -522,9 +522,70 @@ _malf_dependency_cmake_args() {
     _malf_cmake_feature_args "$1" OFF OFF
 }
 
+# ── Concurrent-run safety: two malf runs may not build ONE tree at the same time ──
+#
+# Two malf runs started from DIFFERENT repo roots resolve the SAME conan editables, so both run
+# ninja in the SAME build directory and write the same module BMIs. ninja takes no lock and neither
+# did malf, so the loser reads a half-written BMI. Measured 2026-07-22 (bugs.md): `malf test` in
+# insight-eidos alongside `malf test` in coderoast-server share **seven** editable trees, and the
+# overlap produced a clang ICE in `ASTReader::FindExternalVisibleDeclsByName` and
+# `malformed or corrupted precompiled file: can't skip to bit N from M`. That is two terminals in
+# two repos — the normal case, not an exotic one — and it fails as SILENT CORRUPTION rather than a
+# clean error, which is why it must be enforced here instead of by a "don't do that" convention.
+#
+# Scope is the BUILD DIRECTORY, not the package: runs touching disjoint trees still proceed fully
+# in parallel, and only the genuine overlap serializes.
+#
+# LOCKS ARE NEVER NESTED, and that is what makes deadlock impossible: `_malf_build_flow` lets
+# `_malf_bootstrap_workspace_deps` finish first (each dep locks and releases inside
+# `_malf_build_editable_package`) and only then takes its own target lock. **Do not hoist a lock
+# around the bootstrap** — two runs whose dependency orders differ would then deadlock.
+#
+# RESIDUAL, stated rather than hidden: the lock keys on the build dir, so two runs of the same
+# package under DIFFERENT profiles do not serialize. They write different trees, but they share
+# `CMakeUserPresets.json` in the source dir (backup/rewrite/restore, inside the lock here so the
+# same-profile case is covered). That window is unmeasured and narrower than the one being closed;
+# widening the key to the package dir would serialize legitimate multi-profile work and would put a
+# lock file in a git-tracked source dir.
+_malf_with_build_lock() {
+    local build_dir="$1"; shift
+    local rc=0
+    # Opt-out + graceful degradation: an environment with no flock still builds, just unserialized.
+    if [[ "${MALF_BUILD_LOCK:-1}" == "0" ]] || ! command -v flock >/dev/null 2>&1; then
+        "$@" || rc=$?
+        return $rc
+    fi
+    local lock_fd
+    # The lock file lives INSIDE the tree it guards: the directory path IS the identity, and a lock
+    # kept elsewhere can be cleaned out from under a held lock (new inode -> no exclusion at all).
+    # If the build dir is gone the resource is gone too, so co-locating cannot lose. Every real
+    # build dir is already gitignored (build*/), so this adds no untracked-file noise.
+    local lock_file="$build_dir/.malf-build.lock"
+    # Probe writability with a SIMPLE command, never `exec {fd}>file 2>/dev/null`. A redirection-only
+    # `exec` applies its redirections to THE SHELL, so a trailing 2>/dev/null there does not guard the
+    # open — it silences stderr for the entire rest of the run, swallowing every compiler diagnostic
+    # that follows. Measured while building this: all stderr after the lock vanished, errors included.
+    if ! : > "$lock_file" 2>/dev/null; then
+        echo "malf: warning: cannot create $lock_file — building unserialized" >&2
+        "$@" || rc=$?
+        return $rc
+    fi
+    exec {lock_fd}>"$lock_file"
+    if ! flock -n "$lock_fd"; then
+        echo "malf: another malf run is building $build_dir — waiting for it (MALF_BUILD_LOCK=0 opts out)" >&2
+        # Blocking, with no timeout, ON PURPOSE: serializing is the whole point, a legitimate build
+        # can run 20+ minutes, and the never-nested rule above means this cannot deadlock.
+        flock "$lock_fd" || echo "malf: warning: could not lock $build_dir — proceeding unserialized" >&2
+    fi
+    "$@" || rc=$?
+    # Release here rather than at process exit, so a sweep holds each tree only for its own build.
+    exec {lock_fd}>&-
+    return $rc
+}
+
 _malf_build_editable_package() {
     local pkg_dir="$1"
-    local build_dir pkg_ref user_presets_backup
+    local build_dir pkg_ref
     pkg_ref="$(_malf_pkg_ref "$pkg_dir/conanfile.py")"
     # Content-only packages (a conanfile but no CMakeLists.txt — e.g. a scenario/data corpus that
     # ships files via cpp_info.resdirs) are NOT CMake projects. Consumers read them straight from the
@@ -537,6 +598,17 @@ _malf_build_editable_package() {
     mkdir -p "$build_dir"
 
     echo "malf: building editable $pkg_ref in $build_dir"
+
+    _malf_with_build_lock "$build_dir" _malf_build_editable_package_locked "$pkg_dir" "$build_dir"
+}
+
+# The guarded half of the editable build. Split out so the whole conan-install + configure + build
+# + presets backup/restore sequence sits inside ONE lock hold, rather than the build alone: the
+# presets rewrite targets the shared source dir and must not interleave either.
+_malf_build_editable_package_locked() {
+    local pkg_dir="$1"
+    local build_dir="$2"
+    local user_presets_backup
 
     user_presets_backup="$(_malf_backup_user_presets "$pkg_dir")"
 
@@ -746,8 +818,19 @@ _malf_build_flow() {
     build_dir="$(_malf_build_dir "$target")"
     mkdir -p "$build_dir"
 
+    # DELIBERATELY OUTSIDE the target lock below. Each dependency takes and releases its own
+    # build-dir lock inside _malf_build_editable_package, so no run ever holds two locks at once —
+    # the property that makes the scheme deadlock-free. Hoisting the lock to cover this call would
+    # break it the moment two runs disagreed on dependency order.
     _malf_bootstrap_workspace_deps "$target"
 
+    _malf_with_build_lock "$build_dir" _malf_build_flow_locked "$target" "$build_dir"
+}
+
+# The guarded half of the target build — see _malf_with_build_lock for why this is serialized.
+_malf_build_flow_locked() {
+    local target="$1"
+    local build_dir="$2"
     local user_presets_backup rc=0
     user_presets_backup="$(_malf_backup_user_presets "$target")"
     # Conan writes CMakeUserPresets.json to the source dir with multiple includes,
