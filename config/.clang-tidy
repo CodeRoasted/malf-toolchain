@@ -67,6 +67,22 @@ CheckOptions:
   - key: modernize-use-uniform-initialization.UseAssignment
     value: 'false'
 
+  # Cognitive-complexity bar is DELIBERATELY the default 25 (Founder + Argos policy call,
+  # 2026-07-23), made explicit so it is a CHOSEN standard rather than an inherited default,
+  # and so there is one place to tune. This is a readability-* check → a warning, NOT in
+  # WarningsAsErrors, so it never blocks a build. Handle a finding by TRIAGE, never by raising
+  # this number to silence it: a genuinely sprawling function is refactored (single
+  # responsibility, root CLAUDE.md); a legitimately-complex algorithmic / hot-path function
+  # whose split would fragment a coherent routine gets a SAME-LINE
+  # `// NOLINT(readability-function-cognitive-complexity): <reason>` (same-line, per the
+  # waiver-anchor-rot rule in logcraft/technical_docs/operations/modules_tooling.md). The bar
+  # stays open to revision, but only against DATA: if the finding distribution shows scores
+  # inflated by idiomatic macros (LOG/assert one-liners) rather than real control flow, the
+  # right lever is `IgnoreMacros: 'true'`, decided against the actual findings — not a raised
+  # Threshold, which would silence genuinely-too-complex functions to accommodate a few.
+  - key: readability-function-cognitive-complexity.Threshold
+    value: '25'
+
 WarningsAsErrors: >
   bugprone-*,
   performance-*,
