@@ -1438,6 +1438,25 @@ cmd_compile_commands() {
         # Register/build the editable workspace deps this package needs.
         _malf_bootstrap_workspace_deps "$subdir"
 
+        # CROSS-PACKAGE MODULES: fold each editable workspace dep's build DB in too.
+        # clangd builds its OWN BMI for every imported module, and to build one it needs
+        # that module's SOURCE unit (.cppm) present in the compile DB. A cross-package
+        # import (`import insight.canon;` in an eidos file) has its .cppm in a SIBLING
+        # repo, absent from this repo-scoped DB — so clangd fails to build the module and
+        # reports EVERY symbol from it as unresolved. That is the false-positive flood that
+        # makes named modules unusable in the editor (measured 2026-07-23: eidos's DB held
+        # 0 of canon/metalog/logcraft's module units; clangd-21 --check on engine.cppm:
+        # "Failed to build module insight.canon; Don't get the module unit"). The deps are
+        # already built just above, so their build dirs carry exactly those units — merge
+        # them. rglob in the merge dedups by file, so overlapping deps across members are
+        # harmless.
+        local _dep_ref _dep_dir _dep_build
+        while IFS=$'\t' read -r _dep_ref _dep_dir; do
+            [[ -n "$_dep_dir" ]] || continue
+            _dep_build="$(_malf_editable_build_dir "$_dep_dir")"
+            [[ -d "$_dep_build" ]] && db_dirs+=("$_dep_build")
+        done < <(_malf_workspace_dep_entries "$subdir")
+
         # test_package (if any) -> its own compile_commands.json.
         if [[ -f "$subdir/test_package/CMakeLists.txt" ]]; then
             _malf_configure_test_package "$subdir" "$subdir_build/test_package"
