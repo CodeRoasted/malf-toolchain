@@ -1155,9 +1155,21 @@ cmd_lint() {
 _malf_prune_args() {
     local -a out=()
     local dir_pattern
+    # Split MALF_SOURCE_EXCLUDE_DIRS on whitespace but WITHOUT pathname expansion. A pattern
+    # like `build-*` must reach `find -name` as the literal glob; unquoted here it instead
+    # globs against the CWD, resolving to only the build dirs that sit at the CWD ROOT
+    # (e.g. build-clang21-libcxx-release) and MISSING profile-variant build dirs in
+    # SUB-packages (detection/build-clang21-asan). find then descends into those and hands
+    # clang-tidy/clang-format the CMake compiler-probe TUs (CMakeCXXCompilerId.cpp) — spurious
+    # findings, and on a module TU an ASTReader crash. `"$@"` is already-quoted array words,
+    # unaffected by noglob. Measured 2026-07-23: 4 CMakeCXXCompilerId.cpp leaked into a
+    # `lint --all-files` before this, 0 after.
+    local _had_noglob=1; [[ -o noglob ]] || _had_noglob=0
+    set -f
     for dir_pattern in $MALF_SOURCE_EXCLUDE_DIRS "$@"; do
         out+=(-name "$dir_pattern" -o)
     done
+    (( _had_noglob )) || set +f
     unset "out[$((${#out[@]} - 1))]"   # drop the trailing -o
     printf '%s\0' "${out[@]}"
 }

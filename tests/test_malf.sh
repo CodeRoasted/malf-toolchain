@@ -275,5 +275,34 @@ check "build lock — guarded command's exit code propagates" \
       "7" "$("$lock_tmp/rc.sh" "$lock_tmp/rctree" 2>/dev/null)"
 
 echo
+
+echo "[7e] _malf_prune_args splits exclude dirs WITHOUT globbing them"
+
+# MALF_SOURCE_EXCLUDE_DIRS carries `build-*`, which must reach `find -name` as a literal glob.
+# If it is expanded unquoted it globs against the CWD, resolving to only the build dirs at the
+# CWD root and MISSING profile-variant build dirs in sub-packages — find then descends into them
+# and hands clang-tidy/clang-format CMake compiler-probe TUs (spurious findings; ASTReader crash
+# on a module TU). This builds a tree where the buggy glob would miss `pkg/build-clang21-asan`
+# (the CWD root carries a DIFFERENT build dir, so `build-*` globs to that and not to the one in
+# the sub-package) and asserts the prune still excludes it.
+prune_tmp="$(mktemp -d)"   # cleaned inline below (a second `trap ... EXIT` would REPLACE [7d]'s)
+mkdir -p "$prune_tmp/pkg/build-clang21-asan/CMakeFiles" "$prune_tmp/pkg/src" "$prune_tmp/build-gcc15-release"
+: > "$prune_tmp/pkg/build-clang21-asan/CMakeFiles/probe.cpp"   # must be pruned
+: > "$prune_tmp/pkg/src/real.cpp"                              # must be kept
+prune_fn="$(sed -n '/^_malf_prune_args() {/,/^}/p' "$MALF_BIN")"
+prune_out="$(cd "$prune_tmp" && bash -c "
+    set -uo pipefail
+    MALF_SOURCE_EXCLUDE_DIRS='build build-* .git'
+    $prune_fn
+    mapfile -d '' -t p < <(_malf_prune_args)
+    find \"\$PWD\" \\( -type d \\( \"\${p[@]}\" \\) -prune \\) -o \\( -type f -name '*.cpp' -print \\)
+")"
+check "prune excludes sub-package build-* dir (glob-safe)" \
+      "kept+pruned" \
+      "$([[ "$prune_out" == *real.cpp* && "$prune_out" != *probe.cpp* ]] && echo 'kept+pruned' \
+         || echo "LEAK: $(printf '%s' "$prune_out" | tr '\n' ' ')")"
+rm -rf "$prune_tmp"
+
+echo
 echo "malf selftest: $pass_count passed, $fail_count failed"
 [[ $fail_count -eq 0 ]] || exit 1
