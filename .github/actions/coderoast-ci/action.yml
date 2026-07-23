@@ -94,15 +94,15 @@ runs:
         # this is the ONE place they are set: a per-repo copy is the
         # [[ci-vendoring-baseline-drift]] failure by construction.
         MALF_LOCKFILE: ${{ github.action_path }}/../../../conan.lock
-        # PIN now, GATE later — deliberate. Partial pins every ref the lockfile knows (the
-        # primary value: no silent drift between legs) while still allowing a ref the lockfile
-        # has not seen, so this can only make CI more reproducible, never newly red. Strict
-        # (`0`) additionally makes "a dependency entered UNLOCKED" a hard failure — but the CI
-        # graph is `conan create` against real cache packages, whereas the desk is editables,
-        # and that difference is precisely what cannot be rehearsed locally. Since there is no
-        # `push: [main]`, a first strict failure would land at a TAG. Flip to '0' after one
-        # observed-green cut.
-        MALF_LOCKFILE_PARTIAL: '1'
+        # GATE (strict). Flipped '1' (pin) → '0' (gate) at the 1.8.4 head, after v1.8.3 was the
+        # first observed-green cut (adr/0038 §Consequences). Strict drops --lockfile-partial, so
+        # "a dependency entered UNLOCKED" is now a hard failure — cheap and attributable. The
+        # residual risk stands and is accepted knowingly: the CI graph is `conan create` against
+        # real cache packages while the desk is editables, and that difference cannot be rehearsed
+        # locally; with no `push: [main]` the first strict run lands at the 1.8.4 tag, where a red
+        # is the checkpoint working and is fixed forward. The lockfile was refreshed in the same
+        # pass (`malf lock --update`), so it covers every ref the current graph resolves.
+        MALF_LOCKFILE_PARTIAL: '0'
         # Build-time codegen reachability, same seam and same reason as the lockfile above:
         # this path does not go through malf, so malf's own export never reaches it.
         # logcraft/core's CMake FATALs unless it can find intent_library_codegen.py, and its
