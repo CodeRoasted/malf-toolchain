@@ -1076,6 +1076,44 @@ cmd_lint() {
         files=("${lintable[@]}")
     fi
 
+    # DB-completeness filter. clang-tidy replays each file's command from the compile DB; a file
+    # ABSENT from the DB gets clang-tidy's flag-less fallback, which on a module TU cannot find
+    # `import std`, the third-party -isystem headers (glaze/curl), or the module BMIs — yielding a
+    # FLOOD of clang-diagnostic-error that looks like real findings but is pure DB miss. Measured
+    # 2026-07-23: an incremental-build DB held 0 sift-cli entries, so `lint --all-files` reported
+    # 293 phantom errors that vanished once `malf commands` regenerated the full DB. So: lint only
+    # files the DB actually knows, and REPORT the rest with the fix (no silent coverage gap — the
+    # no-silent-caps rule). Skipped only when we HAVE a DB; with none, clang-tidy's own context
+    # note already fired above and every file goes through as before.
+    if [[ -n "$comp_db" && -f "$comp_db/compile_commands.json" ]]; then
+        local -A _db_files=()
+        local _dbf
+        while IFS= read -r _dbf; do [[ -n "$_dbf" ]] && _db_files["$_dbf"]=1; done < <(
+            python3 -c "import json,sys; [print(e['file']) for e in json.load(open(sys.argv[1]))]" \
+                "$comp_db/compile_commands.json" 2>/dev/null)
+        if [[ ${#_db_files[@]} -gt 0 ]]; then
+            local -a _in_db=() _missing_tu=()
+            local _rf
+            for _f in "${files[@]}"; do
+                _rf="$(realpath -e "$_f" 2>/dev/null || echo "$_f")"
+                if [[ -n "${_db_files[$_rf]:-}" ]]; then
+                    _in_db+=("$_f")
+                elif [[ "$_f" == *.h || "$_f" == *.hpp ]]; then
+                    : # A header has no own compile command and never appears in the DB; it is
+                      # linted TRANSITIVELY via header-filter when a TU that includes it is checked.
+                      # Dropping it here is not a coverage gap, so it is silent (not a "missing TU").
+                else
+                    _missing_tu+=("$_f")   # a TU absent from the DB IS a real gap (unbuilt package)
+                fi
+            done
+            if [[ ${#_missing_tu[@]} -gt 0 ]]; then
+                echo "malf lint: ${#_missing_tu[@]} translation unit(s) NOT in the compile DB — skipped (run 'malf commands' to index them, or build their package):" >&2
+                printf '  %s\n' "${_missing_tu[@]#"$CWD"/}" >&2
+            fi
+            files=("${_in_db[@]}")
+        fi
+    fi
+
     if [[ ${#files[@]} -eq 0 ]]; then
         echo "malf lint: no files to check"
         return 0

@@ -42,6 +42,17 @@ Checks:
   - -hicpp-braces-around-statements
   - -bugprone-easily-swappable-parameters
 
+  # CRASHES the tool on our module code — not a style choice.
+  # cppcoreguidelines-owning-memory reliably SIGSEGVs clang-tidy-21 (then hangs
+  # symbolizing its own stack, so a timeout reads as "slow"): its ASTMatcher dies
+  # matching a LambdaExpr inside libc++'s <string> that `import std` pulls into every
+  # TU's AST (reproduced on fuzz/src/parse_fuzzer.cpp, 2026-07-23). A check that
+  # aborts gives ZERO coverage, so disabling it removes nothing. It is also swept in
+  # by cppcoreguidelines-* (never deliberately chosen) and near-vacuous here: it needs
+  # gsl::owner<> annotations to be meaningful and the workspace has ZERO of them (RAII
+  # is enforced, CLAUDE.md). Re-evaluate if a fixed clang-tidy lands AND we adopt owner<>.
+  - -cppcoreguidelines-owning-memory
+
   # Toolchain / irrelevant ecosystems
   - -fuchsia-*
   - -llvm-*
