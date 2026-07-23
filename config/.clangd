@@ -33,44 +33,22 @@ Diagnostics:
   # real format errors still surface at compile time on the CI matrix.
   Suppress:
     - invalid_consteval_call
-  ClangTidy:
-    Add:
-      - "*"
-    Remove:
-      # modules: a non-exported helper in a NAMED namespace already has module linkage
-      # (internal, not exported, NOT TU-local). This check pushes static/anon-ns = TU-local,
-      # which makes inline interface templates that use it ill-formed (exposes TU-local entity).
-      - misc-use-internal-linkage
-      - altera-struct-pack-align
-      - altera-unroll-loops
-      - cppcoreguidelines-pro-type-member-init
-      - cppcoreguidelines-pro-bounds-pointer-arithmetic
-      - cppcoreguidelines-pro-bounds-constant-array-index
-      - fuchsia-default-arguments-calls
-      - fuchsia-default-arguments-declarations
-      - fuchsia-overloaded-operator
-      - fuchsia-statically-constructed-objects
-      - fuchsia-trailing-return
-      - llvm-header-guard
-      - llvmlibc-callee-namespace
-      - llvmlibc-implementation-in-namespace
-      - llvmlibc-inline-function-decl
-      - llvmlibc-restrict-system-libc-headers
-      - llvm-include-order
-      - misc-non-private-member-variables-in-classes
-      - modernize-use-trailing-return-type
-      - readability-isolate-declaration
-      - readability-braces-around-statements
-      - google-readability-braces-around-statements
-      - hicpp-braces-around-statements
-      - bugprone-easily-swappable-parameters
-      - cppcoreguidelines-avoid-magic-numbers
-      - hicpp-avoid-c-arrays
-      - cppcoreguidelines-avoid-c-arrays
-      - cppcoreguidelines-pro-bounds-array-to-pointer-decay
-    CheckOptions:
-      misc-non-private-member-variables-in-classes.PrivateMemberSuffix: "_"
-      modernize-use-uniform-initialization.UseAssignment: "false"
+  # clang-tidy CHECK SELECTION is deliberately NOT configured here. clangd reads the
+  # sibling .clang-tidy (the gate) and uses its Checks + CheckOptions VERBATIM when this
+  # file adds no ClangTidy.Add/Remove — verified: with none, clangd runs exactly the gate's
+  # five families (bugprone/performance/modernize/readability/cppcoreguidelines) and honours
+  # its disables. The gate is the SINGLE SOURCE OF TRUTH; add or drop a check by editing
+  # .clang-tidy, never by re-diverging here.
+  #
+  # This block previously did `Add: ["*"]` then a long Remove:, which made the IDE a strict
+  # SUPERSET of the gate — every gate finding PLUS whole families the gate never runs
+  # (google-*, misc-*, cert-*, clang-analyzer-*, …) as phantom squiggles that can never fail
+  # `malf lint`, and — the real hazard — it left `cppcoreguidelines-owning-memory` ENABLED in
+  # the editor: the check that reliably SIGSEGVs clang-tidy on our named-module code
+  # ([[clang-tidy-crashes-on-modules]]; full rationale in .clang-tidy). Inheriting the gate
+  # disables it. (The gate's own CheckOptions — PrivateMemberSuffix '_', UseAssignment false,
+  # the cognitive-complexity Threshold — now reach the IDE through .clang-tidy, not a
+  # duplicated copy here.)
 
 ---
 
@@ -79,15 +57,6 @@ If:
   PathMatch: .conan2/.*
 Diagnostics:
   Suppress: ["*"]
-
----
-
-# Remove magic numbers inside tests
-If:
-  PathMatch: .*/tests/.*
-Diagnostics:
-  Suppress:
-    - readability-magic-numbers
 
 ---
 

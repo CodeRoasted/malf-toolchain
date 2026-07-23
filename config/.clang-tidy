@@ -53,6 +53,13 @@ Checks:
   # is enforced, CLAUDE.md). Re-evaluate if a fixed clang-tidy lands AND we adopt owner<>.
   - -cppcoreguidelines-owning-memory
 
+  # NOTE (modules) — misc-* is NOT enabled here, so this does not run today. If you ever
+  # allowlist misc-*, disable misc-use-internal-linkage: on named-module code it wrongly
+  # pushes a non-exported NAMED-namespace helper (which already has internal MODULE linkage,
+  # not TU-local) to TU-local, making inline interface templates that use it ill-formed. This
+  # rationale used to live in .clangd's Remove list; it moved here when .clangd was collapsed
+  # to inherit this file verbatim (the IDE ⇄ gate parity fix, 2026-07-23).
+
   # Toolchain / irrelevant ecosystems
   - -fuchsia-*
   - -llvm-*
