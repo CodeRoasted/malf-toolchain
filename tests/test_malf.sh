@@ -304,5 +304,26 @@ check "prune excludes sub-package build-* dir (glob-safe)" \
 rm -rf "$prune_tmp"
 
 echo
+
+echo "[7f] _malf_db_lintable_files drops entries whose build dir is gone"
+
+# clang-tidy chdir's into an entry's `directory` before parsing and aborts with
+# `LLVM ERROR: Cannot chdir` when it is a sub-package build dir that was never built in the
+# active profile. lint must exclude such entries up front. This builds a DB with one entry whose
+# directory EXISTS and one whose directory is MISSING and asserts only the live one is emitted.
+db_tmp="$(mktemp -d)"
+mkdir -p "$db_tmp/live"                       # exists
+cat > "$db_tmp/cc.json" <<JSON
+[{"directory":"$db_tmp/live","file":"$db_tmp/a.cpp","command":"cc -c a.cpp"},
+ {"directory":"$db_tmp/gone","file":"$db_tmp/b.cpp","command":"cc -c b.cpp"}]
+JSON
+db_fn="$(sed -n '/^_malf_db_lintable_files() {/,/^}/p' "$MALF_BIN")"
+db_out="$(bash -c "$db_fn; _malf_db_lintable_files '$db_tmp/cc.json'" | tr '\n' ' ')"
+check "db-lintable keeps live-dir entry, drops missing-dir entry (no chdir crash)" \
+      "a-only" \
+      "$([[ "$db_out" == *a.cpp* && "$db_out" != *b.cpp* ]] && echo a-only || echo "GOT: $db_out")"
+rm -rf "$db_tmp"
+
+echo
 echo "malf selftest: $pass_count passed, $fail_count failed"
 [[ $fail_count -eq 0 ]] || exit 1

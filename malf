@@ -1076,21 +1076,23 @@ cmd_lint() {
         files=("${lintable[@]}")
     fi
 
-    # DB-completeness filter. clang-tidy replays each file's command from the compile DB; a file
-    # ABSENT from the DB gets clang-tidy's flag-less fallback, which on a module TU cannot find
-    # `import std`, the third-party -isystem headers (glaze/curl), or the module BMIs — yielding a
-    # FLOOD of clang-diagnostic-error that looks like real findings but is pure DB miss. Measured
-    # 2026-07-23: an incremental-build DB held 0 sift-cli entries, so `lint --all-files` reported
-    # 293 phantom errors that vanished once `malf commands` regenerated the full DB. So: lint only
-    # files the DB actually knows, and REPORT the rest with the fix (no silent coverage gap — the
-    # no-silent-caps rule). Skipped only when we HAVE a DB; with none, clang-tidy's own context
-    # note already fired above and every file goes through as before.
+    # DB-completeness + valid-directory filter. clang-tidy replays each file's command from the
+    # compile DB and chdir's into the entry's `directory` first. TWO failure modes this closes:
+    #   * a file ABSENT from the DB gets clang-tidy's flag-less fallback, which on a module TU cannot
+    #     find `import std`, the third-party -isystem headers (glaze/curl), or the BMIs — a FLOOD of
+    #     clang-diagnostic-error that mimics real findings (measured 2026-07-23: an incremental-build
+    #     DB held 0 sift-cli entries -> 293 phantom errors, gone once `malf commands` rebuilt the DB);
+    #   * a file whose entry's `directory` is a MISSING build dir (sub-package not built in this
+    #     profile) makes clang-tidy abort with `LLVM ERROR: Cannot chdir` and hang symbolizing.
+    # _malf_db_lintable_files handles both: it lists only entries with an existing directory, so a
+    # file that is absent OR has a dead directory falls through to the report below. Either way the
+    # file is unlintable and the fix is the same (build/index its package) — no silent coverage gap.
+    # Skipped only when we HAVE a DB; with none, clang-tidy's own context note already fired above.
     if [[ -n "$comp_db" && -f "$comp_db/compile_commands.json" ]]; then
         local -A _db_files=()
         local _dbf
         while IFS= read -r _dbf; do [[ -n "$_dbf" ]] && _db_files["$_dbf"]=1; done < <(
-            python3 -c "import json,sys; [print(e['file']) for e in json.load(open(sys.argv[1]))]" \
-                "$comp_db/compile_commands.json" 2>/dev/null)
+            _malf_db_lintable_files "$comp_db/compile_commands.json")
         if [[ ${#_db_files[@]} -gt 0 ]]; then
             local -a _in_db=() _missing_tu=()
             local _rf
@@ -1107,7 +1109,7 @@ cmd_lint() {
                 fi
             done
             if [[ ${#_missing_tu[@]} -gt 0 ]]; then
-                echo "malf lint: ${#_missing_tu[@]} translation unit(s) NOT in the compile DB — skipped (run 'malf commands' to index them, or build their package):" >&2
+                echo "malf lint: ${#_missing_tu[@]} translation unit(s) with no usable compile command — skipped (absent from the DB, or their build dir is missing; run 'malf commands' or build their package):" >&2
                 printf '  %s\n' "${_missing_tu[@]#"$CWD"/}" >&2
             fi
             files=("${_in_db[@]}")
@@ -1190,6 +1192,26 @@ cmd_lint() {
 
 # Emit `find` prune arguments for the shared hazard baseline plus any per-command
 # additions passed as "$@". Consumed as: find DIR \( -type d \( ARGS \) -prune \) -o ...
+# Emit, one per line, the `file` of every compile-DB entry whose `directory` EXISTS.
+# clang-tidy chdir's into an entry's `directory` before parsing and aborts with
+# `LLVM ERROR: Cannot chdir into "<dir>"!` (then hangs symbolizing its stack, so a timeout
+# reads as "slow") when that dir is gone — a sub-package not built in the active profile. Such
+# an entry is unlintable regardless (no BMIs / modmap there either), so lint must drop it up
+# front rather than hand it to clang-tidy. Directory is load-bearing (commands carry relative
+# @modmap paths that resolve against it), so it cannot simply be rewritten to an existing dir.
+_malf_db_lintable_files() {
+    python3 -c "
+import json, os, sys
+try:
+    entries = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+for e in entries:
+    if os.path.isdir(e.get('directory', '')):
+        print(e['file'])
+" "$1" 2>/dev/null
+}
+
 _malf_prune_args() {
     local -a out=()
     local dir_pattern
