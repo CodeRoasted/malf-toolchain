@@ -1568,7 +1568,7 @@ cmd_compile_commands() {
 #
 # `malf bench` used to answer it from the build OUTPUT — build the package, then look for a
 # *bench* executable and skip if none. Correct, and it pays a full compile for every benchless
-# package in a sweep (llm, fuzz, insight-mcp, sift-cli today) purely to learn there was nothing
+# package in a sweep (llm, fuzz, insight-mcp, sift today) purely to learn there was nothing
 # to run. That was most of the sweep's marginal cost.
 #
 # The predicate is the same one the output check applies, evaluated one step earlier: a bench
@@ -1788,7 +1788,7 @@ cmd_editables() {
 # predecessor drifted three minors before anyone noticed, and since sbom-cve.yml scans the
 # file, its accuracy is the ceiling on our CVE detection.
 _MALF_SBOM_TARGETS=(
-    "insight-eidos/sift-cli|insight-eidos/sift-cli/sbom.cdx.json"
+    "insight-eidos/sift|insight-eidos/sift/sbom.cdx.json"
 )
 
 # `malf sbom` regenerates them; `malf sbom --check` fails if one is stale against the graph,

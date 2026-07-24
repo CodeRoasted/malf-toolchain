@@ -26,9 +26,9 @@ inputs:
     description: |
       Newline-separated modules to build in order, one per row:
         <module> [test] [create] [cmake-args...]
-      module is a path relative to the repo root (`core`, `.`, `infra/redis`, `sift-cli`). `test` and
+      module is a path relative to the repo root (`core`, `.`, `infra/redis`, `sift`). `test` and
       `create` default to `true`; set either to `false` to skip that phase (e.g. leaf binaries build
-      + test but do not `conan create`: `sift-cli true false`). Any fields AFTER create are extra cmake
+      + test but do not `conan create`: `sift true false`). Any fields AFTER create are extra cmake
       configure flags for the test build, e.g. `core true true -DPKG_BUILD_TESTS=ON` (for packages that
       gate their unit tests behind a flag). `#` starts a comment.
     required: true

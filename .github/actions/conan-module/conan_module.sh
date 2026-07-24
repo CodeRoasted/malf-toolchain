@@ -5,7 +5,7 @@
 # cannot loop a `uses:` step over a variable-length module list).
 #
 # Usage: conan_module.sh <module> <test:true|false> <create:true|false> [profile] [cmake-args]
-#   module      path relative to the repo root (e.g. `core`, `.`, `infra/redis`, `sift-cli`)
+#   module      path relative to the repo root (e.g. `core`, `.`, `infra/redis`, `sift`)
 #   test        'true' => conan install + cmake build + ctest (Release); anything else skips the phase
 #   create      'true' => conan create <module>; anything else skips it
 #   profile     conan profile name in $CONAN_HOME/profiles (default linux-gcc15-release)

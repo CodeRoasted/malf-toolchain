@@ -91,7 +91,7 @@ def shipped_components(graph: dict) -> tuple[dict, list[dict]]:
     nodes = graph["graph"]["nodes"]
     root_node, comps = None, []
     # A package required by several consumers is several NODES in the graph (glaze is pulled
-    # by eidos, llm and sift-cli, each with visible=False). An SBOM is an inventory, so it
+    # by eidos, llm and sift, each with visible=False). An SBOM is an inventory, so it
     # wants one row per distinct ref — dedupe on the full name/version, NOT on the name, so a
     # genuine two-version split (measured: lz4 1.9.4 vs 1.10.0 across roots) still shows up as
     # two rows instead of being collapsed into a false single answer.
@@ -182,7 +182,7 @@ def selftest() -> int:
         "5": {"ref": "insight_canon/1.8.3", "context": "host"},
         # Same ref reached via two consumers -> ONE row. Regression guard: the first cut of
         # this tool emitted glaze four times because glaze is pulled by eidos, llm and
-        # sift-cli independently.
+        # sift independently.
         "6": {"ref": "openssl/3.6.3#abc", "context": "host"},
         # A genuine two-VERSION split must survive dedup as two rows (measured: lz4 1.9.4 vs
         # 1.10.0 across roots). Deduping on name would hide exactly the skew we care about.
