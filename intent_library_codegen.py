@@ -525,20 +525,27 @@ GRAINS = ("structure", "body")
 
 
 def grain_hash(declaration: dict, grain: str) -> str:
-    """sha256 over the canonical JSON of ONE grain of the declaration.
+    """sha256 over the canonical JSON of ONE grain of the declaration, PLUS the dialect.
 
     §4.6: the freshness hash covers exactly the grain it measured, so editing the body
     cannot revoke a structure ratification. Under the whole-entry hash it did — and that
     is the fence punishing the very work its own residual compass points at, since the
     body is edited precisely BECAUSE the twin measured it wrong.
 
-    Only the grain's own sub-declaration enters. The entry NAME deliberately does not:
-    resolution is keyed on (name, grain) before the hash is ever compared, so the hash has
-    no identifying work to do, and leaving the name out means renaming an entry does not
-    masquerade as an edit to its content.
+    THE DIALECT IS IN BOTH GRAINS, and leaving it out was a real hole in the first cut of
+    this function: `dialect:` sits at the declaration's top level, in neither grain subtree,
+    so `github` -> `jenkins` moved no grain hash at all and a GHA-measured ratification
+    survived onto a Jenkins declaration. A ratification is evidence gathered in ONE
+    dialect's corpus; no measurement transfers across that change, at either grain. The
+    whole-entry hash this replaced happened to cover it — replacing a coarse key with a
+    precise one must not quietly drop what the coarse one caught.
+
+    The entry NAME deliberately stays out: resolution is keyed on (name, grain) before the
+    hash is ever compared, so the hash has no identifying work to do, and a rename surfaces
+    as the LOUD stale-record fault rather than as a quiet hash mismatch.
     """
-    canonical = json.dumps(declaration.get(grain), sort_keys=True, separators=(",", ":"),
-                           ensure_ascii=True)
+    covered = {"dialect": declaration.get("dialect"), grain: declaration.get(grain)}
+    canonical = json.dumps(covered, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(canonical.encode("ascii")).hexdigest()
 
 
@@ -830,8 +837,7 @@ def emit_cpp(entries: dict[str, dict], resolution: dict[str, dict | None],
                 out.append("};")
         out.append(f"struct {symbol}Entry")
         out.append("{")
-        out.append(f'    static constexpr IntentIdentity identity{{"{name}"sv,')
-        out.append(f'                                             "{canonical_hash(declaration)}"sv}};')
+        out.append(f'    static constexpr IntentIdentity identity{{"{name}"sv}};')
         dialect = declaration.get("dialect")
         structure = declaration.get("structure")
 
@@ -843,6 +849,7 @@ def emit_cpp(entries: dict[str, dict], resolution: dict[str, dict | None],
             out.append("        StructureGrainView{")
             out.append(f"            StructuralHalfView{{IntentKind::{structure['kind']}, "
                        f"PayloadContract::{structure['payload']}}},")
+            out.append(f'            "{grain_hash(declaration, "structure")}"sv,')
             _emit_ratification(out, resolution[(name, "structure")], "Structure",
                                structure_ratified_names, name)
             out.append("        }};")
@@ -855,6 +862,7 @@ def emit_cpp(entries: dict[str, dict], resolution: dict[str, dict | None],
             out.append("        BodyGrainView{")
             out.append(f'            BodyContractView{{"{_cpp_escape(body["message_template"])}"sv, '
                        f"{fields_span}}},")
+            out.append(f'            "{grain_hash(declaration, "body")}"sv,')
             _emit_ratification(out, resolution[(name, "body")], "Body", body_ratified_names, name)
             out.append("        }};")
         else:
@@ -1118,6 +1126,20 @@ def selftest() -> int:
                        "a structure edit must revoke the structure grain ONLY: "
                        f"{resolution} / {notices}"))
 
+    # The dialect is in NEITHER grain subtree, so a grain hash that covered only its own
+    # subtree let `github` -> `jenkins` keep a GHA-measured ratification alive on a Jenkins
+    # declaration. A ratification is evidence gathered in one dialect's corpus; it transfers
+    # across that change at NO grain.
+    dialect_swapped = _SYNTHETIC_ENTRY.replace("dialect: github", "dialect: jenkins")
+    notices = []
+    resolution = resolve_ratification({"synthetic.demo": _parse_entry(dialect_swapped)},
+                                      records, "<manifest>", notices)
+    _selftest_case("grain: a DIALECT change revokes BOTH grains", failures, lambda: _assert(
+        resolution[("synthetic.demo", "structure")] is None
+        and resolution[("synthetic.demo", "body")] is None and len(notices) == 2,
+        "a dialect swap must revoke every grain — no measurement survives it: "
+        f"{resolution} / {notices}"))
+
     _expect_rejection("manifest: stale record is an instrument fault", failures,
                       "instrument fault",
                       lambda: resolve_ratification({"synthetic.other": base}, records,
@@ -1198,9 +1220,18 @@ def selftest() -> int:
                        "declares a real element of the non-default-constructible view type"))
     _selftest_case("emit: tool version outside the hash (MUST 4)", failures, lambda: _assert(
         f"tool version: {TOOL_VERSION}" in rendered_a
-        and base_hash in rendered_a
+        and demo_structure_hash in rendered_a and demo_body_hash in rendered_a
         and TOOL_VERSION not in json.dumps(base, sort_keys=True),
         "tool version must appear in the header and never in hashed content"))
+    # The grain hashes are PUBLISHED into the entries so the twin harness can transcribe them
+    # into a manifest rather than re-implementing canonicalize-then-hash in C++. A second
+    # implementation would diverge silently: every record would miss its match and every entry
+    # would sit at Authored with nothing to say why.
+    _selftest_case("emit: each grain publishes its own hash", failures, lambda: _assert(
+        rendered_a.count(f'"{demo_structure_hash}"sv') == 1
+        and rendered_a.count(f'"{demo_body_hash}"sv') == 1
+        and demo_structure_hash != demo_body_hash,
+        "each declared grain must carry exactly its own hash in the generated entry"))
 
     if failures:
         for failure in failures:
