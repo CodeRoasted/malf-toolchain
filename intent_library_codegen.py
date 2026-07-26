@@ -21,8 +21,16 @@ THE FOUR TEETH this tool carries (the soundness fence, §4):
   3. Ratification is keyed on the declaration's CONTENT HASH — resolution is a
      comparison (manifest hash == canonical hash of the current declaration), so an
      edit revokes it and a reformat does not.
-  4. The showcase surface is fail-closed — the generated ratified index contains
-     ONLY hash-matched entries; Authored entries are not in it, by construction.
+  4. The showcase surface is fail-closed — the generated ratified indices contain
+     ONLY hash-matched entries; Authored entries are not in them, by construction.
+
+RATIFICATION IS GRAIN-SCOPED (§4.6, ruled 2026-07-26). A declaration's two halves are
+measured independently and can carry OPPOSITE verdicts, so a record names the GRAIN it
+measured, resolution is keyed on (name, grain), and the freshness hash of tooth 3 covers
+exactly that grain — `record.hash == hash(entry.<grain>)`. Two consequences the whole-
+entry hash got wrong: editing a body no longer revokes a structure ratification (the fence
+used to punish acting on its own residual compass), and tooth 4 dispatches per grain, so a
+structurally-ratified entry cannot license its unmeasured body into the showcase.
 
 DETERMINISM MUSTs (§5.3): output is byte-identical across machines, runs and
 toolchains. Concretely: entries and every emitted list iterate in sorted or declared
@@ -503,15 +511,40 @@ def canonical_hash(declaration: dict) -> str:
     Key order is sorted; list order is preserved (field order and domain order are
     semantic — emission order and positional weights bind to them). The tool version
     is deliberately NOT part of the input (MUST 4).
+
+    This is the ENTRY's content identity, carried on IntentIdentity. It is no longer the
+    ratification key — that is `grain_hash` below (§4.6).
     """
     canonical = json.dumps(declaration, sort_keys=True, separators=(",", ":"),
                            ensure_ascii=True)
     return hashlib.sha256(canonical.encode("ascii")).hexdigest()
 
 
+# The declaration sub-keys each grain covers, so `record.hash == hash(entry.<grain>)` (§4.6).
+GRAINS = ("structure", "body")
+
+
+def grain_hash(declaration: dict, grain: str) -> str:
+    """sha256 over the canonical JSON of ONE grain of the declaration.
+
+    §4.6: the freshness hash covers exactly the grain it measured, so editing the body
+    cannot revoke a structure ratification. Under the whole-entry hash it did — and that
+    is the fence punishing the very work its own residual compass points at, since the
+    body is edited precisely BECAUSE the twin measured it wrong.
+
+    Only the grain's own sub-declaration enters. The entry NAME deliberately does not:
+    resolution is keyed on (name, grain) before the hash is ever compared, so the hash has
+    no identifying work to do, and leaving the name out means renaming an entry does not
+    masquerade as an edit to its content.
+    """
+    canonical = json.dumps(declaration.get(grain), sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("ascii")).hexdigest()
+
+
 # ── manifest resolution (§4.2/§4.3 — teeth 2 and 3) ──────────────────────────
 
-_MANIFEST_RECORD_KEYS = ("name", "declaration_hash", "corpus", "residual", "floor",
+_MANIFEST_RECORD_KEYS = ("name", "grain", "declaration_hash", "corpus", "residual", "floor",
                          "study", "date")
 
 
@@ -526,7 +559,7 @@ def parse_manifest(text: str, source: str) -> list[dict]:
     if not isinstance(entries, list):
         fail(source, None, "manifest `entries:` must be a sequence")
     records: list[dict] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     for position, record in enumerate(entries):
         context = f"manifest entries[{position}]"
         if not isinstance(record, dict):
@@ -539,41 +572,66 @@ def parse_manifest(text: str, source: str) -> list[dict]:
                 # A partial record is an instrument fault, not a warning: the manifest
                 # is measured evidence, and evidence with missing fields is no evidence.
                 fail(source, None, f"{context}: missing or empty `{key}:` (instrument fault)")
-        if record["name"] in seen:
-            fail(source, None, f"{context}: duplicate record for {record['name']!r}")
-        seen.add(record["name"])
+        if record["grain"] not in GRAINS:
+            fail(source, None,
+                 f"{context}: grain {record['grain']!r} outside the closed set "
+                 f"{{{', '.join(GRAINS)}}} (§4.6)")
+        # (name, grain) is the key: one record per measured grain, so an entry may carry a
+        # Structure record and a Body record, and never two of either.
+        key = (record["name"], record["grain"])
+        if key in seen:
+            fail(source, None,
+                 f"{context}: duplicate record for {record['name']!r} at grain "
+                 f"{record['grain']!r}")
+        seen.add(key)
         records.append(dict(record))
     return records
 
 
 def resolve_ratification(entries: dict[str, dict], records: list[dict],
-                         manifest_source: str, notices: list[str]) -> dict[str, dict | None]:
-    """Per entry name: the matching Ratified record, or None (Authored).
+                         manifest_source: str,
+                         notices: list[str]) -> dict[tuple[str, str], dict | None]:
+    """Per (entry name, grain): the matching Ratified record, or None (Authored).
 
-    The name/hash partition implements both §4.3 bullets at once:
-      * record name matches a current entry, hash differs  -> the entry was EDITED;
+    The partition of §4.3 is unchanged in SHAPE and now runs per (name, grain) — §4.6:
+      * (name, grain) matches a declared grain, hash differs -> that GRAIN was EDITED;
         it silently reverts to Authored (by design — an edited declaration is a new,
-        unmeasured claim). A notice says so; it is not an error.
+        unmeasured claim). A notice says so; it is not an error. The entry's OTHER grain
+        is untouched, which is the whole point of the ruling.
       * record name matches NO current entry -> a claim about something that no
         longer exists: an INSTRUMENT FAULT. The register must fail loudly rather
         than quietly assert a dead judgment.
+      * record names a grain the entry does NOT declare -> the same fault, one level
+        down. A Body record on a banner-only entry is evidence about a half that does
+        not exist; it cannot be "stale but harmless", because tooth 4 dispatches on it.
     """
-    resolution: dict[str, dict | None] = {name: None for name in entries}
+    resolution: dict[tuple[str, str], dict | None] = {
+        (name, grain): None
+        for name in entries
+        for grain in GRAINS
+        if entries[name].get(grain) is not None
+    }
     for record in records:
-        name = record["name"]
+        name, grain = record["name"], record["grain"]
         if name not in entries:
             fail(manifest_source, None,
                  f"Ratified record for {name!r} matches no current declaration — a stale "
                  "record is an instrument fault (§4.3); regenerate the manifest from a "
                  "measured twin run")
-        current_hash = canonical_hash(entries[name])
+        if entries[name].get(grain) is None:
+            fail(manifest_source, None,
+                 f"Ratified record for {name!r} claims grain {grain!r}, which that "
+                 "declaration does not have — evidence about a half that does not exist is "
+                 "an instrument fault (§4.6), not a stale-but-harmless row")
+        current_hash = grain_hash(entries[name], grain)
         if record["declaration_hash"] == current_hash:
-            resolution[name] = record
+            resolution[(name, grain)] = record
         else:
             notices.append(
-                f"notice: {name} was Ratified against {record['declaration_hash'][:12]}... "
-                f"but its declaration hash is now {current_hash[:12]}... -- the edit revoked "
-                "ratification; the entry is Authored until the twin re-measures it")
+                f"notice: {name} was Ratified at grain {grain} against "
+                f"{record['declaration_hash'][:12]}... but that grain's hash is now "
+                f"{current_hash[:12]}... -- the edit revoked ratification for THAT GRAIN "
+                "only; it is Authored until the twin re-measures it")
     return resolution
 
 
@@ -647,6 +705,27 @@ def _emit_field(entry_symbol: str, index: int, field: dict, out: list[str]) -> s
         domain = (f'FieldDomain{{NumericContract{{"{_cpp_escape(field["unit"])}"sv, '
                   f"{minimum}}}}}")
     return f'FieldContractView{{"{_cpp_escape(name)}"sv, {domain}}}'
+
+
+def _emit_ratification(out: list[str], record: dict | None, grain_enumerator: str,
+                       ratified_names: list[str], name: str) -> None:
+    """Emit ONE grain's Ratification, indented inside its grain view initializer.
+
+    The grain enumerator is emitted for BOTH phases: an Authored state names the grain it
+    fails to rate, which is what lets the concept check that a state is filed against the
+    half it actually measures.
+    """
+    if record is None:
+        out.append(f"            Ratification::authored(RatificationGrain::{grain_enumerator})")
+        return
+    ratified_names.append(name)
+    out.append(f"            Ratification::ratified(RatificationGrain::{grain_enumerator},")
+    out.append("                                   RatificationEvidence{")
+    out.append(f'                                       "{_cpp_escape(record["corpus"])}"sv, '
+               f'"{_cpp_escape(record["residual"])}"sv,')
+    out.append(f'                                       "{_cpp_escape(record["floor"])}"sv, '
+               f'"{_cpp_escape(record["study"])}"sv,')
+    out.append(f'                                       "{_cpp_escape(record["date"])}"sv}})')
 
 
 def _emit_view_index(out: list[str], index_name: str, initializers: list[str],
@@ -732,11 +811,11 @@ def emit_cpp(entries: dict[str, dict], resolution: dict[str, dict | None],
     out.append("")
 
     view_initializers: list[str] = []
-    ratified_names: list[str] = []
+    structure_ratified_names: list[str] = []
+    body_ratified_names: list[str] = []
     for name in sorted(entries):
         declaration = entries[name]
         symbol = _cpp_symbol(name)
-        record = resolution[name]
         out.append(f"// ---- {name} ----")
         field_views: list[str] = []
         body = declaration.get("body")
@@ -755,26 +834,31 @@ def emit_cpp(entries: dict[str, dict], resolution: dict[str, dict | None],
         out.append(f'                                             "{canonical_hash(declaration)}"sv}};')
         dialect = declaration.get("dialect")
         structure = declaration.get("structure")
+
+        # Each declared half is emitted PAIRED with its own grain's state (§4.6). The state
+        # sits inside the optional, so a declared half without one, or a state for an
+        # undeclared half, is unrepresentable rather than merely unwritten.
         if structure is not None:
-            out.append(f"    static constexpr std::optional<StructuralHalfView> structure{{StructuralHalfView{{")
-            out.append(f"        IntentKind::{structure['kind']}, PayloadContract::{structure['payload']}}}}};")
+            out.append("    static constexpr std::optional<StructureGrainView> structure{")
+            out.append("        StructureGrainView{")
+            out.append(f"            StructuralHalfView{{IntentKind::{structure['kind']}, "
+                       f"PayloadContract::{structure['payload']}}},")
+            _emit_ratification(out, resolution[(name, "structure")], "Structure",
+                               structure_ratified_names, name)
+            out.append("        }};")
         else:
-            out.append("    static constexpr std::optional<StructuralHalfView> structure{std::nullopt};")
+            out.append("    static constexpr std::optional<StructureGrainView> structure{std::nullopt};")
         if body is not None:
             fields_span = (f"std::span<const FieldContractView>{{k{symbol}Fields}}"
                            if field_views else "std::span<const FieldContractView>{}")
-            out.append(f"    static constexpr std::optional<BodyContractView> body{{BodyContractView{{")
-            out.append(f'        "{_cpp_escape(body["message_template"])}"sv, {fields_span}}}}};')
+            out.append("    static constexpr std::optional<BodyGrainView> body{")
+            out.append("        BodyGrainView{")
+            out.append(f'            BodyContractView{{"{_cpp_escape(body["message_template"])}"sv, '
+                       f"{fields_span}}},")
+            _emit_ratification(out, resolution[(name, "body")], "Body", body_ratified_names, name)
+            out.append("        }};")
         else:
-            out.append("    static constexpr std::optional<BodyContractView> body{std::nullopt};")
-        if record is None:
-            out.append("    static constexpr Ratification ratification{Ratification::authored()};")
-        else:
-            ratified_names.append(name)
-            out.append("    static constexpr Ratification ratification{Ratification::ratified(RatificationEvidence{")
-            out.append(f'        "{_cpp_escape(record["corpus"])}"sv, "{_cpp_escape(record["residual"])}"sv,')
-            out.append(f'        "{_cpp_escape(record["floor"])}"sv, "{_cpp_escape(record["study"])}"sv,')
-            out.append(f'        "{_cpp_escape(record["date"])}"sv}})}};')
+            out.append("    static constexpr std::optional<BodyGrainView> body{std::nullopt};")
         if dialect is not None and structure is not None:
             out.append(f"    using dialect = insight::semantic::{dialect}::Dialect;")
         out.append("};")
@@ -792,7 +876,7 @@ def emit_cpp(entries: dict[str, dict], resolution: dict[str, dict | None],
         dialect_view = f'"{_cpp_escape(dialect)}"sv' if dialect is not None else '""sv'
         view_initializers.append(
             f"IntentLibraryEntryView{{{symbol}Entry::identity, {dialect_view}, "
-            f"{symbol}Entry::structure, {symbol}Entry::body, {symbol}Entry::ratification}}")
+            f"{symbol}Entry::structure, {symbol}Entry::body}}")
         out.append("")
 
     # Index emission note: the indices are SPANS over conditionally-emitted storage arrays.
@@ -801,11 +885,18 @@ def emit_cpp(entries: dict[str, dict], resolution: dict[str, dict | None],
     _emit_view_index(out, "kEntries", view_initializers,
                      "// The derived index (sec 6): discovered by content, sorted by name --")
     out.append("")
-    out.append("// Tooth 4 -- the showcase surface is fail-closed BY CONSTRUCTION: this index is")
-    out.append("// generated from hash-matched records only. An Authored entry is not in it; there")
-    out.append("// is nothing to filter and nothing to forget to filter.")
-    ratified_views = [view_initializers[sorted(entries).index(name)] for name in ratified_names]
-    _emit_view_index(out, "kRatifiedEntries", ratified_views, None)
+    out.append("// Tooth 4 -- the showcase surface is fail-closed BY CONSTRUCTION: these indices")
+    out.append("// are generated from hash-matched records only. An Authored grain is not in one;")
+    out.append("// there is nothing to filter and nothing to forget to filter. ONE INDEX PER GRAIN")
+    out.append("// (sec 4.6): an entry ratified structurally appears in the structure index alone,")
+    out.append("// so a body claim can never be reached by way of a structure one.")
+    ordered_names = sorted(entries)
+    structure_views = [view_initializers[ordered_names.index(name)]
+                       for name in structure_ratified_names]
+    body_views = [view_initializers[ordered_names.index(name)] for name in body_ratified_names]
+    _emit_view_index(out, "kStructureRatifiedEntries", structure_views, None)
+    out.append("")
+    _emit_view_index(out, "kBodyRatifiedEntries", body_views, None)
     out.append("")
     out.append("} // namespace logcraft::core::intent_library_gen")
     out.append("// clang-format on")
@@ -977,44 +1068,90 @@ def selftest() -> int:
     _expect_rejection("parser: duplicate keys", failures, "duplicate",
                       lambda: parse_subset_yaml("intent:\n  name: a\n  name: b\n", "<selftest>"))
 
-    # ── manifest resolution (teeth 2+3 at the register) ──
-    manifest_text = (
-        "ratification:\n"
-        "  entries:\n"
-        f"    - name: synthetic.demo\n"
-        f"      declaration_hash: {base_hash}\n"
-        "      corpus: synthetic-corpus-A\n"
-        '      residual: "0.010"\n'
-        '      floor: "0.050"\n'
-        "      study: synthetic-study\n"
-        "      date: 2026-01-01\n")
+    # ── manifest resolution (teeth 2+3 at the register, grain-scoped per §4.6) ──
+    def _record(name: str, grain: str, declaration_hash: str) -> str:
+        return (f"    - name: {name}\n"
+                f"      grain: {grain}\n"
+                f"      declaration_hash: {declaration_hash}\n"
+                "      corpus: synthetic-corpus-A\n"
+                '      residual: "0.010"\n'
+                '      floor: "0.050"\n'
+                "      study: synthetic-study\n"
+                "      date: 2026-01-01\n")
+
+    demo_structure_hash = grain_hash(base, "structure")
+    demo_body_hash = grain_hash(base, "body")
+    manifest_text = ("ratification:\n  entries:\n"
+                     + _record("synthetic.demo", "structure", demo_structure_hash)
+                     + _record("synthetic.demo", "body", demo_body_hash))
     records = parse_manifest(manifest_text, "<manifest>")
     notices: list[str] = []
     resolution = resolve_ratification({"synthetic.demo": base}, records, "<manifest>", notices)
-    _selftest_case("manifest: hash match ratifies", failures, lambda: _assert(
-        resolution["synthetic.demo"] is not None and not notices,
-        f"expected Ratified with no notice, got {resolution} / {notices}"))
+    _selftest_case("manifest: hash match ratifies each grain", failures, lambda: _assert(
+        resolution[("synthetic.demo", "structure")] is not None
+        and resolution[("synthetic.demo", "body")] is not None and not notices,
+        f"expected both grains Ratified with no notice, got {resolution} / {notices}"))
 
-    edited_entry = _parse_entry(edited)
+    # THE §4.6 property, and the reason the ruling exists: the body is edited precisely
+    # BECAUSE the twin measured it wrong, so a whole-entry hash made the fence revoke the
+    # skeleton claim the moment anyone acted on its own residual compass.
     notices = []
-    resolution = resolve_ratification({"synthetic.demo": edited_entry}, records,
+    resolution = resolve_ratification({"synthetic.demo": _parse_entry(edited)}, records,
                                       "<manifest>", notices)
-    _selftest_case("manifest: edit reverts to Authored (tooth 3)", failures, lambda: _assert(
-        resolution["synthetic.demo"] is None and len(notices) == 1,
-        f"an edited declaration must silently revert to Authored: {resolution} / {notices}"))
+    _selftest_case("grain: a BODY edit leaves the STRUCTURE ratification standing",
+                   failures, lambda: _assert(
+                       resolution[("synthetic.demo", "structure")] is not None
+                       and resolution[("synthetic.demo", "body")] is None
+                       and len(notices) == 1,
+                       "a body edit must revoke the body grain ONLY: "
+                       f"{resolution} / {notices}"))
+
+    structure_edited = _SYNTHETIC_ENTRY.replace("payload: Declared", "payload: None")
+    notices = []
+    resolution = resolve_ratification({"synthetic.demo": _parse_entry(structure_edited)},
+                                      records, "<manifest>", notices)
+    _selftest_case("grain: a STRUCTURE edit leaves the BODY ratification standing",
+                   failures, lambda: _assert(
+                       resolution[("synthetic.demo", "body")] is not None
+                       and resolution[("synthetic.demo", "structure")] is None
+                       and len(notices) == 1,
+                       "a structure edit must revoke the structure grain ONLY: "
+                       f"{resolution} / {notices}"))
 
     _expect_rejection("manifest: stale record is an instrument fault", failures,
                       "instrument fault",
                       lambda: resolve_ratification({"synthetic.other": base}, records,
                                                    "<manifest>", []))
+    # One level down from a stale NAME: a claim about a half that does not exist. It cannot
+    # be stale-but-harmless, because tooth 4 dispatches on exactly this.
+    _expect_rejection("grain: a record for an undeclared grain is an instrument fault",
+                      failures, "does not have",
+                      lambda: resolve_ratification(
+                          {"synthetic.generic": _parse_entry(_SYNTHETIC_GENERIC,
+                                                             name="synthetic.generic")},
+                          parse_manifest("ratification:\n  entries:\n"
+                                         + _record("synthetic.generic", "structure",
+                                                   demo_structure_hash), "<manifest>"),
+                          "<manifest>", []))
+    _expect_rejection("grain: outside the closed set", failures, "closed set",
+                      lambda: parse_manifest(manifest_text.replace(
+                          "      grain: body\n", "      grain: vibes\n"), "<manifest>"))
+    _expect_rejection("grain: duplicate (name, grain)", failures, "duplicate",
+                      lambda: parse_manifest(
+                          "ratification:\n  entries:\n"
+                          + _record("synthetic.demo", "body", demo_body_hash)
+                          + _record("synthetic.demo", "body", demo_body_hash), "<manifest>"))
+    _selftest_case("grain: the same name at BOTH grains is legal", failures, lambda: _assert(
+        len(parse_manifest(manifest_text, "<manifest>")) == 2,
+        "one record per grain must be accepted — that is the shape the ruling requires"))
     _expect_rejection("manifest: partial record is an instrument fault", failures,
                       "instrument fault",
                       lambda: parse_manifest(manifest_text.replace(
-                          "      study: synthetic-study\n", ""), "<manifest>"))
+                          "      study: synthetic-study\n", "", 1), "<manifest>"))
     _expect_rejection("manifest: no unknown keys", failures, "unknown key",
                       lambda: parse_manifest(manifest_text.replace(
                           "      date: 2026-01-01\n",
-                          "      date: 2026-01-01\n      vibe: good\n"), "<manifest>"))
+                          "      date: 2026-01-01\n      vibe: good\n", 1), "<manifest>"))
 
     # ── emission determinism + tooth 4 at the emitter ──
     generic = _parse_entry(_SYNTHETIC_GENERIC, name="synthetic.generic")
@@ -1028,15 +1165,35 @@ def selftest() -> int:
     _selftest_case("emit: ASCII only", failures, lambda: _assert(
         all(0x20 <= ord(c) <= 0x7E or c == "\n" for c in rendered_a),
         "emitted bytes outside printable ASCII + LF"))
-    _selftest_case("emit: ratified index excludes Authored (tooth 4)", failures, lambda: _assert(
-        "std::array<IntentLibraryEntryView, 1> kRatifiedEntriesStorage" in rendered_a
+    _selftest_case("emit: ratified indices exclude Authored (tooth 4)", failures, lambda: _assert(
+        "std::array<IntentLibraryEntryView, 1> kStructureRatifiedEntriesStorage" in rendered_a
+        and "std::array<IntentLibraryEntryView, 1> kBodyRatifiedEntriesStorage" in rendered_a
         and rendered_a.count("SyntheticGenericEntry::identity") == 1,
-        "the generated ratified index must contain exactly the hash-matched entry"))
-    empty_rendered = emit_cpp(both, {name: None for name in both}, sorted(both))
-    _selftest_case("emit: empty ratified index is a bare span (MSVC array<T,0> hazard)",
+        "each generated index must contain exactly its hash-matched entries"))
+    # Tooth 4, grain-scoped: synthetic.generic is body-only and unratified, so it must be
+    # absent from BOTH indices; synthetic.demo is ratified at both grains and in both.
+    structure_only = resolve_ratification(
+        both,
+        parse_manifest("ratification:\n  entries:\n"
+                       + _record("synthetic.demo", "structure", demo_structure_hash),
+                       "<manifest>"),
+        "<manifest>", [])
+    structure_only_rendered = emit_cpp(both, structure_only, sorted(both))
+    _selftest_case("grain: a structure ratification does NOT populate the body index",
                    failures, lambda: _assert(
-                       "std::span<const IntentLibraryEntryView> kRatifiedEntries{};"
-                       in empty_rendered and "kRatifiedEntriesStorage" not in empty_rendered,
+                       "kStructureRatifiedEntriesStorage" in structure_only_rendered
+                       and "std::span<const IntentLibraryEntryView> kBodyRatifiedEntries{};"
+                       in structure_only_rendered,
+                       "a Structure-ratified entry must not reach the showcase's body index "
+                       "— that is the unbarring the ruling exists to prevent"))
+    empty_rendered = emit_cpp(both, {key: None for key in resolution_full}, sorted(both))
+    _selftest_case("emit: empty ratified indices are bare spans (MSVC array<T,0> hazard)",
+                   failures, lambda: _assert(
+                       "std::span<const IntentLibraryEntryView> kStructureRatifiedEntries{};"
+                       in empty_rendered
+                       and "std::span<const IntentLibraryEntryView> kBodyRatifiedEntries{};"
+                       in empty_rendered
+                       and "RatifiedEntriesStorage" not in empty_rendered,
                        "an empty index must emit no storage array — MSVC's std::array<T,0> "
                        "declares a real element of the non-default-constructible view type"))
     _selftest_case("emit: tool version outside the hash (MUST 4)", failures, lambda: _assert(
