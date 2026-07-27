@@ -39,6 +39,14 @@
 
 set -euo pipefail
 
+# Did the CALLER export MALF_BUILD_PROFILE? Captured HERE, at the top, for two reasons: the
+# default seeding further down makes the variable non-empty either way (so the two cases become
+# indistinguishable after it), and `set -u` makes reading an undefined name fatal — so the answer
+# has to exist before any function that consults it can possibly run, whatever the call order.
+# _malf_apply_profile needs the distinction: a caller's override must survive `--profile`, this
+# file's own default must not. See the arm64 defect recorded there.
+MALF_BUILD_PROFILE_EXPLICIT="${MALF_BUILD_PROFILE:+1}"
+
 MALF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CWD="$(pwd)"
 MALF_WORKSPACE_ROOT="${MALF_WORKSPACE_ROOT:-$(cd "$MALF_DIR/.." && pwd)}"
@@ -166,7 +174,18 @@ _malf_apply_profile() {
         # as static, which glibc now declares — so evaluating a candidate compiler died on a
         # BUILD TOOL before reaching a single line of first-party code. Without this override the
         # only escape was a sanitizer flag the profile must not carry.
-        MALF_BUILD_PROFILE="${MALF_BUILD_PROFILE:-$MALF_PROFILE}"
+        #
+        # KEY ON THE CALLER'S EXPORT, NOT ON EMPTINESS. This used to read
+        # `${MALF_BUILD_PROFILE:-$MALF_PROFILE}`, which never fired: the top-level default seeding
+        # already made the variable non-empty, so `--profile <name>` moved the HOST context and
+        # left the BUILD context on the default profile forever. Invisible on x86 (both sides are
+        # x86 anyway) and fatal on arm64 — measured 2026-07-27 on the eidos v1.8.4 golden legs,
+        # where conan reported `Profile host: arch=armv8` beside `Profile build: arch=x86_64`
+        # + `-march=x86-64-v2`, so m4/1.4.19 configured for x86 on an aarch64 runner and died with
+        # "C compiler cannot create executables". Both arm64 legs of the 5-leg determinism proof
+        # were down. It had been masked for as long as the arm64 conan cache kept a prebuilt m4;
+        # the first cache miss exposed it.
+        [[ -z "$MALF_BUILD_PROFILE_EXPLICIT" ]] && MALF_BUILD_PROFILE="$MALF_PROFILE"
         MALF_IS_SANITIZER=0
     fi
     # The profile-named editable subdir, for malf's OWN build-dir logic (_malf_editable_build_dir /
