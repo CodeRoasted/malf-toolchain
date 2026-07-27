@@ -36,8 +36,12 @@ LOG="$GITHUB_WORKSPACE/build.log"
 LOCKFILE_ARGS=()
 if [ -n "${MALF_LOCKFILE:-}" ] && [ -f "$MALF_LOCKFILE" ]; then
   LOCKFILE_ARGS+=("--lockfile=$MALF_LOCKFILE")
-  # See the action for why this defaults to partial (pin now, gate later).
-  [ "${MALF_LOCKFILE_PARTIAL:-1}" = "1" ] && LOCKFILE_ARGS+=("--lockfile-partial")
+  # GATE by default (adr/0038 §3): '1' pins, anything else drops --lockfile-partial so that "a
+  # dependency entered UNLOCKED" is a hard red. The default was '1' (pin) only while the flip to
+  # strict was pending; it is taken, so a caller that sets MALF_LOCKFILE without naming a mode now
+  # inherits the gate instead of silently inheriting the weaker pin. `coderoast-ci` still sets
+  # MALF_LOCKFILE_PARTIAL explicitly — this default is the backstop, not the policy.
+  [ "${MALF_LOCKFILE_PARTIAL:-0}" = "1" ] && LOCKFILE_ARGS+=("--lockfile-partial")
   echo "conan_module: using lockfile $MALF_LOCKFILE ${LOCKFILE_ARGS[*]}"
 else
   echo "conan_module: no lockfile (MALF_LOCKFILE=${MALF_LOCKFILE:-unset}) — resolving live"
