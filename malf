@@ -1071,8 +1071,15 @@ cmd_lint() {
         while IFS= read -r f; do
             [[ "$f" =~ \.(cpp|cc|cxx|h|hpp|cppm)$ ]] && [[ -f "$CWD/$f" ]] && [[ "$f" != */test_package/* ]] && [[ "$f" != */technical_docs/* ]] && [[ "$f" != */tests/* ]] && [[ "$f" != */benchmarks/* ]] && files+=("$CWD/$f")
         done < <(git -C "$CWD" diff --name-only --cached 2>/dev/null || true)
-        # dedupe
-        mapfile -t files < <(printf '%s\n' "${files[@]}" | sort -u)
+        # dedupe — GUARDED, and the guard is the whole point. `printf '%s\n'` applies its format
+        # once even with NO arguments, so on an EMPTY array this pipeline emits one blank line and
+        # mapfile turns "no changed files" into a one-element array holding "". That element then
+        # reaches the DB filter below, where `${_db_files[$_rf]}` with an empty subscript is a hard
+        # `bad array subscript` — so `malf lint` with no arguments died on any repo with a CLEAN
+        # worktree, which is the common case, in every repo at once.
+        if [[ ${#files[@]} -gt 0 ]]; then
+            mapfile -t files < <(printf '%s\n' "${files[@]}" | sort -u)
+        fi
     fi
 
     # C++ module files are lintable ONLY when clang-tidy is the same build as the
