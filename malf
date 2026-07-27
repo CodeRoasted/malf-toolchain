@@ -1795,8 +1795,19 @@ cmd_editables() {
 # — so per-profile lockfiles would be 9 copies of one fact.
 #
 # First-party editables land WITHOUT a recipe revision, i.e. they float and are resolved from
-# the editable registry, so first-party churn never touches this file. Only third-party is
-# pinned — which is the whole point.
+# the editable registry. Only third-party is revision-pinned — which is the whole point.
+#
+# CAREFUL — the sentence that used to sit here said "first-party churn never touches this
+# file", and that is only true of REVISION churn. First-party entries still carry a VERSION,
+# so a post-cut `malf bump` desynchronises this file from every recipe: the recipes read the
+# new version and the lockfile still names the old one. CI resolves strict, and strict RAISES
+# `Requirement '<pkg>/<new>' not in lockfile` rather than degrading — so it reds every repo
+# before any of the cut's actual work is reached. Measured twice, one cut apart (the 1.8.4 and
+# 1.8.5 bumps), and the old comment is the likeliest reason it recurred: it tells a reader this
+# file needs no attention on a first-party change. It does, on a version change.
+#
+# The fix after a bump is a plain `malf lock` (behaviour-neutral: first-party versions only,
+# third-party untouched) — NOT `--update`, which additionally pulls upstream movement.
 #
 # By default this locks WHAT WE CURRENTLY BUILD (no --update), so regenerating on a green
 # tree is behaviour-neutral and any later red is attributable to the change that caused it.
