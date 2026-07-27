@@ -505,22 +505,8 @@ def _validate_field(field: dict, position: int, seen_names: set[str], source: st
 # ── canonicalize + hash (§4.3 / §5.3 MUST 3) ─────────────────────────────────
 
 
-def canonical_hash(declaration: dict) -> str:
-    """sha256 over the canonical JSON of the SEMANTIC declaration.
-
-    Key order is sorted; list order is preserved (field order and domain order are
-    semantic — emission order and positional weights bind to them). The tool version
-    is deliberately NOT part of the input (MUST 4).
-
-    This is the ENTRY's content identity, carried on IntentIdentity. It is no longer the
-    ratification key — that is `grain_hash` below (§4.6).
-    """
-    canonical = json.dumps(declaration, sort_keys=True, separators=(",", ":"),
-                           ensure_ascii=True)
-    return hashlib.sha256(canonical.encode("ascii")).hexdigest()
-
-
-# The declaration sub-keys each grain covers, so `record.hash == hash(entry.<grain>)` (§4.6).
+# The declaration sub-keys a ratification can rate; the ratification key is `grain_hash`
+# below, which covers the named grain's subtree PLUS `dialect:` (§4.6).
 GRAINS = ("structure", "body")
 
 
@@ -999,28 +985,35 @@ def selftest() -> int:
     failures: list[str] = []
 
     base = _parse_entry(_SYNTHETIC_ENTRY)
-    base_hash = canonical_hash(base)
+    base_structure_hash = grain_hash(base, "structure")
+    base_body_hash = grain_hash(base, "body")
 
-    # ── tooth 3: canonicalize-then-hash (MUST 3) ──
+    # ── tooth 3: canonicalize-then-hash (MUST 3), asserted on the LIVE ratification key ──
+    # These four properties were first asserted on the entry-level canonical hash, which was
+    # ripped with `IntentIdentity::declaration_hash` — a gate aimed at a dead surface guards
+    # nothing, so they now exercise `grain_hash`, the key `resolve_ratification` compares.
     reformatted = _SYNTHETIC_ENTRY.replace("  name: synthetic.demo",
                                            "  # a comment\n  name:   'synthetic.demo'")
     reordered = _SYNTHETIC_ENTRY.replace(
         "  name: synthetic.demo\n  dialect: github\n",
         "  dialect: github\n  name: synthetic.demo\n")
     _selftest_case("hash: reformat invariant", failures, lambda: _assert(
-        canonical_hash(_parse_entry(reformatted)) == base_hash,
-        "a reformat moved the hash — authors would avoid touching files (MUST 3)"))
+        grain_hash(_parse_entry(reformatted), "structure") == base_structure_hash
+        and grain_hash(_parse_entry(reformatted), "body") == base_body_hash,
+        "a reformat moved a grain hash — authors would avoid touching files (MUST 3)"))
     _selftest_case("hash: key-order invariant", failures, lambda: _assert(
-        canonical_hash(_parse_entry(reordered)) == base_hash,
-        "mapping key order moved the hash"))
+        grain_hash(_parse_entry(reordered), "structure") == base_structure_hash
+        and grain_hash(_parse_entry(reordered), "body") == base_body_hash,
+        "mapping key order moved a grain hash"))
     edited = _SYNTHETIC_ENTRY.replace("domain: [alpha, beta]", "domain: [alpha, gamma]")
-    _selftest_case("hash: edit revokes", failures, lambda: _assert(
-        canonical_hash(_parse_entry(edited)) != base_hash,
-        "a semantic edit did NOT move the hash — an edit would inherit soundness"))
+    _selftest_case("hash: edit revokes — and only its own grain", failures, lambda: _assert(
+        grain_hash(_parse_entry(edited), "body") != base_body_hash
+        and grain_hash(_parse_entry(edited), "structure") == base_structure_hash,
+        "a body edit must move the body hash and ONLY the body hash (§4.6)"))
     field_order = _SYNTHETIC_ENTRY.replace(
         "domain: [alpha, beta]", "domain: [beta, alpha]")
     _selftest_case("hash: domain order is semantic", failures, lambda: _assert(
-        canonical_hash(_parse_entry(field_order)) != base_hash,
+        grain_hash(_parse_entry(field_order), "body") != base_body_hash,
         "domain order is positional-binding-semantic and must enter the hash"))
 
     # ── tooth 2: the grammar has no ratified form ──
