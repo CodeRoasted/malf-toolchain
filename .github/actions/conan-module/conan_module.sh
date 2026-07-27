@@ -15,6 +15,10 @@
 # Assumes the profile is already installed in $CONAN_HOME/profiles (by setup-build-env); it does NOT
 # vendor or copy a profile itself. Build + test + create output is mirrored to $GITHUB_WORKSPACE/
 # build.log so the Sift dogfood can diff it; the crash diagnostic prints to the console only.
+#
+# It DOES own the two toolchain-file settings — the conan lockfile (adr/0038) and MALF_TOOLCHAIN_DIR
+# — derived below from this script's own path, so every caller gets them whether it reaches here
+# through `coderoast-ci` or by `uses:`-ing the `conan-module` action directly.
 
 set -euo pipefail
 
@@ -26,25 +30,58 @@ PROFILE="$CONAN_HOME/profiles/$PROFILE_NAME"
 CMAKE_ARGS="${5:-}"   # extra -D flags for the test-build configure; intentionally word-split below
 LOG="$GITHUB_WORKSPACE/build.log"
 
+# The malf-toolchain root, derived from THIS script's own location:
+#   <toolchain>/.github/actions/conan-module/conan_module.sh  ->  <toolchain>
+# Every setting below that names a file SHIPPED BY THE TOOLCHAIN (the lockfile, the intent codegen
+# tool) resolves from here, and deriving it here is what makes those settings unbypassable.
+# The two callers are composite ACTIONS, and a composite step's `env:` reaches only that composite's
+# own steps — never a workflow that `uses:` the *other* action directly. `insight-eidos`'s ci.yml
+# does exactly that for the `insight-e2e` module, so while `coderoast-ci` was the only place these
+# were set, that module resolved with NO lockfile at all — weaker than partial, and silent
+# (adr/0038 §3's "set once in the composite, which every repo reaches" was false for that path).
+# This script is the one thing every path goes through, so it is the one place they belong.
+# Callers still override by exporting the variable; a per-caller *copy* of the default is the
+# [[ci-vendoring-baseline-drift]] failure by construction and must not be added.
+TOOLCHAIN_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
+
+# Build-time codegen reachability. logcraft/core's CMake FATALs unless it can find
+# intent_library_codegen.py, and its fallback — the sibling <workspace>/malf — is unreachable under
+# `conan create` / `--build=missing`, which build from sources exported into the conan cache. This
+# path does not go through malf, so malf's own export (malf:63) never reaches it.
+export MALF_TOOLCHAIN_DIR="${MALF_TOOLCHAIN_DIR:-$TOOLCHAIN_ROOT}"
+
 # Lockfile args (adr/0038), shared by the install and create phases below so the two can never
 # disagree about which graph they resolved. Third-party recipes require by RANGE
 # (clickhouse-cpp -> lz4/[>=1.9.4 <2], libcurl -> openssl/[>=3 <4]) and conan resolves a range
 # against whatever is reachable at that moment — so without this, two legs of one release can
 # legitimately resolve different dependency versions, and the 5-leg golden compare reds with no
-# diagnosable cause. Absent lockfile => empty array => previous behaviour exactly, so an older
-# caller ref that predates malf/conan.lock still builds.
+# diagnosable cause. NOTE this path does NOT go through malf either — raw `conan install` /
+# `conan create` — so MALF_LOCKFILE_STRICT is inert here; these two variables are the CI seam.
+#
+# MALF_LOCKFILE overrides the derived path. Setting it to the EMPTY string is the one way to opt out
+# ("resolve live"), and it has to be deliberate: a NON-EMPTY path that does not exist is a hard
+# error, not a silent downgrade to live resolution. The old form (`-n $VAR && -f $VAR`) turned a
+# typo'd or missing lockfile into a free resolve that reads as green — the exact silent-green class
+# the lockfile exists to stop.
+MALF_LOCKFILE="${MALF_LOCKFILE-$TOOLCHAIN_ROOT/conan.lock}"
 LOCKFILE_ARGS=()
-if [ -n "${MALF_LOCKFILE:-}" ] && [ -f "$MALF_LOCKFILE" ]; then
+if [ -n "$MALF_LOCKFILE" ]; then
+  if [ ! -f "$MALF_LOCKFILE" ]; then
+    echo "::error::conan_module: lockfile '$MALF_LOCKFILE' does not exist. The default is derived from"
+    echo "::error::this script's location (toolchain root '$TOOLCHAIN_ROOT'), so a missing file means a"
+    echo "::error::broken malf-toolchain checkout or a bad MALF_LOCKFILE override. Set MALF_LOCKFILE='' to"
+    echo "::error::resolve live on purpose."
+    exit 1
+  fi
   LOCKFILE_ARGS+=("--lockfile=$MALF_LOCKFILE")
-  # GATE by default (adr/0038 §3): '1' pins, anything else drops --lockfile-partial so that "a
-  # dependency entered UNLOCKED" is a hard red. The default was '1' (pin) only while the flip to
-  # strict was pending; it is taken, so a caller that sets MALF_LOCKFILE without naming a mode now
-  # inherits the gate instead of silently inheriting the weaker pin. `coderoast-ci` still sets
-  # MALF_LOCKFILE_PARTIAL explicitly — this default is the backstop, not the policy.
+  # GATE (adr/0038 §3), and this is the POLICY, not a backstop: '1' pins (the desk posture),
+  # anything else drops --lockfile-partial so that "a dependency entered UNLOCKED" is a hard red.
+  # Flipped '1' (pin) -> '0' (gate) at the 1.8.4 head, after v1.8.3 was the first observed-green cut
+  # (adr/0038 §Consequences). Set here for the same reason the path is: one place, every caller.
   [ "${MALF_LOCKFILE_PARTIAL:-0}" = "1" ] && LOCKFILE_ARGS+=("--lockfile-partial")
   echo "conan_module: using lockfile $MALF_LOCKFILE ${LOCKFILE_ARGS[*]}"
 else
-  echo "conan_module: no lockfile (MALF_LOCKFILE=${MALF_LOCKFILE:-unset}) — resolving live"
+  echo "conan_module: MALF_LOCKFILE set EMPTY by the caller — resolving live, unlocked"
 fi
 
 # On a failed test phase, capture a backtrace for whatever crashed — at ANY phase: startup (e.g.
