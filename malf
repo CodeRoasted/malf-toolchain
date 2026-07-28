@@ -982,8 +982,20 @@ cmd_lint() {
         comp_db="$(_malf_default_build_root "$CWD")"
     fi
 
+    # No compile DB is not a "may miss context" warning — it is a total loss of context, and
+    # it fails LOUDLY as noise rather than quietly as a gap. clang-tidy with no `-p` runs
+    # "without flags": no -std=c++23, no -isystem dep headers, no module BMIs. Measured on a
+    # clean insight-twin clone (2026-07-28): 39 clang-diagnostic-error, starting with
+    # `error: unknown type name 'module'` on `export module insight.twin;`. Every one is a
+    # phantom, and clang-tidy exits 1 — a gate wired this way can never PASS, whatever the
+    # source says, which is the worst way for a gate to be wrong. So: refuse, and name the
+    # remedy. This is the guard that makes `lint` safe to wire into CI at all.
     if [[ -z "$comp_db" ]]; then
-        echo "malf lint: warning: no compile_commands.json found; clang-tidy may miss context" >&2
+        echo "malf lint: error: no compile_commands.json at $CWD or $(_malf_default_build_root "$CWD")." >&2
+        echo "malf lint: refusing to run — with no compile database clang-tidy parses every TU without" >&2
+        echo "malf lint: flags and reports phantom clang-diagnostic-errors it cannot be right about." >&2
+        echo "malf lint: build the package ('malf build') or index it ('malf commands') first." >&2
+        exit 1
     fi
 
     local output_file=""
@@ -1143,6 +1155,22 @@ cmd_lint() {
     fi
 
     if [[ ${#files[@]} -eq 0 ]]; then
+        # An empty set means two opposite things depending on the mode, and only one of them
+        # is benign. In the DEFAULT mode the set is `git diff --name-only HEAD`, so empty ==
+        # "nothing changed" — the ordinary state of a clean worktree, and a correct pass.
+        # Under --all-files empty can NEVER mean that: the mode walks the tree, so zero files
+        # means the walk or the DB filter ate everything (wrong CWD, an over-broad
+        # MALF_LINT_EXCLUDE_EXTRA, an unbuilt package whose TUs are all absent from the DB).
+        # Passing there is the can't-FAIL vacuity: a gate that inspects nothing and reports
+        # green. --all-files is the only mode fit for CI precisely because it does not depend
+        # on a dirty worktree, so it is the one that must refuse to be vacuous.
+        if $all_files; then
+            echo "malf lint: error: --all-files matched no lintable file under $CWD." >&2
+            echo "malf lint: refusing to report success — this mode walks the tree, so an empty set is a" >&2
+            echo "malf lint: scoping failure (wrong directory, MALF_LINT_EXCLUDE_EXTRA too broad, or the" >&2
+            echo "malf lint: package is not built so every TU was dropped as absent from the compile DB)." >&2
+            exit 1
+        fi
         echo "malf lint: no files to check"
         return 0
     fi
@@ -1287,20 +1315,42 @@ cmd_format() {
     fi
     [[ -n "$clang_format_bin" ]] || { echo "malf format: error: clang-format not found" >&2; exit 1; }
 
-    # clang-format config: prefer CWD, fall back to malf dir
-    local format_args
-    if $check; then
-        format_args=(--dry-run --Werror -style=file)
-        echo "=== malf format: checking ==="
+    # ── Style resolution: explicit, and NEVER a silent fallback ──────────────
+    # A bare `-style=file` makes clang-format search upward from each FILE and, finding
+    # nothing, format to LLVM style — with no warning and no error, so the whole tree
+    # reports as misformatted for a reason that never appears in the output. That is not
+    # hypothetical: every C++ repo here except insight-twin commits `.clang-format` as a
+    # RELATIVE SYMLINK to `../malf/config/.clang-format`, which resolves in a workspace
+    # checkout and DANGLES in a standalone clone — i.e. in every CI checkout, where the
+    # sibling malf/ does not exist. `[[ -f ]]` follows symlinks, so a dangling link is
+    # correctly "absent" here and we fall through to the toolchain's own copy, which is
+    # the very file the symlink names, passed by explicit path.
+    #
+    # The old form looked for `$MALF_DIR/.clang-format` (the bundled config actually lives
+    # in `$MALF_DIR/config/`, which is where cmd_lint reads its .clang-tidy from), so the
+    # fallback could never fire and the silent-LLVM path was the only outcome. It also
+    # COPIED the config into the tree it was about to check — a checker must not dirty its
+    # own worktree; passing the path does the same job and leaves the checkout clean.
+    local style
+    if [[ -f "$CWD/.clang-format" ]]; then
+        # Let clang-format do its own upward search so per-subdirectory overrides still apply.
+        style="file"
+    elif [[ -f "$MALF_DIR/config/.clang-format" ]]; then
+        style="file:$MALF_DIR/config/.clang-format"
+        echo "malf format: no usable $CWD/.clang-format (absent, or a symlink that does not resolve in this checkout) — using the toolchain config $MALF_DIR/config/.clang-format" >&2
     else
-        format_args=(-i -style=file)
-        echo "=== malf format: formatting ==="
+        echo "malf format: error: no .clang-format at $CWD and none at $MALF_DIR/config/.clang-format." >&2
+        echo "malf format: refusing to run — clang-format would silently format to LLVM style and report the whole tree as misformatted." >&2
+        exit 1
     fi
 
-    # If no .clang-format in CWD, copy from malf dir so -style=file works
-    if [[ ! -f "$CWD/.clang-format" && -f "$MALF_DIR/.clang-format" ]]; then
-        cp "$MALF_DIR/.clang-format" "$CWD/.clang-format"
-        echo "malf format: copied .clang-format from malf dir"
+    local format_args
+    if $check; then
+        format_args=(--dry-run --Werror "-style=$style")
+        echo "=== malf format: checking (-style=$style) ==="
+    else
+        format_args=(-i "-style=$style")
+        echo "=== malf format: formatting (-style=$style) ==="
     fi
 
     # Prune list → find args. `-name` glob-matches, so `build-*` works as written.

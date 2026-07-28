@@ -69,8 +69,8 @@ gone. The merged clangd DB lands at the repo root's default-leg tree
 | `test` | same build flow, then `ctest` |
 | `bench` | same build flow, then run benchmark executables, output JSON to `bench_results/` (plain runs update `baseline.json`) |
 | `bench --compare` | variance-aware regression gate vs `baseline.json` (`bench_compare.py`): runs 5 repetitions by default, compares MEDIANS, and widens the `--threshold` floor (default ±10%) to 3×cv per bench — so honestly-noisy benches (the ±40–90pt pipeline swings) no longer false-positive while tight benches keep the floor |
-| `lint` | clang-tidy on git-changed files (or `--all-files`) |
-| `format` | clang-format all C++ files in-place |
+| `lint` | clang-tidy on git-changed files (or `--all-files`). Requires a compile database — it refuses to run without one, because a flag-less clang-tidy reports phantom errors it cannot be right about. Under `--all-files` an empty file set is a scoping failure, not a pass |
+| `format` | clang-format all C++ files in-place (`--check` = `--dry-run --Werror`, non-zero on any violation). Resolves the style explicitly and refuses to run if it cannot, rather than let clang-format fall back to LLVM style unannounced |
 | `commands` / `compile-commands` | configure every member package (+ its `test_package`) and merge all `compile_commands.json` into the repo root's default-leg DB |
 | `clean` | remove build trees (CWD + every member package) and/or local Conan cache packages |
 | `run` | execute a binary from any member package's build tree |
@@ -118,5 +118,13 @@ must never target either (fork-PR RCE). Full guide: `runner/README.md`.
 | File | Purpose |
 |---|---|
 | `global.conf` | Conan global config (seeded into local cache if missing) |
-| `.clang-tidy` | Default clang-tidy config (overridden by project's own `.clang-tidy`) |
-| `.clang-format` | Default clang-format style (overridden by project's own `.clang-format`) |
+| `config/.clang-tidy` | Default clang-tidy config (overridden by the project's own `.clang-tidy`) |
+| `config/.clang-format` | Default clang-format style (overridden by the project's own `.clang-format`) |
+| `config/.clangd` | Default clangd config |
+
+Every C++ repo except `insight-twin` commits these three as **relative symlinks** into
+`../malf/config/`. Those resolve in a workspace checkout and **dangle in a standalone
+clone** — which is what a CI checkout is. `lint` and `format` both treat a dangling link
+as absent and fall back to the path above, so both resolve the same config either way;
+neither ever falls through to a tool default (`format` refuses to run rather than let
+clang-format silently format to LLVM style).

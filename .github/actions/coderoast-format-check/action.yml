@@ -1,0 +1,108 @@
+name: 'CodeRoast format check'
+description: |
+  clang-format conformance gate over the caller repo's C++ sources: `malf format --check`
+  (clang-format --dry-run --Werror), non-zero on the first violation, naming file:line:col.
+  The remedy is always the same one command — `malf format` — so the failure is self-describing.
+
+  Ships a SELF-TEST that runs BEFORE the repo is checked, the same way coderoast-module-conformance
+  runs `--selftest` first: a deliberately misformatted probe TU must be REJECTED, and the same TU
+  after `malf format` must be ACCEPTED. Both legs, because either alone leaves a hole — a gate that
+  cannot fail reports green over anything, and a gate that cannot pass red-walls every lane for a
+  reason that is not in the source. Two live hazards make this more than ritual here:
+
+    * clang-format is version-sensitive. A different major reflows differently, so a runner that
+      quietly provided clang-format-18 would fail the whole tree on churn, not on defects. The
+      version is asserted, not assumed.
+    * every C++ repo except insight-twin commits `.clang-format` as a RELATIVE SYMLINK into the
+      sibling `../malf/config/`. That resolves in a workspace checkout and DANGLES in a standalone
+      clone — which is exactly what a CI checkout is. clang-format's `-style=file` answers a
+      dangling link by formatting to LLVM style with no warning, so before `malf` learned to
+      resolve the style explicitly this gate would have reported every file in seven repos as
+      misformatted. `malf format` now falls back to the toolchain's own config and refuses to run
+      if it cannot resolve one; the probe leg is what keeps that true.
+
+  Run after `actions/checkout`. Requires no build: clang-format parses each file on its own, so
+  unlike `malf lint` this gate needs neither a compile database nor module BMIs.
+
+inputs:
+  clang-format-major:
+    description: 'Required clang-format major version. The dev toolchain is clang-21; a mismatch is a hard failure, never a silent reflow diff.'
+    required: false
+    default: '21'
+
+runs:
+  using: composite
+  steps:
+    - name: Provision clang-21 (supplies the version-matched clang-format)
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-clang21-libcxx@main
+
+    - name: Format gate (self-test, then the repo)
+      shell: bash
+      env:
+        # Same derivation conan_module.sh uses: <toolchain>/.github/actions/<this>/action.yml -> <toolchain>.
+        # Deriving it from the action's own location is what makes it unbypassable and keeps the
+        # toolchain layout encoded in exactly one place per script.
+        MALF: ${{ github.action_path }}/../../../malf
+        WANT_MAJOR: ${{ inputs.clang-format-major }}
+      run: |
+        set -euo pipefail
+
+        # ── Version assertion ────────────────────────────────────────────────
+        # Resolve the binary the way `malf format` does — from clang-21's own install — so the
+        # thing asserted here is the thing that runs below, not a different clang-format on PATH.
+        clang_bin="$(command -v clang-21 || command -v clang || true)"
+        [ -n "$clang_bin" ] || { echo "::error::no clang on PATH — setup-clang21-libcxx did not provision"; exit 1; }
+        fmt="$(dirname "$(readlink -f "$clang_bin")")/clang-format"
+        [ -x "$fmt" ] || fmt="$(command -v "clang-format-${WANT_MAJOR}" || command -v clang-format || true)"
+        if [ -z "$fmt" ] || [ ! -x "$fmt" ]; then
+          echo "::error::clang-format not found next to $clang_bin or on PATH"
+          exit 1
+        fi
+        got="$("$fmt" --version | grep -oE 'version [0-9]+' | grep -oE '[0-9]+')"
+        if [ "$got" != "$WANT_MAJOR" ]; then
+          echo "::error::clang-format major $got, expected $WANT_MAJOR ($fmt). A different major reflows differently, so this gate would fail on churn rather than on defects. Fix the runner provisioning; do not relax the check."
+          exit 1
+        fi
+        echo "clang-format $got — $fmt"
+
+        # ── Self-test: the gate must be able to FAIL and to PASS ─────────────
+        # Run in a temp dir OUTSIDE the checkout, so the probe cannot dirty the tree under test and
+        # the repo's own violations cannot be confused with the probe's. The style is resolved by
+        # `malf format` itself: the repo's .clang-format when it resolves, else the toolchain's —
+        # so this exercises malf's real resolution rather than re-implementing it here.
+        echo "::group::format gate self-test"
+        probe="$(mktemp -d)"
+        trap 'rm -rf "$probe"' EXIT
+        if [ -f "$GITHUB_WORKSPACE/.clang-format" ]; then
+          cp "$GITHUB_WORKSPACE/.clang-format" "$probe/.clang-format"
+        fi
+        printf 'namespace  probe { int   misformatted( ){ return 0;} }\n' > "$probe/probe.cpp"
+
+        if ( cd "$probe" && bash "$MALF" format --check ) >/dev/null 2>&1; then
+          echo "::error::self-test leg 1 FAILED: a deliberately misformatted TU was ACCEPTED. The gate has no teeth — it would report green over any violation. Do not trust a pass from this run."
+          exit 1
+        fi
+        echo "leg 1 ok — a misformatted TU is rejected"
+
+        # Guarded, and the guard is the point. Under `set -e` a bare failing call here would abort
+        # the step with malf's exit code and NO diagnostic — leg 2 would look like it never ran,
+        # and the run would read as an infrastructure hiccup rather than as the gate refusing.
+        # This is the branch that fires when the style cannot be resolved at all, which is the
+        # can't-PASS mode leg 2 exists to name.
+        if ! ( cd "$probe" && bash "$MALF" format ) >/dev/null 2>&1; then
+          echo "::error::self-test leg 2 FAILED: 'malf format' could not format the probe TU at all — the style is unresolvable, or clang-format itself failed. This gate cannot pass for any source, so a red repo below would carry no information. Fix the config resolution."
+          exit 1
+        fi
+        if ! ( cd "$probe" && bash "$MALF" format --check ) >/dev/null 2>&1; then
+          echo "::error::self-test leg 2 FAILED: a TU freshly formatted by 'malf format' is still reported as a violation. The style is unstable, so this gate cannot pass for any source. Fix the config resolution; a red repo below would be meaningless."
+          exit 1
+        fi
+        echo "leg 2 ok — a formatted TU is accepted"
+        echo "::endgroup::"
+
+        # ── The repo ─────────────────────────────────────────────────────────
+        cd "$GITHUB_WORKSPACE"
+        if ! bash "$MALF" format --check; then
+          echo "::error::clang-format violations above. Run 'malf format' at the repo root and commit the result."
+          exit 1
+        fi

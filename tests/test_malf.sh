@@ -325,5 +325,59 @@ check "db-lintable keeps live-dir entry, drops missing-dir entry (no chdir crash
 rm -rf "$db_tmp"
 
 echo
+
+echo "[7g] lint + format REFUSE the states in which their output would be meaningless"
+
+# All three arms pin the same class: a checker that cannot be right must say so, not produce
+# output. Each was a live silent path before, and each is now the thing that makes these two
+# verbs safe to wire into CI — which is why they are pinned here rather than trusted.
+#
+# The probe tree is a bare directory with two source files and no build, no git, no config.
+# That is exactly a CI checkout of a repo whose .clang-format is a symlink into a sibling repo
+# that was not cloned.
+guard_tmp="$(mktemp -d)"
+printf 'export module probe;\n' > "$guard_tmp/probe.cppm"
+printf 'namespace  probe { int  f( ){return 0;} }\n' > "$guard_tmp/probe.cpp"
+
+# 1. lint with no compile DB. Previously a warning followed by a flag-less clang-tidy run:
+#    measured 39 phantom clang-diagnostic-errors on a clean insight-twin clone, i.e. a gate
+#    that can never pass. Both modes refuse, because neither can produce a trustworthy verdict.
+lint_all_out="$(cd "$guard_tmp" && bash "$MALF_BIN" lint --all-files --console 2>&1)"; lint_all_rc=$?
+check "lint --all-files refuses with no compile_commands.json" \
+      "rc=1 refused" \
+      "rc=$lint_all_rc $([[ "$lint_all_out" == *"no compile_commands.json"* ]] && echo refused || echo "GOT: $lint_all_out")"
+
+lint_def_out="$(cd "$guard_tmp" && bash "$MALF_BIN" lint --console 2>&1)"; lint_def_rc=$?
+check "lint (default mode) refuses with no compile_commands.json" \
+      "rc=1 refused" \
+      "rc=$lint_def_rc $([[ "$lint_def_out" == *"no compile_commands.json"* ]] && echo refused || echo "GOT: $lint_def_out")"
+
+# 2. format with an unresolvable style. `-style=file` answers a missing config by formatting to
+#    LLVM style SILENTLY — no warning, no error — so every file in the tree reports as violating
+#    a style nobody chose. The refusal is checked against a malf whose bundled config is not
+#    reachable, since the real one always is.
+fmt_iso="$(mktemp -d)"
+cp "$MALF_BIN" "$fmt_iso/malf"          # copied ALONE: no sibling config/ dir, so no fallback
+fmt_none_out="$(cd "$guard_tmp" && bash "$fmt_iso/malf" format --check 2>&1)"; fmt_none_rc=$?
+check "format refuses rather than fall back to LLVM style" \
+      "rc=1 refused" \
+      "rc=$fmt_none_rc $([[ "$fmt_none_out" == *"refusing to run"* ]] && echo refused || echo "GOT: $fmt_none_out")"
+
+# 3. format resolves the TOOLCHAIN config when the repo's own does not resolve — the CI case.
+#    The probe tree has no .clang-format at all, which is what `[[ -f ]]` also reports for the
+#    dangling symlink every C++ repo but insight-twin ships. It must announce the substitution
+#    (a silent one would be the same defect wearing a different hat) and must not write the
+#    config into the tree it is checking.
+fmt_fb_out="$(cd "$guard_tmp" && bash "$MALF_BIN" format --check 2>&1)" || true
+check "format falls back to the toolchain config, and says so" \
+      "announced" \
+      "$([[ "$fmt_fb_out" == *"config/.clang-format"* ]] && echo announced || echo "GOT: $fmt_fb_out")"
+check "format does not copy a config into the tree it checks" \
+      "clean" \
+      "$([[ -e "$guard_tmp/.clang-format" ]] && echo "DIRTIED: .clang-format written into the checkout" || echo clean)"
+
+rm -rf "$guard_tmp" "$fmt_iso"
+
+echo
 echo "malf selftest: $pass_count passed, $fail_count failed"
 [[ $fail_count -eq 0 ]] || exit 1

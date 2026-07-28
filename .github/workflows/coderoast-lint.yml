@@ -1,9 +1,20 @@
 name: CodeRoast Lint
 
 # Shared lint gate for every CodeRoast repo, as a reusable workflow: actionlint over the caller's
-# workflows + the C++23 module-conformance gate over the caller's own module units. Both are
-# per-repo-local and toggle true/false (default true). Replaces the copy-pasted-and-drifted per-repo
-# workflow-lint.yml, and lets every C++ package repo self-check its modules on its own PRs.
+# workflows, the C++23 module-conformance gate over the caller's own module units, and the
+# clang-format conformance gate over the caller's C++ sources. All three are per-repo-local and
+# toggle true/false (default true). Replaces the copy-pasted-and-drifted per-repo workflow-lint.yml,
+# and lets every C++ package repo self-check its modules and its formatting on its own PRs.
+#
+# Every toggle DEFAULTS TRUE, deliberately: a repo that says nothing is gated, and a hole is a
+# written line in that repo's own lint.yml stating which gate is off and why. The inverse — default
+# false, opt in — makes a missing gate indistinguishable from a deliberate one, and a new repo
+# silently ungated.
+#
+# `malf lint` (clang-tidy) is NOT here and cannot be: it needs a compile database and clang-21
+# module BMIs, so it needs a BUILD, and this workflow only checks out. `malf format --check` has no
+# such dependency — clang-format parses each file on its own — which is why the two source gates
+# split across two homes rather than landing together.
 #
 # Cross-repo determinism gates (wall-clock, RNG) are NOT here — they span multiple repos and only the
 # superproject can run them; it wires them as its own chained jobs.
@@ -18,6 +29,15 @@ on:
         default: true
       module-conformance:
         description: 'Run the C++23 module-conformance gate over the caller repo module units. Set false for a repo with no .cppm (e.g. the superproject, a TS repo).'
+        type: boolean
+        required: false
+        default: true
+      format-check:
+        description: |
+          Run `malf format --check` (clang-format --dry-run --Werror) over the caller repo C++ sources.
+          Set false ONLY for a repo carrying pre-existing violations, and say so in the caller with the
+          file count and the owner — an unexplained false is indistinguishable from an oversight. Also
+          false for a repo with no C++ (a TS repo), where the walk finds nothing and the gate is inert.
         type: boolean
         required: false
         default: true
@@ -54,3 +74,11 @@ jobs:
       - name: C++ modules conformance
         if: ${{ inputs.module-conformance }}
         uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-module-conformance@main
+
+      # Last, because it provisions clang-21 to get a version-matched clang-format. On the
+      # self-hosted fleet that provisioning is an idempotent no-op (the toolchain persists between
+      # jobs); on a hosted runner it is a real apt install, so the two cheap checkout-only checks
+      # above report first and a repo never pays for the toolchain to learn its workflows are broken.
+      - name: C++ format conformance
+        if: ${{ inputs.format-check }}
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-format-check@main
