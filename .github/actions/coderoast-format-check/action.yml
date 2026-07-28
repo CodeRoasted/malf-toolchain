@@ -33,8 +33,39 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Provision clang-21 (supplies the version-matched clang-format)
+    - name: Provision clang-21 (the compiler leg; adds the apt.llvm.org source)
       uses: CodeRoasted/malf-toolchain/.github/actions/setup-clang21-libcxx@main
+
+    - name: Provision the version-matched clang-format
+      shell: bash
+      env:
+        WANT_MAJOR: ${{ inputs.clang-format-major }}
+      run: |
+        set -euo pipefail
+        # clang-format is NOT part of the compiler leg. `llvm.sh 21` installs exactly
+        # `clang-21 lldb-21 lld-21 clangd-21`; clang-format ships in its own `clang-format-21`
+        # deb. Without this step the resolution below falls through to whatever clang-format the
+        # base image carries — ubuntu-latest's is major 18 — and the version assertion refuses.
+        # That is the gate working, but it red-walls every lane for a reason that is not in the
+        # source, so the tool is provisioned here rather than asserted into existence.
+        #
+        # WHY HERE AND NOT IN setup-clang21-libcxx, which this action already calls: that action is
+        # shared with the golden.yaml determinism legs, and it opens with an idempotent-skip guard
+        # over a FIXED end-state set (clang++-21, libc++-21, the modules.json bridge, the
+        # alternatives). On a persistent self-hosted runner that guard returns before any install
+        # runs, so a clang-format folded in there would be skipped on exactly the boxes that
+        # already satisfy the old invariants — provisioned on hosted, silently absent on
+        # self-hosted. An action provisioning the one tool it asserts on has no such gap.
+        want_dir="$(dirname "$(readlink -f "$(command -v clang-21 || command -v clang)")")"
+        if ! "$want_dir/clang-format" --version 2>/dev/null | grep -qE "version ${WANT_MAJOR}\."; then
+          sudo apt-get update
+          sudo apt-get install -y "clang-format-${WANT_MAJOR}"
+        fi
+        # Assert the END STATE this step is responsible for — that clang-format sits next to the
+        # compiler, which is the first branch the resolution below takes. A packaging change that
+        # moved it would otherwise surface as the version mismatch downstream, pointing at the
+        # runner image instead of at this step.
+        "$want_dir/clang-format" --version
 
     - name: Format gate (self-test, then the repo)
       shell: bash
