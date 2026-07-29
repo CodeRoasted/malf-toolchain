@@ -41,6 +41,15 @@ on:
         type: boolean
         required: false
         default: true
+      dead-symbol-check:
+        description: |
+          Fail when the change deletes the last code occurrence of an identifier a comment still
+          names in backticks (CLAUDE.md § Comments — a comment restating a symbol is a mirror with
+          no enforced edge). Diff-scoped, so it only ever considers identifiers THIS change removed;
+          a pre-existing tree is never swept. Set false only for a repo with no C++.
+        type: boolean
+        required: false
+        default: true
       runs-on:
         description: 'Runner label for the checks job. Defaults to hosted ubuntu-latest. PUBLIC callers MUST omit it — a self-hosted runner reachable from a public repo fork PR is an RCE. PRIVATE callers pass vars.CI_RUNS_ON (fallback ubuntu-latest) to route to the self-hosted fleet.'
         type: string
@@ -60,6 +69,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+        with:
+          # depth 2, not 1, and it is load-bearing for the dead-symbol gate below: that gate
+          # inspects HEAD~1..HEAD, and at depth 1 HEAD~1 does not exist. An unreachable range
+          # yields an EMPTY diff — zero candidates, zero findings, exit 0 — which reads exactly
+          # like a clean run. The gate refuses such a range rather than passing vacuously, so
+          # this is what keeps it from being permanently, silently green.
+          fetch-depth: 2
 
       - name: Install actionlint
         if: ${{ inputs.actionlint }}
@@ -82,3 +98,11 @@ jobs:
       - name: C++ format conformance
         if: ${{ inputs.format-check }}
         uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-format-check@main
+
+      # Cheap (no toolchain, no build — it reads text), but placed last on purpose: it is the
+      # newest gate here, and a repo should learn its workflows, modules and formatting are sound
+      # before it hears about a comment. Unlike format-check this one needs no provisioning, so
+      # ordering costs nothing either way.
+      - name: Dead symbol in comment
+        if: ${{ inputs.dead-symbol-check }}
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dead-symbol@main

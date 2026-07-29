@@ -1,0 +1,65 @@
+name: 'CodeRoast dead-symbol-in-comment gate'
+description: |
+  Fails when a change deletes the last code occurrence of an identifier that a comment in the
+  repo still names in backticks. CLAUDE.md § Comments calls such a comment a MIRROR with no
+  enforced edge; this gate is the missing edge, for that one failure mode.
+
+  Ships a SELF-TEST that runs BEFORE the repo is checked, the same way coderoast-format-check
+  and coderoast-module-conformance do: the gate must be able to FAIL (a comment naming an
+  absent symbol is caught) and to PASS (a live symbol, a string-literal-only name, and plain
+  English are all left alone). Either leg alone leaves a hole — a gate that cannot fail reports
+  green over anything, and one that cannot pass red-walls every lane and gets switched off.
+
+  WHY DIFF-SCOPED. A whole-tree sweep was built and measured first: 1289 backticked candidates
+  across the workspace, 119 flagged. Almost all were legitimate — DSL keywords, JSON fields, env
+  vars, conan targets, and above all CROSS-REPO references (a logcraft comment correctly naming
+  canon's `dominant_level`). The sweep cannot tell those from real rot, because a correct
+  cross-repo reference and a rotted one have the identical shape: alive elsewhere, named here.
+  Diff scope deletes that class by construction — only identifiers THIS change removed are ever
+  candidates — and it fires at the commit that caused the rot, where the repair is cheapest and
+  the author still has the context.
+
+  Measured on real history before arming: 8 firing commits out of 240 examined (3.3%), every one
+  a genuine refactor that left a comment pointing at nothing — canon's T4 dialect inversion,
+  eidos's stream declaration, the twin's medium strip, logcraft's `LogFormat` rename. Each
+  flagged token was then confirmed to have ZERO code occurrences repo-wide.
+
+  Requires history: the caller must check out with `fetch-depth: 2` or deeper, else HEAD~1 does
+  not exist and the gate cannot see a diff at all. It says so and fails rather than passing
+  vacuously on an empty range — a shallow checkout must never read as "no findings".
+
+inputs:
+  range:
+    description: 'git range to inspect. Default HEAD~1..HEAD, which on a PR merge commit is base..head.'
+    required: false
+    default: 'HEAD~1..HEAD'
+
+runs:
+  using: composite
+  steps:
+    - name: Dead-symbol gate (self-test, then the repo)
+      shell: bash
+      env:
+        # Same derivation the other composites use: <toolchain>/.github/actions/<this>/action.yml
+        # -> <toolchain>. Deriving it from the action's own location keeps the layout in one place.
+        LINT: ${{ github.action_path }}/../../../dead_symbol_lint.py
+        RANGE: ${{ inputs.range }}
+      run: |
+        set -euo pipefail
+
+        # The range must be REACHABLE. A shallow clone makes HEAD~1 missing, and an unreachable
+        # range yields an empty diff — zero candidates, zero findings, exit 0. That is the
+        # can't-FAIL mode: it reads exactly like a clean run. Refuse instead.
+        if ! git -C "$GITHUB_WORKSPACE" rev-parse --verify --quiet "${RANGE%%..*}^{commit}" >/dev/null; then
+          echo "::error::range '$RANGE' is not reachable — the checkout is too shallow. Set fetch-depth: 2 or deeper on actions/checkout. Refusing to report a vacuous pass."
+          exit 1
+        fi
+
+        echo "::group::dead-symbol gate self-test"
+        python3 "$LINT" --selftest
+        echo "::endgroup::"
+
+        if ! python3 "$LINT" --repo "$GITHUB_WORKSPACE" --range "$RANGE"; then
+          echo "::error::a comment names a symbol this change just deleted. Repair by REMOVING the mirror — name the owner, never restate what the compiler already checks (CLAUDE.md § Comments)."
+          exit 1
+        fi
