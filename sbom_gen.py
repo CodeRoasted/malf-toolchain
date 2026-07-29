@@ -53,6 +53,34 @@ CPE_VENDOR: dict[str, str] = {
     "yaml-cpp": "yaml-cpp_project",
 }
 
+# ── First-party predicate ───────────────────────────────────────────────────────────────
+# THE single definition of "first-party" for every consumer in this file: the unmapped-CPE
+# report AND the coderoast:cpe-coverage ratio (adr/0070 §3). A second, independently-written
+# definition of "third-party" is how a numerator and a denominator drift apart — so both
+# derive from this one predicate, on the component's rendered (display) name.
+FIRST_PARTY_PREFIXES: tuple[str, ...] = ("insight_", "coderoast_", "logcraft_")
+
+
+def is_first_party(component_name: str) -> bool:
+    return component_name.startswith(FIRST_PARTY_PREFIXES)
+
+
+def cpe_coverage(components: list[dict]) -> str:
+    """The coderoast:cpe-coverage ratio, `<with-CPE>/<third-party-total>` (adr/0070 §3).
+
+    trivy matches C/C++ components to NVD by CPE; a component without one is matched by PURL
+    alone and in practice scanned weakly or not at all. Without this declared ratio an SBOM
+    whose components are mostly CPE-less reads as green while being nearly blind — the
+    workspace's signature defect shape. First-party components carry no CVE surface, so they
+    are excluded from BOTH sides via `is_first_party`. The `malf sbom --check` byte-compare
+    freshness gate is what makes this number a control: a component entering without a CPE
+    mapping changes the ratio, stales the committed file, and reds the gate.
+    """
+    third_party = [comp for comp in components if not is_first_party(comp["name"])]
+    with_cpe = sum(1 for comp in third_party if "cpe" in comp)
+    return f"{with_cpe}/{len(third_party)}"
+
+
 # conan package name -> CycloneDX component name, where the ecosystem spells it differently.
 # The PURL always keeps the CONAN name (it is a pkg:conan purl); only the display name moves.
 DISPLAY_NAME: dict[str, str] = {
@@ -131,7 +159,8 @@ def to_component(node: dict) -> tuple[dict, bool]:
     return comp, bool(vendor)
 
 
-def build_sbom(root: Path, profile: Path, lockfile: Path | None, note: str) -> tuple[dict, list[str]]:
+def build_sbom(root: Path, profile: Path, lockfile: Path | None,
+               note: str | None) -> tuple[dict, list[str]]:
     graph = resolve_graph(root, profile, lockfile)
     root_node, nodes = shipped_components(graph)
     root_ref = (root_node.get("ref") or "").split("#", 1)[0]
@@ -142,7 +171,7 @@ def build_sbom(root: Path, profile: Path, lockfile: Path | None, note: str) -> t
         comp, has_cpe = to_component(node)
         # A first-party package carries no CVE surface and needs no CPE; only flag THIRD-party
         # gaps, or the report cries wolf on every insight_* row and stops being read.
-        if not has_cpe and not comp["name"].startswith(("insight_", "coderoast_", "logcraft_")):
+        if not has_cpe and not is_first_party(comp["name"]):
             missing_cpe.append(f'{comp["name"]}/{comp["version"]}')
         comps.append(comp)
 
@@ -152,7 +181,10 @@ def build_sbom(root: Path, profile: Path, lockfile: Path | None, note: str) -> t
         "version": 1,
         "metadata": {
             "component": {"type": "application", "name": root_name, "version": root_version},
-            "properties": [{"name": "coderoast:note", "value": note}],
+            "properties": [
+                {"name": "coderoast:note", "value": note_for(root_name, note)},
+                {"name": "coderoast:cpe-coverage", "value": cpe_coverage(comps)},
+            ],
         },
         "components": comps,
     }
@@ -165,6 +197,29 @@ DEFAULT_NOTE = (
     "provenance + license verdict: insight-eidos/SBOM.md. Scanned by "
     ".github/workflows/sbom-cve.yml."
 )
+
+# Per-artifact note, keyed on the ROOT package name. adr/0070 §2: this artifact is "the
+# linked-closure SBOM for coderoast_server", never "the server SBOM" — the deployed server is
+# THREE inventories and this projection covers exactly one, so the boundary must travel WITH
+# the artifact (a reader cannot recover it from the file otherwise). An artifact that
+# over-reports its blast radius converts an absent check into a believed one.
+ARTIFACT_NOTE: dict[str, str] = {
+    "coderoast_server": (
+        "The LINKED-CLOSURE SBOM for the coderoast_server binary — not 'the server SBOM'. "
+        "The deployed server is three inventories (adr/0070 §1): (1) the linked closure — "
+        "third-party conan packages archived into the executable (readelf -d NEEDED lists "
+        "only the C/C++ runtime) — covered by THIS artifact; (2) the Docker image's apt "
+        "layer — scanned by coderoast-server/.github/workflows/ci-security-trivy.yml; "
+        "(3) the sidecar images (redis, postgres, clickhouse-server, llama) — covered by "
+        "NEITHER, declared deliberately rather than silently omitted. DERIVED from the "
+        "resolved conan graph by malf/sbom_gen.py — do not hand-edit; regenerate with "
+        "`malf sbom`."
+    ),
+}
+
+
+def note_for(root_name: str, explicit: str | None) -> str:
+    return explicit if explicit is not None else ARTIFACT_NOTE.get(root_name, DEFAULT_NOTE)
 
 
 def selftest() -> int:
@@ -208,7 +263,24 @@ def selftest() -> int:
     unknown, has_cpe = to_component({"ref": "picosha2/1.0.0#x"})
     assert not has_cpe and "cpe" not in unknown, "unmapped package must not invent a CPE"
 
-    print("sbom_gen selftest: OK (filter, display name, purl, cpe vendor+product, cpe absence)")
+    # cpe-coverage ratio (adr/0070 §3): third-party only, on BOTH sides, via the ONE
+    # first-party predicate. curl carries a CPE, picosha2 does not, insight_canon is
+    # first-party and must count on neither side -> 1/2.
+    canon, _ = to_component({"ref": "insight_canon/1.8.7"})
+    assert is_first_party(canon["name"]), "insight_canon must be first-party"
+    assert not is_first_party(unknown["name"]), "picosha2 must be third-party"
+    ratio = cpe_coverage([curl, unknown, canon])
+    assert ratio == "1/2", f"cpe_coverage: got {ratio}, expected 1/2"
+    assert cpe_coverage([canon]) == "0/0", "all-first-party SBOM must declare 0/0, not crash"
+
+    # Per-artifact note (adr/0070 §2): the server root gets the linked-closure boundary note,
+    # any other root the generic derived note, and an explicit --note always wins.
+    assert "LINKED-CLOSURE" in note_for("coderoast_server", None), "server note override lost"
+    assert note_for("insight_sift", None) == DEFAULT_NOTE, "sift must keep the generic note"
+    assert note_for("coderoast_server", "custom") == "custom", "explicit --note must win"
+
+    print("sbom_gen selftest: OK (filter, display name, purl, cpe vendor+product, cpe absence, "
+          "cpe-coverage ratio, per-artifact note)")
     return 0
 
 
@@ -218,7 +290,9 @@ def main() -> int:
     ap.add_argument("--profile", type=Path, help="conan profile applied to host and build")
     ap.add_argument("--out", type=Path, help="SBOM path to write (or compare against)")
     ap.add_argument("--lockfile", type=Path, default=None, help="workspace conan.lock")
-    ap.add_argument("--note", default=DEFAULT_NOTE, help="coderoast:note property text")
+    ap.add_argument("--note", default=None,
+                    help="coderoast:note property text (default: the per-artifact note for the "
+                         "resolved root, else the generic derived-artifact note)")
     ap.add_argument("--check", action="store_true",
                     help="do not write; exit 1 if --out differs from the derived SBOM")
     ap.add_argument("--selftest", action="store_true", help="run offline self-test and exit")

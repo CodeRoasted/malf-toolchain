@@ -1876,6 +1876,7 @@ cmd_editables() {
 # file, its accuracy is the ceiling on our CVE detection.
 _MALF_SBOM_TARGETS=(
     "insight-eidos/sift|insight-eidos/sift/sbom.cdx.json"
+    "coderoast-server/server|coderoast-server/server/sbom.cdx.json"
 )
 
 # `malf sbom` regenerates them; `malf sbom --check` fails if one is stale against the graph,
