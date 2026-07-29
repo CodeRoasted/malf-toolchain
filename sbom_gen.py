@@ -37,9 +37,16 @@ from pathlib import Path
 # ── CPE vendor table ────────────────────────────────────────────────────────────────────
 # trivy matches CVEs by PURL *and* CPE; for the C/C++ ecosystem CPE is what actually hits
 # NVD, so a wrong vendor string silently scans nothing. Curated, deliberately explicit, and
-# small enough to review. A package ABSENT here gets no CPE and is REPORTED (never silently
-# dropped) — see `--report-missing-cpe`. Absence is a real state: several of these genuinely
+# small enough to review. A package ABSENT here gets no CPE and is unconditionally REPORTED
+# on stderr (never silently dropped). Absence is a real state: several of these genuinely
 # have no NVD vendor entry, and inventing one would be worse than omitting it.
+# Curation pass 2026-07-29 (Argos) against the live NVD CPE dictionary
+# (services.nvd.nist.gov/rest/json/cpes/2.0): every entry below was confirmed present and
+# non-deprecated; where NVD carries a legacy twin the CURRENT one was taken (c-ares over
+# c-ares_project, redis over redislabs for hiredis). Verified as having NO NVD entry and
+# therefore deliberately unmapped: asio, clickhouse-cpp, fmt, glaze (NVD's only "glaze" hit
+# is glazedlists:glazed_lists, an unrelated Java library), libnuma, libpqxx, picosha2,
+# redis-plus-plus, trantor.
 CPE_VENDOR: dict[str, str] = {
     "openssl": "openssl",
     "libcurl": "haxx",
@@ -51,6 +58,19 @@ CPE_VENDOR: dict[str, str] = {
     "lz4": "lz4",
     "zstd": "facebook",
     "yaml-cpp": "yaml-cpp_project",
+    # NVD's product for abseil-cpp; its dictionary carries abseil's YYYYMMDD.patch
+    # versioning (incl. 20260107.1), so version-range matching lines up with the conan pin.
+    "abseil": "abseil",
+    "c-ares": "c-ares",
+    "cityhash": "google",
+    "drogon": "drogon",
+    "hiredis": "redis",
+    "jsoncpp": "jsoncpp_project",
+    "simdjson": "simdjson_project",
+    # The conan package is the libuuid subset, but it is built from util-linux source at
+    # util-linux's version, so NVD's kernel:util-linux ranges match it — over-reporting
+    # (mount/login CVEs land on a uuid-only consumer) is the conservative direction.
+    "util-linux-libuuid": "kernel",
 }
 
 # ── First-party predicate ───────────────────────────────────────────────────────────────
@@ -91,6 +111,8 @@ DISPLAY_NAME: dict[str, str] = {
 CPE_PRODUCT: dict[str, str] = {
     "libcurl": "curl",
     "libpq": "postgresql",
+    "abseil": "common_libraries",
+    "util-linux-libuuid": "util-linux",
 }
 
 
