@@ -1959,6 +1959,21 @@ if multi:
     for k, v in sorted(multi.items()):
         print(f"      {k}: {', '.join(v)}")
 PY
+
+    # The lockfile IS the resolved graph, and the SBOM is a projection of it (adr/0038 §4), so
+    # writing one without re-deriving the other publishes a description of a graph that no
+    # longer exists. `--update` is the sharp case: it re-resolves third-party against the
+    # REMOTES, so upstream movement lands in the lock and the committed SBOM silently stops
+    # matching — and the SBOM's accuracy is the ceiling on CVE detection, since sbom-cve.yml
+    # scans that file and a component it omits is one no scanner ever looks at.
+    #
+    # Chained here as well as in `bump` because the two commands move DIFFERENT halves of the
+    # graph — bump moves first-party, `lock --update` moves third-party — and the documented
+    # post-cut ceremony runs them back to back. Fixing only bump would leave the operator's
+    # manual `malf sbom` as the sole thing between a bump and a red tag in exactly the case
+    # where upstream had moved, which is the case that matters.
+    echo "── re-deriving the SBOM from the graph just locked ──"
+    cmd_sbom || return 1
 }
 
 # Surgically remove STALE first-party conan packages: old-version (and ghost/renamed)
@@ -2136,7 +2151,9 @@ Commands:
     profiles                       list available build profiles (the registry)
     bump    X.Y.Z                  coordinated workspace version bump: rewrite every version axis,
                                    verify pin coherence, re-sync editables + prune stale cache to
-                                   the new baseline, repackage Sift Action bundle
+                                   the new baseline, re-derive the SBOM (derived from the graph the
+                                   bump just moved). Does NOT touch the Sift Action engine pin —
+                                   that tracks the PUBLISHED engine and is sift-action/bump.sh's.
     cut-verify [pkg] [--profile <name>] [--list]
                                    pre-cut Release Gate: forced `conan create` for every
                                    release:true package (packages.yml), dep order, clean export —
@@ -2148,7 +2165,9 @@ Commands:
                                    recipe revision, first-party editables float. Default locks
                                    what we CURRENTLY build, so it is behaviour-neutral; --update
                                    re-resolves ranges from the REMOTES (deliberate upstream
-                                   movement — expect a diff, re-run the gates).
+                                   movement — expect a diff, re-run the gates). Re-derives the
+                                   SBOM after writing: the lockfile IS the resolved graph the
+                                   SBOM projects.
                                    Builds pass --lockfile automatically when the file exists;
                                    MALF_LOCKFILE_STRICT=1 drops --lockfile-partial so an
                                    unlocked dependency is a hard error (CI / release legs).
@@ -2285,6 +2304,32 @@ cmd_bump() {
     _malf_editables_sync || return 1
     echo "── pruning stale (!= $target) first-party packages from every cache ──"
     _malf_clean_stale || return 1
+
+    # ── The SBOM is DERIVED, so a bump necessarily invalidates it (adr/0038 §4) ──
+    # Every published SBOM is a projection of the RESOLVED conan graph, and the bump above
+    # just moved every first-party version in that graph. Leaving the regeneration to the
+    # operator is what made it a step to forget: the v1.8.5 tag went red at the
+    # SBOM-freshness gate because the 1.8.4 post-cut bump ran the bump and the lock but not
+    # `malf sbom`. Under the main-only trunk model a bump commit meets NO gate at all — the
+    # C++ repos carry no `push:` trigger, gates fire at the tag — so a manual step was the
+    # only thing standing between a bump and a red tag, for an artifact whose accuracy is
+    # the ceiling on our CVE detection (sbom-cve.yml scans the committed file; a component
+    # it omits is a component no scanner ever looks at).
+    #
+    # MEASURED, and one measurement settles both the ordering and the lockfile question:
+    # with conan.lock still pinning first-party at 1.8.7 and the editables just re-pointed at
+    # 1.8.8, the derived SBOM read 1.8.8. The EDITABLE REGISTRY decides the resolved
+    # first-party version here, not the lock. So:
+    #   * it must run AFTER the re-sync above — before it, the registry still holds the
+    #     previous version's refs, and this would faithfully derive the OLD graph. A fresh
+    #     SBOM that is wrong is worse than a stale one that is visibly old.
+    #   * `lock --update` is deliberately NOT chained. The derivation does not need it —
+    #     first-party floats past the lock (adr/0038 §1) and third-party is unmoved by a
+    #     bump. And it is not harmless to add: `--update` re-resolves third-party against the
+    #     REMOTES, taking upstream movement that wants a reviewable diff and a re-run of the
+    #     gates. That belongs at the cut head, not on every bump.
+    echo "── re-deriving the SBOM from the resolved graph at $target ──"
+    cmd_sbom || return 1
 
     # ── sift-action is NOT part of a platform bump, by design ────────────────
     # This used to rewrite src/sift-version.ts to $target and re-bundle dist/index.js.
