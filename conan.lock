@@ -21,6 +21,7 @@
         "insight_sift/1.8.7",
         "insight_semantic_test_frameworks/1.8.7",
         "insight_semantic_jenkins/1.8.7",
+        "insight_semantic_gitlab/1.8.7",
         "insight_semantic_github/1.8.7",
         "insight_scenarios/1.8.7",
         "insight_metalog/1.8.7",
