@@ -1,12 +1,11 @@
-# ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║ PARKED — DO NOT USE for the modules build (2026-06-06). gcc-16.1.0 ICEs        ║
-# ║ (segfault in build_special_member_call) on the LogCraft 1.5.1 module-attached  ║
-# ║ engine classes' member-init — a released-version regression (gcc-15.2 clean,   ║
-# ║ clang-21 clean). Filed upstream: GCC Bugzilla #<PENDING — see                  ║
-# ║ logcraft/technical_docs/gcc16_ice_repro/UPSTREAM_BUG_REPORT.md>. SHIP/CI STAYS  ║
-# ║ gcc-15. The profile is correct + kept (it builds non-dense TUs + the std        ║
-# ║ module fine) so the leg comes back the day GCC fixes the ICE — re-verify then.  ║
-# ╚══════════════════════════════════════════════════════════════════════════════╝
+# ╔═══════════════════════════════════════════════════════════════════════════════╗
+# ║ PARKED — DO NOT USE for the modules build (2026-06-06). gcc-16.1.0 ICEs       ║
+# ║ (segfault in build_special_member_call) on module-attached classes'           ║
+# ║ member-init — a released-version regression; gcc-15.2 and clang-21 are clean. ║
+# ║ Filed upstream (GCC Bugzilla, report pending). SHIP/CI STAYS gcc-15. The      ║
+# ║ profile is correct + kept (it builds non-dense TUs + the std module fine) so  ║
+# ║ the leg comes back the day GCC fixes the ICE — re-verify then.                ║
+# ╚═══════════════════════════════════════════════════════════════════════════════╝
 #
 # linux-gcc16-release — gcc-16.1.0 (STABLE) + libstdc++-16 + Release. The import-std
 # libstdc++ leg.
@@ -62,8 +61,8 @@ tools.build:sharedlinkflags=["-Wl,-rpath,/home/windows/toolchains/gcc-16.1/lib64
 # this conf conan defaults CMAKE_CXX_COMPILER to /usr/bin/g++-16 (the rejected apt 16.0.1 snapshot,
 # absent anyway), so the from-source 16.1.0 must be named explicitly here too.
 tools.build:compiler_executables={"c": "/home/windows/toolchains/gcc-16.1/bin/gcc-16.1", "cpp": "/home/windows/toolchains/gcc-16.1/bin/g++-16.1"}
-# Editable build-dir keying ([[malf-build-type-isolation]]): the profile carries the keyed
-# build dir so a RAW `conan create --profile <this>` (no malf env) resolves an editable dep's
-# matching-profile build tree — closing the cross-stdlib editable .a contamination. malf still
-# sets MALF_EDITABLE_BUILD_DIR (takes precedence; covers sanitizer profiles).
+# Editable build-dir keying: the profile carries the keyed build dir so a RAW
+# `conan create --profile <this>` (no malf env) still resolves an editable dep's
+# matching-profile build tree, closing the cross-stdlib editable .a contamination.
+# malf still sets MALF_EDITABLE_BUILD_DIR (takes precedence; covers sanitizer profiles).
 user.malf:editable_build_dir=build-gcc16-release

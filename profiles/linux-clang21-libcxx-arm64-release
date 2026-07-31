@@ -1,10 +1,10 @@
 # linux-clang21-libcxx-arm64-release — the Linux-arm64 (aarch64) twin of linux-clang21-libcxx-release.
-# The clang/libc++ half of the arm64 cross-STDLIB diagonal: paired with linux-gcc15-arm64-release it
-# proves gcc-15/libstdc++ ≡ clang-21/libc++ ON arm64 (the only axis that exposes an unordered_*/
-# hash-iteration-order leak — F5-M8 — and it can differ by ISA). Flags MIRROR the x86 libc++ profile
-# except arch=armv8 and the armv8-a baseline (see linux-gcc15-arm64-release for the ISA-specific notes).
-# clang-21 + libc++-21 come from apt.llvm.org, which serves aarch64 — so setup-clang21-libcxx is already
-# arch-agnostic and needs no arm64 variant; only the conan profile's arch/march change.
+# The clang/libc++ half of the arm64 cross-stdlib diagonal: paired with linux-gcc15-arm64-release it
+# proves gcc-15/libstdc++ and clang-21/libc++ agree byte-for-byte ON arm64 — the axis that exposes
+# unordered-container / hash-iteration-order leaks, which can differ by ISA. Flags MIRROR the x86
+# libc++ profile except arch=armv8 and the armv8-a baseline (see linux-gcc15-arm64-release for the
+# ISA-specific notes). clang-21 + libc++-21 come from apt.llvm.org, which serves aarch64 — so
+# setup-clang21-libcxx is already arch-agnostic; only the profile's arch/-march change here.
 [settings]
 arch=armv8
 build_type=Release

@@ -1,7 +1,7 @@
 # linux-gcc15-arm64-release — the Linux-arm64 (aarch64) twin of linux-gcc15-release.
 # The 2nd-ISA leg of the bit-identity diagonal: the determinism leg builds canon/metalog/eidos
 # under THIS profile on an arm64 runner and asserts the serialized digest is byte-identical to the
-# other legs' digest (bibles/determinism_model.md §3; ADR-8.D6). Flags MIRROR
+# other legs' digest. Flags MIRROR
 # linux-gcc15-release EXACTLY except the inherently-ISA-specific bits, so a digest divergence is a
 # genuine ISA-codegen / float / container-order finding, never a flag artifact:
 #   • arch=armv8 (conan's aarch64 token), not x86_64.
@@ -36,6 +36,6 @@ tools.build:cxxflags=["-O3", "-march=armv8-a"]
 # loud runtime load error, not a silent determinism drift, but we remove the failure mode regardless).
 tools.build:exelinkflags=["-Wl,-rpath,/opt/gcc-15.3/lib64", "-Wl,-rpath,/opt/gcc-15.3/lib"]
 tools.build:sharedlinkflags=["-Wl,-rpath,/opt/gcc-15.3/lib64", "-Wl,-rpath,/opt/gcc-15.3/lib"]
-# Editable build-dir keying ([[malf-build-type-isolation]]): arm64-keyed so an arm64 leg never squats
+# Editable build-dir keying: arm64-keyed so an arm64 leg never squats
 # on the x86 gcc15-release build tree (the two ISAs coexist in one workspace on a cross-build host).
 user.malf:editable_build_dir=build-gcc15-arm64-release

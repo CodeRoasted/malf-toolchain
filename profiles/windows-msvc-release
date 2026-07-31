@@ -1,21 +1,18 @@
 # windows-msvc-release — the Windows / MSVC build profile (shared, single-sourced here).
 #
-# TOOLCHAIN: MSVC >= 14.52.36418, installed by malf-toolchain's setup-msvc1452 action
-# (VS 2026 Insiders channel + the VC.Preview.Tools component — see that action + the
-# workspace memory msvc-1452-gather-via-preview-component). 14.52 is the C++23-modules fix
-# floor: the released 14.51 / 14.44 toolsets miscompile our module DTOs (consumer-TU
-# special-member double-free) and carry an import-std/stop_token C1116 (bugs.md).
+# TOOLCHAIN: MSVC >= 14.52.36418, installed by this repo's setup-msvc1452 action (VS 2026
+# Insiders channel + the VC.Preview.Tools component). 14.52 is the C++23-modules fix floor:
+# the released 14.51 / 14.44 toolsets miscompile module-boundary DTOs (consumer-TU
+# special-member double-free) and carry an import-std/stop_token C1116.
 #
-# WHY MSVC, NOT CLANG (a probe-proven decision): clang + import std on Windows is a dead end
-# (no libc++ in the official LLVM Windows release → CXX_MODULE_STD rejects the MSVC STL).
-# MSVC cl.exe is the only mature import-std path; it ships std.ixx.
+# WHY MSVC, NOT CLANG (probe-proven): clang + import std on Windows is a dead end — no libc++
+# in the official LLVM Windows release, so CXX_MODULE_STD rejects the MSVC STL. cl.exe is the
+# only mature import-std path; it ships std.ixx.
 #
-# ⚠ DETERMINISM-MODEL FLAG (Daidalos): MSVC is a THIRD compiler + stdlib, and it is now a
-# FIRST-CLASS Tier-1 leg of each surface's golden.yaml 5-way cross-compare — not a side probe
-# measured against a committed value. Its status is re-earned every run and a red blocks the cut.
-# The claim rests on a PINNED, FETCHABLE toolchain (setup-msvc1452), never on a stock one, so it
-# does NOT wait on 14.52 GA; GA only widens who reproduces it without the Preview step.
-# See bibles/determinism_model.md §2-§3 and ADR-8.D6.
+# MSVC is a THIRD compiler + stdlib and a first-class leg of the byte-identity cross-compare,
+# not a side probe measured against a committed value: its status is re-earned every run. The
+# claim rests on the PINNED, FETCHABLE toolchain above, never on a stock one — it does NOT wait
+# on 14.52 GA; GA only widens who can reproduce it without the Preview step.
 [settings]
 arch=x86_64
 build_type=Release
