@@ -16,7 +16,7 @@
 # vendor or copy a profile itself. Build + test + create output is mirrored to $GITHUB_WORKSPACE/
 # build.log so the Sift dogfood can diff it; the crash diagnostic prints to the console only.
 #
-# It DOES own the two toolchain-file settings — the conan lockfile (adr/0038) and MALF_TOOLCHAIN_DIR
+# It DOES own the two toolchain-file settings — the conan lockfile and MALF_TOOLCHAIN_DIR
 # — derived below from this script's own path, so every caller gets them whether it reaches here
 # through `coderoast-ci` or by `uses:`-ing the `conan-module` action directly.
 
@@ -38,10 +38,10 @@ LOG="$GITHUB_WORKSPACE/build.log"
 # own steps — never a workflow that `uses:` the *other* action directly. `insight-eidos`'s ci.yml
 # does exactly that for the `insight-e2e` module, so while `coderoast-ci` was the only place these
 # were set, that module resolved with NO lockfile at all — weaker than partial, and silent
-# (adr/0038 §3's "set once in the composite, which every repo reaches" was false for that path).
+# ("set once in the composite, which every repo reaches" was false for that path).
 # This script is the one thing every path goes through, so it is the one place they belong.
-# Callers still override by exporting the variable; a per-caller *copy* of the default is the
-# [[ci-vendoring-baseline-drift]] failure by construction and must not be added.
+# Callers still override by exporting the variable; a per-caller *copy* of the default is two
+# places encoding one fact, one of which rots — and must not be added.
 TOOLCHAIN_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
 # Build-time codegen reachability. logcraft/core's CMake FATALs unless it can find
@@ -50,7 +50,7 @@ TOOLCHAIN_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
 # path does not go through malf, so malf's own export (malf:63) never reaches it.
 export MALF_TOOLCHAIN_DIR="${MALF_TOOLCHAIN_DIR:-$TOOLCHAIN_ROOT}"
 
-# Lockfile args (adr/0038), shared by the install and create phases below so the two can never
+# Lockfile args, shared by the install and create phases below so the two can never
 # disagree about which graph they resolved. Third-party recipes require by RANGE
 # (clickhouse-cpp -> lz4/[>=1.9.4 <2], libcurl -> openssl/[>=3 <4]) and conan resolves a range
 # against whatever is reachable at that moment — so without this, two legs of one release can
@@ -74,10 +74,10 @@ if [ -n "$MALF_LOCKFILE" ]; then
     exit 1
   fi
   LOCKFILE_ARGS+=("--lockfile=$MALF_LOCKFILE")
-  # GATE (adr/0038 §3), and this is the POLICY, not a backstop: '1' pins (the desk posture),
-  # anything else drops --lockfile-partial so that "a dependency entered UNLOCKED" is a hard red.
-  # Flipped '1' (pin) -> '0' (gate) at the 1.8.4 head, after v1.8.3 was the first observed-green cut
-  # (adr/0038 §Consequences). Set here for the same reason the path is: one place, every caller.
+  # GATE, and this is the POLICY, not a backstop: '1' pins (the desk posture), anything else
+  # drops --lockfile-partial so that "a dependency entered UNLOCKED" is a hard red.
+  # Flipped '1' (pin) -> '0' (gate) at the 1.8.4 head, after v1.8.3 was the first observed-green
+  # cut. Set here for the same reason the path is: one place, every caller.
   [ "${MALF_LOCKFILE_PARTIAL:-0}" = "1" ] && LOCKFILE_ARGS+=("--lockfile-partial")
   echo "conan_module: using lockfile $MALF_LOCKFILE ${LOCKFILE_ARGS[*]}"
 else

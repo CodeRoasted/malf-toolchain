@@ -87,15 +87,15 @@ runs:
         MODULES: ${{ inputs.modules }}
         PROFILE_NAME: ${{ inputs.profile }}
         CONAN_MODULE: ${{ github.action_path }}/../conan-module/conan_module.sh
-        # NOT SET HERE, deliberately: MALF_LOCKFILE / MALF_LOCKFILE_PARTIAL (adr/0038) and
+        # NOT SET HERE, deliberately: MALF_LOCKFILE / MALF_LOCKFILE_PARTIAL and
         # MALF_TOOLCHAIN_DIR. They used to be set in this env block under the premise that "every
         # repo reaches this action" — false for one live path: insight-eidos `uses:` the
         # `conan-module` action DIRECTLY for its insight-e2e module, and a composite step's `env:`
         # does not reach another action's steps, so that module resolved with no lockfile at all.
         # conan_module.sh now derives all three from its own location (it is the single source of
         # truth for the per-module logic, so it is the only thing every path goes through). Setting
-        # them again here would be the vendoring duplication [[ci-vendoring-baseline-drift]] names:
-        # two places encoding one fact about the toolchain layout, one of which rots.
+        # them again here would be vendoring duplication: two places encoding one fact about
+        # the toolchain layout, one of which rots.
       run: |
         set -euo pipefail
         # Build each declared module in order through the single-sourced per-module logic (shared with

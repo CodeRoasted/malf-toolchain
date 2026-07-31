@@ -8,8 +8,9 @@ description: >
   Component.VC.14.52.*). Anonymous, no secrets — fetches from Microsoft each run.
 
   NOTE — drift: the Insiders Preview floats (weekly). This action pins a >= floor, not an
-  exact toolset; a shipped determinism CLAIM must ride 14.52 GA, never this Preview. See
-  the workspace memory msvc-1452-gather-via-preview-component + bugs.md.
+  exact toolset. That floor is what a determinism claim rests on: the toolchain is PINNED and
+  FETCHABLE here, so the claim does not wait on 14.52 GA — GA only widens who can reproduce it
+  without the Preview step.
 
 inputs:
   min-version:

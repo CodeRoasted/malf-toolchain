@@ -3,10 +3,10 @@ description: >-
   Re-derive a published CycloneDX SBOM from the RESOLVED conan graph and fail if the committed
   file has drifted. The SBOM is a projection of the graph, not a claim maintained beside it.
 
-# Why this is a GATE and not a nicety (adr/0038):
+# Why this is a GATE and not a nicety:
 # sbom-cve.yml scans the committed SBOM, so that file's accuracy is the CEILING on our CVE
 # detection — a component it omits is a component no scanner ever looks at. Hand-maintained, it
-# drifted three minors unnoticed: on 2026-07-21 it still named the four pre-adr/0019 packages
+# drifted three minors unnoticed: on 2026-07-21 it still named four long-removed packages
 # (insight_detection / insight_explain / insight_engine / insight_diff, none of which exist),
 # pinned first-party at 1.5.4 against an actual 1.8.3, and omitted insight_llm plus the three
 # insight_semantic_* packages. It is now DERIVED by malf/sbom_gen.py; this action is what keeps

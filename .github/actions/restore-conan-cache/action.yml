@@ -4,7 +4,7 @@ description: |
   (the superproject's conan-cache-publish.yml) and stored as a private ghcr OCI artifact — and
   `conan cache restore` it into $CONAN_HOME. A following `conan ... --build=missing` then resolves
   the ~26-dep world as DOWNLOADS and rebuilds ONLY the first-party engine packages (the irreducible
-  per-cell codegen). See technical_docs/operations/ci_conan_binary_cache.md.
+  per-cell codegen).
 
   ACCELERATOR, NEVER A GATE. Every failure mode — a cold/missing cache tag, a network drop, oras
   absent, a restore error — is swallowed (::warning:: / ::notice:: + continue). The consumer then

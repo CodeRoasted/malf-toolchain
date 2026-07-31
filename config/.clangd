@@ -19,9 +19,8 @@ CompileFlags:
   #   3. The DB must list every importable module unit (all .cppm) AND the std module
   #      TU (CMake's import-std support emits it); clangd then builds its OWN BMIs —
   #      it ignores the build's .pcm files, so it works before a build completes.
-  #   4. Stale-BMI DevX ([[clangd-modules-stale-bmi-devx]]): after switching toolchain/
-  #      profile, wipe `rm -rf .cache/clangd` or stale cached BMIs poison diagnostics.
-  # Full triage matrix: technical_docs/operations/modules_tooling.md
+  #   4. Stale BMIs: after switching toolchain/profile, wipe `rm -rf .cache/clangd`
+  #      or stale cached BMIs poison diagnostics.
 
 ---
 
@@ -45,7 +44,7 @@ Diagnostics:
   # (google-*, misc-*, cert-*, clang-analyzer-*, …) as phantom squiggles that can never fail
   # `malf lint`, and — the real hazard — it left `cppcoreguidelines-owning-memory` ENABLED in
   # the editor: the check that reliably SIGSEGVs clang-tidy on our named-module code
-  # ([[clang-tidy-crashes-on-modules]]; full rationale in .clang-tidy). Inheriting the gate
+  # (full rationale in the sibling .clang-tidy). Inheriting the gate
   # disables it. (The gate's own CheckOptions — PrivateMemberSuffix '_', UseAssignment false,
   # the cognitive-complexity Threshold — now reach the IDE through .clang-tidy, not a
   # duplicated copy here.)
@@ -64,7 +63,7 @@ Diagnostics:
 # ← CXXRecordDecl::addedMember) when it concurrently deserializes the test/bench TUs that
 # `import <pkg>.test;` / `import <pkg>.bench;` (the full-surface re-export aggregators). This
 # is the SAME upstream named-module ASTReader bug that crashes standalone clang-tidy
-# ([[clang-tidy-crashes-on-modules]]) — not config/provenance/stale-BMI. A single-file parse
+# — not config/provenance/stale-BMI. A single-file parse
 # (clangd --check, or just OPENING the file) is fine; only the concurrent indexer trips it,
 # and after 5 crashes VS Code stops restarting the server. Skip indexing these TUs: live
 # diagnostics on the file you open still work; only the project-wide xref entries for the

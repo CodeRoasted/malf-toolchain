@@ -4,7 +4,7 @@
 Why this exists
 ---------------
 The Sift SBOM used to be hand-maintained, and on 2026-07-21 it was measured three minors
-stale: it still named the four pre-``adr/0019`` packages (``insight_detection`` /
+stale: it still named four long-removed packages (``insight_detection`` /
 ``insight_explain`` / ``insight_engine`` / ``insight_diff``) which no longer exist, pinned
 first-party at ``1.5.4`` against an actual ``1.8.3``, and omitted ``insight_llm`` plus the
 three ``insight_semantic_*`` dialect packages entirely. Nobody noticed because the file
@@ -40,7 +40,7 @@ from pathlib import Path
 # small enough to review. A package ABSENT here gets no CPE and is unconditionally REPORTED
 # on stderr (never silently dropped). Absence is a real state: several of these genuinely
 # have no NVD vendor entry, and inventing one would be worse than omitting it.
-# Curation pass 2026-07-29 (Argos) against the live NVD CPE dictionary
+# Curation pass 2026-07-29 against the live NVD CPE dictionary
 # (services.nvd.nist.gov/rest/json/cpes/2.0): every entry below was confirmed present and
 # non-deprecated; where NVD carries a legacy twin the CURRENT one was taken (c-ares over
 # c-ares_project, redis over redislabs for hiredis). Verified as having NO NVD entry and
@@ -75,7 +75,7 @@ CPE_VENDOR: dict[str, str] = {
 
 # ── First-party predicate ───────────────────────────────────────────────────────────────
 # THE single definition of "first-party" for every consumer in this file: the unmapped-CPE
-# report AND the coderoast:cpe-coverage ratio (adr/0070 §3). A second, independently-written
+# report AND the coderoast:cpe-coverage ratio. A second, independently-written
 # definition of "third-party" is how a numerator and a denominator drift apart — so both
 # derive from this one predicate, on the component's rendered (display) name.
 FIRST_PARTY_PREFIXES: tuple[str, ...] = ("insight_", "coderoast_", "logcraft_")
@@ -86,7 +86,7 @@ def is_first_party(component_name: str) -> bool:
 
 
 def cpe_coverage(components: list[dict]) -> str:
-    """The coderoast:cpe-coverage ratio, `<with-CPE>/<third-party-total>` (adr/0070 §3).
+    """The coderoast:cpe-coverage ratio, `<with-CPE>/<third-party-total>`.
 
     trivy matches C/C++ components to NVD by CPE; a component without one is matched by PURL
     alone and in practice scanned weakly or not at all. Without this declared ratio an SBOM
@@ -220,7 +220,7 @@ DEFAULT_NOTE = (
     ".github/workflows/sbom-cve.yml."
 )
 
-# Per-artifact note, keyed on the ROOT package name. adr/0070 §2: this artifact is "the
+# Per-artifact note, keyed on the ROOT package name. This artifact is "the
 # linked-closure SBOM for coderoast_server", never "the server SBOM" — the deployed server is
 # THREE inventories and this projection covers exactly one, so the boundary must travel WITH
 # the artifact (a reader cannot recover it from the file otherwise). An artifact that
@@ -228,7 +228,7 @@ DEFAULT_NOTE = (
 ARTIFACT_NOTE: dict[str, str] = {
     "coderoast_server": (
         "The LINKED-CLOSURE SBOM for the coderoast_server binary — not 'the server SBOM'. "
-        "The deployed server is three inventories (adr/0070 §1): (1) the linked closure — "
+        "The deployed server is three inventories: (1) the linked closure — "
         "third-party conan packages archived into the executable (readelf -d NEEDED lists "
         "only the C/C++ runtime) — covered by THIS artifact; (2) the Docker image's apt "
         "layer — scanned by coderoast-server/.github/workflows/ci-security-trivy.yml; "
@@ -285,7 +285,7 @@ def selftest() -> int:
     unknown, has_cpe = to_component({"ref": "picosha2/1.0.0#x"})
     assert not has_cpe and "cpe" not in unknown, "unmapped package must not invent a CPE"
 
-    # cpe-coverage ratio (adr/0070 §3): third-party only, on BOTH sides, via the ONE
+    # cpe-coverage ratio: third-party only, on BOTH sides, via the ONE
     # first-party predicate. curl carries a CPE, picosha2 does not, insight_canon is
     # first-party and must count on neither side -> 1/2.
     canon, _ = to_component({"ref": "insight_canon/1.8.7"})
@@ -295,7 +295,7 @@ def selftest() -> int:
     assert ratio == "1/2", f"cpe_coverage: got {ratio}, expected 1/2"
     assert cpe_coverage([canon]) == "0/0", "all-first-party SBOM must declare 0/0, not crash"
 
-    # Per-artifact note (adr/0070 §2): the server root gets the linked-closure boundary note,
+    # Per-artifact note: the server root gets the linked-closure boundary note,
     # any other root the generic derived note, and an explicit --note always wins.
     assert "LINKED-CLOSURE" in note_for("coderoast_server", None), "server note override lost"
     assert note_for("insight_sift", None) == DEFAULT_NOTE, "sift must keep the generic note"

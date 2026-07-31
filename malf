@@ -192,14 +192,14 @@ _malf_apply_profile() {
     # _malf_build_dir). NOT exported: a recipe's package_info reads this env unconditionally, so a
     # CROSS-REPO CACHED dep (no editable build tree) would prepend a BOGUS build-<key> path that
     # becomes <pkg>_DIR and shadows its packaged lib/cmake config → find_package fails (the release
-    # benchmark: editable target + cached cross-repo deps, bugs.md 2026-07-10). Keeping it un-exported
+    # benchmark: editable target + cached cross-repo deps, 2026-07-10). Keeping it un-exported
     # means conan never sees it → recipe LAYOUTS fall back to the profile's user.malf:editable_build_dir
     # conf (same value, every profile carries it) for the editable case, and cached deps get the clean
     # lib/cmake path. Matches the cut-verify `unset MALF_EDITABLE_BUILD_DIR` discipline.
     MALF_EDITABLE_BUILD_DIR="build-$(_malf_build_key)"
 }
 
-# ─── Build-type isolation ([[malf-build-type-isolation]]) ─────────────────────
+# ─── Build-type isolation ──────────────────────────────────────────────────────
 # CONAN-CACHE isolation key from the active profile. The dev default -> "" so the
 # shared base cache (.conan2) is reused; any other profile (gcc-15 ship /
 # clang-libstdc++ / sanitizer / msan) -> a distinct key, so its conan packages can
@@ -243,8 +243,8 @@ _malf_default_build_root() {
 # Sync the in-tree global.conf (the source of truth) into the active CONAN_HOME, OVERWRITING when it
 # differs. The profiles + hooks already re-seed every run; global.conf must too — a PERSISTENT conan
 # home (the self-hosted runner) that was seeded once would otherwise SHADOW a policy change forever
-# (a `package_id` mode change silently never applied → stale-binary ABI skew, superproject bugs.md
-# 2026-07-10). cmp -s keeps it a no-op when already in sync.
+# (a `package_id` mode change silently never applied → stale-binary ABI skew, 2026-07-10).
+# cmp -s keeps it a no-op when already in sync.
 _malf_sync_global_conf() {
     [[ -f "$MALF_DIR/global.conf" ]] || return 0
     mkdir -p "$CONAN_HOME"
@@ -509,8 +509,7 @@ _malf_editable_build_dir() {
     # ALWAYS profile-named now (default -> <pkg>/build-clang21-libcxx-release); a raw
     # `conan create --profile X` (env unset) reads the same name from the profile's
     # user.malf:editable_build_dir conf; the recipes' bare-"build" fallback is the
-    # no-profile-conf last resort only. [[malf-build-type-isolation]] — this is the
-    # "reviewed conanfile-layout pass".
+    # no-profile-conf last resort only. This is the "reviewed conanfile-layout pass".
     local pkg_dir="$1"
     echo "$pkg_dir/${MALF_EDITABLE_BUILD_DIR:-build}"
 }
@@ -545,7 +544,7 @@ _malf_dependency_cmake_args() {
 #
 # Two malf runs started from DIFFERENT repo roots resolve the SAME conan editables, so both run
 # ninja in the SAME build directory and write the same module BMIs. ninja takes no lock and neither
-# did malf, so the loser reads a half-written BMI. Measured 2026-07-22 (bugs.md): `malf test` in
+# did malf, so the loser reads a half-written BMI. Measured 2026-07-22: `malf test` in
 # insight-eidos alongside `malf test` in coderoast-server share **seven** editable trees, and the
 # overlap produced a clang ICE in `ASTReader::FindExternalVisibleDeclsByName` and
 # `malformed or corrupted precompiled file: can't skip to bit N from M`. That is two terminals in
@@ -1961,7 +1960,7 @@ if multi:
         print(f"      {k}: {', '.join(v)}")
 PY
 
-    # The lockfile IS the resolved graph, and the SBOM is a projection of it (adr/0038 §4), so
+    # The lockfile IS the resolved graph, and the SBOM is a projection of it, so
     # writing one without re-deriving the other publishes a description of a graph that no
     # longer exists. `--update` is the sharp case: it re-resolves third-party against the
     # REMOTES, so upstream movement lands in the lock and the committed SBOM silently stops
@@ -1987,7 +1986,7 @@ PY
 # CodeRoast namespaces (pin_coherence.CODEROAST_PREFIXES — the single source of truth) at a
 # version != the uniform workspace baseline; NEVER third-party, NEVER the current version.
 # Sweeps every cache `editables sync` touches (base + keyed subdirs) plus the stray default
-# home. [[conan-cache-hygiene-multi-home]] [[build-via-malf-editables]].
+# home.
 _malf_clean_stale() {
     # Homes: base + every keyed subdir (settings.yml marker, exactly as editables sync), plus
     # the stray default ~/.conan2 iff it is a real, DISTINCT cache (raw conan ran outside malf).
@@ -2269,8 +2268,8 @@ cmd_bin_dir() {
 # bring the conan world along with the recipes — re-sync editables to the new
 # baseline across EVERY keyed cache, then surgically prune the now-stale (old-
 # version) first-party binaries. Both were the recurring post-bump footgun left
-# to human memory ([[editables-version-skew-after-bump]],
-# [[conan-cache-hygiene-multi-home]]); chaining them in makes a bump leave a
+# to human memory — editable version skew after a bump, and cache hygiene across
+# multiple conan homes; chaining them in makes a bump leave a
 # coherent workspace by construction, never one cache behind. sift-action is
 # deliberately OUT of scope — its engine pin tracks published releases, not the
 # line being opened, and `sift-action/bump.sh` owns it (see the note at the end).
@@ -2306,7 +2305,7 @@ cmd_bump() {
     echo "── pruning stale (!= $target) first-party packages from every cache ──"
     _malf_clean_stale || return 1
 
-    # ── The SBOM is DERIVED, so a bump necessarily invalidates it (adr/0038 §4) ──
+    # ── The SBOM is DERIVED, so a bump necessarily invalidates it ──
     # Every published SBOM is a projection of the RESOLVED conan graph, and the bump above
     # just moved every first-party version in that graph. Leaving the regeneration to the
     # operator is what made it a step to forget: the v1.8.5 tag went red at the
@@ -2325,7 +2324,7 @@ cmd_bump() {
     #     previous version's refs, and this would faithfully derive the OLD graph. A fresh
     #     SBOM that is wrong is worse than a stale one that is visibly old.
     #   * `lock --update` is deliberately NOT chained. The derivation does not need it —
-    #     first-party floats past the lock (adr/0038 §1) and third-party is unmoved by a
+    #     first-party floats past the lock and third-party is unmoved by a
     #     bump. And it is not harmless to add: `--update` re-resolves third-party against the
     #     REMOTES, taking upstream movement that wants a reviewable diff and a re-run of the
     #     gates. That belongs at the cut head, not on every bump.
@@ -2353,10 +2352,9 @@ cmd_bump() {
 # `release: true` set in packages.yml), in dependency order, from a CLEAN EXPORT.
 # Catches the conan-create-only drift class — a rotted test_package, or a sibling
 # package the editable `malf test <repo>` never compiles — BEFORE the tag, not AT
-# it (the v1.6.2 eidos break; [[conan-create-only-drift-at-tag]]). The released set
-# is the ONE canonical source (scripts/pin_coherence.py released, from packages.yml),
-# shared with the tag-time Release Gate — no second hand-maintained list to drift
-# (compatibility_matrix.md § Release Gates; [[ci-vendoring-baseline-drift]]).
+# it (the v1.6.2 eidos break). The released set is the ONE canonical source
+# (scripts/pin_coherence.py released, from packages.yml), shared with the tag-time
+# Release Gate — no second hand-maintained list to drift out of step with it.
 #
 # Non-vacuity is the whole point of the gate:
 #   * --build="<pkg>/*" FORCES each package from source even when a cached binary
@@ -2474,7 +2472,7 @@ cmd_cut_verify() {
         echo "❌ malf cut-verify: ${#failed[@]} released package(s) FAILED forced conan create: ${failed[*]}" >&2
         [[ ${#skipped[@]} -gt 0 ]] && echo "   blocked (upstream failed): ${skipped[*]}" >&2
         echo "   A failure here is a conan-create-only break (rotted test_package / sibling package) that" >&2
-        echo "   'malf test' + editables never compile — fix at root BEFORE the cut. [[conan-create-only-drift-at-tag]]" >&2
+        echo "   'malf test' + editables never compile — fix at root BEFORE the cut." >&2
         return 1
     fi
     echo "✅ malf cut-verify: all $ok released package(s) conan-create clean —"

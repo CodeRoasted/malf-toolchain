@@ -10,8 +10,8 @@ description: |
 
   Calling this action directly (rather than through `coderoast-ci`) resolves against the SAME conan
   lockfile and the same strict/gate mode: `conan_module.sh` derives `malf/conan.lock` and
-  `MALF_TOOLCHAIN_DIR` from its own path (adr/0038). Do NOT re-declare those variables in a caller —
-  a per-caller copy of a toolchain-layout fact is the [[ci-vendoring-baseline-drift]] failure.
+  `MALF_TOOLCHAIN_DIR` from its own path. Do NOT re-declare those variables in a caller — a
+  per-caller copy of a toolchain-layout fact is two places encoding one thing, one of which rots.
 
 inputs:
   module:

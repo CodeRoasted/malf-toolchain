@@ -10,11 +10,10 @@ WHY DIFF-SCOPED AND NOT A TREE SWEEP. A tree sweep was built first and MEASURED:
 candidates across the workspace, 119 flagged (9.2%). Almost all were legitimate — DSL keywords,
 JSON field names, env vars, conan targets, and above all CROSS-REPO references, a comment in
 logcraft correctly naming canon's `dominant_level`. The sweep cannot separate those from a real
-rot: `IntentFormat` named in canon (wrong — canon stopped knowing formats at T4) and
+rot: `IntentFormat` named in canon (wrong — canon stopped knowing formats there) and
 `dominant_level` named in logcraft (right) have the identical shape — alive in another repo,
 named here. A gate shipping 119 findings that are mostly correct references is the can't-PASS
-mode of [[synthetic-gate-vacuity-vs-judgment]]: it red-walls every lane for reasons that are not
-defects, and gets switched off.
+failure mode: it red-walls every lane for reasons that are not defects, and gets switched off.
 
 Diff scope removes that entire class by construction, because it only ever considers identifiers
 THIS change deleted. A legitimate cross-repo reference is never a candidate — nothing about it

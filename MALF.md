@@ -2,7 +2,7 @@
 
 Unified build system for coderoast C++ projects. Replaces per-repo `dev.sh` scripts with a single portable tool.
 
-Cross-repo package pins and release sequencing live in [../technical_docs/README.md](../technical_docs/README.md) and [../technical_docs/ROADMAP.md](../technical_docs/ROADMAP.md). `malf` is a local build helper, not the source of product roadmap or compatibility policy.
+`malf` is a local build helper — not the source of cross-repo package pins, release sequencing, or compatibility policy. Those live with the consuming projects.
 
 ## Installation
 

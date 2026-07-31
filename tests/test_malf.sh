@@ -210,7 +210,7 @@ echo "[7d] _malf_with_build_lock serializes concurrent runs on ONE build tree"
 # ninja in the SAME build dir, writing the same module BMIs. ninja takes no lock; without one in
 # malf the loser reads a half-written BMI, which surfaces as a clang ICE in
 # ASTReader::FindExternalVisibleDeclsByName or "malformed or corrupted precompiled file"
-# (bugs.md 2026-07-22). The lock is therefore load-bearing, and these are its four properties.
+# (measured 2026-07-22). The lock is therefore load-bearing, and these are its four properties.
 lock_tmp="$(mktemp -d)"
 trap 'rm -rf "$lock_tmp"' EXIT
 # Extract the function under test from malf itself, so this tests the SHIPPED code, not a copy.

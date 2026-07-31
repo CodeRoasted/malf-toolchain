@@ -85,7 +85,7 @@ runs:
         # cache. global.conf carries the package_id policy — hashing it means a policy change (e.g.
         # a package_id mode) BUSTS the binary cache (its package_ids are recomputed anyway), and the
         # post-cache install below OVERWRITES a stale cached copy. Without this a PERSISTENT/restored
-        # conan home shadows the policy forever (the stale-binary ABI-skew segfault, bugs.md 2026-07-10).
+        # conan home shadows the policy forever (the stale-binary ABI-skew segfault, 2026-07-10).
         mkdir -p "$GITHUB_WORKSPACE/.malf-toolchain"
         cp "$ACTION_PATH/../../../profiles/$PROFILE" "$GITHUB_WORKSPACE/.malf-toolchain/$PROFILE"
         cp "$ACTION_PATH/../../../global.conf" "$GITHUB_WORKSPACE/.malf-toolchain/global.conf"
