@@ -3,7 +3,7 @@
 
 Generates the library's C++ entries (constexpr data + derived index) from declaration
 files, resolving each entry's ratification state against the twin-generated manifest.
-Design: technical_docs/architecture/logcraft_intent_library.md (§2 schema, §4 fence,
+Design: technical_docs/bibles/intent_library.md (§2 schema, §4 fence,
 §5 codegen, §6 organization) in the coderoast workspace.
 
 THE BOUNDARY (Topic H hard rule): this TOOL is public; the intent DECLARATIONS it

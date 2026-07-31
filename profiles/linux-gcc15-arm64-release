@@ -1,7 +1,7 @@
 # linux-gcc15-arm64-release — the Linux-arm64 (aarch64) twin of linux-gcc15-release.
 # The 2nd-ISA leg of the bit-identity diagonal: the determinism leg builds canon/metalog/eidos
 # under THIS profile on an arm64 runner and asserts the serialized digest is byte-identical to the
-# x86_64 golden (insight_determinism_model.md § cross-ISA; ROADMAP Topic C/F). Flags MIRROR
+# other legs' digest (bibles/determinism_model.md §3; ADR-8.D6). Flags MIRROR
 # linux-gcc15-release EXACTLY except the inherently-ISA-specific bits, so a digest divergence is a
 # genuine ISA-codegen / float / container-order finding, never a flag artifact:
 #   • arch=armv8 (conan's aarch64 token), not x86_64.

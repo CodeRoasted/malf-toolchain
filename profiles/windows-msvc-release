@@ -10,10 +10,12 @@
 # (no libc++ in the official LLVM Windows release → CXX_MODULE_STD rejects the MSVC STL).
 # MSVC cl.exe is the only mature import-std path; it ships std.ixx.
 #
-# ⚠ DETERMINISM-MODEL FLAG (Daidalos): MSVC is a THIRD compiler + stdlib outside the pinned
-# gcc-15/libstdc++ ≡ clang-21/libc++ diagonal. det_math is integer / no-libm, so the canonical
-# digest SHOULD hold cross-OS, but that is MEASURED (the probe), not CLAIMED. A shipped cross-OS
-# determinism claim rides 14.52 GA, never the weekly-moving Preview. (insight_determinism_model.md.)
+# ⚠ DETERMINISM-MODEL FLAG (Daidalos): MSVC is a THIRD compiler + stdlib, and it is now a
+# FIRST-CLASS Tier-1 leg of each surface's golden.yaml 5-way cross-compare — not a side probe
+# measured against a committed value. Its status is re-earned every run and a red blocks the cut.
+# The claim rests on a PINNED, FETCHABLE toolchain (setup-msvc1452), never on a stock one, so it
+# does NOT wait on 14.52 GA; GA only widens who reproduces it without the Preview step.
+# See bibles/determinism_model.md §2-§3 and ADR-8.D6.
 [settings]
 arch=x86_64
 build_type=Release
