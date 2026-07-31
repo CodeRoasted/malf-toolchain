@@ -1,7 +1,7 @@
 # linux-clang21-libcxx-release — clang-21 + libc++ + Release.
 # The C++ modules / `import std` PoC leg: clang-21's native std module ships with **libc++-21**,
 # NOT with libstdc++ (Gate A proven green 2026-06-04). Also the cross-stdlib determinism DIAGONAL —
-# gcc-15/libstdc++ ≡ clang-21/libc++ must be byte-identical (technical_docs/adr/0015-cxx-named-modules-policy.md) —
+# gcc-15/libstdc++ ≡ clang-21/libc++ must be byte-identical (technical_docs/adr/003-build-toolchain-and-distribution.md D4) —
 # and the dev-default TARGET for the workspace libc++ flip (migration track, §6/§7).
 # Determinism-relevant flags (-O3 -march=x86-64-v2, gnu23) MIRROR coderoast-security/linux-gcc15-release
 # so the diagonal is flag-comparable; -stdlib=libc++ is inherent to the libc++ leg.
@@ -13,7 +13,7 @@
 # source-path that CMake misresolves to /lib/share/libc++/v1 (a packaging bug), so any libc++ build with
 # CXX_MODULE_STD ON fails. Bridge it once:
 #     sudo mkdir -p /usr/lib/share && sudo ln -sfn /usr/lib/llvm-21/share/libc++ /usr/lib/share/libc++
-# (technical_docs/adr/0015-cxx-named-modules-policy.md / [[import-std-on-server]]).
+# (technical_docs/adr/003-build-toolchain-and-distribution.md D4 / [[import-std-on-server]]).
 [settings]
 arch=x86_64
 build_type=Release

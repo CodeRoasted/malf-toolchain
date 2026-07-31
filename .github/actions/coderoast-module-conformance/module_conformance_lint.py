@@ -2,7 +2,7 @@
 """Static C++-modules conformance lint for the CodeRoast workspace.
 
 The automated form of the whole-cascade modules audit
-(technical_docs/adr/0015-cxx-named-modules-policy.md — the load-bearing rules (MUSTs); granular as-built detail in git history + memory) — the
+(technical_docs/adr/003-build-toolchain-and-distribution.md D4 — the load-bearing rules (MUSTs); granular as-built detail in git history + memory) — the
 checks that are UNCONDITIONAL across every repo, package, and module unit.
 Judgment-call template items (sizing-rule layer counts, member-vs-consumer
 test targets, aggregate adoption) are deliberately NOT linted: those carry
@@ -193,7 +193,7 @@ def lint(root: pathlib.Path) -> int:
               f"across {unit_count} module units:\n")
         for entry in violations:
             print(f"  • {entry}")
-        print("\nRules: technical_docs/adr/0015-cxx-named-modules-policy.md "
+        print("\nRules: technical_docs/adr/003-build-toolchain-and-distribution.md D4 "
               "(this script's docstring is the authoritative rule→rationale map).")
         return 1
 
