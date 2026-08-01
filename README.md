@@ -124,11 +124,13 @@ tool, on our CI and on your fork. Usage: **[MALF.md](MALF.md)**.
 
 ## License
 
-Repo content (the action, workflow, scripts) is CodeRoast's. **The published gcc binaries are
-GNU GCC, licensed under GPLv3** — each release ships the **Corresponding Source** (the pristine,
-unmodified `gcc-<version>.tar.xz`, sha-verified against ftp.gnu.org) alongside the binary, and
-the build recipe is `.github/workflows/build-gcc-toolchain.yml` (no patches applied), per
-GPLv3 §6.
+This repository's own content — `malf`, the scripts, `profiles/`, `config/`, the
+composite actions and workflows — is **Apache-2.0** (`LICENSE`).
+
+The **published gcc release assets are GPLv3, not Apache**, and `NOTICE` owns that
+boundary: which assets, the Corresponding Source we ship beside them, and the build
+recipe. It is stated once, there — a second copy here would be a claim able to
+disagree with the first.
 
 ## Roadmap
 
