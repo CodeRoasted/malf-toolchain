@@ -34,8 +34,8 @@ inputs:
     default: 'comment'
   changed-outcome:
     description: >-
-      The build's NATIVE CI verdict token, forwarded verbatim to the engine (ADR 0025 —
-      four-class: UNSTABLE never folds to failure). Pass the job.status context value from the
+      The build's NATIVE CI verdict token, forwarded verbatim to the engine (four-class:
+      UNSTABLE never folds to failure). Pass the job.status context value from the
       dogfood tail (the job's own status IS GitHub's native token at that point). NOTE: no
       literal expression syntax in this description — expressions in descriptions abort
       action-load.

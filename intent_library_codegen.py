@@ -385,7 +385,7 @@ def validate_declaration(document: dict, entry_name_from_filename: str, source: 
         if "child_order" in structure:
             fail(source, None,
                  "structure: `child_order:` is CONSUMED from the canon dialect rows through "
-                 "`kind`, never re-declared here (SID-1) — remove the key")
+                 "`kind`, never re-declared here — remove the key")
         _expect_keys(structure, ("kind", "payload"), "structure", source)
         if dialect is None:
             fail(source, None,

@@ -1,8 +1,8 @@
 name: Sift courtesy --explain dogfood
 description: >-
   Narrate the sift-action's ALREADY-COMPUTED report against the CodeRoast
-  COURTESY hosted endpoint (ADR 0017 §5) — the sovereign-CI BYO path. The
-  published sift-action stays Local-Auto / zero-credential (§3.6), so it runs
+  COURTESY hosted endpoint — the sovereign-CI BYO path. The
+  published sift-action stays Local-Auto / zero-credential, so it runs
   with explain:false and writes report.json; THIS step narrates that report via
   `sift explain --report`, so the story explains the Action's real diff (not a
   re-diff against an empty baseline). Endpoint+token come from org config; runs
