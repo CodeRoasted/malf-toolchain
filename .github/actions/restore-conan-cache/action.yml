@@ -131,6 +131,16 @@ runs:
         if oras pull "$CACHE_REF" --output "$work"; then
           tarball="$(find "$work" -name '*.tgz' -type f | head -n1)"
           if [ -n "$tarball" ]; then
+            # Make the existing cache writable before extracting over it. `conan cache restore` is a
+            # plain `tarfile.extractall` into $CONAN_HOME, and conan marks cached SOURCE folders
+            # read-only on purpose — so on a PERSISTENT runner, where a previous job already populated
+            # the tree, extraction dies with `PermissionError: [Errno 13]` on the first read-only file
+            # it must overwrite. Measured 2026-08-03 on the self-hosted box, the very first pull that
+            # ever succeeded: `.conan2/p/automc33ba5c0bcb5c/s/src/ChangeLog`. It cannot appear on a
+            # hosted runner (fresh workspace, nothing to overwrite), which is why an accelerator that
+            # never worked also never showed this. Scoped to CONAN_HOME and to the owner bit; it does
+            # not touch anything the restore is not about to write.
+            chmod -R u+w "$CONAN_HOME" 2>/dev/null || true
             if conan cache restore "$tarball"; then
               echo "::notice::restored third-party conan cache from $CACHE_REF — only first-party engine packages will build from source"
             else
