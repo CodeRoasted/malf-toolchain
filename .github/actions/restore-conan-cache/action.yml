@@ -22,9 +22,17 @@ description: |
 
 inputs:
   registry:
-    description: 'OCI repository holding the cache artifact (no tag).'
+    description: |
+      OCI repository holding the cache artifact (no tag). The default is the package the SUPERPROJECT
+      owns. It is not `conan-cache`: that package is linked on ghcr to CodeRoasted/insight-eidos (it was
+      created by the retired MSVC producer), and ghcr authorizes container reads and writes PER PACKAGE
+      by linked repository — so the superproject's GITHUB_TOKEN 403s on it in BOTH directions. The push
+      side failed loudly; this side failed silently, because a best-effort pull reports a 403 as
+      "cold / miss" and builds from source. That is how a wholly broken accelerator stayed invisible.
+      A consumer in a repo OTHER than the one the package is linked to will always miss — override this
+      input only with a package that consumer's own token can read.
     required: false
-    default: 'ghcr.io/coderoasted/conan-cache'
+    default: 'ghcr.io/coderoasted/conan-deps'
   tag:
     description: |
       Cache tag = the toolset namespace (e.g. msvc1452). Binaries inside are package_id-keyed on
