@@ -29,6 +29,7 @@ package is the ``metadata.component``, not a component of itself.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -244,6 +245,35 @@ def note_for(root_name: str, explicit: str | None) -> str:
     return explicit if explicit is not None else ARTIFACT_NOTE.get(root_name, DEFAULT_NOTE)
 
 
+def note_fingerprint() -> str:
+    """Digest of every note string that reaches a generated SBOM.
+
+    THE NOTES ARE DOCUMENT CONTENT, not commentary about it — they are written into
+    `metadata.properties`, so editing one changes the bytes of every committed SBOM and
+    silently invalidates it. There is no other tripwire: the staleness check runs at the
+    TAG, so an edit here surfaces days later as a red release, which is exactly how it
+    went. Measured 2026-08-04: malf-toolchain `3e63f82` (a documentation sweep) removed an
+    `adr/` citation from the server note on 2026-07-31; `coderoast-server`'s committed SBOM
+    was stale from that moment and reded `v1.9.0` at Wave 5.
+
+    Pinning a digest makes the edit fail HERE, at the moment it is made, with the repair in
+    the message. It is deliberately a fingerprint and not a golden copy of the prose: the
+    point is to force `malf sbom` to be re-run in the same pass, not to freeze the wording.
+    """
+    h = hashlib.sha256()
+    h.update(DEFAULT_NOTE.encode())
+    for key in sorted(ARTIFACT_NOTE):
+        h.update(key.encode())
+        h.update(ARTIFACT_NOTE[key].encode())
+    return h.hexdigest()[:16]
+
+
+# Bump this WITH the note edit, in the same commit, after running `malf sbom` so the
+# committed artifacts move with it. A mismatch is not a lint nit — it means every
+# committed SBOM in the workspace is now stale.
+NOTE_FINGERPRINT = "d432ac021939c88b"
+
+
 def selftest() -> int:
     """Offline self-test of the pure logic (no conan, no network).
 
@@ -298,8 +328,35 @@ def selftest() -> int:
     # Per-artifact note: the server root gets the linked-closure boundary note,
     # any other root the generic derived note, and an explicit --note always wins.
     assert "LINKED-CLOSURE" in note_for("coderoast_server", None), "server note override lost"
-    assert note_for("insight_sift", None) == DEFAULT_NOTE, "sift must keep the generic note"
     assert note_for("coderoast_server", "custom") == "custom", "explicit --note must win"
+    # The routing assertion, stated so it can FAIL. It used to read
+    # `note_for("insight_sift", None) == DEFAULT_NOTE` — which compares the function against
+    # the constant it returns for any non-server root, and is therefore true for every
+    # possible prose. That tautology is why 74/74 stayed green while a note edit left
+    # coderoast-server's committed SBOM stale for three days and reded the v1.9.0 tag.
+    # What is actually worth pinning is the ROUTING: a non-server root must not receive the
+    # server's boundary note. That is a real distinction and a wrong ARTIFACT_NOTE key
+    # breaks it.
+    assert note_for("insight_sift", None) != note_for("coderoast_server", None), \
+        "sift must NOT receive the server's linked-closure note"
+    assert "LINKED-CLOSURE" not in note_for("insight_sift", None), \
+        "the linked-closure boundary must not travel onto a non-server artifact"
+
+    # The tripwire the stale-SBOM defect actually needed. The notes are document CONTENT, so
+    # any edit to them invalidates every committed SBOM — and the only other check runs at
+    # the tag. This fails at edit time instead, with the repair in the message.
+    assert note_fingerprint() == NOTE_FINGERPRINT, (
+        f"SBOM note text changed (fingerprint {note_fingerprint()}, pinned "
+        f"{NOTE_FINGERPRINT}). The notes are written into metadata.properties, so EVERY "
+        "committed sbom.cdx.json is now stale. Re-run `malf sbom`, commit the regenerated "
+        "artifacts, and update NOTE_FINGERPRINT in the same commit.")
+
+    # No `adr/` path form may reach a generated artifact: the workspace ADR shelf is private
+    # and this file is PUBLIC, which is what the 2026-07-31 sweep was enforcing when it
+    # edited the note and stranded the committed SBOMs.
+    for label, text in [("DEFAULT_NOTE", DEFAULT_NOTE),
+                        *((k, v) for k, v in ARTIFACT_NOTE.items())]:
+        assert "adr/" not in text, f"{label} cites a private workspace path"
 
     print("sbom_gen selftest: OK (filter, display name, purl, cpe vendor+product, cpe absence, "
           "cpe-coverage ratio, per-artifact note)")
