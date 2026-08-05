@@ -117,6 +117,45 @@ def emit(rows):
         print(f"{ref}\t{directory}")
 
 
+def resolve_ref(dep: str, recipes: dict) -> str | None:
+    """Map a recipe's requirement string onto a workspace member ref, or None.
+
+    An exact `name/version` matches by string. A VERSION RANGE does not, and that
+    silently dropped a real edge: `insight_e2e` test_requires
+    `insight_scenarios/[>=1.7.0 <2]` while the member index is keyed
+    `insight_scenarios/1.9.0`, so `dep in recipes` was False and the corpus package
+    was never returned as a dependency — never registered as an editable, and
+    therefore unresolvable to its consumer on any checkout without a stale prior
+    registration. `mode_deps`' own docstring names that exact case ("a
+    test_requires-only editable (e.g. the e2e harness's scenario corpus) is otherwise
+    never rebuilt") — the intent was written and the matcher defeated it.
+
+    A range is resolved BY NAME, which is sound here and not a guess: the workspace
+    carries exactly one version of each package (the uniform line, held by
+    pin_coherence INV-1). That is asserted rather than assumed — an ambiguous name
+    raises instead of picking, because silently binding the wrong version would be a
+    worse failure than the one this fixes.
+
+    Measured population when this landed: ONE range-form first-party edge in the
+    whole workspace. The narrowness is the point — this resolves references, it does
+    not widen what counts as a dependency.
+    """
+    if dep in recipes:
+        return dep
+    name, _, version = dep.partition("/")
+    if "[" not in version:
+        return None          # an exact ref that is not a member: third-party, ignore
+    matches = [ref for ref in recipes if ref.split("/", 1)[0] == name]
+    if not matches:
+        return None          # third-party range (openssl/[>=3 <4]) — not ours
+    if len(matches) > 1:
+        raise SystemExit(
+            f"malf_graph: '{dep}' resolves to {len(matches)} workspace members "
+            f"({', '.join(sorted(matches))}). The workspace is supposed to carry one "
+            "version per package; refusing to guess which one a range means.")
+    return matches[0]
+
+
 def mode_deps(workspace: pathlib.Path, target_dir: pathlib.Path, include_test_requires: bool):
     recipes = scan(workspace)
     t_name, t_version, t_requires, t_test_requires = recipe_info(target_dir / "conanfile.py")
@@ -143,8 +182,9 @@ def mode_deps(workspace: pathlib.Path, target_dir: pathlib.Path, include_test_re
             if is_target and include_test_requires:
                 deps += recipe["test_requires"]
             for dep in deps:
-                if dep in recipes:
-                    visit(dep)
+                resolved = resolve_ref(dep, recipes)
+                if resolved is not None:
+                    visit(resolved)
             if ref != target_ref:
                 order.append((ref, recipe["dir"]))
         visiting.remove(ref)
@@ -172,8 +212,9 @@ def mode_members(root: pathlib.Path):
         visiting.add(ref)
         recipe = recipes[ref]
         for dep in recipe["requires"] + recipe["test_requires"]:
-            if dep in recipes:
-                visit(dep)
+            resolved = resolve_ref(dep, recipes)
+            if resolved is not None:
+                visit(resolved)
         order.append((ref, recipe["dir"]))
         visiting.remove(ref)
         seen.add(ref)
