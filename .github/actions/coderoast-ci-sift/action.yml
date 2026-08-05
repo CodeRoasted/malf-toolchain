@@ -58,6 +58,18 @@ inputs:
       `artifact=sift-baseline-main-<job>` — the caller stays King of the baseline.
     required: false
     default: ''
+  baseline-max-age:
+    description: >-
+      Staleness bound forwarded to the vs-MAIN diffs (sift-action `baseline-max-age`). Over a red
+      streak the green-gated re-seed stops and the main baseline ages silently — measured on eidos: a
+      5-day, ~20-commit-stale baseline read as "diffing against the wrong thing" at the v1.8.4 cut.
+      72h flags before that point while tolerating a weekend gap on a near-daily-push trunk. The
+      vs-previous PR diff is deliberately UNBOUNDED: a per-PR baseline legitimately ages between
+      pushes, and a bound there would only manufacture noise. Exceeding the bound reds the dogfood
+      STEP (loud), never the build — the caller's mandatory continue-on-error is the advisory
+      guarantee. Empty disables the bound.
+    required: false
+    default: '72h'
   pr-vs-previous:
     description: 'PRs (comment mode): ALSO diff this build against the PR''s own previous run — its own tagged comment, quiet unless significant. true|false.'
     required: false
@@ -101,6 +113,7 @@ runs:
         log: ${{ inputs.log }}
         baseline: ${{ steps.source.outputs.baseline }}
         baseline-name: sift-baseline-main-${{ inputs.job }}
+        baseline-max-age: ${{ inputs.baseline-max-age }}
         fail-on: ${{ inputs.fail-on }}
         commit-comment: ${{ inputs.commit-comment }}
         changed-outcome: ${{ inputs.changed-outcome }}
@@ -114,6 +127,7 @@ runs:
       with:
         log: ${{ inputs.log }}
         baseline: ${{ steps.source.outputs.baseline }}
+        baseline-max-age: ${{ inputs.baseline-max-age }}
         publish-baseline: never   # the vs-previous step below owns this PR's seeding
         fail-on: ${{ inputs.fail-on }}
         commit-comment: ${{ inputs.commit-comment }}
@@ -151,6 +165,7 @@ runs:
         log: ${{ inputs.log }}
         mode: render
         baseline: ${{ steps.source.outputs.baseline }}
+        baseline-max-age: ${{ inputs.baseline-max-age }}   # render never fails — banner + annotation carry the signal
         baseline-name: ${{ github.event_name == 'pull_request' && format('sift-baseline-{0}-pr-{1}', inputs.job, github.event.number) || format('sift-baseline-main-{0}', inputs.job) }}
         changed-outcome: ${{ inputs.changed-outcome }}
 
