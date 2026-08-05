@@ -4,7 +4,7 @@
 Replaces the original single-run point comparison, which false-positived on the
 2-3-iteration pipeline benches (BM_Pipeline_Drop/Block/16/*): identical
 back-to-back runs swing +/-40-90 points, so a fixed +/-10% threshold flagged
-noise as regression (WIP 1.5.2 handoff item).
+noise as regression.
 
 Two fixes, both statistical:
 
@@ -15,14 +15,23 @@ Two fixes, both statistical:
           `malf bench --compare` now passes by default;
        b. raw repetition rows (run_type == "iteration", same run_name
           repeated) - median + cv computed here;
-       c. a single run (legacy baseline.json) - the value itself, cv unknown.
+       c. a SINGLE sample - the value itself, cv unknown. NOT a legacy-format
+          shim, and the distinction is load-bearing: this branch keys on SAMPLE
+          COUNT, not on file vintage. google-benchmark emits exactly one
+          `iteration` row and no aggregate whenever `--benchmark_repetitions` is
+          not passed, so any run that does not go through `malf bench --compare`
+          lands here. Measured 2026-08-05: all six published hub baselines are
+          100% aggregate (488 rows, 0 single-run), which is what makes this look
+          dead from the baseline side alone - and it is not. Verified live in both
+          directions on default google-benchmark output: a 4% move passes, a 40%
+          move is still caught.
 
   2. VARIANCE-AWARE THRESHOLD: per benchmark,
          thr_eff = max(threshold_floor, K_SIGMA * max(cv_base, cv_curr))
      where cv = stddev/mean (google-benchmark's own "cv" aggregate when
      present). A bench whose honest run-to-run noise is 30% is only flagged
      beyond ~3 sigma of that noise; a tight bench keeps the floor. When a
-     side has no cv (legacy single-run baseline), the other side's cv is
+     side has no cv (a single sample - see 1c), the other side's cv is
      used; when neither has one, the floor applies (the old behavior).
 
 Usage:  bench_compare.py BASELINE.json CURRENT.json THRESHOLD_FLOOR
@@ -76,6 +85,10 @@ def load_runs(path: str) -> dict[str, dict]:
             mean = statistics.fmean(samples)
             cv = (statistics.stdev(samples) / mean) if mean > 0 else None
         elif samples:
+            # ONE sample: no dispersion to measure, so cv is unknown and
+            # effective_threshold falls back to the floor. Reachable by any
+            # benchmark_out produced without --benchmark_repetitions - a live
+            # path, not a legacy-format fallback.
             central, cv = samples[0], None
         else:
             continue  # aggregates without a median (shouldn't happen) - skip
