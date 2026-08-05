@@ -155,15 +155,62 @@ def removed_identifiers(repo: Path, diff_args: list[str]) -> set[str]:
     return tokens
 
 
-def check_repo(repo: Path, diff_args: list[str]) -> list[str]:
+def sibling_code_owner(token: str, repo: Path, workspace: Path | None) -> str | None:
+    """The sibling repo whose CODE still defines `token`, or None.
+
+    THE CROSS-REPO BLIND SPOT, and it is the one this gate's own description already
+    named ("above all CROSS-REPO references") while believing diff scope removed it.
+    It does not. Diff scope narrows WHICH tokens are candidates; the death test is still
+    `code_identifiers[token] == 0` over ONE repo. So a comment in logcraft correctly
+    naming canon's `LogFormat` — 200 code occurrences across 48 files in canon, zero in
+    logcraft — reads as rot the moment a logcraft change removes logcraft's last local
+    occurrence. Reproduced on the real tree 2026-08-05: the gate flagged
+    `core/api/core.api-output.cppm:123` and told the reader to REMOVE THE MIRROR, which
+    would delete a true statement. That is worse than noise: it puts a correct comment
+    on a repair list, and a reader without a positive control obeys it.
+
+    BOUNDED BY CONSTRUCTION, which is why this is a second pass and not a wider sweep:
+    it runs ONLY for tokens the repo-local pass already declared dead — measured at 8
+    firings across 240 commits — so its cost is the flagged set, never the tree. The
+    walk reuses `iter_sources`, so it inherits the same prunes; it never descends into
+    build trees or vendored packages.
+    """
+    if workspace is None:
+        return None
+    for sibling in sorted(workspace.iterdir()):
+        if not sibling.is_dir() or sibling == repo or not (sibling / ".git").exists():
+            continue
+        for path in iter_sources(sibling):
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            code, _ = split_code_and_comments(text)
+            if token in IDENTIFIER.findall(code):
+                return sibling.name
+    return None
+
+
+def check_repo(repo: Path, diff_args: list[str],
+               workspace: Path | None = None) -> tuple[list[str], list[str]]:
+    """(findings, cross-repo resolutions). See sibling_code_owner for why the second exists."""
     removed = removed_identifiers(repo, diff_args)
     if not removed:
-        return []
+        return [], []
     code_identifiers, mentions = scan_repo(repo)
     # Its last CODE occurrence is gone if the change removed it and nothing in the tree
     # still uses it. Comments are excluded from that count by construction — otherwise the
     # stale comment would vouch for the symbol it is stale about.
     dead = {token for token in removed if code_identifiers[token] == 0}
+    # A token alive in a SIBLING repo is not dead — the comment is a correct cross-repo
+    # reference. Only tokens the local pass already flagged are looked up, so this cannot
+    # widen the walk beyond the flagged set.
+    resolved = []
+    for token in sorted(dead):
+        owner = sibling_code_owner(token, repo, workspace)
+        if owner:
+            resolved.append(f"`{token}` is alive in {owner} — cross-repo reference, not rot")
+    dead -= {r.split("`")[1] for r in resolved}
     findings = []
     for path, lineno, token in mentions:
         if token in dead:
@@ -171,7 +218,7 @@ def check_repo(repo: Path, diff_args: list[str]) -> list[str]:
                 f"{path.relative_to(repo).as_posix()}:{lineno}: comment names `{token}`, "
                 f"whose last code occurrence this change removes — repair by REMOVING THE "
                 f"MIRROR, not by re-typing the name (CLAUDE.md § Comments)")
-    return sorted(set(findings))
+    return sorted(set(findings)), resolved
 
 
 # ── Selftest ─────────────────────────────────────────────────────────────────────────────
@@ -215,7 +262,32 @@ def selftest() -> int:
         print("selftest FAILED: a removed comment line must yield no code identifiers")
         failures += 1
 
-    print(f"selftest: {len(SELFTEST_CASES) + 2 - failures}/{len(SELFTEST_CASES) + 2} cases pass")
+    # ── The cross-repo arm, BOTH directions, on a synthetic two-repo workspace ──────────
+    # Either alone leaves a hole and the wrong one is silent: without the first, a correct
+    # cross-repo reference goes on a repair list and a reader deletes a true statement;
+    # without the second, "resolve it elsewhere" degenerates into never failing at all.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = Path(tmp)
+        near, far = ws / "near_repo", ws / "far_repo"
+        for r in (near, far):
+            (r / ".git").mkdir(parents=True)
+        (near / "a.cppm").write_text("// the `SharedThing` lives next door\nint local_only = 0;\n")
+        (far / "b.cppm").write_text("struct SharedThing { int x; };\n")
+        alive = sibling_code_owner("SharedThing", near, ws)
+        if alive != "far_repo":
+            print(f"selftest FAILED: cross-repo ALIVE arm — expected far_repo, got {alive}")
+            failures += 1
+        gone = sibling_code_owner("ZzQqNoSuchSymbol", near, ws)
+        if gone is not None:
+            print(f"selftest FAILED: genuinely-dead arm — expected None, got {gone}")
+            failures += 1
+        # And with no workspace the resolver must stay OFF rather than guess.
+        if sibling_code_owner("SharedThing", near, None) is not None:
+            print("selftest FAILED: reach must be OFF when no workspace is given")
+            failures += 1
+
+    print(f"selftest: {len(SELFTEST_CASES) + 5 - failures}/{len(SELFTEST_CASES) + 5} cases pass")
     return 1 if failures else 0
 
 
@@ -227,6 +299,11 @@ def main() -> int:
     parser.add_argument("--staged", action="store_true", help="inspect the staged diff")
     parser.add_argument("--repo", action="append", default=[],
                         help="repo path (repeatable; default: every git repo beside this one)")
+    parser.add_argument("--workspace", default=None,
+                        help="workspace root holding the sibling repos. When given, a token the "
+                             "repo-local pass calls dead is re-checked against siblings and dropped "
+                             "if alive there. When ABSENT the gate cannot see that class at all and "
+                             "says so — see the limit line it prints.")
     parser.add_argument("--selftest", action="store_true")
     args = parser.parse_args()
 
@@ -241,16 +318,34 @@ def main() -> int:
         if (root / ".git").exists():
             repos.insert(0, root)
 
+    workspace = Path(args.workspace).resolve() if args.workspace else None
     diff_args = ["--cached"] if args.staged else [args.range]
     total = 0
+    resolved_total = 0
     for repo in repos:
-        findings = check_repo(repo, diff_args)
+        findings, resolved = check_repo(repo, diff_args, workspace)
+        for note in resolved:
+            print(f"note {repo.name}: {note}")
         for finding in findings:
             print(f"FAIL {repo.name}/{finding}")
         total += len(findings)
+        resolved_total += len(resolved)
 
     scope = "staged" if args.staged else args.range
     print(f"dead_symbol_lint: {len(repos)} repo(s) over {scope} — {total} finding(s)")
+    # THE REACH, STATED EVERY RUN. A gate that does not say what it cannot see lets its
+    # green stand for more than it measured — the class MEMN-9 names, and the reason this
+    # line is unconditional rather than printed only on a finding.
+    if workspace is not None:
+        siblings = sum(1 for d in workspace.iterdir()
+                       if d.is_dir() and (d / ".git").exists() and d not in repos)
+        print(f"dead_symbol_lint: cross-repo reach ON — {siblings} sibling repo(s) consulted, "
+              f"{resolved_total} token(s) resolved as live elsewhere.")
+    else:
+        print("dead_symbol_lint: LIMIT — cross-repo reach OFF (no --workspace). A symbol that "
+              "lives in ANOTHER repo is indistinguishable from a dead one here, so a correct "
+              "cross-repo reference can be reported as rot. Pass --workspace <root> where the "
+              "siblings are on disk.")
     return 1 if total else 0
 
 
