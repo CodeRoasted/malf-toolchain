@@ -1289,13 +1289,36 @@ _malf_prune_args() {
 
 cmd_format() {
     local check=false
+    # PATHSPEC (Founder, 2026-08-08): `malf format [--check] [PATH...]`. A lane formats what it
+    # OWNS and never touches what it does not.
+    #
+    # WHY IT EXISTS, since a no-arg sweep is otherwise fine: the repos share ONE worktree across
+    # parallel lanes, so a whole-repo format touches files another lane has uncommitted. The
+    # workaround was save-untracked -> format -> revert-foreign -> restore, run by hand on every
+    # commit, twice over a sibling's live work. That manoeuvre has a data-loss failure mode and its
+    # only safeguard is somebody remembering to save first. A pathspec removes the manoeuvre
+    # instead of asking people to keep performing it correctly.
+    #
+    # No PATH = the whole-repo sweep, unchanged, for whoever wants it.
+    local -a roots=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --check) check=true ;;
-            *) echo "malf format: unknown option $1" >&2; exit 1 ;;
+            -*) echo "malf format: unknown option $1" >&2; exit 1 ;;
+            *)
+                if [[ ! -e "$1" ]]; then
+                    # A typo'd path must NOT format nothing and exit 0 — that is a silent no-op
+                    # reported as a clean format, the failure class this tool keeps finding
+                    # elsewhere.
+                    echo "malf format: error: path does not exist: $1" >&2; exit 1
+                fi
+                roots+=("$1")
+                ;;
         esac
         shift
     done
+    local explicit_paths=true
+    if [[ ${#roots[@]} -eq 0 ]]; then explicit_paths=false; roots=("$CWD"); fi
 
     # Use the clang-format from the SAME install as the build compiler (clang-21) for
     # consistency. clang-format is a pure formatter — a version skew can't error like
@@ -1365,7 +1388,7 @@ cmd_format() {
     # reads as "formatted everything" when it did not. `! -size -Nk` is the
     # exact complement of the `-size -Nk` filter below, so nothing falls in a gap.
     local oversized
-    oversized="$(find "$CWD" \
+    oversized="$(find "${roots[@]}" \
         \( -type d \( "${prune_args[@]}" \) -prune \) -o \
         \( -type f \( "${source_globs[@]}" \) ! -size "-${MALF_SOURCE_MAX_FILE_KB}k" \
            -printf '  %p (%s bytes)\n' \))"
@@ -1378,9 +1401,26 @@ cmd_format() {
     # `ulimit -v` applies to the clang-format child, so an overrun aborts the
     # formatter instead of the machine. Batched (-n) so one pathological file
     # cannot cost the whole run, and so the surviving output names the culprit.
-    find "$CWD" \
+    local -a targets=()
+    mapfile -d '' -t targets < <(find "${roots[@]}" \
         \( -type d \( "${prune_args[@]}" \) -prune \) -o \
-        \( -type f \( "${source_globs[@]}" \) -size "-${MALF_SOURCE_MAX_FILE_KB}k" -print0 \) \
+        \( -type f \( "${source_globs[@]}" \) -size "-${MALF_SOURCE_MAX_FILE_KB}k" -print0 \))
+
+    # An EXPLICIT pathspec matching no source file is an error, never a quiet success: it means a
+    # typo or a wrong directory, and reporting it as a clean format is the silent-green shape.
+    # A no-arg sweep over a repo with no C++ stays inert and exit 0 — that is a real, declared
+    # state (the lint workflow's `format-check: false` for TS repos rests on it).
+    if [[ ${#targets[@]} -eq 0 ]]; then
+        if $explicit_paths; then
+            echo "malf format: error: no source file under: ${roots[*]}" >&2
+            echo "malf format: (looked for .cpp .cxx .cc .h .hpp .cppm)" >&2
+            exit 1
+        fi
+        echo "malf format: no source files found under $CWD — nothing to do."
+        return 0
+    fi
+
+    printf '%s\0' "${targets[@]}" \
     | xargs -0 -r -n "$MALF_FORMAT_BATCH_SIZE" \
         bash -c 'ulimit -v "$0"; exec "$@"' \
         "$MALF_SOURCE_MEM_LIMIT_KB" "$clang_format_bin" "${format_args[@]}"
