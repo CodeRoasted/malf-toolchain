@@ -10,13 +10,17 @@
 #   malf bench   [subdir] [--quick] [--filter REGEX] [--compare] [--repetitions N]
 #   malf clean   [build|conan|editables|stale|all]
 #   malf bump    X.Y.Z
+#   malf inventory [dir]
 #   malf cut-verify [pkg] [--profile <name>] [--list]
 #   malf run     <exe-name>
 #   malf editables [list|sync]
 #
 # Verb semantics:
 #   `build` compiles EVERYTHING — package + tests + benches (one compile
-#   surface; a bench-only TU can't rot unseen). `test` runs ctest and `bench`
+#   surface; a bench-only TU can't rot unseen), and since DN-33 that promise is
+#   ENFORCED rather than asserted: `build`/`test` also run the INVENTORY, which
+#   fails on any CMake `project()` no package build configures. That clause used
+#   to be false — `insight-canon/proof/` rotted unseen for a whole release cycle. `test` runs ctest and `bench`
 #   runs the bench executables, each on top of the same incremental build.
 #
 # Targets:
@@ -408,7 +412,44 @@ _malf_resolve_target_or_sweep() {
         fi
     done
     echo "=== malf $verb: all ${#members[@]} packages done ==="
+    if [[ "$verb" == "build" || "$verb" == "test" ]]; then
+        _malf_run_inventory "$root" || exit 1
+    fi
     exit 0
+}
+
+# ── DN-33: the build system's INVENTORY ──────────────────────────────────────
+# A CMake project that no package build ever configures is a build-system defect: `malf test`
+# reports green while a translation unit in the repo does not compile, and the first thing that
+# compiles it is the TAG. Measured 2026-08-08 — malf test 714/714, cut-verify 18/18, every gate
+# green, then all five golden legs red on a three-argument call against a four-argument signature.
+#
+# So this runs in the DAILY loop, not at the cut: a false green repaired at the last gate is still
+# a false green for the fourteen days before it. `malf build`/`malf test` fire it once per repo —
+# once, never per sweep member (MALF_SWEEP marks a member), and never for a lone package build,
+# where the caller asked about one package and gets what they asked for.
+#
+# Cost is why this is affordable daily: the inventory cell uses a PERSISTENT profile-keyed tree,
+# so a no-change run is ~0.6s per repo. The determinism scripts' mktemp clean room is right for a
+# DIGEST and wrong for a compile check.
+_malf_repo_root_of() {
+    local dir="$1"
+    while [[ "$dir" != "/" && -n "$dir" ]]; do
+        [[ -e "$dir/.git" ]] && { echo "$dir"; return 0; }
+        dir="$(dirname "$dir")"
+    done
+    return 1
+}
+
+_malf_run_inventory() {
+    local root="$1"
+    [[ -n "${MALF_SWEEP:-}" ]] && return 0            # a sweep member — the root runs it once
+    [[ -n "${MALF_SKIP_INVENTORY:-}" ]] && return 0   # the mutation arms drive the tool directly
+    local repo; repo="$(_malf_repo_root_of "$root")" || return 0
+    python3 "$MALF_DIR/build_inventory.py" lint --workspace "$MALF_WORKSPACE_ROOT" || return 1
+    python3 "$MALF_DIR/build_inventory.py" build \
+        --workspace "$MALF_WORKSPACE_ROOT" --repo "$repo" \
+        --build-key "$(_malf_build_key)" --profile "$MALF_PROFILE_NAME" || return 1
 }
 
 _malf_build_dir() {
@@ -897,6 +938,7 @@ cmd_build() {
     echo "=== malf build: $target ($MALF_CONFIG${MALF_PROFILE_NAME:+, $MALF_PROFILE_NAME}) ==="
     _malf_build_flow "$target"
     echo "=== done: $(_malf_build_dir "$target") ==="
+    _malf_run_inventory "$target"
 }
 
 cmd_test() {
@@ -951,6 +993,7 @@ cmd_test() {
     $verbose && ctest_args+=(--verbose)
     [[ -n "$gtest_filter" ]] && ctest_args+=(-R "$gtest_filter")
     ctest "${ctest_args[@]}"
+    _malf_run_inventory "$target"
 }
 
 cmd_lint() {
@@ -2411,6 +2454,37 @@ cmd_bump() {
 # Usage: malf cut-verify [pkg-name] [--profile <name>] [--list]
 #   pkg-name   scope the sweep to one released package (else: the whole set)
 #   --list     print the canonical released set (dep order) and exit — build nothing
+# malf inventory [dir] — the DN-33 gate, standalone. Lints the WHOLE workspace (an orphan
+# anywhere is a defect, and the predicate is workspace-wide by nature), then configures and
+# builds every inventory entry of the resolved repo to a LINKED artifact in ONE canonical cell.
+#
+# ⚠ THE BOUNDARY IS DECLARED, NOT DISCOVERED (DN-33.D4): this proves the harnesses BUILD. The
+# 8-cell determinism matrices (canon scripts/det_public_proof.sh, metalog
+# scripts/determinism_bitidentity.sh) prove they are DETERMINISTIC, at the tag. A digest drift
+# still first appears at the cut, BY DESIGN — do not widen this into an 8-cell run to make the
+# daily gate feel complete.
+cmd_inventory() {
+    local subdir=""
+    MALF_CONFIG="Release"   # an inventory cell is a Release compile-and-link check
+    # The SAME flag grammar as build/test — not a subset. A verb that silently ignored
+    # `--profile` would run the wrong leg and report success for it, which is the species of
+    # false claim this whole file exists to remove.
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --debug)   MALF_CONFIG="Debug" ;;
+            --release) MALF_CONFIG="Release" ;;
+            --profile) shift; _malf_apply_profile "$1" ;;
+            --asan)    _malf_apply_profile "$MALF_ASAN_PROFILE" ;;
+            -*) echo "malf inventory: unknown option $1" >&2; exit 1 ;;
+            *) subdir="$1" ;;
+        esac
+        shift
+    done
+    local root; root="$(_malf_resolve_dir "$subdir")" || exit 1
+    _malf_use_keyed_cache
+    MALF_SWEEP="" MALF_SKIP_INVENTORY="" _malf_run_inventory "$root"
+}
+
 cmd_cut_verify() {
     local only="" list_only=false
     # A RELEASE gate builds the way the cut SHIPS: gcc-15 / libstdc++ — the canonical
@@ -2544,6 +2618,7 @@ case "$COMMAND" in
     editables)        cmd_editables "$@" ;;
     profiles)         cmd_profiles ;;
     bump)             cmd_bump "$@" ;;
+    inventory)        cmd_inventory "$@" ;;
     cut-verify)       cmd_cut_verify "$@" ;;
     lock)             cmd_lock "$@" ;;
     sbom)             cmd_sbom "$@" ;;
