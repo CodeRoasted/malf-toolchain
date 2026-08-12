@@ -111,7 +111,18 @@ def git_tracked_cmake_lists(repo: Path) -> list[Path]:
 
 
 def discover_repos(workspace: Path) -> list[Repo]:
+    """Repo discovery is derived from .git presence, over BOTH legitimate workspace shapes:
+    the workspace-of-repos (the dev tree: children carry .git; the superproject root also
+    carries one and contributes its own tracked files) and the single-repo checkout (CI:
+    MALF_WORKSPACE_ROOT is the tag checkout, whose .git sits at the root and whose children
+    carry none). The first release run of the DN-33 lint saw only the first shape and
+    returned ZERO repos on the second — the non-vacuity arm then failed the publish job on
+    a scan that had reached nothing (coderoast-ipc v1.9.3, run 31634074680). The arm was
+    right; discovery was blind. A repo found both ways is counted once."""
     repos = []
+    if (workspace / ".git").exists():
+        repos.append(Repo(root=workspace, name=workspace.name,
+                          cmake_lists=git_tracked_cmake_lists(workspace)))
     for entry in sorted(workspace.iterdir()):
         if not entry.is_dir() or not (entry / ".git").exists():
             continue
