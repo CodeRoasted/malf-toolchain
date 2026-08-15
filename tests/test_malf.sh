@@ -379,5 +379,136 @@ check "format does not copy a config into the tree it checks" \
 rm -rf "$guard_tmp" "$fmt_iso"
 
 echo
+
+echo "[7h] build_inventory — the DN-33.D6 shape gate on workspace-grain cells"
+
+# A cell whose defines dereference \${workspace} beyond the repo root is workspace-grain.
+# Absent sibling => single-repo shape SKIPS (loud, counted, declared) while the workspace
+# shape FAILS — and the skip must be UNREACHABLE in the workspace shape (DN-33.D7's
+# BOTH-SHAPES MUST). The tool is driven directly (the same seam malf's
+# MALF_SKIP_INVENTORY mutation arms use); python runs with -B so no __pycache__ dirties
+# the tree. Homing note: placement here is provisional pending Kleio's ratification.
+inv_tmp="$(mktemp -d)"   # cleaned inline below (a second `trap ... EXIT` would REPLACE [7d]'s)
+BI="$MALF_ROOT/build_inventory.py"
+
+# THE NEEDLE IS IMPORTED FROM ITS ONE WRITE SITE, never retyped here: an absence
+# assertion keyed on a hand-copied string goes vacuous on the first rewording
+# (MEM:synthetic-gate-vacuity-vs-judgment). Test A proves this same needle matches real
+# output, which is what makes the absence assertions in C non-vacuous.
+skip_needle="$(python3 -B -c "import sys; sys.path.insert(0, '$MALF_ROOT'); \
+import build_inventory; print(build_inventory.WORKSPACE_GRAIN_SKIP_NEEDLE)")"
+check "the skip needle constant resolves non-empty (guards a vacuous absence assert)" \
+      "non-empty" "$([[ -n "$skip_needle" ]] && echo non-empty || echo EMPTY)"
+
+# One fixture writer => the SAME manifest in every arrangement, so the arm that proves
+# "this condition skips" (A) and the arm that proves "the same condition FAILS in the
+# workspace shape" (C) are bound to one condition, not to two hand-copies.
+write_probe_repo() {
+    mkdir -p "$1/cell"
+    printf 'project(probe_cell LANGUAGES NONE)\n' > "$1/cell/CMakeLists.txt"
+    cat > "$1/packages.yml" <<'YAML'
+inventory:
+  probe_cell:
+    path: cell
+    toolchain_from: .
+    target: probe_bin
+    defines:
+      SIB_ROOT: ${workspace}/insight-sib
+      OWN_ROOT: ${repo}
+YAML
+}
+
+solo="$inv_tmp/solo"          # single-repo shape: workspace root == repo root
+write_probe_repo "$solo"
+ws="$inv_tmp/ws"              # workspace shape: workspace root != repo root
+write_probe_repo "$ws/repoA"
+
+# (A) single-repo shape + absent sibling -> declared, counted SKIP; exit 0.
+check "A: arrangement applied — the sibling is genuinely absent (single-repo)" \
+      "absent" "$([[ ! -e "$solo/insight-sib" ]] && echo absent || echo PRESENT)"
+solo_out="$(python3 -B "$BI" build --workspace "$solo" --repo "$solo" \
+            --build-key probe --profile probe 2>&1)"; solo_rc=$?
+check "A: single-repo + absent sibling exits 0" "0" "$solo_rc"
+check "A: the skip line is PRESENT, matched via the imported needle" \
+      "present" "$(grep -qF "$skip_needle" <<< "$solo_out" && echo present || echo "ABSENT: $solo_out")"
+check "A: the skip names the cell" \
+      "named" "$(grep -qF "cell probe_cell" <<< "$solo_out" && echo named || echo "unnamed: $solo_out")"
+check "A: the skip names the missing root" \
+      "named" "$(grep -qF "$solo/insight-sib" <<< "$solo_out" && echo named || echo "unnamed: $solo_out")"
+check "A: the skip is COUNTED, not only declared" \
+      "counted" "$(grep -qF "1 workspace-grain cell(s) skipped" <<< "$solo_out" && echo counted || echo "uncounted: $solo_out")"
+
+# (B) lint membership is shape-independent: the cell still counts toward non-vacuity in
+# the single-repo shape with the sibling absent — the skip lives in the BUILD arm only.
+git -C "$solo" init -q 2>/dev/null \
+    && git -C "$solo" add packages.yml cell/CMakeLists.txt 2>/dev/null
+lint_solo_out="$(python3 -B "$BI" lint --workspace "$solo" 2>&1)"; lint_solo_rc=$?
+check "B: lint counts the workspace-grain cell in single-repo shape (sibling absent)" \
+      "rc=0 counted" \
+      "rc=$lint_solo_rc $(grep -qF "1 declared CMake project" <<< "$lint_solo_out" && echo counted || echo "GOT: $lint_solo_out")"
+
+# (C) workspace shape + absent sibling -> loud FAIL naming the cell, and the skip is
+# UNREACHABLE: the identical manifest that skipped in A must not skip here.
+check "C: arrangement applied — the sibling is genuinely absent (workspace)" \
+      "absent" "$([[ ! -e "$ws/insight-sib" ]] && echo absent || echo PRESENT)"
+ws_out="$(python3 -B "$BI" build --workspace "$ws" --repo "$ws/repoA" \
+          --build-key probe --profile probe 2>&1)"; ws_rc=$?
+check "C: workspace + absent sibling FAILS (exit 1)" "1" "$ws_rc"
+check "C: the FAIL names the cell" \
+      "named" "$(grep -qF "cell probe_cell" <<< "$ws_out" && echo named || echo "unnamed: $ws_out")"
+check "C: the FAIL names the absent sibling" \
+      "named" "$(grep -qF "$ws/insight-sib" <<< "$ws_out" && echo named || echo "unnamed: $ws_out")"
+check "C: the skip is UNREACHABLE in the workspace shape (needle absent; A proved it real)" \
+      "absent" "$(grep -qF "$skip_needle" <<< "$ws_out" && echo "LEAKED: $ws_out" || echo absent)"
+
+# (D) sibling PRESENT -> the cell builds in EITHER shape, no skip line: the machinery
+# must not have widened into the live path. conan/cmake are stubbed (this suite's floor
+# is no-network/no-build); the stub still produces the linked artifact the tool demands,
+# so the assertion reaches the "linked:" proof, not merely a zero exit.
+stub_bin="$inv_tmp/bin"
+mkdir -p "$stub_bin"
+cat > "$stub_bin/conan" <<'STUB'
+#!/usr/bin/env bash
+out=""; prev=""
+for a in "$@"; do [[ "$prev" == "-of" ]] && out="$a"; prev="$a"; done
+[[ -n "$out" ]] && mkdir -p "$out" && : > "$out/conan_toolchain.cmake"
+exit 0
+STUB
+cat > "$stub_bin/cmake" <<'STUB'
+#!/usr/bin/env bash
+build=""; target=""; prev=""
+for a in "$@"; do
+    case "$prev" in
+        -B|--build) build="$a" ;;
+        --target)   target="$a" ;;
+    esac
+    prev="$a"
+done
+if [[ -n "$build" && -n "$target" ]]; then
+    mkdir -p "$build" && printf '#!/bin/sh\n' > "$build/$target" && chmod +x "$build/$target"
+fi
+exit 0
+STUB
+chmod +x "$stub_bin/conan" "$stub_bin/cmake"
+check "D: stub toolchain applied (conan resolves to the stub, not the real one)" \
+      "$stub_bin/conan" "$(PATH="$stub_bin:$PATH" command -v conan)"
+
+mkdir -p "$ws/insight-sib" "$solo/insight-sib"
+ws_sat_out="$(PATH="$stub_bin:$PATH" python3 -B "$BI" build --workspace "$ws" \
+              --repo "$ws/repoA" --build-key probe --profile probe 2>&1)"; ws_sat_rc=$?
+check "D: workspace shape + sibling present -> the cell configures and links (exit 0)" \
+      "rc=0 linked" \
+      "rc=$ws_sat_rc $(grep -qF "linked:" <<< "$ws_sat_out" && echo linked || echo "GOT: $ws_sat_out")"
+check "D: no skip line when the path is satisfiable (workspace shape)" \
+      "absent" "$(grep -qF "$skip_needle" <<< "$ws_sat_out" && echo "LEAKED: $ws_sat_out" || echo absent)"
+solo_sat_out="$(PATH="$stub_bin:$PATH" python3 -B "$BI" build --workspace "$solo" \
+              --repo "$solo" --build-key probe --profile probe 2>&1)"; solo_sat_rc=$?
+check "D: single-repo shape + sibling STAGED -> the cell builds, no skip (the D6 staging clause)" \
+      "rc=0 linked no-skip" \
+      "rc=$solo_sat_rc $(grep -qF "linked:" <<< "$solo_sat_out" && echo linked || echo "GOT: $solo_sat_out") $(grep -qF "$skip_needle" <<< "$solo_sat_out" && echo "LEAKED" || echo no-skip)"
+
+rm -rf "$inv_tmp"
+
+echo
 echo "malf selftest: $pass_count passed, $fail_count failed"
 [[ $fail_count -eq 0 ]] || exit 1

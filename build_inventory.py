@@ -274,12 +274,78 @@ def substitute(value: str, workspace: Path, repo: Path) -> str:
     return value.replace("${workspace}", str(workspace)).replace("${repo}", str(repo))
 
 
+# ── DN-33.D6: a ${workspace}-crossing cell is WORKSPACE-GRAIN ────────────────────────────
+#
+# A cell whose defines dereference `${workspace}` beyond the repo root holds a compile
+# property of the workspace-of-repos SHAPE, not of the repo alone — a repo-shaped checkout
+# cannot evaluate it, any more than one cell can evaluate the 8-cell matrix. Measured on
+# the v1.9.3 metalog publish (run 31891808449): the single-repo tag checkout substituted
+# `${workspace}/insight-canon` to a nonexistent directory and the cell failed a configure
+# it was never designed to run, while the same harness was green at its designed site.
+#
+# Per shape, when a dereferenced root is ABSENT:
+#   * workspace-of-repos (workspace root != repo root): loud FAIL — there it means a
+#     partial checkout or a typo'd root, and a skip would silently disarm the daily
+#     anti-false-green, the exact class DN-33 closed.
+#   * single-repo (workspace root == repo root): a loud, COUNTED, DECLARED skip — the
+#     cell is out of the shape's jurisdiction and its property is held by the workspace
+#     shape's release-train gate (DN-33.D7's coverage MUST). If the substituted path
+#     exists (a job that stages the sibling inside the checkout), the cell builds: the
+#     skip covers only the genuinely unsatisfiable.
+#
+# The trigger is DERIVED from the defines this file already parses. A declared
+# `requires:`/`siblings:` manifest key was considered and REFUSED (DN-33.D6): the fact
+# already lives in the defines, and a second declaration can drift from it — a drifted
+# declaration is a lie with a straight face.
+#
+# ONE WRITE SITE for the skip line's needle. The tests assert both its PRESENCE
+# (single-repo shape) and its ABSENCE (workspace shape), and an absence assertion keyed
+# on a retyped string goes vacuous on the first rewording
+# (MEM:synthetic-gate-vacuity-vs-judgment) — tests import this constant, never respell it.
+WORKSPACE_GRAIN_SKIP_NEEDLE = "DN-33.D6 SKIP (workspace-grain)"
+
+
+def workspace_grain_absences(entry: dict, workspace: Path, repo: Path) -> list[tuple[str, Path]]:
+    """The entry's defines whose RAW value dereferences `${workspace}` and whose
+    substituted path does not exist — (define key, substituted path) pairs.
+    Derived from the manifest text, never declared (DN-33.D6)."""
+    absent: list[tuple[str, Path]] = []
+    for key, raw in entry.get("defines", {}).items():
+        if "${workspace}" not in raw:
+            continue
+        resolved = Path(substitute(raw, workspace, repo))
+        if not resolved.exists():
+            absent.append((key, resolved))
+    return absent
+
+
 def run_build(workspace: Path, repo_root: Path, build_key: str, profile: str) -> int:
     inventory = load_inventory(repo_root)
     if not inventory:
         return 0
+    skipped = 0
     for name, entry in sorted(inventory.items()):
         source = repo_root / entry["path"]
+        # The DN-33.D6 shape gate, before any configure. The FAIL arm is checked by shape
+        # FIRST so the skip is structurally unreachable in the workspace shape — not
+        # merely unreached.
+        absences = workspace_grain_absences(entry, workspace, repo_root)
+        if absences:
+            missing = ", ".join(f"{key} -> {path}" for key, path in absences)
+            if workspace != repo_root:
+                print(f"malf inventory: FAIL — cell {name} ({repo_root.name}/"
+                      f"{entry['path']}): {missing} does not exist. In the "
+                      "workspace-of-repos shape an absent ${workspace}-dereferenced "
+                      "sibling is a partial checkout or a typo'd root, never a skip "
+                      "(DN-33.D6).", file=sys.stderr)
+                return 1
+            skipped += 1
+            print(f"{WORKSPACE_GRAIN_SKIP_NEEDLE}: cell {name} ({repo_root.name}/"
+                  f"{entry['path']}) — {missing} is unsatisfiable in this single-repo "
+                  "checkout. The cell is workspace-grain: its compile property is held "
+                  "by the workspace-of-repos shape's release-train gate (DN-33.D7), "
+                  "not by this shape.")
+            continue
         # PERSISTENT, profile-keyed build tree — deliberately NOT the mktemp the determinism
         # scripts use. Their clean room is load-bearing for a DIGEST; this cell's job is to
         # answer "does it still compile", and an incremental tree is what makes that
@@ -342,6 +408,12 @@ def run_build(workspace: Path, repo_root: Path, build_key: str, profile: str) ->
                   f"artifact under {build_dir}", file=sys.stderr)
             return 1
         print(f"   linked: {produced[0]}")
+    if skipped:
+        # COUNTED as well as declared: a skip that is only a per-cell line can scroll
+        # away; the count is the one-glance fact a CI log reader checks against the
+        # inventory size.
+        print(f"malf inventory: {skipped} workspace-grain cell(s) skipped in the "
+              "single-repo shape (declared above, DN-33.D6).")
     return 0
 
 
