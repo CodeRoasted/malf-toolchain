@@ -2233,9 +2233,10 @@ Commands:
     editables [list|sync]
     profiles                       list available build profiles (the registry)
     bump    X.Y.Z                  coordinated workspace version bump: rewrite every version axis,
-                                   verify pin coherence, re-sync editables + prune stale cache to
-                                   the new baseline, re-derive the SBOM (derived from the graph the
-                                   bump just moved). Does NOT touch the Sift Action engine pin —
+                                   re-sync editables, re-derive the lockfile (plain lock — first-
+                                   party only) + the SBOM, prune stale cache, then verify pin
+                                   coherence on the FINISHED state (last, so INV-14 judges the
+                                   result, not the chain). Does NOT touch the Sift Action engine pin —
                                    that tracks the PUBLISHED engine and is sift-action/bump.sh's.
     cut-verify [pkg] [--profile <name>] [--list]
                                    pre-cut Release Gate: forced `conan create` for every
@@ -2370,8 +2371,6 @@ cmd_bump() {
     fi
     echo "── malf bump $target — rewriting every workspace version axis ──"
     python3 "$pin" bump "$target" "$MALF_WORKSPACE_ROOT" || return 1
-    echo "── verifying pin coherence at $target ──"
-    python3 "$pin" "$MALF_WORKSPACE_ROOT" || return 1
 
     # ── Staleness hygiene, chained in so it is never left to memory. The bump above
     # rewrote every recipe to $target, but the conan world is still one version behind:
@@ -2379,40 +2378,41 @@ cmd_bump() {
     # editable add refuses a recipe-mismatched version, so the prior ref lingers), and
     # the previous version's first-party BINARIES sit in every cache as inert disk bloat
     # + a footgun for any raw (non-malf) conan call. Re-sync editables to the new baseline
-    # across EVERY keyed cache, THEN prune the now-stale (!= $target) first-party binaries
-    # — sync first so clean stale runs against a registry already coherent at the baseline
-    # it derives from the recipes. Runs BEFORE the Sift repackage so an unrelated node/npm
-    # failure can never leave the conan workspace one cache behind.
+    # across EVERY keyed cache FIRST — the lock below resolves through the registry, and
+    # clean stale must run against a registry already coherent at the baseline it derives
+    # from the recipes.
     echo "── re-syncing editables to $target across every keyed cache ──"
     _malf_editables_sync || return 1
+
+    # ── The plain lock, chained where its own doc already prescribed it ──
+    # A bump moves every first-party VERSION, and first-party entries in conan.lock carry
+    # one — so every bump desynchronises the lockfile from the recipes (the CAREFUL note on
+    # cmd_lock: measured at the 1.8.4 and 1.8.5 bumps as red tags, then again as INV-14 once
+    # the gate learned to look). "The fix after a bump is a plain `malf lock`" was that
+    # note's instruction to the operator; leaving it to the operator is the same
+    # step-to-forget class that got the SBOM chained. Plain lock, NEVER --update: plain is
+    # behaviour-neutral (first-party versions only, third-party untouched), while --update
+    # re-resolves third-party against the REMOTES — upstream movement that wants a
+    # reviewable diff and a gate re-run, which belongs at the cut head (OPS-1.S15), not on
+    # every bump. cmd_lock chains the SBOM re-derivation itself, and the measured ordering
+    # lesson holds by construction here: the registry was re-synced above, so the projected
+    # graph reads $target (the EDITABLE REGISTRY decides resolved first-party, not the lock
+    # — measured at 1.8.8 with a 1.8.7 lock).
+    cmd_lock || return 1
+
     echo "── pruning stale (!= $target) first-party packages from every cache ──"
     _malf_clean_stale || return 1
 
-    # ── The SBOM is DERIVED, so a bump necessarily invalidates it ──
-    # Every published SBOM is a projection of the RESOLVED conan graph, and the bump above
-    # just moved every first-party version in that graph. Leaving the regeneration to the
-    # operator is what made it a step to forget: the v1.8.5 tag went red at the
-    # SBOM-freshness gate because the 1.8.4 post-cut bump ran the bump and the lock but not
-    # `malf sbom`. Under the main-only trunk model a bump commit meets NO gate at all — the
-    # C++ repos carry no `push:` trigger, gates fire at the tag — so a manual step was the
-    # only thing standing between a bump and a red tag, for an artifact whose accuracy is
-    # the ceiling on our CVE detection (sbom-cve.yml scans the committed file; a component
-    # it omits is a component no scanner ever looks at).
-    #
-    # MEASURED, and one measurement settles both the ordering and the lockfile question:
-    # with conan.lock still pinning first-party at 1.8.7 and the editables just re-pointed at
-    # 1.8.8, the derived SBOM read 1.8.8. The EDITABLE REGISTRY decides the resolved
-    # first-party version here, not the lock. So:
-    #   * it must run AFTER the re-sync above — before it, the registry still holds the
-    #     previous version's refs, and this would faithfully derive the OLD graph. A fresh
-    #     SBOM that is wrong is worse than a stale one that is visibly old.
-    #   * `lock --update` is deliberately NOT chained. The derivation does not need it —
-    #     first-party floats past the lock and third-party is unmoved by a
-    #     bump. And it is not harmless to add: `--update` re-resolves third-party against the
-    #     REMOTES, taking upstream movement that wants a reviewable diff and a re-run of the
-    #     gates. That belongs at the cut head, not on every bump.
-    echo "── re-deriving the SBOM from the resolved graph at $target ──"
-    cmd_sbom || return 1
+    # ── Verification LAST, judging the finished state — never the half-built one ──
+    # This check ran directly after the rewrite until 2026-08-15, and INV-14 made that
+    # ordering self-defeating: post-rewrite the lockfile STILL names the old version by
+    # construction, so the full-coherence check was structurally red at that point in the
+    # chain — the 1.9.4 bump exited there and STRANDED the re-sync, the prune and the SBOM,
+    # leaving every cache one version behind (the next `malf lock --update` refused 19
+    # roots). Sitting last, a green means the whole post-bump state is coherent, and a red
+    # indicts the state rather than the chain's own ordering.
+    echo "── verifying pin coherence at $target ──"
+    python3 "$pin" "$MALF_WORKSPACE_ROOT" || return 1
 
     # ── sift-action is NOT part of a platform bump, by design ────────────────
     # This used to rewrite src/sift-version.ts to $target and re-bundle dist/index.js.

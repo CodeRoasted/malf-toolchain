@@ -509,6 +509,51 @@ check "D: single-repo shape + sibling STAGED -> the cell builds, no skip (the D6
 
 rm -rf "$inv_tmp"
 
+echo "[7i] cmd_bump — the chain survives its own coherence check (the INV-14 self-defeat)"
+
+# Post-bump, the FULL pin-coherence verification is structurally RED until the lockfile is
+# re-derived: INV-14 compares conan.lock's first-party pins against the recipes the bump just
+# moved. Measured 2026-08-15 (the 1.9.4 bump): with the verification mid-chain, cmd_bump exited
+# at that check and STRANDED the editable re-sync, the stale prune and the SBOM — the caches
+# stayed one version behind and the next `malf lock --update` refused 19 roots. The contract
+# this section pins: every hygiene step the ceremony owns runs BEFORE the check that judges the
+# result, with the plain (behaviour-neutral, first-party-only) lock chained where the lock doc
+# already prescribed it, so a green bump means the whole post-bump state is coherent — and a red
+# one indicts the state, not the ordering.
+bump_tmp="$(mktemp -d)"
+mkdir -p "$bump_tmp/ws/scripts"
+: > "$bump_tmp/ws/scripts/pin_coherence.py"   # existence-checked by cmd_bump; python3 is stubbed
+# Extract the function under test from malf itself, so this tests the SHIPPED code, not a copy.
+bump_fn="$(sed -n '/^cmd_bump() {/,/^}/p' "$MALF_BIN")"
+cat > "$bump_tmp/probe.sh" <<PROBE
+#!/usr/bin/env bash
+set -uo pipefail
+T="\$1"
+MALF_WORKSPACE_ROOT="\$T/ws"
+log() { printf '%s ' "\$1" >> "\$T/order"; }
+# The collaborators, stubbed to record order — and python3 carries INV-14's SEMANTICS:
+# the verification is red until the lock re-derive has run. A stub that always greens
+# would let the broken ordering pass, which is the gate-lying rule this exists to obey.
+python3() {
+    if [[ "\${2:-}" == "bump" ]]; then log rewrite; return 0; fi
+    if [[ -f "\$T/lock-ran" ]]; then log verify; return 0; fi
+    log verify-RED; return 1
+}
+_malf_editables_sync() { log sync; }
+cmd_lock()             { log lock; : > "\$T/lock-ran"; }
+_malf_clean_stale()    { log clean; }
+cmd_sbom()             { log sbom; }
+echo() { :; }   # silence the banners; the order file is the observable
+$bump_fn
+cmd_bump 1.2.3
+command echo "rc=\$? order=\$(cat "\$T/order" 2>/dev/null)"
+PROBE
+chmod +x "$bump_tmp/probe.sh"
+check "bump chain — rc=0 and every hygiene step precedes the verification" \
+      "rc=0 order=rewrite sync lock clean verify " \
+      "$("$bump_tmp/probe.sh" "$bump_tmp")"
+rm -rf "$bump_tmp"
+
 echo
 echo "malf selftest: $pass_count passed, $fail_count failed"
 [[ $fail_count -eq 0 ]] || exit 1
