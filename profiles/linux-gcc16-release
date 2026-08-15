@@ -2,7 +2,7 @@
 # ║ PARKED — DO NOT USE for the modules build (2026-06-06). gcc-16.1.0 ICEs       ║
 # ║ (segfault in build_special_member_call) on module-attached classes'           ║
 # ║ member-init — a released-version regression; gcc-15.2 and clang-21 are clean. ║
-# ║ Filed upstream (GCC Bugzilla, report pending). SHIP/CI STAYS gcc-15. The      ║
+# ║ Filed upstream: GCC PR 125768 (fixed in 16.2). SHIP/CI STAYS gcc-15. The      ║
 # ║ profile is correct + kept (it builds non-dense TUs + the std module fine) so  ║
 # ║ the leg comes back the day GCC fixes the ICE — re-verify then.                ║
 # ╚═══════════════════════════════════════════════════════════════════════════════╝
