@@ -114,6 +114,11 @@ the runner solves *minutes*, not that source blocker.)
 
 ## Notes
 
+- **Host-tool invariant: `patchelf` is installed on the Linux runner.** The eidos release
+  packaging strips the build-host runpath off the published `sift-linux-x64` with it
+  (`.github/workflows/release.yaml`, the consumer-runnability gate) — same packaging class
+  as `strip`. Provisioned 2026-08-16 (patchelf 0.18.0); a rebuilt host must restore it or
+  that release step reds loudly.
 - **Warm caches = faster than hosted.** A persistent runner keeps the conan cache,
   `/opt/gcc-16.2`, and apt state between jobs (the in-job `setup-*` actions are
   idempotent — they **detect-and-skip** when the toolchain is already present at the
