@@ -82,7 +82,7 @@ DETAIL_UNIT_REF = re.compile(r"[\w./${}]*\.detail[\w.-]*\.cppm")
 
 
 def skip(path: pathlib.Path) -> bool:
-    # "build" + every profile-named tree (build-gcc15-release, build-clang21-…) —
+    # "build" + every profile-named tree (build-gcc16-release, build-clang21-…) —
     # build dirs hold CMake-copied module units that must not be double-linted.
     return any(part in IGNORE_PARTS or part == "build" or part.startswith("build-")
                or part.startswith("linux-")  # repo-root profile-named build trees (legacy)

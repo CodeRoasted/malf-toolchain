@@ -33,7 +33,7 @@ IGNORE_PARTS = {".conan2", ".git", ".venv", "node_modules", "test_package"}
 
 
 def should_skip(path: pathlib.Path) -> bool:
-    # IGNORE_PARTS + "build" + every profile-named tree (build-gcc15-release, …).
+    # IGNORE_PARTS + "build" + every profile-named tree (build-gcc16-release, …).
     return any(part in IGNORE_PARTS or part == "build" or part.startswith("build-")
                for part in path.parts)
 

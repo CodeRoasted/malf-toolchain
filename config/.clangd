@@ -15,7 +15,7 @@ CompileFlags:
   #      → zero modules support, every import errors.
   #   2. build/compile_commands.json must come from the CLANG preset (`malf commands`
   #      against linux-clang21): clangd can't consume gcc's -fmodule-mapper/-fmodules-ts
-  #      commands nor .gcm CMIs from the gcc-15 tree.
+  #      commands nor .gcm CMIs from the ship-gcc tree.
   #   3. The DB must list every importable module unit (all .cppm) AND the std module
   #      TU (CMake's import-std support emits it); clangd then builds its OWN BMIs —
   #      it ignores the build's .pcm files, so it works before a build completes.

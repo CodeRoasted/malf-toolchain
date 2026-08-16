@@ -52,7 +52,7 @@ fail in the release pipeline (the 1.7.2 drift-at-tag class).
 ### Build trees — package-anchored
 
 Every build tree lives at `<pkg>/build-<profile-key>` (`build-clang21-libcxx-release/`
-(the dev default), `build-gcc15-release/`, `build-clang21-asan/`, …) — anchored at
+(the dev default), `build-gcc16-release/`, `build-clang21-asan/`, …) — anchored at
 the **package**, never the invocation CWD, and always profile-named. The target
 build, the editable-dep build, and a subfolder invocation all share **one tree per
 (package, profile)**: a bare `build/` is never created, an ASan tree can never
