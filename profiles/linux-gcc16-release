@@ -66,3 +66,18 @@ tools.build:compiler_executables={"c": "/home/windows/toolchains/gcc-16.1/bin/gc
 # matching-profile build tree, closing the cross-stdlib editable .a contamination.
 # malf still sets MALF_EDITABLE_BUILD_DIR (takes precedence; covers sanitizer profiles).
 user.malf:editable_build_dir=build-gcc16-release
+# gcc-16's -Wmaybe-uninitialized false positive on constructor initializer lists (GCC PR 125203,
+# a [16 Regression]) fires inside redis-plus-plus 1.3.15's OWN -Werror build (reply.h:54
+# ParseError / sentinel.h:130 StopIterError — the diagnostic cannot even name a variable).
+# Upstream confirmed + fixed on master (sewenew/redis-plus-plus#678, 2026-07-18: _err_info/_to_msg
+# made static), but NO release carries it and conancenter's head is 1.3.15. Desk-verified
+# 2026-08-16: without this line the package REDS on exactly those two sites; with it, the build is
+# green and all 5 diagnostics stay VISIBLE as warnings (-Wno-error=<name> is per-diagnostic and
+# position-independent under the library's blanket -Werror). Scope: this one package, this one
+# named diagnostic — any NEW warning class still reds (fail-closed). The per-package conf REPLACES
+# the global cxxflags, so the base flags are repeated verbatim. REMOVAL TRIGGER: the first
+# redis-plus-plus release > 1.3.15 reaching conancenter (bump the pin, delete this block), or a
+# ship gcc carrying the PR 125203 fix. A recipe fork or a source-mutating hook was rejected: the
+# first grows the supply-chain surface we'd own forever, the second makes the SBOM lie about the
+# built bits.
+redis-plus-plus/*:tools.build:cxxflags=["-O3", "-march=x86-64-v2", "-Wno-error=maybe-uninitialized"]
