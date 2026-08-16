@@ -227,7 +227,7 @@ _malf_profile_key() {
 
 # BUILD-TREE name key from the active profile: ALWAYS named, default included.
 # Every leg builds into build-<key>/ (build-clang21-libcxx-release/,
-# build-gcc15-release/, build-clang21-asan/, ...): the tree self-documents its
+# build-gcc16-release/, build-clang21-asan/, ...): the tree self-documents its
 # toolchain, and the old asymmetry — the default leg squatting on a bare build/
 # while the gcc leg was named — is gone.
 _malf_build_key() {
@@ -1108,7 +1108,7 @@ cmd_lint() {
     # and reports tens of thousands of spurious warnings.
     # Exclude .conan2/, build/ + the keyed build-*/ dirs, and test_package/ to avoid
     # linting dependencies and CMake-generated probe TUs (e.g. CMakeCXXCompilerId.cpp).
-    # The `build` token here prefix-matches build-gcc15-release/ etc. too.
+    # The `build` token here prefix-matches build-gcc16-release/ etc. too.
     # tests/ + benchmarks/: their TUs `import <pkg>.test;`/`import <pkg>.bench;` (the
     # full-surface re-export aggregators); under the -P parallel fan-out below, concurrent
     # clang-tidy processes deserialising those heavy BMIs race in clang::ASTReader and
