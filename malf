@@ -261,6 +261,25 @@ _malf_sync_conan_conf() {
     done
 }
 
+# Every conan home malf owns: the base + each keyed subdir, identified by the settings.yml
+# marker MINUS conan's own home-schema entries (p/ profiles/ extensions/ migrations/ — the
+# structural children conan creates INSIDE a home; a keyed cache can never take one of these
+# names because _malf_profile_key derives keys from profile names). The name exclusion is a
+# fact about conan-2's home layout, not a hand-kept denylist. WHY it exists: the bare marker
+# was POISONED on 2026-07-22 — a stray conan run with CONAN_HOME pointed at each structural
+# dir seeded a full home (settings.yml included) into all four, and from then on editables
+# sync + clean stale treated them as caches: 4 phantom 27-entry editable registries, silently
+# re-written on every sync. A marker an outside actor can mint needs a schema guard.
+_malf_conan_homes() {
+    echo "$MALF_CONAN_HOME_BASE"
+    local home_dir name
+    for home_dir in "$MALF_CONAN_HOME_BASE"/*/; do
+        name="$(basename "$home_dir")"
+        case "$name" in p|profiles|extensions|migrations) continue ;; esac
+        [[ -f "${home_dir}settings.yml" ]] && echo "${home_dir%/}"
+    done
+}
+
 # Point CONAN_HOME at a build-type-keyed SUBDIR of the base, then re-seed global.conf + hooks +
 # re-resolve the profiles into it. No-op for the default profile (key == "") — the load-time base
 # seed stands. Call AFTER the profile is resolved (post arg-parse), BEFORE conan install.
@@ -1897,14 +1916,8 @@ _malf_editables_sync() {
     # each keyed cache has its OWN editable registry. Syncing only the active cache left
     # the others drifting — e.g. after a 1.x→1.5.0 bump the gcc15-release cache still
     # carried stale 1.4.x editables + a partial 1.5.0 set, so a `--profile linux-gcc15-release`
-    # build failed to resolve a freshly-bumped dep. Identify every conan home by its
-    # settings.yml (the base + every keyed subdir; excludes the base's own p/ and
-    # profiles/ which are not homes). settings.yml is the universal marker — global.conf
-    # is malf-seeded and missing on caches created outside malf (e.g. clang21-release).
-    local caches=("$MALF_CONAN_HOME_BASE") cache_dir
-    for cache_dir in "$MALF_CONAN_HOME_BASE"/*/; do
-        [[ -f "${cache_dir}settings.yml" ]] && caches+=("${cache_dir%/}")
-    done
+    # build failed to resolve a freshly-bumped dep.
+    local caches; mapfile -t caches < <(_malf_conan_homes)
 
     local cache entry ref dep_dir label
     for cache in "${caches[@]}"; do
@@ -2075,12 +2088,10 @@ PY
 # Sweeps every cache `editables sync` touches (base + keyed subdirs) plus the stray default
 # home.
 _malf_clean_stale() {
-    # Homes: base + every keyed subdir (settings.yml marker, exactly as editables sync), plus
+    # Homes: base + every keyed subdir (_malf_conan_homes, exactly as editables sync), plus
     # the stray default ~/.conan2 iff it is a real, DISTINCT cache (raw conan ran outside malf).
-    local homes=("$MALF_CONAN_HOME_BASE") d
-    for d in "$MALF_CONAN_HOME_BASE"/*/; do
-        [[ -f "${d}settings.yml" ]] && homes+=("${d%/}")
-    done
+    local homes; mapfile -t homes < <(_malf_conan_homes)
+    local d
     if [[ -f "$HOME/.conan2/settings.yml" ]] \
         && [[ "$(realpath "$HOME/.conan2")" != "$(realpath "$MALF_CONAN_HOME_BASE")" ]]; then
         homes+=("$HOME/.conan2")
