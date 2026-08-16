@@ -205,7 +205,7 @@ _malf_apply_profile() {
 
 # ─── Build-type isolation ──────────────────────────────────────────────────────
 # CONAN-CACHE isolation key from the active profile. The dev default -> "" so the
-# shared base cache (.conan2) is reused; any other profile (gcc-15 ship /
+# shared base cache (.conan2) is reused; any other profile (gcc-16 ship /
 # clang-libstdc++ / sanitizer / msan) -> a distinct key, so its conan packages can
 # never collide with the base (an ASan-built libz.a reaching a release link, or a
 # libstdc++ .a reaching a libc++ link).
@@ -216,7 +216,7 @@ _malf_apply_profile() {
 _malf_profile_key() {
     # Dev default is clang-21 + libc++ (devXP/tooling + the cross-stdlib determinism diagonal;
     # founder 2026-06-04, the clang→libc++ flip) -> IT is the unkeyed base cache.
-    # gcc-15+libstdc++ (ship + the diagonal's reference leg) and clang-21+libstdc++ are explicit
+    # gcc-16+libstdc++ (ship + the diagonal's reference leg) and clang-21+libstdc++ are explicit
     # + keyed. Conan coexists the stdlibs by package_id (the -stdlib flag folds into it).
     case "${MALF_PROFILE_NAME:-$MALF_DEFAULT_PROFILE}" in
         $MALF_DEFAULT_PROFILE|"") echo "" ;;
@@ -2502,7 +2502,7 @@ cmd_inventory() {
 
 cmd_cut_verify() {
     local only="" list_only=false
-    # A RELEASE gate builds the way the cut SHIPS: gcc-15 / libstdc++ — the canonical
+    # A RELEASE gate builds the way the cut SHIPS: gcc-16 / libstdc++ — the canonical
     # conan-create environment (release-publish + the conan-module action default), not
     # the dev-default clang/libc++. Overridable with --profile (e.g. a clang-only box).
     _malf_apply_profile "${MALF_CUT_VERIFY_PROFILE:-linux-gcc16-release}"
