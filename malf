@@ -2321,7 +2321,7 @@ Workspace Conan hooks:
 
 Profile:
     $CONAN_HOME/profiles/linux-clang21-libcxx-release  (dev default; or MALF_PROFILE_NAME)
-  gcc-15 (ship + determinism reference leg): --profile linux-gcc15-release
+  gcc-16 (ship + determinism reference leg): --profile linux-gcc16-release
   clang-21 + libstdc++ (keyed):              --profile linux-clang21-release
 EOF
 }
@@ -2505,7 +2505,7 @@ cmd_cut_verify() {
     # A RELEASE gate builds the way the cut SHIPS: gcc-15 / libstdc++ — the canonical
     # conan-create environment (release-publish + the conan-module action default), not
     # the dev-default clang/libc++. Overridable with --profile (e.g. a clang-only box).
-    _malf_apply_profile "${MALF_CUT_VERIFY_PROFILE:-linux-gcc15-release}"
+    _malf_apply_profile "${MALF_CUT_VERIFY_PROFILE:-linux-gcc16-release}"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --profile) shift; _malf_apply_profile "$1" ;;

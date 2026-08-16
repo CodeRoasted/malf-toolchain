@@ -1,5 +1,5 @@
 # clang-21 + libstdc++ + Release — the determinism cross-compiler leg (vs gcc15-release) and
-# the future ship toolchain (concepts/modules). Flags MIRROR linux-gcc15-release so the
+# the future ship toolchain (concepts/modules). Flags MIRROR linux-gcc16-release so the
 # determinism gate proves clang-21 ≡ gcc-15 bit-identity (det_math is integer/no-libm/
 # -ffp-contract-invariant by design, so the serialized document must match across both).
 # Requires clang-21 (apt.llvm.org).

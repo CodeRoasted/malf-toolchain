@@ -2,7 +2,7 @@
 # The `import std` leg: clang-21's native std module ships with libc++-21, NOT with libstdc++.
 # Also the clang half of the cross-stdlib determinism diagonal — gcc-15/libstdc++ and
 # clang-21/libc++ must produce byte-identical output — so the determinism-relevant flags
-# (-O3 -march=x86-64-v2, gnu23) MIRROR linux-gcc15-release and only -stdlib=libc++ differs.
+# (-O3 -march=x86-64-v2, gnu23) MIRROR linux-gcc16-release and only -stdlib=libc++ differs.
 # As the dev default it uses the UNKEYED base conan cache (.conan2); its build tree is still
 # profile-named (build-clang21-libcxx-release/), so no leg ever squats on a bare build/.
 # Requires clang-21 + libc++-21-dev + libc++abi-21-dev (LLVM apt; 1:21.1.8, exact-match).
