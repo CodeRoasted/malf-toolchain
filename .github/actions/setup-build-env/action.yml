@@ -3,9 +3,9 @@ description: |
   The shared C++ build environment every CodeRoast repo's CI uses, as ONE step: apt base +
   the pinned CMake 4.3.x + Conan (no profile autodetect) + the conan dep-binary cache + the
   canonical conan profile fetched from THIS toolchain repo (single source — no per-repo
-  vendored `linux-gcc15-release` copy).
+  vendored `linux-gcc16-release` copy).
 
-  Run AFTER `setup-gcc153` (the profile pins CC/CXX=/opt/gcc-15.3/bin/...). This replaces the
+  Run AFTER `setup-gcc` (the profile pins CC/CXX=/opt/gcc-16.2/bin/...). This replaces the
   inlined 5-step block (Setup environment → Setup Conan → Cache → Setup Conan profile) that
   was copy-pasted across every consumer CI. Consumers add repo-specific apt via `extra-apt`.
 
@@ -24,7 +24,7 @@ inputs:
   profile:
     description: 'Conan profile (in this repo''s profiles/) to install into $CONAN_HOME/profiles.'
     required: false
-    default: 'linux-gcc15-release'
+    default: 'linux-gcc16-release'
 
 runs:
   using: composite
@@ -93,13 +93,13 @@ runs:
         # the pinned conan (the from-source gcc legs) must validate on a FRESH hosted cache too.
         cp "$ACTION_PATH/../../../settings_user.yml" "$GITHUB_WORKSPACE/.malf-toolchain/settings_user.yml"
 
-    - name: Cache conan dep binaries (keyed on the dep set + the gcc-15.3 profile)
+    - name: Cache conan dep binaries (keyed on the dep set + the gcc-16.2 profile)
       uses: actions/cache@v5
       with:
         path: ${{ env.CONAN_HOME }}
-        key: conan-gcc153-${{ runner.os }}-${{ hashFiles('**/conanfile.py', '.malf-toolchain/*') }}
+        key: conan-gcc162-${{ runner.os }}-${{ hashFiles('**/conanfile.py', '.malf-toolchain/*') }}
         restore-keys: |
-          conan-gcc153-${{ runner.os }}-
+          conan-gcc162-${{ runner.os }}-
 
     - name: Install the conan profile + global.conf into $CONAN_HOME
       shell: bash

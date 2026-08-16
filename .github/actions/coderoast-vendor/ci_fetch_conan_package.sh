@@ -25,7 +25,7 @@
 #   * `GH_TOKEN` env with read access to the source repo's releases. For a PUBLIC source repo the
 #     built-in Actions GITHUB_TOKEN suffices; a PRIVATE source repo needs a fine-grained PAT
 #     (Contents:read) — the coderoast-ci-setup vendor loop selects the token by declared visibility.
-#   * The same `linux-gcc15-release` profile already present in CONAN_HOME (otherwise the restored
+#   * The same `linux-gcc16-release` profile already present in CONAN_HOME (otherwise the restored
 #     binary's settings won't match a consumer install resolving against a different profile sha).
 
 set -euo pipefail

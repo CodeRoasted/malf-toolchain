@@ -9,7 +9,7 @@ description: |
   "ensure the Release exists + upload". (The `coderoast-release` reusable workflow uses
   `measure-benchmark` directly so a bad benchmark gates the release before it is created.)
 
-  Assumes setup-gcc153 + setup-build-env already ran and the caller vendored first-party deps.
+  Assumes setup-gcc + setup-build-env already ran and the caller vendored first-party deps.
 
 inputs:
   outputs:
@@ -27,7 +27,7 @@ inputs:
   profile:
     description: 'Conan profile name in `$CONAN_HOME/profiles` to build with.'
     required: false
-    default: 'linux-gcc15-release'
+    default: 'linux-gcc16-release'
   token:
     description: 'Token with contents:write on THIS package repo (its own GITHUB_TOKEN) for the Release upload.'
     required: true

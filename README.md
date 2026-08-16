@@ -17,7 +17,7 @@ standard-library internals all leak the compiler into the output — so *which c
 is part of the determinism contract, not an environment detail to leave to chance. CodeRoast's
 answer is stronger than "pin one compiler": the deterministic core is engineered (integer /
 fixed-point math, no `libm` in any path feeding the artifact) to be **bit-identical across a pinned
-set of toolchains** — gcc-15.3 / libstdc++, clang-21 / libc++, and MSVC 14.52 — *the same bytes on
+set of toolchains** — gcc-16.2 / libstdc++, clang-21 / libc++, and MSVC 14.52 — *the same bytes on
 Linux and Windows, across two standard libraries.* This repo provisions all three, identically, for
 every CodeRoast repo's CI: no per-repo drift, no "works on my runner," no private toolchain a fork
 can't reach. That cross-toolchain × cross-OS diagonal is the standing oracle that keeps the claim
@@ -38,21 +38,21 @@ left by construction.)
 
 | Leg | Toolchain | Role |
 |---|---|---|
-| **Ship / reference** | gcc-15.3 / libstdc++ | the Linux release build; the determinism golden's reference leg |
+| **Ship / reference** | gcc-16.2 / libstdc++ | the Linux release build; the determinism golden's reference leg |
 | **Dev / cross-stdlib** | clang-21 / libc++ | the day-to-day dev compiler; the *second standard library* that makes the determinism diagonal real (libc++ ≠ libstdc++) |
 | **Windows / cross-OS** | MSVC 14.52 / MSVC STL | the native Windows build; proves the artifact is bit-identical *across operating systems* and a third STL |
 
-### gcc-15.3 — Linux ship + reference (PR124309 fix)
+### gcc-16.2 — Linux ship + reference
 
 gcc < 15.3 mis-records linemaps for a partitioned module interface that imports a cross-package
 module (upstream PR124309) → "Bad import dependency" — so the workspace pins a from-source
-**gcc-15.3** at `/opt/gcc-15.3`. This repo builds that compiler once and publishes it as a public
+**gcc-16.2** at `/opt/gcc-16.2`. This repo builds that compiler once and publishes it as a public
 release; it is also the leg the determinism goldens are frozen from.
 
 ```yaml
-- name: Provision gcc-15.3
-  uses: CodeRoasted/malf-toolchain/.github/actions/setup-gcc153@main
-# → extracts to /opt/gcc-15.3 ; point your conan profile's CC/CXX there.
+- name: Provision the pinned gcc
+  uses: CodeRoasted/malf-toolchain/.github/actions/setup-gcc@main
+# → extracts to /opt/gcc-16.2 ; point your conan profile's CC/CXX there.
 ```
 
 The release is **public**, so the download is anonymous — no token, no `packages:` scope, no
@@ -67,7 +67,7 @@ Source to a new `gcc-<version>` release. ≈ 2 h; consumers then pull in ≈ 1-2
 
 The dev compiler, and the leg that makes "deterministic" mean something: libc++'s containers,
 `std::hash`, and float formatting differ from libstdc++, so a clang-21/libc++ build matching the
-gcc-15.3/libstdc++ golden proves the artifact is free of standard-library leakage — not just
+gcc-16.2/libstdc++ golden proves the artifact is free of standard-library leakage — not just
 compiler-flag-stable. `setup-clang21-libcxx` provisions clang-21 + libc++ and the `import std` /
 modules bridge the determinism gates build on.
 
@@ -95,13 +95,13 @@ Composite actions consumed cross-repo by `uses:` — true single source, no per-
 
 | Action | Purpose |
 |---|---|
-| `setup-gcc153` | Provision the from-source gcc-15.3 to `/opt/gcc-15.3` (above) — the Linux ship + determinism reference leg. |
-| `setup-clang21-libcxx` | Provision clang-21 + libc++ and the `import std` / modules bridge — the dev compiler and the cross-stdlib determinism leg (the gates run gcc-15.3 ≡ clang-21/libc++). |
+| `setup-gcc` | Provision the pinned from-source gcc (tag-derived version + prefix, `/opt/gcc-16.2` today; above) — the Linux ship + determinism reference leg. |
+| `setup-clang21-libcxx` | Provision clang-21 + libc++ and the `import std` / modules bridge — the dev compiler and the cross-stdlib determinism leg (the gates run gcc-16.2 ≡ clang-21/libc++). |
 | `setup-msvc1452` | On a Windows runner: install MSVC 14.52 from the VS Insiders Preview component, assert the 14.52 fix floor, activate the dev env (`cl.exe`/`link.exe` + INCLUDE/LIB), and export `MSVC1452_INSTALL` (the `windows-msvc-release` profile points Conan's `vcvars` at it). The Windows + cross-OS leg. |
-| `setup-build-env` | The shared Linux C++ build env as one step: apt base + pinned CMake 4.3.x + Conan (no autodetect) + the conan dep-binary cache + the canonical `linux-gcc15-release` profile (fetched from `profiles/` here — no per-repo vendored copy). Owns `CONAN_HOME`. Run after `setup-gcc153`; pass repo-specific apt via `extra-apt`. |
+| `setup-build-env` | The shared Linux C++ build env as one step: apt base + pinned CMake 4.3.x + Conan (no autodetect) + the conan dep-binary cache + the canonical `linux-gcc16-release` profile (fetched from `profiles/` here — no per-repo vendored copy). Owns `CONAN_HOME`. Run after `setup-gcc`; pass repo-specific apt via `extra-apt`. |
 | `conan-module` | Test / create one Conan module (gated by `test`/`create` inputs from `dorny/paths-filter`), with a gdb crash-diagnose fallback for `-march` SIGILLs. Reconciled from the three drifted per-repo copies. |
 
-A consumer build job is then: `checkout` → `setup-gcc153` → `setup-build-env` → `conan-module` (×N).
+A consumer build job is then: `checkout` → `setup-gcc` → `setup-build-env` → `conan-module` (×N).
 
 ## malf — the build orchestrator
 
@@ -114,7 +114,7 @@ tool, on our CI and on your fork. Usage: **[MALF.md](MALF.md)**.
 
 - `profiles/` — the canonical Conan profiles, one per leg (single source; CI gets them via the
   setup actions, local `malf` reads them from here):
-  - `linux-gcc15-release` — gcc-15.3 / libstdc++ (ship + determinism reference)
+  - `linux-gcc16-release` — gcc-16.2 / libstdc++ (ship + determinism reference)
   - `linux-clang21-libcxx-release` — clang-21 / libc++ (dev default; the cross-stdlib leg)
   - `linux-clang21-release` — clang-21 / libstdc++ (keyed, for isolating the compiler axis from the stdlib axis)
   - `windows-msvc-release` — MSVC 14.52 (`compiler.version=195` → conan maps to vs_version 18 + `vcvars_ver=14.5` → the 14.52 toolset; Ninja generator; `vcvars` pointed at `MSVC1452_INSTALL`)
@@ -134,7 +134,7 @@ disagree with the first.
 
 ## Roadmap
 
-Everything that defines *how we build* now lives here: the three pinned compiler legs (gcc-15.3,
+Everything that defines *how we build* now lives here: the three pinned compiler legs (gcc-16.2,
 clang-21/libc++, MSVC 14.52), the conan profiles, the shared dev config, the CI actions, and `malf`
 itself. The cross-toolchain × cross-OS determinism diagonal is measured green — the MetaLog and the
 Sift structural diff are bit-identical across gcc/libstdc++, clang/libc++, and MSVC, on Linux and

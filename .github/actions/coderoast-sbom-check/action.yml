@@ -31,7 +31,7 @@ inputs:
   profile:
     description: 'Conan profile name, resolved inside CONAN_HOME/profiles.'
     required: false
-    default: 'linux-gcc15-release'
+    default: 'linux-gcc16-release'
 
 runs:
   using: composite

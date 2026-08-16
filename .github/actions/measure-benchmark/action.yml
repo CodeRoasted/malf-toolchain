@@ -12,7 +12,7 @@ description: |
   Integrity: a run captured with CPU frequency scaling ENABLED is REJECTED — a throttled / variable
   measurement must never become published evidence. Pin the runner's governor to 'performance'.
 
-  Assumes setup-gcc153 + setup-build-env already ran (CONAN_HOME + profile staged) and the caller
+  Assumes setup-gcc + setup-build-env already ran (CONAN_HOME + profile staged) and the caller
   vendored CROSS-REPO first-party deps into the cache. SAME-REPO deps (a multi-package repo's bench
   harness) build as workspace editables confined to the checkout (MALF_WORKSPACE_ROOT) — they are the
   tag's own sources and cannot be vendored (their release is the one being cut).
@@ -33,7 +33,7 @@ inputs:
   profile:
     description: 'Conan profile name in `$CONAN_HOME/profiles` to build with.'
     required: false
-    default: 'linux-gcc15-release'
+    default: 'linux-gcc16-release'
   timeout:
     description: 'Seconds before the benchmark run is presumed DEADLOCKED — the watchdog then dumps thread backtraces (gdb) and fails, instead of hanging to the runner limit. Default 1200 (20 min).'
     required: false

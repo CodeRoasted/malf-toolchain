@@ -167,7 +167,7 @@ _malf_apply_profile() {
     # Match the actual conf FLAG lines (tools.build:...-fsanitize=...), not a comment that
     # merely mentions -fsanitize (e.g. the libc++ profile's "NOT a sanitizer profile" note).
     if grep -qE '^[[:space:]]*tools\.build:.*-fsanitize=' "$MALF_PROFILE"; then
-        MALF_BUILD_PROFILE="$(MALF_PROFILE_NAME="${MALF_CLEAN_BUILD_PROFILE:-linux-gcc15-release}" _malf_profile_path)"
+        MALF_BUILD_PROFILE="$(MALF_PROFILE_NAME="${MALF_CLEAN_BUILD_PROFILE:-linux-gcc16-release}" _malf_profile_path)"
         MALF_IS_SANITIZER=1
     else
         # An EXPLICIT MALF_BUILD_PROFILE wins. Sanitizers are not the only reason the tool

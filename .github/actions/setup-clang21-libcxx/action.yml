@@ -6,7 +6,7 @@ description: |
   clang/clang++ update-alternatives. Single source for the fiddly bits (the modules.json bridge,
   the clang-21 version) that were copy-pasted across determinism-gate + fuzz-asan-gate.
 
-  The gcc leg is provisioned separately (setup-gcc153 → /opt/gcc-15.3); this action does NOT touch
+  The gcc leg is provisioned separately (setup-gcc → /opt/gcc-16.2); this action does NOT touch
   gcc/g++ alternatives. Self-contained: installs wget if absent.
 
 runs:

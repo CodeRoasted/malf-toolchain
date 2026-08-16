@@ -8,7 +8,7 @@
 #   module      path relative to the repo root (e.g. `core`, `.`, `infra/redis`, `sift`)
 #   test        'true' => conan install + cmake build + ctest (Release); anything else skips the phase
 #   create      'true' => conan create <module>; anything else skips it
-#   profile     conan profile name in $CONAN_HOME/profiles (default linux-gcc15-release)
+#   profile     conan profile name in $CONAN_HOME/profiles (default linux-gcc16-release)
 #   cmake-args  extra flags for the test-build configure, e.g. `-DPKG_BUILD_TESTS=ON -DPKG_BUILD_BENCH=ON`
 #               (word-split into separate args; needed by packages that gate their unit tests behind a flag)
 #
@@ -25,7 +25,7 @@ set -euo pipefail
 MODULE="${1:?module arg required}"
 TEST="${2:?test arg required}"
 CREATE="${3:?create arg required}"
-PROFILE_NAME="${4:-linux-gcc15-release}"
+PROFILE_NAME="${4:-linux-gcc16-release}"
 PROFILE="$CONAN_HOME/profiles/$PROFILE_NAME"
 CMAKE_ARGS="${5:-}"   # extra -D flags for the test-build configure; intentionally word-split below
 LOG="$GITHUB_WORKSPACE/build.log"

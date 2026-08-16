@@ -115,7 +115,7 @@ the runner solves *minutes*, not that source blocker.)
 ## Notes
 
 - **Warm caches = faster than hosted.** A persistent runner keeps the conan cache,
-  `/opt/gcc-15.3`, and apt state between jobs (the in-job `setup-*` actions are
+  `/opt/gcc-16.2`, and apt state between jobs (the in-job `setup-*` actions are
   idempotent — they **detect-and-skip** when the toolchain is already present at the
   required version), so after the first run, builds skip the cold-cache dependency rebuild
   that dominates the GitHub-hosted runs.

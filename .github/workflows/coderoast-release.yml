@@ -41,7 +41,7 @@ on:
         description: 'Conan profile name to build with.'
         type: string
         required: false
-        default: 'linux-gcc15-release'
+        default: 'linux-gcc16-release'
       runs-on:
         description: 'Runner label for the publish job. Defaults to hosted ubuntu-latest. PUBLIC callers MUST omit it — a self-hosted runner reachable from a public repo fork PR is an RCE. PRIVATE callers pass vars.CI_RUNS_ON (fallback ubuntu-latest) to route to the self-hosted fleet.'
         type: string
@@ -83,8 +83,8 @@ jobs:
           fetch-depth: 0
           ref: ${{ steps.tag.outputs.tag }}   # always build the requested tag (manual re-runs are release replays)
 
-      - name: Provision gcc-15.3 toolchain (PR124309 fix; replaces PPA gcc-15 = 15.2)
-        uses: CodeRoasted/malf-toolchain/.github/actions/setup-gcc153@main
+      - name: Provision the pinned gcc toolchain (published asset; never the PPA)
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-gcc@main
 
       - name: Setup build env (apt + CMake 4.3.x + Conan + dep cache + canonical profile)
         uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-env@main

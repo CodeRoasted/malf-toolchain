@@ -21,7 +21,7 @@ Those assets are **not** Apache-licensed and are not covered by the root
 
     GNU Compiler Collection (GCC) — GNU General Public License, version 3
 
-For each published toolchain release (e.g. tag `gcc-15.3.0`):
+For each published toolchain release (e.g. tag `gcc-16.2.0`):
 
   * the binaries — one per target ISA, each a native bootstrap of the same
     unmodified upstream source (`gcc-<version>-<distro>-x64.tar.zst`,
