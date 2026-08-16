@@ -1,0 +1,48 @@
+# linux-gcc16-arm64-release — the Linux-arm64 (aarch64) twin of linux-gcc16-release.
+# The 2nd-ISA leg of the bit-identity diagonal: the determinism leg builds canon/metalog/eidos
+# under THIS profile on an arm64 runner and asserts the serialized digest is byte-identical to the
+# other legs' digest. Flags MIRROR linux-gcc16-release EXACTLY except the inherently-ISA-specific
+# bits, so a digest divergence is a genuine ISA-codegen / float / container-order finding, never a
+# flag artifact:
+#   • arch=armv8 (conan's aarch64 token), not x86_64.
+#   • -march=armv8-a — the portable ARMv8.0-A baseline every arm64 server core runs (Graviton2/3,
+#     Ampere Altra/One); -march=x86-64-v2 is a hard compile error here. march is determinism-neutral
+#     (it bounds the ISA the host emits, not the serialized content), the same role the x86 -v2 plays.
+# Same from-source gcc-16.2 under /opt (native aarch64 bootstrap of the same pinned source);
+# setup-gcc picks the aarch64 asset by arch.
+[settings]
+arch=armv8
+build_type=Release
+compiler=gcc
+# EXACT version token — same argument as the x64 twin: package_id must separate 16.x point
+# releases so a stale 16.1-era binary can never be served to a 16.2 link.
+compiler.version=16.2
+compiler.cppstd=gnu23
+compiler.libcxx=libstdc++11
+os=Linux
+
+[buildenv]
+# Same /opt/gcc-16.2 layout as x86 — setup-gcc extracts the aarch64 asset to the same prefix, so
+# CC/CXX are identical across ISAs (only the asset bytes differ). On aarch64, --disable-multilib gcc
+# installs libstdc++ under lib64; LD_LIBRARY_PATH covers build-time gtest_discover_tests runs.
+CC=/opt/gcc-16.2/bin/gcc
+CXX=/opt/gcc-16.2/bin/g++
+LD_LIBRARY_PATH=/opt/gcc-16.2/lib64
+
+[conf]
+# armv8-a portable baseline (mirrors the x86 -v2 portability intent). Through [conf] (not [buildenv]
+# CXXFLAGS) is mandatory: only tools.build:cflags/cxxflags reach CMAKE_*_FLAGS_INIT via CMakeToolchain.
+tools.build:cflags=["-O3", "-march=armv8-a"]
+tools.build:cxxflags=["-O3", "-march=armv8-a"]
+# rpath the from-source libstdc++ into every binary so tests run without LD_LIBRARY_PATH. aarch64
+# --disable-multilib gcc uses lib64; rpath lib too (belt-and-braces — a missing libstdc++ rpath is a
+# loud runtime load error, not a silent determinism drift, but we remove the failure mode regardless).
+tools.build:exelinkflags=["-Wl,-rpath,/opt/gcc-16.2/lib64", "-Wl,-rpath,/opt/gcc-16.2/lib"]
+tools.build:sharedlinkflags=["-Wl,-rpath,/opt/gcc-16.2/lib64", "-Wl,-rpath,/opt/gcc-16.2/lib"]
+# Editable build-dir keying: arm64-keyed so an arm64 leg never squats
+# on the x86 gcc16-release build tree (the two ISAs coexist in one workspace on a cross-build host).
+user.malf:editable_build_dir=build-gcc16-arm64-release
+# redis-plus-plus gcc-16 -Wmaybe-uninitialized waiver — the FULL argument, verification record and
+# removal trigger live in linux-gcc16-release (the x64 twin); this line mirrors it with the arm64
+# base flags (per-package conf REPLACES the global cxxflags, so they are repeated verbatim).
+redis-plus-plus/*:tools.build:cxxflags=["-O3", "-march=armv8-a", "-Wno-error=maybe-uninitialized"]
