@@ -89,6 +89,9 @@ runs:
         mkdir -p "$GITHUB_WORKSPACE/.malf-toolchain"
         cp "$ACTION_PATH/../../../profiles/$PROFILE" "$GITHUB_WORKSPACE/.malf-toolchain/$PROFILE"
         cp "$ACTION_PATH/../../../global.conf" "$GITHUB_WORKSPACE/.malf-toolchain/global.conf"
+        # settings_user.yml rides the same single-source pipeline: compiler versions newer than
+        # the pinned conan (the from-source gcc legs) must validate on a FRESH hosted cache too.
+        cp "$ACTION_PATH/../../../settings_user.yml" "$GITHUB_WORKSPACE/.malf-toolchain/settings_user.yml"
 
     - name: Cache conan dep binaries (keyed on the dep set + the gcc-15.3 profile)
       uses: actions/cache@v5
@@ -106,7 +109,9 @@ runs:
         set -euo pipefail
         mkdir -p "$CONAN_HOME/profiles"
         cp "$GITHUB_WORKSPACE/.malf-toolchain/$PROFILE" "$CONAN_HOME/profiles/$PROFILE"
-        # OVERWRITE global.conf from the source of truth — a cache-restored home may carry a stale
-        # copy (seeded before the current policy). This is the CI counterpart of the malf script's
-        # _malf_sync_global_conf; the package_id policy must always match the in-tree global.conf.
+        # OVERWRITE global.conf + settings_user.yml from the source of truth — a cache-restored home
+        # may carry stale copies (seeded before the current policy). This is the CI counterpart of the
+        # malf script's _malf_sync_conan_conf; the package_id policy must always match the in-tree
+        # global.conf, and the compiler-version extensions must validate on any cache vintage.
         cp "$GITHUB_WORKSPACE/.malf-toolchain/global.conf" "$CONAN_HOME/global.conf"
+        cp "$GITHUB_WORKSPACE/.malf-toolchain/settings_user.yml" "$CONAN_HOME/settings_user.yml"

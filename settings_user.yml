@@ -1,0 +1,12 @@
+# settings_user.yml — additive extension of conan's built-in settings.yml, seeded into every
+# CONAN_HOME malf or CI touches (same sync as global.conf: overwrite-if-different from this
+# in-tree source of truth — see _malf_sync_conan_conf and setup-build-env).
+#
+# WHY: a conan cache only knows the compiler versions its conan RELEASE shipped, so a
+# from-source toolchain newer than the installed conan (the gcc-16.2 ship leg) fails profile
+# validation ("Invalid setting") on any fresh or older-vintage cache. Declaring the versions
+# here makes every cache accept them regardless of conan vintage. The merge is a union with
+# settings.yml, so listing a version the base already knows is a no-op.
+compiler:
+    gcc:
+        version: ["16", "16.1", "16.2"]
