@@ -1,11 +1,12 @@
 # build-gcc-toolchain.yml — build gcc from source and publish it as a PUBLIC release on this
 # repo, so every CodeRoast repo's CI (public AND private) provisions the SAME compiler the dev
-# profile uses (malf/profiles/linux-gcc15-release → /opt/gcc-15.3), with no token and no
+# profile uses (malf/profiles/linux-gcc*-release → /opt/gcc-<maj.min>), with no token and no
 # dependency on any private repo.
 #
-# WHY gcc-15.3: gcc <15.3 mis-records linemaps for a partitioned api module that imports a
-# cross-package module (PR124309) → "Bad import dependency"; blocks insight_diff +
-# coderoast.server.core. The fix is gcc 15.3, not a code restructure.
+# VERSION FLOOR 15.3: gcc <15.3 mis-records linemaps for a partitioned api module that imports
+# a cross-package module (PR124309) → "Bad import dependency"; blocks insight_diff +
+# coderoast.server.core. The validate step refuses anything below that floor. Which version is
+# the CURRENT ship toolchain is owned by the setup-gcc action's `tag` default, not here.
 #
 # GPLv3 COMPLIANCE: GCC is GPLv3. This workflow publishes the binary publicly, so it also
 # publishes the **Corresponding Source** in the same release — the pristine, UNMODIFIED
@@ -13,7 +14,7 @@
 # file (the configure invocation). Together they satisfy GPLv3 §6(d). We do not patch gcc.
 #
 # Re-run ONLY on a gcc bump (new gcc_version). Build ≈ 2 h (3-stage bootstrap); consumers
-# pull the release asset in ≈ 1-2 min via .github/actions/setup-gcc153.
+# pull the release asset in ≈ 1-2 min via .github/actions/setup-gcc.
 name: Build gcc toolchain (→ public release)
 
 on:
@@ -31,7 +32,7 @@ jobs:
   build-and-publish:
     # One job per target ISA, NATIVE on a matching runner (a native bootstrap is the determinism
     # reference; a cross-compiled gcc is NOT bit-equivalent and must never seed the det baseline). Both
-    # arch assets are siblings on the SAME gcc-<ver> release, picked by setup-gcc153 via uname -m.
+    # arch assets are siblings on the SAME gcc-<ver> release, picked by setup-gcc via uname -m.
     # max-parallel:1 serializes the SHARED release create/upload across arches (the two jobs would
     # otherwise race on `gh release create` / double-upload the arch-independent source). ~2 h/arch ⇒
     # ~4 h serial, but this runs ONLY on a gcc bump — rarity, not latency, is the constraint.
@@ -105,6 +106,7 @@ jobs:
           # A version with no pin here is refused — never build/publish an unverified compiler.
           declare -A GCC_SHA256=(
             [15.3.0]=fa59c1beef8995f27c4d71c1df227587189315d3e6faff1bb4306e61b0c530eb
+            [16.2.0]=e6738e29597f733270731aa90600f37ffdc045079dfc27ec7e8192cc81085c3e
           )
           want="${GCC_SHA256[$GCC_VERSION]:-}"
           if [ -z "$want" ]; then
@@ -176,9 +178,9 @@ jobs:
           # gcc ${GCC_VERSION} — CodeRoast build toolchain (Linux x86_64 + aarch64, noble)
 
           Vanilla **GNU GCC ${GCC_VERSION}**, built UNMODIFIED from source for CodeRoast CI
-          (the PR124309 fix; the dev profile pins this exact compiler at /opt/gcc-15.3). Two
+          (≥15.3, the PR124309 floor; consumers extract it to \`${PREFIX}\`). Two
           per-ISA binary assets — \`-x64\` and \`-arm64\` — both native bootstraps of the SAME
-          unmodified source; \`setup-gcc153\` picks one by \`uname -m\`.
+          unmodified source; \`setup-gcc\` picks one by \`uname -m\`.
 
           ## License — GPLv3
           GCC is licensed under the GNU GPL v3. This is a binary redistribution, so the
@@ -188,7 +190,8 @@ jobs:
           - The exact build recipe (configure flags) is \`.github/workflows/build-gcc-toolchain.yml\`
             in this repo. We apply no patches.
 
-          Provision it in CI via \`CodeRoasted/malf-toolchain/.github/actions/setup-gcc153@main\`.
+          Provision it in CI via \`CodeRoasted/malf-toolchain/.github/actions/setup-gcc@main\`
+          (\`tag: ${TAG}\`).
           EOF
           # Asset/source presence via gh api + here-string match (deterministic; a `gh release view … -q`
           # returned nothing on the runner, and `… | grep -q` mis-reads under pipefail). A 200 from the
