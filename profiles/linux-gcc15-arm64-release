@@ -8,7 +8,7 @@
 #   • -march=armv8-a — the portable ARMv8.0-A baseline every arm64 server core runs (Graviton2/3,
 #     Ampere Altra/One); -march=x86-64-v2 is a hard compile error here. march is determinism-neutral
 #     (it bounds the ISA the host emits, not the serialized content), the same role the x86 -v2 plays.
-# Same from-source gcc-15.3 under /opt (PR124309 fix); setup-gcc153 picks the aarch64 asset by arch.
+# Same from-source gcc-15.3 under /opt (PR124309 fix); setup-gcc (tag gcc-15.3.0) picks the aarch64 asset by arch.
 [settings]
 arch=armv8
 build_type=Release
@@ -19,7 +19,7 @@ compiler.libcxx=libstdc++11
 os=Linux
 
 [buildenv]
-# Same /opt/gcc-15.3 layout as x86 — setup-gcc153 extracts the aarch64 asset to the same prefix, so
+# Same /opt/gcc-15.3 layout as x86 — setup-gcc (tag gcc-15.3.0) extracts the aarch64 asset to the same prefix, so
 # CC/CXX are identical across ISAs (only the asset bytes differ). On aarch64, --disable-multilib gcc
 # installs libstdc++ under lib64; LD_LIBRARY_PATH covers build-time gtest_discover_tests runs.
 CC=/opt/gcc-15.3/bin/gcc
