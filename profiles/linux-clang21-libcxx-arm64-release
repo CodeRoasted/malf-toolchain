@@ -1,6 +1,6 @@
 # linux-clang21-libcxx-arm64-release — the Linux-arm64 (aarch64) twin of linux-clang21-libcxx-release.
 # The clang/libc++ half of the arm64 cross-stdlib diagonal: paired with linux-gcc16-arm64-release it
-# proves gcc-15/libstdc++ and clang-21/libc++ agree byte-for-byte ON arm64 — the axis that exposes
+# proves gcc-16/libstdc++ and clang-21/libc++ agree byte-for-byte ON arm64 — the axis that exposes
 # unordered-container / hash-iteration-order leaks, which can differ by ISA. Flags MIRROR the x86
 # libc++ profile except arch=armv8 and the armv8-a baseline (see linux-gcc16-arm64-release for the
 # ISA-specific notes). clang-21 + libc++-21 come from apt.llvm.org, which serves aarch64 — so
