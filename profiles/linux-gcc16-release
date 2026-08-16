@@ -75,9 +75,10 @@ user.malf:editable_build_dir=build-gcc16-release
 # green and all 5 diagnostics stay VISIBLE as warnings (-Wno-error=<name> is per-diagnostic and
 # position-independent under the library's blanket -Werror). Scope: this one package, this one
 # named diagnostic — any NEW warning class still reds (fail-closed). The per-package conf REPLACES
-# the global cxxflags, so the base flags are repeated verbatim. REMOVAL TRIGGER: the first
-# redis-plus-plus release > 1.3.15 reaching conancenter (bump the pin, delete this block), or a
-# ship gcc carrying the PR 125203 fix. A recipe fork or a source-mutating hook was rejected: the
-# first grows the supply-chain surface we'd own forever, the second makes the SBOM lie about the
-# built bits.
+# the global cxxflags, so the base flags are repeated verbatim. REMOVAL TRIGGER, first to land:
+# conan-center-index PR #30798 (our backport of the upstream fix; on merge the 1.3.15 recipe
+# revision carries the patch — take it at the next lock --update, delete this block), a
+# redis-plus-plus release > 1.3.15 on conancenter, or a ship gcc with the PR 125203 fix. A local
+# recipe fork or a source-mutating hook was rejected: the first grows the supply-chain surface
+# we'd own forever, the second makes the SBOM lie about the built bits.
 redis-plus-plus/*:tools.build:cxxflags=["-O3", "-march=x86-64-v2", "-Wno-error=maybe-uninitialized"]
