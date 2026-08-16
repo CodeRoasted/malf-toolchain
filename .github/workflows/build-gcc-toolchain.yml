@@ -125,7 +125,8 @@ jobs:
           ./contrib/download_prerequisites
           cd ..
           mkdir build && cd build
-          # Configure MIRRORS the dev compiler exactly (g++ -v on /opt/gcc-15.3); UNMODIFIED gcc.
+          # Configure flags: the recipe originally read off the 15.3 dev compiler's `g++ -v`;
+          # the same flags build every published version. UNMODIFIED gcc.
           "../gcc-${GCC_VERSION}/configure" \
             --prefix="$PREFIX" \
             --enable-languages=c,c++ \
