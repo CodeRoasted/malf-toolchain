@@ -380,11 +380,11 @@ rm -rf "$guard_tmp" "$fmt_iso"
 
 echo
 
-echo "[7h] build_inventory — the DN-33.D6 shape gate on workspace-grain cells"
+echo "[7h] build_inventory — the ADR-3.D10 shape gate on workspace-grain cells"
 
 # A cell whose defines dereference \${workspace} beyond the repo root is workspace-grain.
 # Absent sibling => single-repo shape SKIPS (loud, counted, declared) while the workspace
-# shape FAILS — and the skip must be UNREACHABLE in the workspace shape (DN-33.D7's
+# shape FAILS — and the skip must be UNREACHABLE in the workspace shape (ADR-3.D10's
 # BOTH-SHAPES MUST). The tool is driven directly (the same seam malf's
 # MALF_SKIP_INVENTORY mutation arms use); python runs with -B so no __pycache__ dirties
 # the tree. Homing note: placement here is provisional pending Kleio's ratification.

@@ -17,7 +17,7 @@
 #
 # Verb semantics:
 #   `build` compiles EVERYTHING — package + tests + benches (one compile
-#   surface; a bench-only TU can't rot unseen), and since DN-33 that promise is
+#   surface; a bench-only TU can't rot unseen), and since the inventory contract (ADR-3.D9) that promise is
 #   ENFORCED rather than asserted: `build`/`test` also run the INVENTORY, which
 #   fails on any CMake `project()` no package build configures. That clause used
 #   to be false — `insight-canon/proof/` rotted unseen for a whole release cycle. `test` runs ctest and `bench`
@@ -441,7 +441,7 @@ _malf_resolve_target_or_sweep() {
     exit 0
 }
 
-# ── DN-33: the build system's INVENTORY ──────────────────────────────────────
+# ── ADR-3.D9: the build system's INVENTORY ──────────────────────────────────────
 # A CMake project that no package build ever configures is a build-system defect: `malf test`
 # reports green while a translation unit in the repo does not compile, and the first thing that
 # compiles it is the TAG. Measured 2026-08-08 — malf test 714/714, cut-verify 18/18, every gate
@@ -2469,11 +2469,11 @@ cmd_bump() {
 # Usage: malf cut-verify [pkg-name] [--profile <name>] [--list]
 #   pkg-name   scope the sweep to one released package (else: the whole set)
 #   --list     print the canonical released set (dep order) and exit — build nothing
-# malf inventory [dir] — the DN-33 gate, standalone. Lints the WHOLE workspace (an orphan
+# malf inventory [dir] — the ADR-3.D9 gate, standalone. Lints the WHOLE workspace (an orphan
 # anywhere is a defect, and the predicate is workspace-wide by nature), then configures and
 # builds every inventory entry of the resolved repo to a LINKED artifact in ONE canonical cell.
 #
-# ⚠ THE BOUNDARY IS DECLARED, NOT DISCOVERED (DN-33.D4): this proves the harnesses BUILD. The
+# ⚠ THE BOUNDARY IS DECLARED, NOT DISCOVERED (ADR-3.D9): this proves the harnesses BUILD. The
 # 8-cell determinism matrices (canon scripts/det_public_proof.sh, metalog
 # scripts/determinism_bitidentity.sh) prove they are DETERMINISTIC, at the tag. A digest drift
 # still first appears at the cut, BY DESIGN — do not widen this into an 8-cell run to make the

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DN-33 — the build system's INVENTORY: no CMake project may be invisible to it.
+"""ADR-3.D9 — the build system's INVENTORY: no CMake project may be invisible to it.
 
 THE DEFECT THIS CLOSES, measured 2026-08-08:
 
@@ -16,10 +16,10 @@ its FIRST compile of a release cycle. The tag was not where the defect entered; 
 the first place anything looked.
 
 So this is not a missing ceremony step. `malf test` was asserting something FALSE, every
-day, to every lane (DN-33.D1) — and a false green repaired at the last gate is still a
+day, to every lane (ADR-3.D9) — and a false green repaired at the last gate is still a
 false green for the fourteen days before it. The repair belongs to the build system.
 
-── THE TWO HALVES, and they are different memberships (DN-33.D2) ────────────────────────
+── THE TWO HALVES, and they are different memberships (ADR-3.D9) ────────────────────────
 
   INVENTORY != UNIFORM BUILD. The build system must know a project EXISTS and COMPILES.
   It need not build it the way it builds a package.
@@ -35,7 +35,7 @@ build, which is exactly what would flatten its 8-cell determinism matrix. Being 
 inventory and being a package are two different things, and conflating them is what
 produced the orphan in the first place.
 
-── THE DECLARED BOUNDARY (DN-33.D4), written here so nobody expects the wrong thing ─────
+── THE DECLARED BOUNDARY (ADR-3.D9), written here so nobody expects the wrong thing ─────
 
   THE DAILY GATE PROVES `proof/` BUILDS. THE TAG PROVES IT IS DETERMINISTIC.
 
@@ -49,7 +49,7 @@ That boundary is DECLARED rather than discovered because an undeclared one is
 indistinguishable from an oversight, and gets "fixed" by widening the daily gate into an
 8-cell run nobody can afford.
 
-── WHY DERIVED AND NEVER ENUMERATED (DN-33.D3) ──────────────────────────────────────────
+── WHY DERIVED AND NEVER ENUMERATED (ADR-3.D9) ──────────────────────────────────────────
 
 Both sides are facts. Declared projects are greppable from `git ls-files` (tracked-ness —
 the same allowlist-from-a-fact shape the root CLAUDE.md mandates for workspace sweeps).
@@ -115,7 +115,7 @@ def discover_repos(workspace: Path) -> list[Repo]:
     the workspace-of-repos (the dev tree: children carry .git; the superproject root also
     carries one and contributes its own tracked files) and the single-repo checkout (CI:
     MALF_WORKSPACE_ROOT is the tag checkout, whose .git sits at the root and whose children
-    carry none). The first release run of the DN-33 lint saw only the first shape and
+    carry none). The first release run of this lint saw only the first shape and
     returned ZERO repos on the second — the non-vacuity arm then failed the publish job on
     a scan that had reached nothing (coderoast-ipc v1.9.3, run 31634074680). The arm was
     right; discovery was blind. A repo found both ways is counted once."""
@@ -239,7 +239,7 @@ def run_lint(workspace: Path, extra_orphan: str | None) -> int:
             if lists_file.parent.resolve() not in {c.resolve() for c in covered}:
                 all_orphans.append((repo.name, lists_file))
 
-    print(f"DN-33 build inventory lint — {len(repos)} repos, "
+    print(f"build inventory lint (ADR-3.D9) — {len(repos)} repos, "
           f"{declared_total} declared CMake project(s)")
     # NON-VACUITY: a scan that found no projects reached nothing and must not read as clean.
     if declared_total == 0:
@@ -260,7 +260,7 @@ def run_lint(workspace: Path, extra_orphan: str | None) -> int:
     for repo_name, lists_file in all_orphans:
         print(f"    {repo_name}: {lists_file}", file=sys.stderr)
     print(
-        "\nAn orphan project is a FALSE GREEN (DN-33.D1): `malf test` reports success while\n"
+        "\nAn orphan project is a FALSE GREEN (ADR-3.D9): `malf test` reports success while\n"
         "a translation unit in the repo does not compile, and the first thing that compiles\n"
         "it is the tag. Give it an `inventory:` entry in its repo's packages.yml — path,\n"
         "toolchain_from, target — so one canonical cell configures and links it every day.\n"
@@ -274,7 +274,7 @@ def substitute(value: str, workspace: Path, repo: Path) -> str:
     return value.replace("${workspace}", str(workspace)).replace("${repo}", str(repo))
 
 
-# ── DN-33.D6: a ${workspace}-crossing cell is WORKSPACE-GRAIN ────────────────────────────
+# ── ADR-3.D10: a ${workspace}-crossing cell is WORKSPACE-GRAIN ────────────────────────────
 #
 # A cell whose defines dereference `${workspace}` beyond the repo root holds a compile
 # property of the workspace-of-repos SHAPE, not of the repo alone — a repo-shaped checkout
@@ -286,15 +286,15 @@ def substitute(value: str, workspace: Path, repo: Path) -> str:
 # Per shape, when a dereferenced root is ABSENT:
 #   * workspace-of-repos (workspace root != repo root): loud FAIL — there it means a
 #     partial checkout or a typo'd root, and a skip would silently disarm the daily
-#     anti-false-green, the exact class DN-33 closed.
+#     anti-false-green, the exact class ADR-3.D9 closed.
 #   * single-repo (workspace root == repo root): a loud, COUNTED, DECLARED skip — the
 #     cell is out of the shape's jurisdiction and its property is held by the workspace
-#     shape's release-train gate (DN-33.D7's coverage MUST). If the substituted path
+#     shape's release-train gate (ADR-3.D10's coverage MUST). If the substituted path
 #     exists (a job that stages the sibling inside the checkout), the cell builds: the
 #     skip covers only the genuinely unsatisfiable.
 #
 # The trigger is DERIVED from the defines this file already parses. A declared
-# `requires:`/`siblings:` manifest key was considered and REFUSED (DN-33.D6): the fact
+# `requires:`/`siblings:` manifest key was considered and REFUSED (ADR-3.D10): the fact
 # already lives in the defines, and a second declaration can drift from it — a drifted
 # declaration is a lie with a straight face.
 #
@@ -302,13 +302,13 @@ def substitute(value: str, workspace: Path, repo: Path) -> str:
 # (single-repo shape) and its ABSENCE (workspace shape), and an absence assertion keyed
 # on a retyped string goes vacuous on the first rewording
 # (MEM:synthetic-gate-vacuity-vs-judgment) — tests import this constant, never respell it.
-WORKSPACE_GRAIN_SKIP_NEEDLE = "DN-33.D6 SKIP (workspace-grain)"
+WORKSPACE_GRAIN_SKIP_NEEDLE = "ADR-3.D10 SKIP (workspace-grain)"
 
 
 def workspace_grain_absences(entry: dict, workspace: Path, repo: Path) -> list[tuple[str, Path]]:
     """The entry's defines whose RAW value dereferences `${workspace}` and whose
     substituted path does not exist — (define key, substituted path) pairs.
-    Derived from the manifest text, never declared (DN-33.D6)."""
+    Derived from the manifest text, never declared (ADR-3.D10)."""
     absent: list[tuple[str, Path]] = []
     for key, raw in entry.get("defines", {}).items():
         if "${workspace}" not in raw:
@@ -326,7 +326,7 @@ def run_build(workspace: Path, repo_root: Path, build_key: str, profile: str) ->
     skipped = 0
     for name, entry in sorted(inventory.items()):
         source = repo_root / entry["path"]
-        # The DN-33.D6 shape gate, before any configure. The FAIL arm is checked by shape
+        # The ADR-3.D10 shape gate, before any configure. The FAIL arm is checked by shape
         # FIRST so the skip is structurally unreachable in the workspace shape — not
         # merely unreached.
         absences = workspace_grain_absences(entry, workspace, repo_root)
@@ -337,13 +337,13 @@ def run_build(workspace: Path, repo_root: Path, build_key: str, profile: str) ->
                       f"{entry['path']}): {missing} does not exist. In the "
                       "workspace-of-repos shape an absent ${workspace}-dereferenced "
                       "sibling is a partial checkout or a typo'd root, never a skip "
-                      "(DN-33.D6).", file=sys.stderr)
+                      "(ADR-3.D10).", file=sys.stderr)
                 return 1
             skipped += 1
             print(f"{WORKSPACE_GRAIN_SKIP_NEEDLE}: cell {name} ({repo_root.name}/"
                   f"{entry['path']}) — {missing} is unsatisfiable in this single-repo "
                   "checkout. The cell is workspace-grain: its compile property is held "
-                  "by the workspace-of-repos shape's release-train gate (DN-33.D7), "
+                  "by the workspace-of-repos shape's release-train gate (ADR-3.D10), "
                   "not by this shape.")
             continue
         # PERSISTENT, profile-keyed build tree — deliberately NOT the mktemp the determinism
@@ -398,7 +398,7 @@ def run_build(workspace: Path, repo_root: Path, build_key: str, profile: str) ->
                 tail = (proc.stdout + proc.stderr).split("\n")[-40:]
                 print("\n".join(tail), file=sys.stderr)
                 return 1
-        # A LINKED ARTIFACT, not merely a successful build command (DN-33.D4). Compile alone
+        # A LINKED ARTIFACT, not merely a successful build command (ADR-3.D9). Compile alone
         # misses a symbol declared and never defined; the binary existing is what proves the
         # link happened.
         produced = [p for p in build_dir.rglob(entry["target"])
@@ -413,12 +413,12 @@ def run_build(workspace: Path, repo_root: Path, build_key: str, profile: str) ->
         # away; the count is the one-glance fact a CI log reader checks against the
         # inventory size.
         print(f"malf inventory: {skipped} workspace-grain cell(s) skipped in the "
-              "single-repo shape (declared above, DN-33.D6).")
+              "single-repo shape (declared above, ADR-3.D10).")
     return 0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="DN-33 build inventory: lint + one-cell build")
+    parser = argparse.ArgumentParser(description="build inventory (ADR-3.D9): lint + one-cell build")
     parser.add_argument("mode", choices=["lint", "build"])
     parser.add_argument("--workspace", required=True)
     parser.add_argument("--repo", help="repo root (build mode)")
