@@ -387,7 +387,11 @@ echo "[7h] build_inventory — the ADR-3.D10 shape gate on workspace-grain cells
 # shape FAILS — and the skip must be UNREACHABLE in the workspace shape (ADR-3.D10's
 # BOTH-SHAPES MUST). The tool is driven directly (the same seam malf's
 # MALF_SKIP_INVENTORY mutation arms use); python runs with -B so no __pycache__ dirties
-# the tree. Homing note: placement here is provisional pending Kleio's ratification.
+# the tree. Homing: RATIFIED in place (Kleio, 2026-08-17) — every property here is a
+# malf-repo-local tool contract, so the tool's own no-network selftest is the home; the
+# workspace shape's LIVE compile proof is deliberately NOT here — it is held by
+# ADR-3.D10's release-train coverage MUST (scripts/workspace_grain_coverage.py), and a
+# stubbed compile in this suite would be a second, weaker copy of that gate.
 inv_tmp="$(mktemp -d)"   # cleaned inline below (a second `trap ... EXIT` would REPLACE [7d]'s)
 BI="$MALF_ROOT/build_inventory.py"
 
@@ -446,6 +450,19 @@ lint_solo_out="$(python3 -B "$BI" lint --workspace "$solo" 2>&1)"; lint_solo_rc=
 check "B: lint counts the workspace-grain cell in single-repo shape (sibling absent)" \
       "rc=0 counted" \
       "rc=$lint_solo_rc $(grep -qF "1 declared CMake project" <<< "$lint_solo_out" && echo counted || echo "GOT: $lint_solo_out")"
+
+# (B') the SAME two predicates in the WORKSPACE shape — the leg the BOTH-SHAPES MUST was
+# minted for: repo discovery went blind on exactly one shape at the v1.9.3 ipc tag
+# (run 31634074680 — zero repos found, the non-vacuity arm was right and discovery was
+# blind), so a one-shape proof of discovery+lint is the scope-blindness ADR-3.D10 names.
+# The ws root carries NO .git, so the only way lint can count this cell is by DISCOVERING
+# repoA as a child repo. The needle pins both facts at once: 1 repo found, 1 cell counted.
+git -C "$ws/repoA" init -q 2>/dev/null \
+    && git -C "$ws/repoA" add packages.yml cell/CMakeLists.txt 2>/dev/null
+lint_ws_out="$(python3 -B "$BI" lint --workspace "$ws" 2>&1)"; lint_ws_rc=$?
+check "B': lint DISCOVERS the child repo and counts its cell in the workspace shape" \
+      "rc=0 counted" \
+      "rc=$lint_ws_rc $(grep -qF "1 repos, 1 declared CMake project" <<< "$lint_ws_out" && echo counted || echo "GOT: $lint_ws_out")"
 
 # (C) workspace shape + absent sibling -> loud FAIL naming the cell, and the skip is
 # UNREACHABLE: the identical manifest that skipped in A must not skip here.
