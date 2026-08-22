@@ -77,24 +77,39 @@ jobs:
           # this is what keeps it from being permanently, silently green.
           fetch-depth: 2
 
-      - name: Install actionlint
+      - name: Install actionlint (PINNED release asset — no remote script is executed)
         if: ${{ inputs.actionlint }}
+        env:
+          ACTIONLINT_VERSION: '1.7.12'
         run: |
-          # Under the default `bash -e {0}` the status of `curl … | bash` is BASH's, and bash fed
-          # an empty stdin exits 0 — measured 2026-08-22, `curl -fsSL <404> | bash` → rc=0. A dead
-          # download therefore reported a successful install, and the defect surfaced in the NEXT
-          # step as `./actionlint: No such file or directory`: a true failure attributed to the
-          # wrong cause, and only because a later step happened to touch the artifact. pipefail
-          # makes curl's status the verdict; the version probe proves the install rather than
-          # leaving the proof to a neighbour.
+          # TWO defects, and the supply-chain one matters more BECAUSE of where this file sits:
+          # coderoast-lint.yml is a reusable workflow called by every C++ repo in the workspace,
+          # so this step runs in each CALLER's context, private repos included.
+          #
+          # 1. SUPPLY CHAIN. This used to be
+          #    `curl -sSfL .../actionlint/main/scripts/download-actionlint.bash | bash` — code
+          #    from a MUTABLE upstream ref, executed on the runner of every repo that calls this
+          #    workflow. `main` is not a version. Pinning the RELEASE ASSET removes the execution
+          #    surface instead of narrowing it, and adopts the shape the superproject's lint.yml
+          #    already uses, so actionlint is provisioned one way everywhere.
+          #
+          # 2. Swallowed status. Under the default `bash -e {0}` the status of `curl … | bash` is
+          #    BASH's, and bash fed an empty stdin exits 0 — measured 2026-08-22,
+          #    `curl -fsSL <404> | bash` → rc=0. A dead download reported a successful install and
+          #    the defect surfaced in the NEXT step as `./actionlint: No such file or directory`,
+          #    a true failure attributed to the wrong cause. The `--version` probe now proves the
+          #    install in the step that performs it rather than leaving the proof to a neighbour.
           set -euo pipefail
-          curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash | bash
-          ./actionlint -version
+          curl -sSfL -o /tmp/al.tgz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          tar -xzf /tmp/al.tgz -C /tmp actionlint
+          /tmp/actionlint --version
 
       - name: Run actionlint
         if: ${{ inputs.actionlint }}
         run: |
-          ./actionlint -color
+          set -euo pipefail
+          /tmp/actionlint -color
 
       - name: C++ modules conformance
         if: ${{ inputs.module-conformance }}
