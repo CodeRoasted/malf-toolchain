@@ -80,7 +80,16 @@ jobs:
       - name: Install actionlint
         if: ${{ inputs.actionlint }}
         run: |
+          # Under the default `bash -e {0}` the status of `curl … | bash` is BASH's, and bash fed
+          # an empty stdin exits 0 — measured 2026-08-22, `curl -fsSL <404> | bash` → rc=0. A dead
+          # download therefore reported a successful install, and the defect surfaced in the NEXT
+          # step as `./actionlint: No such file or directory`: a true failure attributed to the
+          # wrong cause, and only because a later step happened to touch the artifact. pipefail
+          # makes curl's status the verdict; the version probe proves the install rather than
+          # leaving the proof to a neighbour.
+          set -euo pipefail
           curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash | bash
+          ./actionlint -version
 
       - name: Run actionlint
         if: ${{ inputs.actionlint }}
