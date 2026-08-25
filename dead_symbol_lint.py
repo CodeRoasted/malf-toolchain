@@ -334,7 +334,7 @@ def main() -> int:
     scope = "staged" if args.staged else args.range
     print(f"dead_symbol_lint: {len(repos)} repo(s) over {scope} — {total} finding(s)")
     # THE REACH, STATED EVERY RUN. A gate that does not say what it cannot see lets its
-    # green stand for more than it measured — the class MEMN-9 names, and the reason this
+    # green stand for more than it measured — the class MEM:synthetic-gate-vacuity-vs-judgment names, and the reason this
     # line is unconditional rather than printed only on a finding.
     if workspace is not None:
         siblings = sum(1 for d in workspace.iterdir()

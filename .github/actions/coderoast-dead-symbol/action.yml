@@ -36,7 +36,7 @@ description: |
   THE LIMIT, and the gate now prints it on EVERY run rather than leaving it to be rediscovered:
   this action checks out ONE repo, so no siblings are on disk and cross-repo reach is OFF here. A
   symbol alive in another repo is indistinguishable from a dead one in this context. That is a
-  declared boundary, not a silent one — an undeclared limit is the actual defect (MEMN-9).
+  declared boundary, not a silent one — an undeclared limit is the actual defect (MEM:synthetic-gate-vacuity-vs-judgment).
 
   Measured on real history before arming: 8 firing commits out of 240 examined (3.3%) — canon's T4
   dialect inversion, eidos's stream declaration, the twin's medium strip, logcraft's `LogFormat`
