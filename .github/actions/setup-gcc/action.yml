@@ -18,7 +18,9 @@ inputs:
   tag:
     description: |
       Release tag holding the toolchain asset (gcc-MAJOR.MINOR.PATCH). The default IS the
-      current ship toolchain — a gcc bump edits this one default; consumers follow @main.
+      current ship toolchain — a gcc bump edits this one default, and it reaches a consumer
+      when that consumer's pinned malf-toolchain SHA moves. Consumers do NOT follow @main:
+      every CodeRoast `uses:` of this repo is a 40-hex commit SHA (pin_coherence INV-17).
     required: false
     default: 'gcc-16.2.0'
   asset:

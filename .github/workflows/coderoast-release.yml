@@ -9,7 +9,14 @@ name: CodeRoast Release
 # benchmark fails the job and no Release is published. Benchmark is optional (omit `benchmark`).
 #
 # A caller wires this as the job AFTER its own CI (a workflow_call to the repo's ci.yml), so a red CI
-# blocks the release: `release: { needs: ci, uses: .../coderoast-release.yml@main, ... }`.
+# blocks the release: `release: { needs: ci, uses: .../coderoast-release.yml@<40-hex-sha>, ... }`.
+#
+# THE CALLER'S REF IS A COMMIT SHA, NEVER @main — and so are the four actions this file calls below.
+# A mutable ref on this path means a push to malf-toolchain changes what an ALREADY-CUT tag executes,
+# in the one job that holds CR_RELEASE_TOKEN. Pinning the workflow while its nested actions floated
+# on @main made "this workflow is pinned" only PARTLY true, which is worse than false because it
+# reads as settled. `scripts/pin_coherence.py` INV-17 owns the whole argument, including why those
+# four SHAs are this file's PARENT commit rather than its own.
 
 on:
   workflow_call:

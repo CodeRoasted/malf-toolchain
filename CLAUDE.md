@@ -19,10 +19,14 @@ Root CLAUDE.md owns malf *usage*; this file is for working ON the tooling.
 
 ## Constraints & traps
 
-- PUBLIC and consumed live: sibling repos take actions and profiles straight
-  from this repo (`uses: CodeRoasted/malf-toolchain/...`) — a change here lands
-  in consumers' CI with nothing between you and them. Treat every edit as a
-  cross-repo change and check the consumers.
+- PUBLIC and consumed **pinned**: sibling repos take actions and profiles
+  straight from this repo (`uses: CodeRoasted/malf-toolchain/...@<40-hex-sha>`),
+  and every such ref — theirs AND this repo's own self-references — is a commit
+  SHA, never `@main`. So a change here does NOT reach a consumer by itself:
+  landing one means re-pinning the self-references (one commit per nesting
+  layer, after the change, never in the same commit) and then bumping the
+  consumers. The superproject's `scripts/pin_coherence.py` INV-17 owns the rule
+  and reds on a lapse. Treat every edit as a cross-repo change.
 - `profiles/` and `config/` are single-source by design — never fork a per-repo
   copy; repos symlink or fetch them.
 - The toolchain contracts (which compiler legs exist, why, their fix floors)

@@ -51,8 +51,10 @@ release; it is also the leg the determinism goldens are frozen from.
 
 ```yaml
 - name: Provision the pinned gcc
-  uses: CodeRoasted/malf-toolchain/.github/actions/setup-gcc@main
+  uses: CodeRoasted/malf-toolchain/.github/actions/setup-gcc@<40-hex commit sha>
 # → extracts to /opt/gcc-16.2 ; point your conan profile's CC/CXX there.
+# Pin a commit SHA rather than @main: on a mutable ref, a push to this repo changes
+# what your already-cut release executes. Every CodeRoast caller pins, and so should you.
 ```
 
 The release is **public**, so the download is anonymous — no token, no `packages:` scope, no
