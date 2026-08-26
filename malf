@@ -1108,13 +1108,20 @@ cmd_lint() {
     # is no reading of it under which the findings mean what they say. A warning on an output
     # that is specific and wrong is a warning nobody re-reads.
     #
-    # WHY ANY ENTRY AND NOT THE FIRST: the root database is written by
-    # _malf_merge_compile_commands, which folds every build into the DEFAULT leg's build root
-    # — a CONSTANT path (MALF_DEFAULT_PROFILE) — keyed per source file, last writer wins. So
-    # it goes MIXED, not merely wrong, and the path name still says clang. Measured on
-    # insight-canon the day this guard landed: build-clang21-libcxx-release/
-    # compile_commands.json held 169 g++ entries and 3 clang++-21. A first-entry probe passes
-    # on that database.
+    # WHY ANY ENTRY AND NOT THE FIRST: a wrong database goes MIXED, not merely wrong, and the
+    # path name still says clang, so a first-entry probe passes on it. Measured on insight-canon
+    # the day this guard landed: build-clang21-libcxx-release/compile_commands.json held 169 g++
+    # entries and 3 clang++-21.
+    #
+    # THAT MEASUREMENT'S CAUSE IS CLOSED, and the census probe is not. _malf_merge_compile_commands
+    # used to fold every build into the DEFAULT leg's build root — a CONSTANT path derived from
+    # MALF_DEFAULT_PROFILE — keyed per source file, last writer wins, so a gcc build overwrote
+    # clang entries in place. `a181d1c` keys that root by _malf_build_key (the ACTIVE profile), so
+    # a non-default leg now writes its own root and no longer contaminates the clang one; the same
+    # commit landed the day this guard did. Two subjects remain, which is why the detector stays:
+    # build trees written BEFORE a181d1c still hold a mixed file at that path until they are
+    # re-indexed, and the NEXT cause — a hand-run cmake, an IDE, a future change to the merge —
+    # would be silent if the detector were removed because one source was fixed.
     #
     # An UNREADABLE database refuses too: it must not print the same thing as a clean one.
     local db_verdict
@@ -1147,8 +1154,9 @@ PY
         echo "malf lint: WELL-FORMED and WRONG (real rule ids, real lines, real symbols), which is worse" >&2
         echo "malf lint: than the no-database case because there is something plausible to believe." >&2
         echo "malf lint: re-index against the default clang leg: 'malf commands', or build it with" >&2
-        echo "malf lint: 'malf build' (no --profile). Note the root database is shared across profiles," >&2
-        echo "malf lint: so a build under another --profile overwrites entries at this same path." >&2
+        echo "malf lint: 'malf build' (no --profile). Note a tree built BEFORE malf-toolchain a181d1c" >&2
+        echo "malf lint: holds a MIXED file at this path (every profile merged into one database) and" >&2
+        echo "malf lint: keeps it until re-indexed; since a181d1c each profile writes its own root." >&2
         exit 1
     fi
 
