@@ -78,7 +78,7 @@ from codegen_common import (
     required_scalar,
 )
 
-TOOL_VERSION = "1"
+TOOL_VERSION = "2"  # 2: the author-voice marker (`// > `), DN-17.D35
 SCHEMA_VERSION = "1"
 
 DIALECT_FILE_SUFFIX = ".dialect.yaml"
@@ -662,9 +662,55 @@ def _quoted(value: str) -> str:
     return f'"{cpp_escape(value)}"'
 
 
+# The AUTHOR-VOICE marker (DN-17.D35). Every line of `why:` prose reaches the emitted file
+# behind `// > `; every other comment line in the emitted file is this tool's own words. The
+# rule it enforces: a TOOL's explanation and an AUTHOR's argument answer different questions
+# and must be distinguishable in the emitted file.
+#
+# It is not a style preference, and the near-miss that earned it is worth stating. The tool's
+# reason for an empty `locations:` is "its row shape arrives with the test_frameworks package"
+# — a claim about what the SCHEMA can project. The declaration's reason is "that is the
+# test_frameworks package" — a claim about what THIS DIALECT has to say and who owns the
+# vocabulary instead. Same package name, nearly the same words, opposite altitudes. A reader
+# scanning for "is this absence explained?" finds the noun, finds a sentence, and stops — so
+# sharing the identifying token makes adjacency read as coverage. The two land at ONE SITE
+# once a section is declared empty, which is exactly where the confusion would be built in.
+#
+# Mechanical by construction, which is the point: `^\s*// > ` selects the declaration's voice
+# and NOTHING else, so a reviewer scoring whether an argument was carried can do it by
+# selection rather than by judgement, without knowing which line this tool wrote. `--selftest`
+# holds both halves of that equivalence.
+_WHY_MARKER = "// > "
+
+
+def _every_why_line(declaration: dict) -> list[str]:
+    """Every `why:` line in a declaration, at every depth — the author's whole voice.
+
+    Walks the parsed declaration rather than a hand-kept list of seats, so a seat added to the
+    schema is covered the day it exists: the selftest cases below assert a SET EQUIVALENCE, and
+    an enumeration that could go short would silently weaken one half of it.
+    """
+    lines: list[str] = []
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "why" and isinstance(value, list):
+                    lines.extend(value)
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(declaration)
+    return lines
+
+
 def _emit_why(out: list[str], why: list[str], indent: str = "") -> None:
     for line in why:
-        out.append(f"{indent}// {line}" if line else f"{indent}//")
+        out.append(f"{indent}{_WHY_MARKER}{line}" if line
+                   else f"{indent}{_WHY_MARKER.rstrip()}")
 
 
 def _emit_row(out: list[str], fields: list[tuple[str, str]], why: list[str]) -> None:
@@ -710,6 +756,13 @@ def emit_inc(declaration: dict, *, module_suffix: str, source_name: str) -> str:
     out.append("// `--selftest` proves it by generating this declaration both ways and "
                "comparing.)")
     out.append("// BUILT, never committed: a pure function of (the declaration, this tool).")
+    out.append("// TWO VOICES, and they are distinguishable on sight and by `grep`: every "
+               "comment line")
+    out.append("// beginning `// > ` is the DECLARATION's own argument, carried verbatim from "
+               "a `why:`;")
+    out.append("// every other comment line is this TOOL explaining what it generated. They "
+               "answer")
+    out.append("// different questions, so they are never merged into one block.")
     out.append("// clang-format off")
     out.append("")
     out.append(f"namespace {namespace}")
@@ -930,8 +983,15 @@ def _emit_declared_absences(out: list[str], declaration: dict) -> None:
         if section is None or section.get("rows"):
             continue
         member = _MEMBER_OF_SECTION[section_name]
-        out.append(f"// DECLARED ABSENCE -- the manifest's `.{member}` below is empty, "
-                   "and this is the argument:")
+        out.append(f"// DECLARED ABSENCE -- the manifest's `.{member}` below is empty. What "
+                   "follows in the")
+        out.append("// declaration's own voice is why THIS DIALECT has nothing to declare here "
+                   "and who owns")
+        out.append("// the vocabulary instead -- a different question from why the SCHEMA "
+                   "specifies no row")
+        out.append(f"// shape for `{section_name}:`, which is this tool's business and is "
+                   "answered in its")
+        out.append("// refusal message, not here.")
         _emit_why(out, section["why"])
         out.append("")
 
@@ -1171,9 +1231,30 @@ def selftest() -> int:
               "a non-ASCII byte reached emitted CODE — the carve-out is prose only"))
     _case("emit: the argument survives, verbatim and un-transliterated", failures,
           lambda: _assert(
-              "// The dialect-level argument — an em dash lives here, and it is "
+              "// > The dialect-level argument — an em dash lives here, and it is "
               "preserved." in rendered,
               "a `why:` line was lost or transliterated on the way to the comment"))
+
+    # ── the TWO VOICES are distinguishable in the EMITTED file (DN-17.D35) ────────────────
+    # The property is an EQUIVALENCE and both halves are asserted, because either one alone
+    # is satisfiable by a wrong emitter. "Every author line is marked" alone passes if the
+    # tool marks its own lines too; "no tool line is marked" alone passes if nothing is
+    # marked at all. Together they say: `^\s*// > ` selects the declaration's voice, exactly.
+    _marked = {line.lstrip()[len(_WHY_MARKER):] for line in rendered.split("\n")
+               if line.lstrip().startswith(_WHY_MARKER)}
+    _declared_prose = {line for line in _every_why_line(_parse_fixture(_SYNTHETIC)) if line}
+    _case("emit: every declaration `why:` line reaches the file behind the author marker",
+          failures, lambda: _assert(
+              _declared_prose <= _marked,
+              "a `why:` line was emitted unmarked -- it now reads as this tool's own words: "
+              + repr(sorted(_declared_prose - _marked)[:3])))
+    _case("emit: no line this tool wrote carries the author marker", failures,
+          lambda: _assert(
+              _marked <= _declared_prose,
+              "a tool-written comment carries `// > ` -- the marker no longer selects the "
+              "declaration's voice, so a reviewer scoring a carried argument would score "
+              "this tool's prose as the author's: "
+              + repr(sorted(_marked - _declared_prose)[:3])))
 
     # ── declared order is CONTENT, and this is the one that must never be `sorted` ──
     # Reversing the level lifts must move the emitted bytes AND the content hash. If this
