@@ -1063,6 +1063,67 @@ cmd_lint() {
         exit 1
     fi
 
+    # ── ...and the database's TOOLCHAIN must be clang's, for the SAME reason. ──────────
+    # The guard above refuses an ABSENT database because clang-tidy without flags reports
+    # phantoms it cannot be right about. A WRONG-toolchain database is strictly WORSE than an
+    # absent one, and that asymmetry is the whole argument: absent REFUSES, so there are no
+    # findings to believe; wrong PRODUCES findings, and they are well-formed. Measured by
+    # Hephaistos 2026-08-26 — a gcc-profile database against a clean file gave 10 findings,
+    # zero after re-indexing the same file against clang, and FOUR of the ten named a real
+    # rule id, at a real line, on a real symbol ("variable `render_value` is non-const and
+    # globally accessible" — on a function). That is a false positive wearing the
+    # instrument's own vocabulary, which is the shape a reader ACTS on.
+    #
+    # WHY REFUSE RATHER THAN WARN: a wrong-toolchain database can never be the INTENDED input
+    # here. cmd_lint deliberately derives clang-tidy from the same install as the build clang
+    # so module BMIs match; a gcc database carries no clang BMIs and gcc-only flags, so there
+    # is no reading of it under which the findings mean what they say. A warning on an output
+    # that is specific and wrong is a warning nobody re-reads.
+    #
+    # WHY ANY ENTRY AND NOT THE FIRST: the root database is written by
+    # _malf_merge_compile_commands, which folds every build into the DEFAULT leg's build root
+    # — a CONSTANT path (MALF_DEFAULT_PROFILE) — keyed per source file, last writer wins. So
+    # it goes MIXED, not merely wrong, and the path name still says clang. Measured on
+    # insight-canon the day this guard landed: build-clang21-libcxx-release/
+    # compile_commands.json held 169 g++ entries and 3 clang++-21. A first-entry probe passes
+    # on that database.
+    #
+    # An UNREADABLE database refuses too: it must not print the same thing as a clean one.
+    local db_verdict
+    db_verdict="$(python3 - "$comp_db/compile_commands.json" <<'PY'
+import collections, json, os, sys
+try:
+    entries = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception as exc:
+    print(f"UNREADABLE\t{exc}")
+    raise SystemExit(0)
+counts = collections.Counter()
+for entry in entries:
+    cmd = entry.get("command") or " ".join(entry.get("arguments", []))
+    if cmd.strip():
+        counts[os.path.basename(cmd.split()[0])] += 1
+census = ", ".join(f"{name} x{n}" for name, n in counts.most_common())
+alien = sorted(n for n in counts if "clang" not in n)
+print(("ALIEN" if alien else "OK") + "\t" + (census or "no compiler field in any entry"))
+PY
+)"
+    if [[ "${db_verdict%%$'\t'*}" != "OK" ]]; then
+        if [[ "${db_verdict%%$'\t'*}" == "UNREADABLE" ]]; then
+            echo "malf lint: error: the compile database at $comp_db could not be read." >&2
+            echo "malf lint: parse error: ${db_verdict#*$'\t'}" >&2
+        else
+            echo "malf lint: error: the compile database at $comp_db was not produced by clang." >&2
+            echo "malf lint: entries by compiler: ${db_verdict#*$'\t'}" >&2
+        fi
+        echo "malf lint: refusing to run — clang-tidy reading a foreign database emits findings that are" >&2
+        echo "malf lint: WELL-FORMED and WRONG (real rule ids, real lines, real symbols), which is worse" >&2
+        echo "malf lint: than the no-database case because there is something plausible to believe." >&2
+        echo "malf lint: re-index against the default clang leg: 'malf commands', or build it with" >&2
+        echo "malf lint: 'malf build' (no --profile). Note the root database is shared across profiles," >&2
+        echo "malf lint: so a build under another --profile overwrites entries at this same path." >&2
+        exit 1
+    fi
+
     local output_file=""
     if ! $console; then
         output_file="$CWD/lint_output.txt"
