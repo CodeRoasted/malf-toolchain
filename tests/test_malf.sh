@@ -132,6 +132,45 @@ check "default profile: cache key is empty but build key is NOT (the deliberate 
          b="$(MALF_PROFILE_NAME="$MALF_DEFAULT_PROFILE" _malf_build_key)"
          [[ -z "$k" && -n "$b" ]] && echo "empty-cache/named-build" || echo "k='$k' b='$b'")"
 
+# The MERGED ROOT DB's location, both halves, because the two are in tension and a change
+# that satisfies one alone is the defect this pins.
+#
+# HALF 1 — THE EDITOR CONTRACT. config/.clangd names `CompilationDatabase:
+# build-clang21-libcxx-release` STATICALLY, so the default profile's merged root MUST land
+# exactly there. If this fails, every editor in the workspace silently stops finding its
+# index, and nothing else in this suite would notice.
+check "default profile: the merged root IS the path .clangd names statically" \
+      "$(_malf_default_build_root /R)" \
+      "/R/build-$(MALF_PROFILE_NAME="$MALF_DEFAULT_PROFILE" _malf_build_key)"
+
+# HALF 2 — THE CONTAMINATION FIX. _malf_merge_compile_commands used to write EVERY profile's
+# entries to the default leg's root, so `malf build --profile linux-gcc16-release` merged
+# g++ commands into a directory named for clang, keyed per source file, last writer wins.
+# Measured on insight-canon before the fix: 169 g++ against 3 clang++-21 in
+# build-clang21-libcxx-release/compile_commands.json. `malf lint` then ran clang-tidy over
+# gcc flags and produced findings that were specific and WRONG. A non-default profile must
+# resolve somewhere ELSE — the assertion is inequality, which is what "keyed by the ACTIVE
+# profile" means operationally.
+check "gcc16 profile: the merged root is NOT the default leg's (no cross-profile clobber)" \
+      "differs" \
+      "$(d="$(_malf_default_build_root /R)"
+         g="/R/build-$(MALF_PROFILE_NAME=linux-gcc16-release _malf_build_key)"
+         [[ "$d" != "$g" ]] && echo "differs" || echo "SAME: $d")"
+
+# HALF 3 — THE WIRING, read from the source rather than restated, the same way the dispatch
+# arms above are. Halves 1 and 2 pin a PROPERTY of the key functions; neither would notice
+# if _malf_merge_compile_commands stopped calling them and went back to the constant
+# default root, which is precisely the defect. So assert what that function actually
+# resolves its root to. Without this arm the two above are true and vacuous.
+check "the merge root is wired to the ACTIVE profile key, not the default build root" \
+      "build-key" \
+      "$(line="$(sed -n '/^_malf_merge_compile_commands()/,/^}/p' "$MALF_BIN" | grep 'local root_db=')"
+         if [[ "$line" == *_malf_build_key* && "$line" != *_malf_default_build_root* ]]; then
+             echo "build-key"
+         else
+             echo "WIRED TO: $line"
+         fi)"
+
 echo "[5] every profile on disk resolves to a non-empty build tree"
 
 # A profile that produced an empty build key would write to a bare `build-`, colliding with

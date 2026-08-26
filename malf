@@ -834,16 +834,44 @@ _malf_repo_root() {
 }
 
 _malf_merge_compile_commands() {
-    # Fold the just-built package's compile_commands.json into the root DB that
-    # .clangd reads (CompilationDatabase: build-clang21-libcxx-release — the DEFAULT
-    # leg's named build root of the package's REPO; .clangd is static, so it tracks
-    # the dev default). This keeps the editor's index in step with the incremental
-    # build WITHOUT the full `malf commands` workspace walk: one file merge, no
-    # reconfigure. Entries are keyed by source file — the freshly built package's
-    # entries replace any stale entry for the same file, while entries contributed
-    # by *other* packages already in the root DB are preserved (multi-package repos).
+    # Fold the just-built package's compile_commands.json into its REPO-level root DB,
+    # keyed by the ACTIVE profile — `<repo>/build-$(_malf_build_key)/`. This keeps the
+    # editor's index in step with the incremental build WITHOUT the full `malf commands`
+    # workspace walk: one file merge, no reconfigure. Entries are keyed by source file —
+    # the freshly built package's entries replace any stale entry for the same file, while
+    # entries contributed by *other* packages already in the root DB are preserved
+    # (multi-package repos).
+    #
+    # KEYED BY THE ACTIVE PROFILE, not by MALF_DEFAULT_PROFILE, and that was a real defect
+    # rather than a preference. This function used to write EVERY profile's entries to the
+    # DEFAULT leg's root — a constant path — keyed per source file, last writer wins. So
+    # `malf build --profile linux-gcc16-release` merged g++ commands into a directory named
+    # build-clang21-libcxx-release, and the file went MIXED rather than merely wrong:
+    # measured on insight-canon before this change, 169 g++ entries against 3 clang++-21.
+    #
+    # Three things independently say that is wrong, and all three predate it:
+    #   - _malf_build_dir exists precisely so "a bare build/ can never masquerade as
+    #     whichever toolchain built last" — this function bypassed the key and recreated
+    #     exactly that defect under a clang-shaped name;
+    #   - config/.clangd states the requirement outright: the DB "must come from the CLANG
+    #     preset ... clangd can't consume gcc's -fmodule-mapper/-fmodules-ts commands nor
+    #     .gcm CMIs from the ship-gcc tree";
+    #   - `malf commands` (cmd_compile_commands) ALREADY writes per-profile via
+    #     _malf_build_dir. Two writers of one file disagreed, and the incremental one was
+    #     the one that was wrong.
+    #
+    # NOTHING AN EDITOR POINTS AT MOVES. _malf_build_key of the default profile IS
+    # `clang21-libcxx-release`, so for a default build this resolves to the same
+    # `<repo>/build-clang21-libcxx-release/compile_commands.json` that .clangd names
+    # statically. The only change is that a NON-default build now writes its own leg's root
+    # instead of overwriting that one — also strictly more useful, since each leg gets a
+    # usable DB. Build roots are gitignored (`**/build*/`), so no new tracked file appears.
+    #
+    # The `malf lint` guard that refuses a foreign database STAYS. It closes this cause, not
+    # every cause, and removing a detector because one source was fixed is how the next one
+    # ships silently.
     local build_dir="$1" target="$2"
-    local root_db="$(_malf_default_build_root "$(_malf_repo_root "$target")")/compile_commands.json"
+    local root_db="$(_malf_repo_root "$target")/build-$(_malf_build_key)/compile_commands.json"
     local pkg_db="$build_dir/compile_commands.json"
     # Building the repo root itself: cmake already wrote the root DB in place.
     [[ "$(realpath -m "$pkg_db")" == "$(realpath -m "$root_db")" ]] && return 0
@@ -874,7 +902,7 @@ merged.extend(pkg_entries)
 
 root_db.parent.mkdir(parents=True, exist_ok=True)
 root_db.write_text(json.dumps(merged, indent=2) + "\n")
-print(f"malf: refreshed {root_db} for clangd "
+print(f"malf: refreshed {root_db} "
       f"({len(merged)} entries, {len(pkg_entries)} from this build)")
 PY
 }
