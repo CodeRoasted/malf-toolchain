@@ -134,10 +134,6 @@ _EMPTY_ONLY_SECTIONS = {
                       "int64 and would be this schema's first numeric field (DN-17.D19)"),
 }
 
-# The schema key -> manifest member map is identity except for this one.
-_MEMBER_OF_SECTION = {name: name for name in _SECTION_NAMES}
-_MEMBER_OF_SECTION["revisions"] = "dialect_revisions"
-
 # Three keys earn their OWN refusal rather than the generic unknown-key one. `emits:` above
 # all: the manifest HAS that member, so it is the name an implementer will type, and
 # "unknown key" would be a far worse answer than the reason. A closed grammar's value is
@@ -982,8 +978,7 @@ def _emit_declared_absences(out: list[str], declaration: dict) -> None:
         section = declaration.get(section_name)
         if section is None or section.get("rows"):
             continue
-        member = _MEMBER_OF_SECTION[section_name]
-        out.append(f"// DECLARED ABSENCE -- the manifest's `.{member}` below is empty. What "
+        out.append(f"// DECLARED ABSENCE -- the manifest's `.{section_name}` below is empty. What "
                    "follows in the")
         out.append("// declaration's own voice is why THIS DIALECT has nothing to declare here "
                    "and who owns")
