@@ -192,6 +192,15 @@ _WHY_FORBIDDEN = {
 }
 
 
+# The C0 block and DEL, refused by name. A `why:` is copied VERBATIM into a `//` comment,
+# so a control code is not an escaping question here — it is a byte in a source file: NUL
+# is a diagnostic on every compile leg, FF/VT/BS make the emitted line render as something
+# other than its bytes, and BEL/ESC turn a code review into terminal output. The table
+# names the ones an author might plausibly paste; anything else in the range is refused by
+# codepoint, because the fence is the RANGE and the names are courtesy.
+_WHY_CONTROL_NAMES = {0x00: "NUL", 0x07: "BEL", 0x08: "BS", 0x09: "TAB", 0x0B: "VT",
+                      0x0C: "FF", 0x1B: "ESC", 0x7F: "DEL"}
+
 
 def _validate_why(node: dict, context: str, source: str) -> list[str]:
     """Validate and return the `why:` block of any mapping the schema defines.
@@ -218,6 +227,18 @@ def _validate_why(node: dict, context: str, source: str) -> list[str]:
         where = f"{context}: why[{position}]"
         if not isinstance(line, str):
             fail(source, None, f"{where}: must be a scalar")
+        for char in line:
+            code = ord(char)
+            if code < 0x20 or code == 0x7F:
+                named = _WHY_CONTROL_NAMES.get(code)
+                fail(source, None,
+                     f"{where}: U+{code:04X}"
+                     + (f" {named}" if named else "")
+                     + " — a control character. The argument is emitted verbatim as a "
+                     "`//` comment line, so this is not an escaping question: it is a "
+                     "byte in a C++ source file, where a NUL is a diagnostic on every "
+                     "compile leg and a form feed or a backspace makes the line render "
+                     "as something other than what it says. A `why:` carries prose.")
         if not line.strip():
             # An interior empty scalar is a PARAGRAPH BREAK — it emits a bare `//`, which
             # is what makes a multi-paragraph argument readable at the row it annotates.
@@ -1523,6 +1544,25 @@ def selftest() -> int:
                           lambda c=char: _parse_fixture(_SYNTHETIC.replace(
                               "A byte predicate, not a grammar.",
                               f"A byte predicate{c}, not a grammar.")))
+    # The C0 block and DEL, one witness per refused class: the named ones the table
+    # spells out, and one codepoint it does NOT name, because the fence is the RANGE.
+    for _label, _char, _needle in (("NUL", "\x00", "U+0000 NUL"),
+                                   ("BEL", "\x07", "U+0007 BEL"),
+                                   ("FF", "\x0c", "U+000C FF"),
+                                   ("DEL", "\x7f", "U+007F DEL"),
+                                   ("an unnamed C0 code", "\x01", "U+0001")):
+        _expect_rejection(f"encoding: {_label} inside a `why:` scalar", failures, _needle,
+                          lambda c=_char: _parse_fixture(_SYNTHETIC.replace(
+                              "A byte predicate, not a grammar.",
+                              f"A byte predicate{c}, not a grammar.")))
+    # FF and VT are Python whitespace, so a scalar made only of one would reach the
+    # paragraph-break branch and be silently read as a blank line. The control scan runs
+    # BEFORE that branch precisely so this is a refusal and not a shrug.
+    _expect_rejection("encoding: a `why:` scalar that is ONLY a control character",
+                      failures, "U+000C FF",
+                      lambda: _parse_fixture(_SYNTHETIC.replace(
+                          '      why: ["A byte predicate, not a grammar."]',
+                          '      why: ["A byte predicate.", "\x0c", "Nothing more."]')))
     _expect_rejection("encoding: a trailing backslash inside a `why:` scalar", failures,
                       "swallows the line beneath it",
                       lambda: _parse_fixture(_SYNTHETIC.replace(
