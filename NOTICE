@@ -6,7 +6,8 @@ WHAT THE ROOT `LICENSE` COVERS
 
 The Apache License 2.0 in `LICENSE` covers **this repository's own content**: the
 `malf` build orchestrator, `sbom_gen.py`, `malf_graph.py`, `bench_compare.py`,
-`dead_symbol_lint.py`, `intent_library_codegen.py`, the conan profiles in
+`dead_symbol_lint.py`, `intent_library_codegen.py`, `dialect_package_codegen.py`,
+`codegen_common.py`, the conan profiles in
 `profiles/`, the shared editor config in `config/`, the runner tooling in
 `runner/`, and the composite actions and workflows under `.github/`.
 

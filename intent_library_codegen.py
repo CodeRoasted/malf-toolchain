@@ -48,7 +48,6 @@ The subset keeps parsing bit-stable with zero dependencies on every build host.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import re
 import sys
@@ -58,242 +57,27 @@ TOOL_VERSION = "1"
 
 INTENT_FILE_SUFFIX = ".intent.yaml"
 
-# ── error reporting ──────────────────────────────────────────────────────────
-
-
-class DeclarationError(Exception):
-    """A declaration, manifest, or grammar violation. Message carries source + line."""
-
-
-def fail(source: str, line: int | None, message: str) -> None:
-    where = f"{source}:{line}" if line is not None else source
-    raise DeclarationError(f"{where}: {message}")
-
-
-# ── the strict YAML-subset parser (string-only scalars) ──────────────────────
+# ── shared machinery (malf/codegen_common.py) ────────────────────────────────
 #
-# Parsed shape: dict[str, node] | list[node] | str.  All scalars are strings —
-# `domain: [0, 1]` yields ["0", "1"]. The library schema has no numeric-typed
-# declaration value (weights and ranges are BINDINGS, not declarations), and
-# string-only scalars remove the entire number-canonicalization hazard class.
+# The strict-YAML subset parser, the canonical hash and the C++ escaping helpers are
+# SHARED with dialect_package_codegen.py; the schema, the key sets and the SORT RULE are
+# not, and that split is deliberate (DN-17.D19). This tool sorts entries — they are a set
+# discovered from the filesystem, and sorting is what makes discovery order-independent.
+# The dialect tool must NEVER sort: its rows are content in declared order.
 
-_PLAIN_SCALAR = re.compile(r"[A-Za-z0-9_./:>=<+-][A-Za-z0-9_./:>=<+\- ()%]*")
-_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-
-
-def _reject_non_ascii(text: str, source: str) -> None:
-    for line_index, line in enumerate(text.split("\n"), start=1):
-        for ch in line:
-            if ch == "\t":
-                continue  # rejected by the indentation pass, with the tab-specific message
-            if not (0x20 <= ord(ch) <= 0x7E):
-                fail(source, line_index,
-                     f"non-ASCII or control byte 0x{ord(ch):02x} — declarations are "
-                     "ASCII-only (determinism MUST: no encoding may vary by host)")
-
-
-def _strip_comment(line: str, source: str, line_no: int) -> str:
-    """Remove a trailing comment. Respects quoted spans; rejects stray quotes."""
-    out: list[str] = []
-    quote: str | None = None
-    index = 0
-    while index < len(line):
-        ch = line[index]
-        if quote is not None:
-            if ch == "\\" and quote == '"':
-                if index + 1 >= len(line):
-                    fail(source, line_no, "dangling escape at end of line")
-                out.append(ch)
-                out.append(line[index + 1])
-                index += 2
-                continue
-            if ch == quote:
-                quote = None
-            out.append(ch)
-            index += 1
-            continue
-        if ch in ("'", '"'):
-            quote = ch
-            out.append(ch)
-            index += 1
-            continue
-        if ch == "#":
-            break
-        out.append(ch)
-        index += 1
-    if quote is not None:
-        fail(source, line_no, "unterminated quoted scalar")
-    return "".join(out).rstrip()
-
-
-def _parse_scalar(token: str, source: str, line_no: int) -> str:
-    token = token.strip()
-    if token.startswith('"'):
-        if not token.endswith('"') or len(token) < 2:
-            fail(source, line_no, f"malformed double-quoted scalar: {token!r}")
-        body = token[1:-1]
-        result: list[str] = []
-        index = 0
-        while index < len(body):
-            ch = body[index]
-            if ch == "\\":
-                if index + 1 >= len(body):
-                    fail(source, line_no, "dangling escape in quoted scalar")
-                escaped = body[index + 1]
-                if escaped not in ('"', "\\"):
-                    fail(source, line_no,
-                         f"unsupported escape \\{escaped} — the subset allows only "
-                         '\\" and \\\\ (declarations are single-line printable ASCII)')
-                result.append(escaped)
-                index += 2
-                continue
-            if ch == '"':
-                fail(source, line_no, f"unescaped quote inside scalar: {token!r}")
-            result.append(ch)
-            index += 1
-        return "".join(result)
-    if token.startswith("'"):
-        if not token.endswith("'") or len(token) < 2:
-            fail(source, line_no, f"malformed single-quoted scalar: {token!r}")
-        body = token[1:-1]
-        if "'" in body:
-            fail(source, line_no, "single-quoted scalar may not contain a quote")
-        return body
-    if token.startswith("[") or token.startswith("{"):
-        fail(source, line_no,
-             f"flow collection {token!r} is only legal as a full value of `key: [a, b]` form")
-    for forbidden, why in (("&", "anchor"), ("*", "alias"), ("!", "tag"),
-                           ("|", "block scalar"), (">", "folded scalar")):
-        if token.startswith(forbidden):
-            fail(source, line_no,
-                 f"YAML {why} {token!r} — outside the declaration subset (keep "
-                 "declarations literal: they are hashed content, not templated text)")
-    if not token or not _PLAIN_SCALAR.fullmatch(token):
-        fail(source, line_no,
-             f"plain scalar {token!r} outside the subset — quote it if it is literal text")
-    return token
-
-
-def _parse_flow_sequence(token: str, source: str, line_no: int) -> list[str]:
-    body = token.strip()
-    assert body.startswith("[")
-    if not body.endswith("]"):
-        fail(source, line_no, "flow sequence must open and close on one line")
-    inner = body[1:-1].strip()
-    if not inner:
-        return []
-    items: list[str] = []
-    depth_guard = inner.split(",")
-    for raw in depth_guard:
-        if "[" in raw or "]" in raw or "{" in raw or "}" in raw:
-            fail(source, line_no, "nested flow collections are outside the subset")
-        items.append(_parse_scalar(raw, source, line_no))
-    return items
-
-
-class _Line:
-    __slots__ = ("indent", "text", "number")
-
-    def __init__(self, indent: int, text: str, number: int):
-        self.indent = indent
-        self.text = text
-        self.number = number
-
-
-def _logical_lines(text: str, source: str) -> list[_Line]:
-    lines: list[_Line] = []
-    for number, raw in enumerate(text.split("\n"), start=1):
-        if "\t" in raw:
-            fail(source, number, "tab character — indentation is spaces-only in the subset")
-        stripped = _strip_comment(raw, source, number)
-        if not stripped.strip():
-            continue
-        indent = len(stripped) - len(stripped.lstrip(" "))
-        lines.append(_Line(indent, stripped.strip(), number))
-    return lines
-
-
-def _parse_block(lines: list[_Line], pos: int, indent: int, source: str):
-    """Parse the block starting at lines[pos] with exactly `indent`. Returns (node, next_pos)."""
-    if pos >= len(lines) or lines[pos].indent != indent:
-        fail(source, lines[pos - 1].number if pos > 0 else None, "empty block")
-    if lines[pos].text.startswith("- "):
-        return _parse_sequence(lines, pos, indent, source)
-    return _parse_mapping(lines, pos, indent, source)
-
-
-def _parse_mapping(lines: list[_Line], pos: int, indent: int, source: str):
-    mapping: dict[str, object] = {}
-    while pos < len(lines) and lines[pos].indent == indent and not lines[pos].text.startswith("- "):
-        line = lines[pos]
-        if ":" not in line.text:
-            fail(source, line.number, f"expected `key:` or `key: value`, got {line.text!r}")
-        key, _, rest = line.text.partition(":")
-        key = key.strip()
-        if not _KEY.fullmatch(key):
-            fail(source, line.number, f"key {key!r} outside the subset ([A-Za-z_][A-Za-z0-9_]*)")
-        if key in mapping:
-            fail(source, line.number, f"duplicate key {key!r} (K1: keys are unique)")
-        rest = rest.strip()
-        if rest:
-            if rest.startswith("["):
-                mapping[key] = _parse_flow_sequence(rest, source, line.number)
-            else:
-                mapping[key] = _parse_scalar(rest, source, line.number)
-            pos += 1
-            continue
-        # nested block
-        pos += 1
-        if pos >= len(lines) or lines[pos].indent <= indent:
-            fail(source, line.number, f"key {key!r}: has no value and no nested block")
-        mapping[key], pos = _parse_block(lines, pos, lines[pos].indent, source)
-    if pos < len(lines) and lines[pos].indent == indent and lines[pos].text.startswith("- "):
-        fail(source, lines[pos].number, "sequence item at mapping level — mixed block kinds")
-    return mapping, pos
-
-
-def _parse_sequence(lines: list[_Line], pos: int, indent: int, source: str):
-    sequence: list[object] = []
-    while pos < len(lines) and lines[pos].indent == indent and lines[pos].text.startswith("- "):
-        line = lines[pos]
-        head = line.text[2:].strip()
-        if not head:
-            fail(source, line.number, "bare `-` item — the subset requires inline item content")
-        if ":" in head and _KEY.fullmatch(head.partition(":")[0].strip()):
-            # `- key: value` opens an inline mapping item; continuation keys sit at indent+2.
-            item_indent = indent + 2
-            synthetic = [_Line(item_indent, head, line.number)]
-            probe = pos + 1
-            while probe < len(lines) and lines[probe].indent >= item_indent and \
-                    not (lines[probe].indent == indent and lines[probe].text.startswith("- ")):
-                synthetic.append(lines[probe])
-                probe += 1
-            item, consumed = _parse_mapping(synthetic, 0, item_indent, source)
-            if consumed != len(synthetic):
-                fail(source, synthetic[consumed].number,
-                     f"indentation outside the subset near {synthetic[consumed].text!r}")
-            sequence.append(item)
-            pos = probe
-            continue
-        sequence.append(_parse_scalar(head, source, line.number))
-        pos += 1
-    return sequence, pos
-
-
-def parse_subset_yaml(text: str, source: str) -> dict:
-    _reject_non_ascii(text, source)
-    lines = _logical_lines(text, source)
-    if not lines:
-        fail(source, None, "empty document")
-    if lines[0].indent != 0:
-        fail(source, lines[0].number, "top level must start at column 0")
-    node, consumed = _parse_block(lines, 0, 0, source)
-    if consumed != len(lines):
-        fail(source, lines[consumed].number,
-             f"content outside the root block near {lines[consumed].text!r}")
-    if not isinstance(node, dict):
-        fail(source, lines[0].number, "top level must be a mapping")
-    return node
+from codegen_common import (  # noqa: E402
+    CODEGEN_COMMON_VERSION,
+    DeclarationError,
+    cpp_escape as _cpp_escape,
+    cpp_symbol as _cpp_symbol,
+    canonical_hash,
+    expect_keys as _expect_keys_common,
+    fail,
+    parse_subset_yaml,
+    read_text,
+    required as _required,
+    required_scalar as _required_scalar,
+)
 
 
 # ── declaration schema (§2.2) ────────────────────────────────────────────────
@@ -308,6 +92,13 @@ _PLACEHOLDER_PATTERN = re.compile(r"\{([^{}]*)\}")
 # Tooth 2, by name: the grammar has NO ratified form. These keys are rejected with the
 # fence cited so the error teaches, not just refuses.
 _RATIFICATION_KEYS = frozenset({"ratification", "ratified", "soundness", "sound"})
+_RATIFICATION_REJECTIONS = {
+    key: ("a hand-authored declaration can only ever be Authored (soundness fence, "
+          "tooth 2). Ratification lives in the twin-generated manifest, keyed on this "
+          "declaration's content hash; there is no way to write it here, and that is "
+          "the design.")
+    for key in _RATIFICATION_KEYS
+}
 
 _ROLES = ("Categorical", "Identifier", "Numeric")
 _CARDINALITIES = ("bounded", "unbounded")
@@ -316,30 +107,7 @@ _UNITS = ("count",)  # closed; grows deliberately with the next real entry that 
 
 
 def _expect_keys(node: dict, allowed: tuple[str, ...], context: str, source: str) -> None:
-    for key in node:
-        if key in _RATIFICATION_KEYS:
-            fail(source, None,
-                 f"{context}: key `{key}:` — a hand-authored declaration can only ever be "
-                 "Authored (soundness fence, tooth 2). Ratification lives in the "
-                 "twin-generated manifest, keyed on this declaration's content hash; "
-                 "there is no way to write it here, and that is the design.")
-        if key not in allowed:
-            fail(source, None,
-                 f"{context}: unknown key `{key}:` (closed grammar; allowed: "
-                 f"{', '.join(allowed)})")
-
-
-def _required(node: dict, key: str, context: str, source: str):
-    if key not in node:
-        fail(source, None, f"{context}: missing required key `{key}:`")
-    return node[key]
-
-
-def _required_scalar(node: dict, key: str, context: str, source: str) -> str:
-    value = _required(node, key, context, source)
-    if not isinstance(value, str):
-        fail(source, None, f"{context}: `{key}:` must be a scalar")
-    return value
+    _expect_keys_common(node, allowed, context, source, rejected=_RATIFICATION_REJECTIONS)
 
 
 def validate_declaration(document: dict, entry_name_from_filename: str, source: str) -> dict:
@@ -529,8 +297,7 @@ def grain_hash(declaration: dict, grain: str) -> str:
     as the LOUD stale-record fault rather than as a quiet hash mismatch.
     """
     covered = {"dialect": declaration.get("dialect"), grain: declaration.get(grain)}
-    canonical = json.dumps(covered, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return hashlib.sha256(canonical.encode("ascii")).hexdigest()
+    return canonical_hash(covered)
 
 
 # ── manifest resolution (§4.2/§4.3 — teeth 2 and 3) ──────────────────────────
@@ -636,8 +403,7 @@ def discover_entries(library_dir: Path) -> dict[str, dict]:
         if not path.name.endswith(INTENT_FILE_SUFFIX):
             continue
         entry_name = path.name[: -len(INTENT_FILE_SUFFIX)]
-        text = path.read_bytes().decode("ascii", errors="strict") \
-            if _is_ascii(path) else _fail_encoding(path)
+        text = read_text(path, ascii_only=True)
         document = parse_subset_yaml(text, str(path))
         if "intent" not in document:
             fail(str(path), None,
@@ -651,27 +417,7 @@ def discover_entries(library_dir: Path) -> dict[str, dict]:
     return entries
 
 
-def _is_ascii(path: Path) -> bool:
-    try:
-        path.read_bytes().decode("ascii")
-        return True
-    except UnicodeDecodeError:
-        return False
-
-
-def _fail_encoding(path: Path) -> str:
-    raise DeclarationError(f"{path}: non-ASCII bytes — declarations are ASCII-only")
-
-
 # ── C++ emission (deterministic; the shape the api partition defines) ────────
-
-
-def _cpp_escape(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', '\\"')
-
-
-def _cpp_symbol(name: str) -> str:
-    return "".join(part.capitalize() for part in re.split(r"[._]", name))
 
 
 def _emit_field(entry_symbol: str, index: int, field: dict, out: list[str]) -> str:
@@ -741,7 +487,8 @@ def emit_cpp(entries: dict[str, dict], resolution: dict[str, dict | None],
              source_names: list[str]) -> str:
     out: list[str] = []
     out.append("// GENERATED by intent_library_codegen.py -- DO NOT EDIT.")
-    out.append(f"// tool version: {TOOL_VERSION} (enters this header, never the declaration hash -- sec 5.3 MUST 4)")
+    out.append(f"// tool version: {TOOL_VERSION}, codegen_common: {CODEGEN_COMMON_VERSION}")
+    out.append("// (both enter this header, never the declaration hash -- sec 5.3 MUST 4)")
     out.append("// BUILT, never committed (sec 5.2): a pure function of (the declaration set, this tool).")
     out.append(f"// declarations: {', '.join(source_names) if source_names else '(none)'}")
     out.append("// clang-format off")
@@ -904,8 +651,8 @@ def generate(library_dir: Path, manifest_path: Path | None, out_path: Path) -> i
     notices: list[str] = []
     records: list[dict] = []
     if manifest_path is not None and manifest_path.exists():
-        records = parse_manifest(
-            manifest_path.read_bytes().decode("ascii"), str(manifest_path))
+        records = parse_manifest(read_text(manifest_path, ascii_only=True),
+                                 str(manifest_path))
     resolution = resolve_ratification(entries, records, str(manifest_path), notices)
     source_names = [f"{name}{INTENT_FILE_SUFFIX}" for name in sorted(entries)]
     rendered = emit_cpp(entries, resolution, source_names)

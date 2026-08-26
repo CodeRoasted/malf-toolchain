@@ -185,6 +185,15 @@ selftest_status=$?
 check "intent_library_codegen --selftest" \
       "ok" "$([[ $selftest_status -eq 0 ]] && echo ok || echo "failed: $(tail -3 <<< "$selftest_output")")"
 
+# The dialect codegen's fence set is DIFFERENT and its most dangerous predicate is the one the
+# two tools disagree about: the Intent library SORTS its entries, a dialect's rows are content in
+# DECLARED order and must never be sorted. That is why the two tools are separate entry points
+# over a shared parser, and why each proves its own fences here rather than sharing a selftest.
+dialect_selftest_output="$(python3 "$MALF_ROOT/dialect_package_codegen.py" --selftest 2>&1)"
+dialect_selftest_status=$?
+check "dialect_package_codegen --selftest" \
+      "ok" "$([[ $dialect_selftest_status -eq 0 ]] && echo ok || echo "failed: $(tail -3 <<< "$dialect_selftest_output")")"
+
 echo
 
 echo "[7c] sbom_gen carries its own derivation proof (--selftest)"
