@@ -38,3 +38,36 @@ tools.microsoft.msbuild:installation_path={{ os.getenv("MSVC1452_INSTALL", "") }
 # NO -march here: that is a gcc/clang flag MSVC does not understand. MSVC's x64 default codegen
 # (SSE2 baseline, /fp:precise — no contraction) is the determinism-relevant portable floor, the
 # equivalent of the Linux profiles' -march=x86-64-v2 + -ffp-contract=off, without a flag.
+# SOURCE ENCODING IS DECLARED, NEVER INHERITED FROM THE HOST'S CODE PAGE (DN-17.D24 — the shared
+# intent declaration design note). MSVC decodes a BOM-less source with the host's ACTIVE code page;
+# gcc and clang default to UTF-8 input independently of the locale (measured 2026-08-26 on this
+# workspace's typography: gcc-16.2 and clang-21 both compile it clean under LC_ALL=C, and the
+# positive control `-finput-charset=CP932` errors, so the probe fires). MSVC is the ONLY leg that
+# needs a declaration, and it is also the only one that reinterprets SILENTLY instead of erroring.
+# WHAT IS AT STAKE: our sources carry UTF-8 typography in comments — 104 code points / 303 bytes in
+# insight-canon's semantic/github/src/github.cppm alone — plus 44 em dashes inside NARROW STRING
+# LITERALS across the MSVC compile closure (canon core + the four semantic packages + det_proof).
+# Under a 1252-family page those decode to garbage in a comment and round-trip byte-identically in a
+# literal. Under a double-byte page (932/936/950) 0xE2 is a LEAD byte, so the decoder consumes the
+# byte after it: in a comment that can swallow the following line, and in a GENERATED dialect package
+# the following line is a recognition ROW — deleted from the build with no diagnostic, on the one leg
+# whose whole job is to prove the build is byte-identical everywhere.
+# THE EXECUTION-CHARSET HALF IS A MEASURED NO-OP, not an assumed one. /utf-8 sets BOTH
+# /source-charset:utf-8 and /execution-charset:utf-8. Every non-ASCII code point inside a narrow
+# literal in this closure is U+2014 EM DASH and nothing else; its UTF-8 bytes E2 80 94 are all
+# DEFINED in CP1252 (a, EUR, "), so today's cp1252-decode + cp1252-encode already emits E2 80 94 —
+# byte-for-byte what /utf-8 emits. The argument is at the byte level, so it holds whether or not a
+# given literal is digest-reachable. MEM:msvc-port-hazards' ASCII-only GOLDEN CONTENT rule is
+# untouched: only comment prose and diagnostic text are UTF-8.
+# HERE, NOT IN EACH PACKAGE'S CMakeLists: this is the only site a future GENERATED package cannot
+# forget, because the generator emits the .cppm AND its CMakeLists. It rides the same
+# CMakeToolchain -> CMAKE_CXX_FLAGS_INIT path the Linux profiles use for -O3/-march, so it reaches
+# canon through golden.yaml's raw `cmake -S proof` too (that configure consumes conan_toolchain.cmake).
+# COST, MEASURED: global.conf folds cflags/cxxflags into every package_id, so the Windows dep cache
+# rebuilds ONCE — golden.yaml's actions/cache key already hashes this file, so that was designed for.
+# Third-party risk bounded on the revisions in the workspace cache: 0 of the 914 C/C++ sources of
+# canon's compiled deps (fmt, spdlog, simdjson, gtest, picosha2) are invalid UTF-8, so /utf-8 cannot
+# raise C4828 on them. cflags AND cxxflags, mirroring the Linux profiles: a future C dependency on
+# Windows must not inherit either.
+tools.build:cflags=["/utf-8"]
+tools.build:cxxflags=["/utf-8"]
