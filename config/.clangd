@@ -1,8 +1,10 @@
 CompileFlags:
   CompilationDatabase: build-clang21-libcxx-release
   # No toolchain pins. clangd follows compile_commands.json (the package's real
-  # -std / -stdlib / -isystem) and clang-21 auto-detects the system gcc-15
-  # libstdc++ — so this tracks whichever stdlib the package was built under
+  # -std / -stdlib / -isystem) and clang-21 auto-detects the NEWEST system
+  # libstdc++ it finds (measured 2026-08-26: `Selected GCC installation:
+  # /usr/lib/gcc/x86_64-linux-gnu/16`, with 15 also installed and passed over)
+  # — so this tracks whichever stdlib the package was built under
   # (libstdc++ today, libc++ after the dev-default flip) with zero divergence,
   # instead of forcing libstdc++ and fighting a libc++ build's DB.
   #

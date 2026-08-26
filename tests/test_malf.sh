@@ -105,8 +105,8 @@ check "default profile -> unkeyed base cache" \
       "" "$(MALF_PROFILE_NAME="$MALF_DEFAULT_PROFILE" _malf_profile_key)"
 check "empty profile -> unkeyed base cache" \
       "" "$(MALF_PROFILE_NAME="" _malf_profile_key)"
-check "linux-gcc15-release -> gcc15-release (the linux- prefix is stripped)" \
-      "gcc15-release" "$(MALF_PROFILE_NAME=linux-gcc15-release _malf_profile_key)"
+check "linux-gcc16-release -> gcc16-release (the linux- prefix is stripped)" \
+      "gcc16-release" "$(MALF_PROFILE_NAME=linux-gcc16-release _malf_profile_key)"
 check "linux-clang21-asan -> clang21-asan" \
       "clang21-asan" "$(MALF_PROFILE_NAME=linux-clang21-asan _malf_profile_key)"
 check "a non-linux profile passes through verbatim" \
@@ -118,8 +118,8 @@ echo "[4] build key — which build-<key>/ tree a build writes"
 # is gone, and this is what keeps a tree self-documenting about its toolchain.
 check "default profile still gets a NAMED build tree" \
       "clang21-libcxx-release" "$(MALF_PROFILE_NAME="$MALF_DEFAULT_PROFILE" _malf_build_key)"
-check "linux-gcc15-release -> gcc15-release" \
-      "gcc15-release" "$(MALF_PROFILE_NAME=linux-gcc15-release _malf_build_key)"
+check "linux-gcc16-release -> gcc16-release" \
+      "gcc16-release" "$(MALF_PROFILE_NAME=linux-gcc16-release _malf_build_key)"
 check "a non-linux profile passes through verbatim" \
       "windows-msvc-release" "$(MALF_PROFILE_NAME=windows-msvc-release _malf_build_key)"
 
@@ -334,7 +334,7 @@ echo "[7e] _malf_prune_args splits exclude dirs WITHOUT globbing them"
 # (the CWD root carries a DIFFERENT build dir, so `build-*` globs to that and not to the one in
 # the sub-package) and asserts the prune still excludes it.
 prune_tmp="$(mktemp -d)"   # cleaned inline below (a second `trap ... EXIT` would REPLACE [7d]'s)
-mkdir -p "$prune_tmp/pkg/build-clang21-asan/CMakeFiles" "$prune_tmp/pkg/src" "$prune_tmp/build-gcc15-release"
+mkdir -p "$prune_tmp/pkg/build-clang21-asan/CMakeFiles" "$prune_tmp/pkg/src" "$prune_tmp/build-gcc16-release"
 : > "$prune_tmp/pkg/build-clang21-asan/CMakeFiles/probe.cpp"   # must be pruned
 : > "$prune_tmp/pkg/src/real.cpp"                              # must be kept
 prune_fn="$(sed -n '/^_malf_prune_args() {/,/^}/p' "$MALF_BIN")"

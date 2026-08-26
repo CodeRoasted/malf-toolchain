@@ -567,7 +567,7 @@ _malf_editables_clear() {
 _malf_editable_build_dir() {
     # Build-type-keyed (2026-06-04 editable-isolation pass): editables build into <pkg>/build[-<key>],
     # MATCHING the recipe layout `cpp.build.libdirs = [os.environ.get("MALF_EDITABLE_BUILD_DIR","build")]`
-    # (exported by _malf_apply_profile). So a keyed-profile consumer (gcc-15 / clang-21-libc++ / asan)
+    # (exported by _malf_apply_profile). So a keyed-profile consumer (gcc-16 / clang-21-libc++ / asan)
     # links the dep's OWN keyed build — no cross-stdlib/-compiler ABI mismatch. (The clang-21/libc++ leg
     # surfaced the old bug: a libc++ TU linking a libstdc++ editable .a — `__1` vs `__cxx11` mangling.)
     # ALWAYS profile-named now (default -> <pkg>/build-clang21-libcxx-release); a raw
@@ -2179,7 +2179,7 @@ PY
 # version — but they are disk bloat and a real footgun for any RAW (non-malf) conan call,
 # especially the stray ~/.conan2 which has no editables to shadow them. The surgical opposite
 # of `clean conan` (which nukes every package dir, third-party included, forcing a full
-# from-source rebuild — gcc15 has no ConanCenter binaries). SAFE by construction: removes ONLY
+# from-source rebuild — our own gcc toolchain has no ConanCenter binaries). SAFE by construction: removes ONLY
 # CodeRoast namespaces (pin_coherence.CODEROAST_PREFIXES — the single source of truth) at a
 # version != the uniform workspace baseline; NEVER third-party, NEVER the current version.
 # Sweeps every cache `editables sync` touches (base + keyed subdirs) plus the stray default
