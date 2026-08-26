@@ -192,6 +192,7 @@ _WHY_FORBIDDEN = {
 }
 
 
+
 def _validate_why(node: dict, context: str, source: str) -> list[str]:
     """Validate and return the `why:` block of any mapping the schema defines.
 
@@ -1292,6 +1293,36 @@ def selftest() -> int:
               "a PayloadEmit enumerator in the emitted text means this tool carries the "
               "extractor->emitter table, which is the same concept minted at two sites: "
               "a fifth extractor added to canon would then mis-derive in silence"))
+
+    # ── every declared span reaches the emitted file (row presence) ──────────
+    # A span whose rows are dropped still COMPILES: `std::array<Row, N>` with an empty
+    # initializer value-initialises, so the package recognises nothing while every other
+    # arm here stays green. Measured 2026-08-26 by mutation on this tool: with no arm,
+    # dropping the rows of `kRoles`, of `kOutcomeTokens`, the channel symbol list, or the
+    # revision list each exited 0. `kLevelLifts` (order arm) and `kMarkers`/`kEmitMarkers`
+    # (derive arm) are already named above; these are the spans that had no witness.
+    for _symbol, _expected in (("kRoles", ['"##[group]"', '"##[endgroup]"']),
+                               ("kOutcomeTokens", ['"success"', '"skipped"'])):
+        _case(f"presence: {_symbol} carries every declared row", failures,
+              lambda symbol=_symbol, expected=_expected: _assert(
+                  _row_prefixes(rendered, symbol) == expected,
+                  f"{symbol} does not carry the declared rows — an empty span value-"
+                  f"initialises and compiles, and the dialect then recognises nothing: "
+                  f"{_row_prefixes(rendered, symbol)} != {expected}"))
+    _case("presence: one channel symbol per declared channel, and kChannels lists them",
+          failures, lambda: _assert(
+              'export inline constexpr std::string_view kChannelPlain{"plain"};' in rendered
+              and 'export inline constexpr std::string_view kChannelMarked{"marked"};'
+              in rendered
+              and "std::array<std::string_view, 2> kChannels{{kChannelPlain, "
+                  "kChannelMarked}};" in rendered,
+              "the channel vocabulary is what every `channel_gate` resolves against, so an "
+              "empty kChannels makes every gated row unreachable while still compiling"))
+    _case("presence: kDialectRevisions carries the declared revision", failures,
+          lambda: _assert(
+              'std::array<std::string_view, 1> kDialectRevisions{{"v1"}};' in rendered,
+              "an empty revision list compiles and names no vendor generation, so the "
+              "package claims to recognise a dialect it can no longer identify"))
 
     # ── the content hash (MUST 3/4) ──────────────────────────────────────────
     reformatted = _SYNTHETIC.replace("  version: \"1.0.0\"",
