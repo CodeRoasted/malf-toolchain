@@ -93,9 +93,13 @@ runs:
         # `conan-module` action DIRECTLY for its insight-e2e module, and a composite step's `env:`
         # does not reach another action's steps, so that module resolved with no lockfile at all.
         # conan_module.sh now derives all three from its own location (it is the single source of
-        # truth for the per-module logic, so it is the only thing every path goes through). Setting
-        # them again here would be vendoring duplication: two places encoding one fact about
+        # truth for the per-module logic, so it is the only thing every MODULE path goes through).
+        # Setting them again here would be vendoring duplication: two places encoding one fact about
         # the toolchain layout, one of which rots.
+        # NOTE the qualifier "module": `coderoast-release.yml` runs a bare `conan create` that never
+        # calls conan_module.sh, so MALF_TOOLCHAIN_DIR is ALSO exported by `setup-build-env` (which
+        # every composite path runs first, and whose value conan_module.sh's `:-` default defers to).
+        # Same derivation from the same fact, so the two can never disagree.
       run: |
         set -euo pipefail
         # Build each declared module in order through the single-sourced per-module logic (shared with

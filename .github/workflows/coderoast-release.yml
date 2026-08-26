@@ -115,6 +115,10 @@ jobs:
           # dest defaults to $GITHUB_WORKSPACE/release-assets — the same dir the tarballs land in.
 
       - name: Verify recipe versions, conan create, export cache tarballs
+        # This `conan create` is a BARE run: block — it does NOT go through `conan_module.sh`, so it
+        # inherits none of that script's exports. `MALF_TOOLCHAIN_DIR` (build-time codegen
+        # reachability, DN-17.D31) therefore comes from `setup-build-env` above, which puts it in
+        # $GITHUB_ENV for the whole job. Do not re-declare it here.
         env:
           PACKAGES: ${{ inputs.packages }}
           VERSION: ${{ steps.tag.outputs.version }}

@@ -12,6 +12,9 @@ description: |
   lockfile and the same strict/gate mode: `conan_module.sh` derives `malf/conan.lock` and
   `MALF_TOOLCHAIN_DIR` from its own path. Do NOT re-declare those variables in a caller — a
   per-caller copy of a toolchain-layout fact is two places encoding one thing, one of which rots.
+  (`setup-build-env` exports `MALF_TOOLCHAIN_DIR` job-wide by the SAME derivation, because
+  `coderoast-release.yml`'s bare `conan create` never reaches this script; `conan_module.sh`'s
+  `:-` default defers to it, so the two resolve to one path.)
 
 inputs:
   module:

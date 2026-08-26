@@ -12,6 +12,10 @@ description: |
   Owns `CONAN_HOME` (exported to `$GITHUB_ENV` as <workspace>/.conan2) so consumers no longer
   declare it at job level; later steps (conan-module, etc.) read it as `$CONAN_HOME`.
 
+  Also owns `MALF_TOOLCHAIN_DIR` for the COMPOSITE path (see the step below). Do NOT re-declare
+  either variable in a caller — a per-caller copy of a toolchain-layout fact is two places
+  encoding one thing, one of which rots.
+
 inputs:
   extra-apt:
     description: 'Extra apt packages (space-separated), e.g. "libpq-dev redis-tools postgresql-client".'
@@ -71,6 +75,42 @@ runs:
         home: ${{ env.CONAN_HOME }}
         cache_packages: false
         profile_detect: false
+
+    - name: Declare MALF_TOOLCHAIN_DIR (build-time codegen reachability, job-wide)
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        # MALF_TOOLCHAIN_DIR is the generator's RESOLUTION MECHANISM, not a convenience
+        # (DN-17.D31/D32): a package that cannot find its build-time generator FATALs — it never
+        # degrades and never probes a second candidate. Its relative fallback anchors on the DESK
+        # layout alone and is unreachable under `conan create`, which builds from sources exported
+        # into the conan cache. CI is the environment that can declare, so it declares.
+        #
+        # WHY HERE, when `conan_module.sh:51` already exports it. That script is the single source
+        # of truth for PER-MODULE build logic, and the claim written at its site — "it is the one
+        # thing every path goes through" — is false for exactly one live path: this repo's own
+        # `coderoast-release.yml` runs a bare `conan create` in a `run:` block, never through
+        # conan_module.sh, so the release job of EVERY consumer repo built with the variable unset.
+        # `setup-build-env` is the step that path does run, before any build. Both derive the same
+        # absolute path from the same fact (this action's own location inside the pinned
+        # malf-toolchain checkout under `_actions/`), and conan_module.sh's `:-` default means the
+        # value exported here WINS rather than competing — so this is one fact with one derivation
+        # rule, not the per-caller hard-coded copy that action banner forbids.
+        #
+        # The five golden determinism legs declare it a third time, at job level, and that IS a
+        # deliberate duplicate: DN-17.D32 keeps those legs RAW so the byte-identity compare cannot
+        # inherit this wiring's assumptions.
+        #
+        # `$GITHUB_ACTION_PATH` is `<runner>/work/_actions/<owner>/<repo>/<ref>/.github/actions/
+        # setup-build-env`, so `../../..` is the toolchain repo root — the same arithmetic this
+        # action already uses to read `profiles/`, `global.conf` and `settings_user.yml`, and the
+        # same one conan_module.sh uses. Observed in a real run log (coderoast-web
+        # src/assets/sift-showcase/logcraft__ci-build__green-b.log:564).
+        toolchain_root="$(cd -- "$ACTION_PATH/../../.." && pwd)"
+        echo "MALF_TOOLCHAIN_DIR=$toolchain_root" >> "$GITHUB_ENV"
+        echo "MALF_TOOLCHAIN_DIR=$toolchain_root"
 
     - name: Stage the canonical conan profile (single source — from malf-toolchain)
       shell: bash
