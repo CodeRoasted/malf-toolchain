@@ -593,7 +593,7 @@ def validate_declaration(document: dict, stem: str, package_dir: Path, source: s
     if len(revisions) != 1:
         fail(source, None,
              f"section `revisions:`: schema v1 admits exactly ONE revision, got "
-             f"{len(revisions)}. The bound is a SCHEMA bound, not a core one (DN-17.D14): "
+             f"{len(revisions)}. The bound is a SCHEMA bound, not a core one (ADR-17.D9): "
              "core carries the general span so that the day a vendor ships a second syntax "
              "generation is a data change rather than a redesign, and the v2 subject "
              "re-opens this by bumping the declaration schema version.")
