@@ -742,7 +742,7 @@ intent:
 """
 
 # The structure grain of the SHIPPED `github.step`, spelled out as the canonical-JSON preimage
-# `grain_hash` actually hashes. Sixty-six bytes, every token of it public vocabulary: the grain
+# `grain_hash` actually hashes. Sixty-nine bytes, every token of it public vocabulary: the grain
 # covers `dialect:` plus the `structure:` subtree and nothing else — never the entry name, never
 # the body. That is why the pin below can name the shipped hash inside a public tool without any
 # private declaration content crossing the repo boundary.
