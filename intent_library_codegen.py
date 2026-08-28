@@ -703,6 +703,69 @@ intent:
 """
 
 
+# The fixture the hash PINS below are taken on. It is `_SYNTHETIC_ENTRY`'s semantic content
+# carrying, in addition, the five lexical constructs the SHIPPED declarations use and the bare
+# fixture does not — measured against `logcraft/core/library/*.intent.yaml`, not guessed:
+# a column-0 comment, an indented full-line comment, a trailing comment after a value, a blank
+# line inside a block map, and a trailing comment after a flow sequence. A pin taken on a fixture
+# that exercises fewer front-end paths than the real declarations is green over exactly the
+# refactor that moves a real hash, which is the whole failure this gate exists to catch.
+#
+# It is SYNTHETIC, and that is a moat rule rather than a style one: this tool is public and the
+# intent declarations it projects are private (logcraft). No shipped declaration's content is
+# copied here — see the structure-grain congruence argued at the pin itself.
+_HASH_PIN_ENTRY = """\
+# A column-0 comment, because every shipped declaration opens with one.
+intent:
+  name: synthetic.pinned
+  dialect: github                    # a trailing comment after a value
+
+  structure:
+    kind: Step
+    payload: Declared
+
+  body:
+    # An indented full-line comment.
+    message_template: "{verb} {object}"
+    fields:
+      - name: verb
+        role: Categorical
+        domain: [alpha, beta]        # a trailing comment after a flow sequence
+      - name: object
+        role: Identifier
+        domain: open
+        cardinality: unbounded       # a continuation comment, indented past its key
+      - name: tally
+        role: Numeric
+        unit: count
+        constraint: ">= 0"
+"""
+
+# The structure grain of the SHIPPED `github.step`, spelled out as the canonical-JSON preimage
+# `grain_hash` actually hashes. Sixty-six bytes, every token of it public vocabulary: the grain
+# covers `dialect:` plus the `structure:` subtree and nothing else — never the entry name, never
+# the body. That is why the pin below can name the shipped hash inside a public tool without any
+# private declaration content crossing the repo boundary.
+_GITHUB_STEP_STRUCTURE_PREIMAGE = (
+    '{"dialect":"github","structure":{"kind":"Step","payload":"Declared"}}')
+
+# THE VALUE THAT MUST NOT MOVE. `logcraft/core/library/ratification.manifest.yaml` keys its one
+# record on this hash, and `resolve_ratification` matches records to entries BY it. The surface is
+# fail-closed: when a hash stops matching, nothing errors — the record simply stops resolving, the
+# entry drops out of `kStructureRatifiedEntries`, and the twin's ratified claim surface goes empty
+# with a build that is still green. A front-end refactor that moves it therefore RETRACTS A CLAIM
+# IN SILENCE, which is why the pin is a standing assertion here and not a step in a checklist.
+_GITHUB_STEP_STRUCTURE_HASH = \
+    "8eb81dca10a02d8434d779764dbacf8b36a29ed2ccfc12126b72a4ed633db1c1"
+
+# The same pin one grain over. The body grain is where the rich front-end paths land — the quoted
+# template and its placeholders, the flow-sequence domain, the open-domain cardinality, the
+# numeric unit and the quoted constraint — none of which the structure grain touches. Its value is
+# the FIXTURE's own: a shipped body grain is private content and is not reproduced here, so this
+# arm pins front-end invariance rather than a shipped record's key.
+_PINNED_BODY_HASH = "d111dedf7b6fa8f7b5d05e6a82428e47b78055e8cdf9907b5ccc2bb686bf4ad9"
+
+
 def _selftest_case(label: str, failures: list[str], check) -> None:
     try:
         check()
@@ -724,6 +787,44 @@ def _expect_rejection(label: str, failures: list[str], needle: str, thunk) -> No
 
 def _parse_entry(text: str, name: str = "synthetic.demo") -> dict:
     return validate_declaration(parse_subset_yaml(text, "<selftest>"), name, "<selftest>")
+
+
+
+def _pin_arms(pinned: dict, base_structure_hash: str, base_body_hash: str,
+              failures: list[str]) -> None:
+    """The four hash PINS, homed here so a fixture rejection reports once and skips them all."""
+    _selftest_case("pin: the fixture's structure grain IS github.step's", failures,
+                   lambda: _assert(
+                       json.dumps({"dialect": pinned.get("dialect"),
+                                   "structure": pinned.get("structure")},
+                                  sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+                       == _GITHUB_STEP_STRUCTURE_PREIMAGE,
+                       "the pinned fixture's structure grain no longer canonicalizes to the "
+                       "shipped github.step preimage, so the hash pin below has quietly stopped "
+                       "guarding the shipped record. Restore the fixture — do NOT re-baseline the "
+                       "constant, which would unpin the gate while leaving it green"))
+    _selftest_case("pin: github.step's structure hash has not moved", failures, lambda: _assert(
+        grain_hash(pinned, "structure") == _GITHUB_STEP_STRUCTURE_HASH,
+        "THE FRONT END MOVED A DECLARATION HASH. Expected "
+        f"{_GITHUB_STEP_STRUCTURE_HASH}, got {grain_hash(pinned, 'structure')}. This is not a "
+        "fixture failure: it is the key ratification.manifest.yaml resolves on, and the register "
+        "is FAIL-CLOSED, so shipping this moves github.step out of kStructureRatifiedEntries and "
+        "empties the twin's ratified claim surface with nothing red. Revert the front-end change; "
+        "a hash may only move when a DECLARATION is edited (DN-62.D8 G1)"))
+    _selftest_case("pin: the body grain's hash has not moved", failures, lambda: _assert(
+        grain_hash(pinned, "body") == _PINNED_BODY_HASH,
+        "the front end moved the BODY grain hash — the template, the flow-sequence domain, the "
+        "open-domain cardinality, the numeric unit or the quoted constraint canonicalizes "
+        f"differently. Expected {_PINNED_BODY_HASH}, got {grain_hash(pinned, 'body')}"))
+    _selftest_case("pin: comments and blank lines stay OUT of the hash", failures,
+                   lambda: _assert(
+                       grain_hash(pinned, "structure") == base_structure_hash
+                       and grain_hash(pinned, "body") == base_body_hash,
+                       "the five lexical constructs the shipped declarations carry — column-0 and "
+                       "indented comments, a trailing comment after a value and after a flow "
+                       "sequence, a blank line in a block map — must be transparent to the hash; "
+                       f"pinned={grain_hash(pinned, 'structure')}/{grain_hash(pinned, 'body')} vs "
+                       f"bare={base_structure_hash}/{base_body_hash}"))
 
 
 def selftest() -> int:
@@ -760,6 +861,27 @@ def selftest() -> int:
     _selftest_case("hash: domain order is semantic", failures, lambda: _assert(
         grain_hash(_parse_entry(field_order), "body") != base_body_hash,
         "domain order is positional-binding-semantic and must enter the hash"))
+
+    # ── the hash-stability PIN: every arm above is RELATIONAL, and that is the hole ──
+    # Reformat-invariant, key-order-invariant, edit-sensitive: all four still hold after a change
+    # that moves every hash in the world — swap sha256 for sha512, add one field to the preimage,
+    # alter the JSON separators, and the four properties above are untouched while the ratification
+    # register silently empties. Only a pinned VALUE catches that, and the four arms below take it
+    # on the construct-complete fixture so the pin exercises the same front-end paths the shipped
+    # declarations do.
+    # Parsed defensively rather than at statement level: this fixture carries constructs the bare
+    # one does not, so a front-end change can REJECT it while every earlier arm still passes. An
+    # uncaught rejection here would abort the run and leave the whole second half of the suite —
+    # teeth 2, the shape fences, the manifest partition, emission determinism — unreported, which
+    # turns one diagnosis into none.
+    try:
+        pinned = _parse_entry(_HASH_PIN_ENTRY, name="synthetic.pinned")
+    except DeclarationError as error:
+        failures.append(
+            "pin: the pinned fixture no longer PARSES, so the four hash pins below did NOT run — "
+            f"the front end now rejects a construct the shipped declarations use: {error}")
+    else:
+        _pin_arms(pinned, base_structure_hash, base_body_hash, failures)
 
     # ── tooth 2: the grammar has no ratified form ──
     for key in sorted(_RATIFICATION_KEYS):
@@ -976,8 +1098,9 @@ def selftest() -> int:
             print(f"selftest FAIL — {failure}", file=sys.stderr)
         return 1
     print("selftest OK — the fence holds: teeth 1-4 rejections fire, the hash is "
-          "canonical (reformat-stable, edit-sensitive), the manifest partitions "
-          "edit-vs-stale, emission is byte-deterministic ASCII")
+          "canonical (reformat-stable, edit-sensitive) and PINNED at github.step's "
+          "structure grain, the manifest partitions edit-vs-stale, emission is "
+          "byte-deterministic ASCII")
     return 0
 
 
