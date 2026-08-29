@@ -343,6 +343,29 @@ def parse_subset_yaml(text: str, source: str, *, ascii_only: bool = True) -> dic
     return node
 
 
+def key_line(text: str, source: str, key: str) -> int | None:
+    """The 1-based line on which mapping key `key` is written, or None if it is absent.
+
+    A refusal that names a file but not a line makes the author read the file; a refusal
+    that names the line makes the author read the line. The parse discards positions —
+    it returns plain dicts — so a caller that must CITE a key re-derives its line here.
+
+    Built on the SAME logical-line pass the parser itself runs (comments stripped, tabs
+    refused), so it can never disagree with the parse about what is a key and what is
+    scalar content: `message_template: "dialect: x"` partitions at the FIRST colon and
+    yields `message_template`, never `dialect`.
+
+    Returns the FIRST match. Uniqueness is the CALLER's premise, not this function's — in
+    the intent grammar it holds because `expect_keys` admits `dialect:` at exactly one
+    level and a declaration is one entry per file.
+    """
+    for line in _logical_lines(text, source):
+        head, separator, _ = line.text.partition(":")
+        if separator and head.strip() == key:
+            return line.number
+    return None
+
+
 # ── closed-grammar helpers ───────────────────────────────────────────────────
 
 

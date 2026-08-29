@@ -22,6 +22,15 @@ THE FOUR TEETH this tool carries (the soundness fence, §4):
   4. The showcase surface is fail-closed — the generated ratified indices contain
      ONLY hash-matched entries; Authored entries are not in them, by construction.
 
+THE LINK FENCE (DN-62.D9), which is NOT one of the teeth and is deliberately a different
+kind of rule. The four teeth are properties of a declaration; this one relates a
+declaration to the BUILD that compiles it. A `dialect:` names a canon semantic package
+the consuming target must LINK, and the build is the only thing that knows which ones it
+links — so it hands that set over as `--linked-dialects` and this tool refuses, by file
+and line, any declaration naming a dialect outside it. The relation is CONTAINMENT
+(declared ⊆ linked): a linked dialect nobody declares is legitimate. An absent or empty
+operand is FATAL rather than a skipped fence.
+
 RATIFICATION IS GRAIN-SCOPED (§4.6, ruled 2026-07-26). A declaration's two halves are
 measured independently and can carry OPPOSITE verdicts, so a record names the GRAIN it
 measured, resolution is keyed on (name, grain), and the freshness hash of tooth 3 covers
@@ -73,6 +82,7 @@ from codegen_common import (  # noqa: E402
     canonical_hash,
     expect_keys as _expect_keys_common,
     fail,
+    key_line,
     parse_subset_yaml,
     read_text,
     required as _required,
@@ -393,10 +403,75 @@ def resolve_ratification(entries: dict[str, dict], records: list[dict],
     return resolution
 
 
+# ── the link fence (DN-62.D9) ────────────────────────────────────────────────
+#
+# A declaration naming `dialect: X` compiles into `insight::semantic::X::Dialect`. If the
+# consuming target links no `insight_semantic_X` package, today's failure is a C++ error at a
+# GENERATED line the author never wrote — *no member named `X` in namespace `insight::semantic`*
+# — pointing at the projection instead of at the declaration that caused it.
+#
+# The fence closes that, and the SHAPE of the closure is the ruling. The build knows which dialect
+# packages the target links; the declaration does not, and the generator must not guess. So CMake
+# derives the set from its ONE list and hands it over as `--linked-dialects`, and the tool refuses
+# in its own vocabulary, citing the declaration's file and line.
+#
+# THE RELATION IS CONTAINMENT, NEVER EQUALITY (declared ⊆ linked). The intent MEDIA import the
+# same dialect packages for their own rendering with no declaration involved, so a dialect that is
+# linked and undeclared is legitimate and is NOT refused. Closing that direction with an equality
+# fence would red on a medium-only dialect.
+#
+# ABSENT OR EMPTY IS FATAL, NEVER A SKIPPED FENCE. A derived list reaches a tool through a build
+# system that can hand it nothing — a renamed variable, a reordered `set()`, a target that stopped
+# deriving it — and a fence that quietly disarms on an empty operand is worse than no fence, since
+# the build stays green while the guarantee is gone (MEM:conan-malf-build-workflow: an absent input
+# fails loudly and a WRONG one quietly; MEM:ci-vendoring-baseline-drift: a derived list needs a
+# fatal empty case).
+#
+# ⚠ THE OPERAND IS A BUILD COORDINATE AND ENTERS NOTHING. Not the hash preimage (`grain_hash`
+# covers `dialect:` plus one grain subtree and nothing this tool learns outside the document), and
+# not one byte of the emitted file. Both are standing gates rather than intentions: the four
+# pinned-value arms in `--selftest`, and the frozen projection byte-compare.
+
+
+def parse_linked_dialects(raw: str | None) -> frozenset[str]:
+    """The `--linked-dialects` operand: a comma-separated set of canon package suffixes."""
+    if raw is None:
+        fail("--linked-dialects", None,
+             "required: the set of canon semantic packages the consuming target LINKS, "
+             "comma-separated (e.g. `github,jenkins`). It is derived by the build, never "
+             "guessed here — and it is fatal rather than optional because a fence that "
+             "disarms when its operand goes missing leaves a green build with no guarantee")
+    members = [item.strip() for item in raw.split(",") if item.strip()]
+    if not members:
+        fail("--linked-dialects", None,
+             f"empty after parsing {raw!r} — a target that links no dialect package can "
+             "carry no declaration with a `dialect:`, so an empty set is a build-wiring "
+             "fault, not a valid configuration")
+    for member in members:
+        if not _DIALECT_PATTERN.fullmatch(member):
+            fail("--linked-dialects", None,
+                 f"{member!r} is not a canon semantic package suffix ([a-z_][a-z0-9_]*) — "
+                 "the operand names packages the way a declaration's `dialect:` does, so a "
+                 "member the grammar could never match would fence nothing")
+    return frozenset(members)
+
+
+def _refuse_unlinked_dialect(declaration: dict, text: str, source: str,
+                             linked_dialects: frozenset[str]) -> None:
+    dialect = declaration.get("dialect")
+    if dialect is None or dialect in linked_dialects:
+        return
+    fail(source, key_line(text, source, "dialect"),
+         f"declares `dialect: {dialect}`, but logcraft/core links no "
+         f"`insight_semantic_{dialect}` package — add the conan requirement in "
+         f"`core/conanfile.py`, the `find_package` in `core/CMakeLists.txt`, and "
+         f"`import insight.semantic.{dialect};` in `src/scenario/intent_library.cpp`")
+
+
 # ── discovery (§6 — the index is derived, never hand-maintained) ─────────────
 
 
-def discover_entries(library_dir: Path) -> dict[str, dict]:
+def discover_entries(library_dir: Path, linked_dialects: frozenset[str]) -> dict[str, dict]:
     """Scan the flat library directory; every *.intent.yaml IS an entry (fail-closed)."""
     entries: dict[str, dict] = {}
     for path in sorted(library_dir.iterdir()):
@@ -410,6 +485,11 @@ def discover_entries(library_dir: Path) -> dict[str, dict]:
                  "a *.intent.yaml in the library directory must declare an `intent:` root "
                  "— strays are rejected, not skipped (the index is derived by content)")
         declaration = validate_declaration(document, entry_name, str(path))
+        # The link fence runs HERE and not inside `validate_declaration`: that function is the
+        # GRAMMAR, shared in spirit with the dialect tool and answerable to the declaration alone.
+        # Which packages a target links is a build coordinate, and mixing the two would make the
+        # grammar unusable by any caller that does not have a build.
+        _refuse_unlinked_dialect(declaration, text, str(path), linked_dialects)
         name = declaration["name"]
         if name in entries:
             fail(str(path), None, f"duplicate library identity {name!r} (K1)")
@@ -646,8 +726,9 @@ def emit_cpp(entries: dict[str, dict], resolution: dict[str, dict | None],
 # ── generation driver ────────────────────────────────────────────────────────
 
 
-def generate(library_dir: Path, manifest_path: Path | None, out_path: Path) -> int:
-    entries = discover_entries(library_dir)
+def generate(library_dir: Path, manifest_path: Path | None, out_path: Path,
+             linked_dialects: frozenset[str]) -> int:
+    entries = discover_entries(library_dir, linked_dialects)
     notices: list[str] = []
     records: list[dict] = []
     if manifest_path is not None and manifest_path.exists():
@@ -904,6 +985,37 @@ def selftest() -> int:
                       lambda: _parse_entry(_SYNTHETIC_ENTRY.replace(
                           "payload: Declared", "payload: yarn_install")))
 
+    # ── the LINK fence (DN-62.D9): declared ⊆ linked, and the operand is not optional ──
+    #
+    # Five arms, and each covers a way the fence dies rather than a way it fires. The
+    # OPERAND arms exist because a fence whose input can go missing is a fence that
+    # disarms in silence: absent and empty must be as fatal as a bad declaration, and
+    # they are asserted on the operand parser directly because no declaration is
+    # involved. The CITATION arm is the one that keeps the refusal useful — a refusal
+    # naming a file but not a line makes the author read the whole file, and the line is
+    # re-derived rather than parsed, so it is exactly the kind of claim that rots
+    # unwatched. The CONTAINMENT arm is the boundary: linked-and-undeclared is
+    # legitimate (the intent media import dialect packages for their own rendering with
+    # no declaration involved), so an equality fence here would red on a medium-only
+    # dialect. Without it, every arm above is satisfiable by refusing everything.
+    _expect_rejection("link fence: absent operand is fatal", failures, "required",
+                      lambda: parse_linked_dialects(None))
+    _expect_rejection("link fence: empty operand is fatal", failures, "empty after parsing",
+                      lambda: parse_linked_dialects(" , ,"))
+    _expect_rejection("link fence: operand members are package suffixes", failures,
+                      "canon semantic package suffix",
+                      lambda: parse_linked_dialects("github,Jenkins"))
+    _expect_rejection("link fence: an unlinked dialect is refused, with its line", failures,
+                      "<selftest>:3: declares `dialect: github`",
+                      lambda: _refuse_unlinked_dialect(
+                          _parse_entry(_SYNTHETIC_ENTRY), _SYNTHETIC_ENTRY, "<selftest>",
+                          parse_linked_dialects("jenkins")))
+    _selftest_case("link fence: containment, not equality — a linked-and-undeclared "
+                   "dialect passes", failures,
+                   lambda: _refuse_unlinked_dialect(
+                       _parse_entry(_SYNTHETIC_ENTRY), _SYNTHETIC_ENTRY, "<selftest>",
+                       parse_linked_dialects("github,jenkins,gitlab")))
+
     # ── §2.3 witness ruling: open domain declares its cardinality class ──
     _expect_rejection("open domain: cardinality required", failures, "cardinality",
                       lambda: _parse_entry(_SYNTHETIC_ENTRY.replace(
@@ -1100,7 +1212,8 @@ def selftest() -> int:
     print("selftest OK — the fence holds: teeth 1-4 rejections fire, the hash is "
           "canonical (reformat-stable, edit-sensitive) and PINNED at github.step's "
           "structure grain, the manifest partitions edit-vs-stale, emission is "
-          "byte-deterministic ASCII")
+          "byte-deterministic ASCII, and the link fence refuses an unlinked dialect "
+          "with its line while an absent or empty --linked-dialects is fatal")
     return 0
 
 
@@ -1119,6 +1232,10 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--manifest", type=Path, default=None,
                         help="twin-generated ratification manifest (absent = all Authored)")
     parser.add_argument("--out", type=Path, help="generated C++ include to write")
+    parser.add_argument("--linked-dialects", default=None,
+                        help="comma-separated canon semantic packages the consuming target "
+                             "LINKS; a declaration naming any other dialect is refused "
+                             "(DN-62.D9). Build-derived; never defaulted")
     parser.add_argument("--selftest", action="store_true",
                         help="run the synthetic-fixture selftest and exit")
     args = parser.parse_args(argv)
@@ -1128,7 +1245,10 @@ def main(argv: list[str]) -> int:
     if args.library_dir is None or args.out is None:
         parser.error("--library-dir and --out are required (or use --selftest)")
     try:
-        return generate(args.library_dir, args.manifest, args.out)
+        # Parsed inside the try, so a missing or malformed operand refuses in the SAME
+        # vocabulary as a bad declaration instead of raising through argparse's.
+        linked_dialects = parse_linked_dialects(args.linked_dialects)
+        return generate(args.library_dir, args.manifest, args.out, linked_dialects)
     except DeclarationError as error:
         print(f"intent_library_codegen: {error}", file=sys.stderr)
         return 1
