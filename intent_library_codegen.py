@@ -57,7 +57,9 @@ The subset keeps parsing bit-stable with zero dependencies on every build host.
 from __future__ import annotations
 
 import argparse
+import io
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -396,7 +398,7 @@ def resolve_ratification(entries: dict[str, dict], records: list[dict],
             resolution[(name, grain)] = record
         else:
             notices.append(
-                f"notice: {name} was Ratified at grain {grain} against "
+                f"{name} was Ratified at grain {grain} against "
                 f"{record['declaration_hash'][:12]}... but that grain's hash is now "
                 f"{current_hash[:12]}... -- the edit revoked ratification for THAT GRAIN "
                 "only; it is Authored until the twin re-measures it")
@@ -726,6 +728,69 @@ def emit_cpp(entries: dict[str, dict], resolution: dict[str, dict | None],
 # ── generation driver ────────────────────────────────────────────────────────
 
 
+
+# ── revocation reporting ──────────────────────────────────────────────────
+#
+# A revoked grain is the one outcome here that changes what the build SHIPS without failing
+# it: the entry leaves that grain's ratified index, the showcase surface loses a row, and
+# the exit stays 0 because an edited declaration is a new unmeasured claim rather than an
+# error (§4.6 — that ruling stands; nothing below relaxes it). What the combination cost was
+# READABILITY: the only trace was one stderr line written from inside a ninja edge, and in
+# CI that is a line in a build log nobody opens.
+#
+# Under GitHub Actions the sentence is ALSO shaped as a `warning` workflow command. Additive,
+# never a replacement, and that is the load-bearing choice: the runner CONSUMES a recognised
+# command line out of the plain log, so emitting only the command would make the revocation
+# vanish entirely from the log on any run where the panel is not read or the command is not
+# recognised — strictly worse than the line it replaced. Emitting both is worse than the
+# annotation alone by one duplicated line and better than every failure of it.
+#
+# Reach, measured and unmeasured, because the difference decides how far to trust this: the
+# runner reads ONE byte stream per step and cannot tell a line written by the step's shell
+# from one written by a descendant, and the line was measured surviving
+# conan -> cmake -> ninja -> python -> tee unprefixed and at column 0, which is what the
+# command grammar needs. The runner's RENDERING of it into the annotation panel is NOT
+# established here and needs a real Actions run.
+#
+# The desk keeps the bare sentence: this tool runs on every logcraft build
+# (logcraft/core/CMakeLists.txt), and workflow syntax where no runner consumes it is noise
+# on a routine authoring action.
+
+# No `:` and no `,`: those are the property delimiters a title would otherwise have to
+# escape, and the selftest holds the constant to that shape rather than trusting it.
+_REVOCATION_WARNING_TITLE = "Intent ratification revoked"
+
+
+def workflow_command_escape(message: str) -> str:
+    """Escape a workflow-command MESSAGE for the Actions runner.
+
+    `%` is substituted FIRST: it is the escape character, so doing it after CR/LF would
+    re-escape the `%` this function had just written and the runner would render the
+    literal `%0A` instead of a newline.
+    """
+    return message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def report_revocations(notices: list[str], *, in_github_actions: bool,
+                       stream=sys.stderr) -> None:
+    """Print each revocation; under Actions add the annotation form on the SAME stream.
+
+    One stream for both forms so the pair stays adjacent and ordered — across two streams
+    the runner may interleave them and the plain sentence stops reading as the annotation's
+    twin.
+    """
+    for notice in notices:
+        print(f"notice: {notice}", file=stream)
+        if in_github_actions:
+            print(f"::warning title={_REVOCATION_WARNING_TITLE}::"
+                  f"{workflow_command_escape(notice)}", file=stream)
+
+
+def running_in_github_actions() -> bool:
+    """The runner sets GITHUB_ACTIONS=true; nothing else in the workspace sets it."""
+    return os.environ.get("GITHUB_ACTIONS") == "true"
+
+
 def generate(library_dir: Path, manifest_path: Path | None, out_path: Path,
              linked_dialects: frozenset[str]) -> int:
     entries = discover_entries(library_dir, linked_dialects)
@@ -737,8 +802,7 @@ def generate(library_dir: Path, manifest_path: Path | None, out_path: Path,
     resolution = resolve_ratification(entries, records, str(manifest_path), notices)
     source_names = [f"{name}{INTENT_FILE_SUFFIX}" for name in sorted(entries)]
     rendered = emit_cpp(entries, resolution, source_names)
-    for notice in notices:
-        print(notice, file=sys.stderr)
+    report_revocations(notices, in_github_actions=running_in_github_actions())
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if out_path.exists() and out_path.read_bytes() == rendered.encode("ascii"):
         return 0  # unchanged — do not touch the file (no rebuild churn)
@@ -1112,6 +1176,49 @@ def selftest() -> int:
         "a dialect swap must revoke every grain — no measurement survives it: "
         f"{resolution} / {notices}"))
 
+    # ── how a revocation REACHES a reader ──────────────────────────────────
+    #
+    # Both branches are asserted here because the CI branch is otherwise a path only CI
+    # runs, and a path only CI runs is a path nobody watches rot.
+    def _emitted(in_ci: bool) -> list[str]:
+        buffer = io.StringIO()
+        report_revocations(["synthetic.demo grain body moved"], in_github_actions=in_ci,
+                           stream=buffer)
+        return buffer.getvalue().splitlines()
+
+    desk_lines = _emitted(False)
+    _selftest_case("revocation: the desk gets the sentence and no workflow syntax",
+                   failures, lambda: _assert(
+                       desk_lines == ["notice: synthetic.demo grain body moved"],
+                       f"desk emission must carry no runner syntax, got {desk_lines}"))
+
+    ci_lines = _emitted(True)
+    _selftest_case("revocation: Actions gets the sentence AND the annotation form",
+                   failures, lambda: _assert(
+                       len(ci_lines) == 2
+                       and ci_lines[0] == "notice: synthetic.demo grain body moved"
+                       and ci_lines[1].startswith("::warning title=")
+                       and ci_lines[1].endswith("::synthetic.demo grain body moved"),
+                       "the command must ADD to the sentence, never replace it — a runner "
+                       f"consumes the command line out of the log: {ci_lines}"))
+
+    # The title is interpolated into the command's PROPERTY section, where `:` closes the
+    # properties and `,` separates them. Pinning the constant's shape is cheaper than
+    # escaping it, but only while something checks the shape.
+    _selftest_case("revocation: the annotation title needs no property escaping", failures,
+                   lambda: _assert(
+                       ":" not in _REVOCATION_WARNING_TITLE
+                       and "," not in _REVOCATION_WARNING_TITLE,
+                       "a property delimiter in the title would truncate the annotation: "
+                       f"{_REVOCATION_WARNING_TITLE!r}"))
+
+    _selftest_case("revocation: the message escapes the runner's delimiters", failures,
+                   lambda: _assert(
+                       workflow_command_escape("100% done\r\ntail")
+                       == "100%25 done%0D%0Atail",
+                       "`%` must be escaped FIRST or it re-escapes its own output: "
+                       f"{workflow_command_escape('100% done')!r}"))
+
     _expect_rejection("manifest: stale record is an instrument fault", failures,
                       "instrument fault",
                       lambda: resolve_ratification({"synthetic.other": base}, records,
@@ -1212,8 +1319,10 @@ def selftest() -> int:
     print("selftest OK — the fence holds: teeth 1-4 rejections fire, the hash is "
           "canonical (reformat-stable, edit-sensitive) and PINNED at github.step's "
           "structure grain, the manifest partitions edit-vs-stale, emission is "
-          "byte-deterministic ASCII, and the link fence refuses an unlinked dialect "
-          "with its line while an absent or empty --linked-dialects is fatal")
+          "byte-deterministic ASCII, the link fence refuses an unlinked dialect "
+          "with its line while an absent or empty --linked-dialects is fatal, and a "
+          "revocation reaches the desk as a sentence and Actions as that sentence PLUS "
+          "an annotation command")
     return 0
 
 
