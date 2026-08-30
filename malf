@@ -113,6 +113,17 @@ MALF_FORMAT_EXCLUDE_EXTRA="${MALF_FORMAT_EXCLUDE_EXTRA:-}"
 # aggregator BMIs that race clang's ASTReader under the parallel fan-out (see
 # cmd_lint's --header-filter note).
 MALF_LINT_EXCLUDE_EXTRA="${MALF_LINT_EXCLUDE_EXTRA:-test_package technical_docs tests benchmarks}"
+# Wall-clock ceiling for ONE clang-tidy translation unit. This is a WEDGE guard, not a
+# performance bar, and the two caps above do not cover the state it closes: a clang-tidy that
+# SEGFAULTS does not exit — it hangs symbolizing its own stack, indefinitely and while
+# allocating almost nothing, so neither the size cap nor the address-space cap ever fires and
+# the gate stalls forever on one dead TU. Measured twice on this workspace, on two unrelated
+# checks: cppcoreguidelines-owning-memory (2026-07-23) and modernize-use-std-print
+# (2026-08-30) — with symbolization suppressed the same crash returns in 0.22 s, so the whole
+# cost is the stack walk. The ceiling sits roughly twenty times above the worst legitimate TU
+# measured here: run serially on an idle box, insight-eidos/sift/src/engine/diff_engine.cpp
+# costs 30.3 s and coderoast-server/server/src/main.cpp 14.7 s (2026-08-30).
+MALF_LINT_TU_TIMEOUT_S="${MALF_LINT_TU_TIMEOUT_S:-600}"
 
 # ─── Cache resolution ────────────────────────────────────────────────────────
 # Local cache: workspace-shared .conan2 by default so sibling repos reuse the
@@ -1047,6 +1058,96 @@ cmd_test() {
     _malf_run_inventory "$target"
 }
 
+# Did this clang-tidy invocation DIE, rather than report? A dead run checked nothing at all,
+# which is a different fact from "checked and found nothing" and from "checked and found
+# something" — and it is the fact a lint gate has no vocabulary for by default.
+# Two independent tells, because neither alone covers the class: a status at or above 124
+# (timeout exits 124; a signal death exits 128+N), and the LLVM crash banner, which is emitted
+# even where a wrapper normalises the status to something innocent. EXPORTED because the
+# fan-out children are separate `bash -c` processes: one definition, reachable from both the
+# parent and the self-test, instead of a predicate that exists only inside a quoted string.
+_malf_tidy_crashed() {
+    local rc="$1" out="$2"
+    if (( rc >= 124 )); then return 0; fi
+    if [[ "$out" == *"PLEASE submit a bug report"* ]]; then return 0; fi
+    return 1
+}
+
+# ─── The expiry arm for the crash-driven check exclusions in config/.clang-tidy ─────────────
+# That config disables two checks because they CRASH clang-tidy. A crash exclusion decays at the
+# exact moment its premise stops being true: the tool gets fixed, nobody re-tests, and a
+# permanently-disabled check reads forever afterwards as a policy choice nobody chose. This arm
+# gives ONE of the two an automatic death — `-modernize-use-std-print`, whose premise is purely
+# mechanical (a byte >= 0x80 in a printf/fprintf format literal kills clang-tidy 21.1.8 inside
+# FormatStringConverter::appendFormatText) and therefore falsifiable in 0.2 s.
+#
+# It deliberately does NOT cover `-cppcoreguidelines-owning-memory`. That one carries a SECOND,
+# independent reason to stay disabled — it is meaningless without gsl::owner<> annotations and
+# the workspace has zero — so an arm firing on a fixed clang-tidy would demand a change that is
+# still the wrong change. A prescriptive instrument's false positive costs more than a missing
+# arm, because the first ignored red is what teaches everyone to ignore the next one.
+#
+# KEYED ON THE EXACT SPELLING of the disable line, so deleting the exclusion deletes the arm's
+# premise in the same edit: an arm policing a rule nobody writes any more is a red with no owner.
+#
+# BOTH CONTROLS BEFORE EITHER VERDICT. The subject leg (non-ASCII format literal) must crash; the
+# control leg — byte-identical but ASCII — must exit 0 first. Without that control, an
+# environment that cannot compile `#include <cstdio>` at all reports "did not crash", which reads
+# as "the bug is fixed": an expiry declared from a measurement that never happened. A failing
+# control yields NEITHER verdict, and says which one it is.
+_malf_lint_assert_crash_exclusion_live() {
+    local tidy="$1" cfg="$2"
+    [[ -n "$cfg" && -f "$cfg" ]] || return 0
+    grep -qE '^[[:space:]]*-[[:space:]]*-modernize-use-std-print[[:space:]]*$' "$cfg" || return 0
+
+    local tmp; tmp="$(mktemp -d -t malf_tidy_arm.XXXXXX)"
+    printf '#include <cstdio>\nvoid ascii_control(){std::printf("ascii only\\n");}\n' > "$tmp/control.cpp"
+    # ONE byte apart from the control. \342\200\224 is U+2014 EM DASH, written as octal escapes
+    # so this source line stays pure ASCII: the arm rests on a specific byte reaching the
+    # compiler, and a raw one here could be normalised away by an editor, a formatter or a
+    # transport without a single visible character changing.
+    printf '#include <cstdio>\nvoid subject(){std::printf("non ascii \342\200\224\\n");}\n' > "$tmp/subject.cpp"
+
+    # LLVM_SYMBOLIZER_PATH is pointed at nothing on purpose: the crash itself takes 0.2 s and
+    # the stack WALK takes minutes. The arm needs the verdict, not the backtrace.
+    #
+    # THE INNER `bash -c` IS LOAD-BEARING, not a style. When timeout's child dies on a signal,
+    # timeout re-raises that signal on itself so its status stays truthful — so whichever shell
+    # REAPS it prints "Segmentation fault" on its OWN stderr, which no redirection of the
+    # command can reach. Reaped by an inner shell that message lands in the leg's log, where it
+    # is evidence; reaped by this one it would print on every single lint run, about a crash
+    # this arm is deliberately provoking.
+    local args=('--checks=-*,modernize-use-std-print' -quiet)
+    local crc=0 src=0
+    bash -c 'ulimit -v "$1"; LLVM_SYMBOLIZER_PATH=/nonexistent timeout 60 "${@:2}"; rc=$?; exit "$rc"' \
+        _ "$MALF_SOURCE_MEM_LIMIT_KB" "$tidy" "${args[@]}" "$tmp/control.cpp" -- -std=c++23 \
+        > "$tmp/control.log" 2>&1 || crc=$?
+    if (( crc != 0 )) || grep -q 'PLEASE submit a bug report' "$tmp/control.log"; then
+        echo "malf lint: note: the -modernize-use-std-print crash-exclusion expiry arm could not RUN" >&2
+        echo "malf lint: (its ASCII control did not come back clean: rc=$crc). That exclusion in $cfg is" >&2
+        echo "malf lint: UNVERIFIED this run — neither confirmed nor refuted. Lint itself is unaffected." >&2
+        rm -rf "$tmp"
+        return 0
+    fi
+    bash -c 'ulimit -v "$1"; LLVM_SYMBOLIZER_PATH=/nonexistent timeout 60 "${@:2}"; rc=$?; exit "$rc"' \
+        _ "$MALF_SOURCE_MEM_LIMIT_KB" "$tidy" "${args[@]}" "$tmp/subject.cpp" -- -std=c++23 \
+        > "$tmp/subject.log" 2>&1 || src=$?
+    if (( src >= 124 )) || grep -q 'PLEASE submit a bug report' "$tmp/subject.log"; then
+        rm -rf "$tmp"
+        return 0        # premise holds. The expected state is silent on purpose.
+    fi
+
+    echo "malf lint: error: the -modernize-use-std-print crash exclusion has EXPIRED." >&2
+    echo "malf lint: $tidy no longer dies on a non-ASCII printf format literal (subject rc=$src," >&2
+    echo "malf lint: no crash banner), and that crash is the ONLY reason the check is disabled." >&2
+    echo "malf lint: SUCCESSOR — both halves, one edit, neither alone:" >&2
+    echo "malf lint:   1. delete the '- -modernize-use-std-print' line from $cfg" >&2
+    echo "malf lint:   2. delete _malf_lint_assert_crash_exclusion_live and its call site in this script" >&2
+    echo "malf lint: Until then the workspace is paying for coverage it no longer has to lose." >&2
+    rm -rf "$tmp"
+    return 1
+}
+
 cmd_lint() {
     local console=false all_files=false
     while [[ $# -gt 0 ]]; do
@@ -1187,6 +1288,9 @@ PY
             echo "malf lint: note: $install_tidy missing; using $clang_tidy_bin (a different clang build — module BMIs won't match it). 'sudo apt install clang-tidy-21' from the same source as clang-21 to align." >&2
     fi
     [[ -n "$clang_tidy_bin" ]] || { echo "malf lint: error: clang-tidy not found" >&2; exit 1; }
+
+    # Re-test the crash exclusion's premise before trusting the check set it edits (0.4 s).
+    _malf_lint_assert_crash_exclusion_live "$clang_tidy_bin" "$tidy_config" || exit 1
 
     # clang-tidy needs clang-21's OWN resource-dir to find its builtin headers
     # (stddef.h / limits.h via include_next), else a libc++ DB fails to resolve them.
@@ -1358,6 +1462,8 @@ PY
     export _MALF_CWD="$CWD"
     export _MALF_TOTAL="${#files[@]}"
     export _MALF_COUNTER="$counter_file"
+    export _MALF_TU_TIMEOUT="$MALF_LINT_TU_TIMEOUT_S"
+    export -f _malf_tidy_crashed
 
     # Pass each file as $1 to avoid xargs {} substitution inside the script body.
     # shellcheck disable=SC2016
@@ -1365,11 +1471,24 @@ PY
         | xargs -0 -P "$jobs" -n 1 bash -c '
             f="$1"
             ulimit -v "$_MALF_MEM_LIMIT"
-            out=$($_MALF_TIDY $_MALF_ARGS -quiet "$f" 2>&1); rc=$?
-            filtered=$(printf "%s\n" "$out" \
-                | grep -vE "^\[|^Suppressed|warnings generated|^$" || true)
+            out=$(timeout "$_MALF_TU_TIMEOUT" $_MALF_TIDY $_MALF_ARGS -quiet "$f" 2>&1); rc=$?
             key=$(printf "%s" "$f" | md5sum | cut -c1-8)
-            [ -n "$filtered" ] && printf "%s\n" "$filtered" > "$_MALF_TMP/${key}.out"
+            # A DEAD TOOL IS NOT A FINDING, and conflating the two is how a file goes
+            # unchecked without anyone learning it did. A clang-tidy that crashes on a TU
+            # inspected NOTHING in it — no check ran to completion — yet its crash dump is
+            # well-formed text carrying real paths and real line numbers, so merged into the
+            # findings list it reads as something the SOURCE did wrong, and the coverage hole
+            # itself leaves no trace in any file. Split here, at the only place that still
+            # knows WHICH file the tool died on. The predicate is _malf_tidy_crashed, exported
+            # by the parent — see its definition for the two tells and why both are needed.
+            if _malf_tidy_crashed "$rc" "$out"; then
+                printf "%s\n" "$f"   > "$_MALF_TMP/${key}.crash"
+                printf "%s\n" "$out" > "$_MALF_TMP/${key}.crashlog"
+            else
+                filtered=$(printf "%s\n" "$out" \
+                    | grep -vE "^\[|^Suppressed|warnings generated|^$" || true)
+                [ -n "$filtered" ] && printf "%s\n" "$filtered" > "$_MALF_TMP/${key}.out"
+            fi
             printf "x" >> "$_MALF_COUNTER"
             n=$(wc -c < "$_MALF_COUNTER")
             printf "[%d/%d] %s\n" "$n" "$_MALF_TOTAL" "${f#"$_MALF_CWD/"}" >&2
@@ -1397,8 +1516,44 @@ PY
         fi
     fi
 
+    # THE TRANSLATION UNITS THAT WERE NOT CHECKED AT ALL — named, counted, and fatal.
+    # This is the half a lint gate normally has no word for: a file can be clean, dirty, or
+    # UNREAD, and only the first two have a vocabulary. Before this, a crash left the run red
+    # with a stack dump in the findings and nothing anywhere saying that a named file had
+    # gone through zero checks; both TUs it was true of on 2026-08-30 had been discovered by
+    # accident, by lanes doing other work. An unlinted file must never be able to pass for a
+    # linted one, so the count is reported separately and the run cannot exit 0.
+    local -a crashed=()
+    local ckey
+    for file in "${files[@]}"; do
+        ckey="$(printf '%s' "$file" | md5sum | cut -c1-8)"
+        [[ -f "$tmpdir/${ckey}.crash" ]] && crashed+=("$file")
+    done
+    if (( ${#crashed[@]} > 0 )); then
+        lint_status=1
+        echo "malf lint: ${#crashed[@]} of ${#files[@]} translation unit(s) NOT LINTED — clang-tidy died on them:" >&2
+        printf '  %s\n' "${crashed[@]#"$CWD"/}" >&2
+        echo "malf lint: these files were checked by ZERO checks. This is a coverage hole, not a" >&2
+        echo "malf lint: finding, and not a slow run. The crash dump below names the culprit on its" >&2
+        echo "malf lint: \"ASTMatcher: Processing '<check>'\" line. Two remedies, and only two: remove" >&2
+        echo "malf lint: the construct the check dies on, or disable that check in the config this run" >&2
+        echo "malf lint: used (${tidy_config:-none}) with a reproducer, the coverage the disable costs," >&2
+        echo "malf lint: and an expiry. A per-site NOLINT is NOT a third option: the crash happens" >&2
+        echo "malf lint: inside the check, before any diagnostic exists to suppress." >&2
+        {
+            echo
+            echo "=== NOT LINTED (clang-tidy crashed) — ${#crashed[@]} translation unit(s) ==="
+            for file in "${crashed[@]}"; do
+                ckey="$(printf '%s' "$file" | md5sum | cut -c1-8)"
+                echo "--- ${file#"$CWD"/}"
+                head -n 40 "$tmpdir/${ckey}.crashlog"
+            done
+        } >> "${output_file:-/dev/stdout}"
+    fi
+
     rm -rf "$tmpdir"
-    unset _MALF_TIDY _MALF_ARGS _MALF_TMP _MALF_CWD _MALF_TOTAL _MALF_COUNTER _MALF_MEM_LIMIT
+    unset _MALF_TIDY _MALF_ARGS _MALF_TMP _MALF_CWD _MALF_TOTAL _MALF_COUNTER _MALF_MEM_LIMIT _MALF_TU_TIMEOUT
+    export -nf _malf_tidy_crashed
 
     if [[ -n "$output_file" ]]; then
         echo "malf lint: output written to $output_file"
@@ -2330,6 +2485,11 @@ Commands:
     build   [target] [--debug|--release|--asan|--profile <name>]
     test    [target] [--debug|--release|--asan|--profile <name>] [--verbose] [--filter PATTERN]
     lint    [--all-files] [-c|--console]
+                               a translation unit clang-tidy DIES on is reported as NOT LINTED,
+                               by name and separately from the findings, and fails the run —
+                               a crash dump is a coverage hole, never a finding. Each TU is
+                               capped at MALF_LINT_TU_TIMEOUT_S (600 s), because a crashed
+                               clang-tidy hangs symbolizing rather than exiting.
     format  [--check]          guarded: files over MALF_SOURCE_MAX_FILE_KB (2048) are skipped and
                                reported, and each clang-format process is capped at
                                MALF_SOURCE_MEM_LIMIT_KB (4 GB) of address space — clang-format
