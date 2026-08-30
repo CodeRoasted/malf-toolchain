@@ -61,6 +61,32 @@ on:
         type: boolean
         required: false
         default: true
+      dead-symbol-base:
+        description: |
+          The commit the dead-symbol diff is taken FROM. Empty (the default) keeps `HEAD~1..HEAD`.
+
+          WHY THIS INPUT EXISTS. Diff scope is the whole reason this gate is usable at all — a
+          whole-tree sweep flagged 119 of 1289 candidates, almost all legitimate — but a diff has
+          a BASE, and `HEAD~1` is only the right base when the event supplies one. On a
+          `pull_request` it does: the checkout is the merge commit, so `HEAD~1` IS the base tip and
+          the range is exactly the PR. On a `workflow_dispatch` nothing supplies a base, so
+          `HEAD~1..HEAD` means "whatever single commit happens to be on the tip of the dispatched
+          ref" — a well-defined range, but not the one an operator dispatching a lint over a branch
+          believes they asked for. The verdict is then narrower than it reads, and a verdict read
+          wider than it is measured is the failure a green badge is made of.
+
+          So: pass a base here to scope the run deliberately (`main`, a tag, a SHA), and when you
+          do not, the job PRINTS a notice on every non-PR event naming both endpoints and saying
+          the scope is one commit. The default is unchanged, so no caller's behaviour moves; what
+          moves is that the narrow case can no longer be read as the wide one.
+
+          The checkout here is `fetch-depth: 2`, so a base outside that window is not in the clone.
+          The compute step fetches it on demand and FAILS NAMING IT if it still cannot be resolved
+          — an unresolvable base must never silently fall back to `HEAD~1`, which is the shape that
+          turns a deliberate scope into the arbitrary one it was passed to replace.
+        type: string
+        required: false
+        default: ''
       lint:
         description: |
           Run `malf lint --all-files` (clang-tidy) over the caller repo's SHIPPING C++ sources, in
@@ -174,9 +200,53 @@ jobs:
       # newest gate here, and a repo should learn its workflows, modules and formatting are sound
       # before it hears about a comment. Unlike format-check this one needs no provisioning, so
       # ordering costs nothing either way.
+      # The base is decided HERE, in bash, and not in a `${{ }}` expression on the step below,
+      # because only bash can fetch a base the shallow checkout does not have and REFUSE when it
+      # still cannot resolve it. An expression can only choose between strings it already has.
+      - name: Resolve the dead-symbol diff base
+        id: dead-symbol-range
+        if: ${{ inputs.dead-symbol-check }}
+        env:
+          BASE: ${{ inputs.dead-symbol-base }}
+        run: |
+          set -euo pipefail
+          if [ -n "$BASE" ]; then
+            # Two-dot `a..b` on `git diff` is a TREE comparison, so the base only has to be
+            # present as an object — it does not have to be connected to HEAD. A depth-1 fetch is
+            # therefore enough, and is what keeps this cheap on the shallow checkout above.
+            if ! git rev-parse --verify --quiet "${BASE}^{commit}" >/dev/null; then
+              git fetch --no-tags --depth=1 origin "$BASE" || true
+              # `if`, never `a && b`: under `set -e` a false `&&` compound IS the step's status, so
+              # the spelling that reads as "try this" would abort the job on the very path that
+              # exists to recover. The failure would then arrive as a bare non-zero with no message.
+              if git rev-parse --verify --quiet "FETCH_HEAD^{commit}" >/dev/null; then
+                BASE=FETCH_HEAD
+              fi
+            fi
+            if ! git rev-parse --verify --quiet "${BASE}^{commit}" >/dev/null; then
+              echo "::error::dead-symbol-base '${{ inputs.dead-symbol-base }}' does not resolve in this checkout and could not be fetched. Refusing to fall back to HEAD~1: a silent fallback turns the deliberate scope you passed back into the arbitrary one."
+              exit 1
+            fi
+            echo "range=$(git rev-parse "${BASE}^{commit}")..HEAD" >> "$GITHUB_OUTPUT"
+            echo "dead-symbol range: ${{ inputs.dead-symbol-base }}..HEAD (explicit base)"
+          else
+            echo "range=HEAD~1..HEAD" >> "$GITHUB_OUTPUT"
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              echo "dead-symbol range: HEAD~1..HEAD — on a pull_request the checkout is the MERGE commit, so HEAD~1 is the base tip and this range is exactly the PR."
+            else
+              # The scope is correct and narrower than the word "lint" suggests, so it is stated
+              # rather than left for a reader to assume. `::notice::` and not `::warning::`: this
+              # is the documented default, not a defect, and a warning on every dispatch is how a
+              # real one stops being seen.
+              echo "::notice::dead-symbol gate scope is ONE COMMIT: $(git rev-parse --short HEAD~1)..$(git rev-parse --short HEAD) on ${{ github.ref }}. No base was supplied and this event carries none, so the gate did NOT examine the branch. Pass dead-symbol-base to scope it deliberately."
+            fi
+          fi
+
       - name: Dead symbol in comment
         if: ${{ inputs.dead-symbol-check }}
         uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dead-symbol@904d650c3a6bd206540a0912150591879aad9107
+        with:
+          range: ${{ steps.dead-symbol-range.outputs.range }}
 
       # LAST, and it runs even when a step above it FAILED — `!cancelled()`, not the default. That
       # is the ruling's operative half: lint and format must be answered by ONE run, because a
