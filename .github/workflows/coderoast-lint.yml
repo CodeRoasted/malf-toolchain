@@ -67,24 +67,32 @@ on:
           THIS job, beside `malf format --check` — see the ruling in the header.
 
           THIS IS THE EXPENSIVE ONE, and the number belongs where the toggle is. Measured
-          2026-08-30 on this workflow's own `checks` job, before and after, same commit:
-            · coderoast-ipc (hosted ubuntu-latest)  32 s -> 159 s   (+120 s in this step)
-            · coderoast-security (self-hosted fleet) 10 s -> 250 s  (+237 s in this step)
-          The multiplier is 5x hosted and 25x on the fleet, and both of those repos are TOWER ROOTS
-          — the two smallest builds in the workspace. The scale reference for the rest is each
-          repo's own gcc ci.yml run, which is the same build one toolchain cheaper and WITH a
-          published binary cache: insight-twin 130 s · insight-metalog 170 s · insight-canon 215 s ·
-          logcraft 990 s · coderoast-server 1400 s. There is no published clang binary cache, so
-          this leg builds its third-party closure from source.
+          2026-08-30 by dispatch, before -> after on this job, same commit:
+            · coderoast-ipc       hosted   32 s ->  159 s  (+120 s)   5.0x   4 of 4 sources, GREEN
+            · coderoast-security  fleet    13 s ->  281 s  (+237 s)  21.6x  16 of 16 TUs,    GREEN
+            · insight-canon       hosted   30 s -> 1268 s (+1236 s)  42.3x  56 files,        RED
+          The first two are TOWER ROOTS — the smallest builds in the workspace — so they are floors,
+          not typical costs. insight-canon is the first repo here with a real dependency graph, and
+          21 minutes is what this leg costs when the third-party closure has to be built from source,
+          which it always does: conan binaries are package_id-keyed on the compiler and only the
+          gcc-16 cache is published, so nothing warms a clang leg.
 
-          TWO CONSEQUENCES THAT ARE NOT OBVIOUS FROM THE COST. Every release.yaml runs
-          `ci: needs: lint`, so this build now sits IN FRONT of the cut's own build, serially, and
-          the five private repos queue for ONE self-hosted box. And a repo whose first-party
-          requires live in ANOTHER repo cannot run this gate at all yet — the action's description
-          owns that limit and names the shape that closes it; such a repo sets `lint: false` here
-          with the reason written at the site.
+          WHAT THE COST BUYS, since a 42x multiplier needs one: canon's red is SIX error-grade
+          diagnostics in four files that no instrument had ever looked at —
+          bugprone-unchecked-optional-access twice in the published `canon.spi.cppm`,
+          bugprone-exception-escape three times, bugprone-implicit-widening once.
 
-          Set false for a repo with no C++, or for the cross-repo case above. Never set it false to
+          TRIGGER CADENCE IS THE OTHER HALF OF THE COST, and it is small: measured across all eight
+          C++ repos, ONE pull request since 2026-07-01. On a main-only trunk `pull_request` is
+          effectively dead and no repo carries a push trigger, so this runs once per repo per
+          RELEASE TAG plus manual dispatch — which is where the gates are designed to run.
+
+          Every release.yaml runs `ci: needs: lint`, so this build sits IN FRONT of the cut's own
+          build, serially. A repo whose first-party requires live in ANOTHER repo cannot run this
+          gate at all yet — the action's description owns that limit and names the shape that closes
+          it; such a repo sets `lint: false` here with the reason written at the site.
+
+          Set false for a repo with no C++, or for that cross-repo case. Never set it false to
           silence findings: a red here is the gate working.
         type: boolean
         required: false
