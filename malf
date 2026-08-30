@@ -1073,81 +1073,6 @@ _malf_tidy_crashed() {
     return 1
 }
 
-# ─── The expiry arm for the crash-driven check exclusions in config/.clang-tidy ─────────────
-# That config disables two checks because they CRASH clang-tidy. A crash exclusion decays at the
-# exact moment its premise stops being true: the tool gets fixed, nobody re-tests, and a
-# permanently-disabled check reads forever afterwards as a policy choice nobody chose. This arm
-# gives ONE of the two an automatic death — `-modernize-use-std-print`, whose premise is purely
-# mechanical (a byte >= 0x80 in a printf/fprintf format literal kills clang-tidy 21.1.8 inside
-# FormatStringConverter::appendFormatText) and therefore falsifiable in 0.2 s.
-#
-# It deliberately does NOT cover `-cppcoreguidelines-owning-memory`. That one carries a SECOND,
-# independent reason to stay disabled — it is meaningless without gsl::owner<> annotations and
-# the workspace has zero — so an arm firing on a fixed clang-tidy would demand a change that is
-# still the wrong change. A prescriptive instrument's false positive costs more than a missing
-# arm, because the first ignored red is what teaches everyone to ignore the next one.
-#
-# KEYED ON THE EXACT SPELLING of the disable line, so deleting the exclusion deletes the arm's
-# premise in the same edit: an arm policing a rule nobody writes any more is a red with no owner.
-#
-# BOTH CONTROLS BEFORE EITHER VERDICT. The subject leg (non-ASCII format literal) must crash; the
-# control leg — byte-identical but ASCII — must exit 0 first. Without that control, an
-# environment that cannot compile `#include <cstdio>` at all reports "did not crash", which reads
-# as "the bug is fixed": an expiry declared from a measurement that never happened. A failing
-# control yields NEITHER verdict, and says which one it is.
-_malf_lint_assert_crash_exclusion_live() {
-    local tidy="$1" cfg="$2"
-    [[ -n "$cfg" && -f "$cfg" ]] || return 0
-    grep -qE '^[[:space:]]*-[[:space:]]*-modernize-use-std-print[[:space:]]*$' "$cfg" || return 0
-
-    local tmp; tmp="$(mktemp -d -t malf_tidy_arm.XXXXXX)"
-    printf '#include <cstdio>\nvoid ascii_control(){std::printf("ascii only\\n");}\n' > "$tmp/control.cpp"
-    # ONE byte apart from the control. \342\200\224 is U+2014 EM DASH, written as octal escapes
-    # so this source line stays pure ASCII: the arm rests on a specific byte reaching the
-    # compiler, and a raw one here could be normalised away by an editor, a formatter or a
-    # transport without a single visible character changing.
-    printf '#include <cstdio>\nvoid subject(){std::printf("non ascii \342\200\224\\n");}\n' > "$tmp/subject.cpp"
-
-    # LLVM_SYMBOLIZER_PATH is pointed at nothing on purpose: the crash itself takes 0.2 s and
-    # the stack WALK takes minutes. The arm needs the verdict, not the backtrace.
-    #
-    # THE INNER `bash -c` IS LOAD-BEARING, not a style. When timeout's child dies on a signal,
-    # timeout re-raises that signal on itself so its status stays truthful — so whichever shell
-    # REAPS it prints "Segmentation fault" on its OWN stderr, which no redirection of the
-    # command can reach. Reaped by an inner shell that message lands in the leg's log, where it
-    # is evidence; reaped by this one it would print on every single lint run, about a crash
-    # this arm is deliberately provoking.
-    local args=('--checks=-*,modernize-use-std-print' -quiet)
-    local crc=0 src=0
-    bash -c 'ulimit -v "$1"; LLVM_SYMBOLIZER_PATH=/nonexistent timeout 60 "${@:2}"; rc=$?; exit "$rc"' \
-        _ "$MALF_SOURCE_MEM_LIMIT_KB" "$tidy" "${args[@]}" "$tmp/control.cpp" -- -std=c++23 \
-        > "$tmp/control.log" 2>&1 || crc=$?
-    if (( crc != 0 )) || grep -q 'PLEASE submit a bug report' "$tmp/control.log"; then
-        echo "malf lint: note: the -modernize-use-std-print crash-exclusion expiry arm could not RUN" >&2
-        echo "malf lint: (its ASCII control did not come back clean: rc=$crc). That exclusion in $cfg is" >&2
-        echo "malf lint: UNVERIFIED this run — neither confirmed nor refuted. Lint itself is unaffected." >&2
-        rm -rf "$tmp"
-        return 0
-    fi
-    bash -c 'ulimit -v "$1"; LLVM_SYMBOLIZER_PATH=/nonexistent timeout 60 "${@:2}"; rc=$?; exit "$rc"' \
-        _ "$MALF_SOURCE_MEM_LIMIT_KB" "$tidy" "${args[@]}" "$tmp/subject.cpp" -- -std=c++23 \
-        > "$tmp/subject.log" 2>&1 || src=$?
-    if (( src >= 124 )) || grep -q 'PLEASE submit a bug report' "$tmp/subject.log"; then
-        rm -rf "$tmp"
-        return 0        # premise holds. The expected state is silent on purpose.
-    fi
-
-    echo "malf lint: error: the -modernize-use-std-print crash exclusion has EXPIRED." >&2
-    echo "malf lint: $tidy no longer dies on a non-ASCII printf format literal (subject rc=$src," >&2
-    echo "malf lint: no crash banner), and that crash is the ONLY reason the check is disabled." >&2
-    echo "malf lint: SUCCESSOR — both halves, one edit, neither alone:" >&2
-    echo "malf lint:   1. delete the '- -modernize-use-std-print' line from $cfg" >&2
-    echo "malf lint:   2. delete _malf_lint_assert_crash_exclusion_live and its call site in this script" >&2
-    echo "malf lint: Until then the workspace is paying for coverage it no longer has to lose." >&2
-    rm -rf "$tmp"
-    return 1
-}
-
 cmd_lint() {
     local console=false all_files=false
     while [[ $# -gt 0 ]]; do
@@ -1288,9 +1213,6 @@ PY
             echo "malf lint: note: $install_tidy missing; using $clang_tidy_bin (a different clang build — module BMIs won't match it). 'sudo apt install clang-tidy-21' from the same source as clang-21 to align." >&2
     fi
     [[ -n "$clang_tidy_bin" ]] || { echo "malf lint: error: clang-tidy not found" >&2; exit 1; }
-
-    # Re-test the crash exclusion's premise before trusting the check set it edits (0.4 s).
-    _malf_lint_assert_crash_exclusion_live "$clang_tidy_bin" "$tidy_config" || exit 1
 
     # clang-tidy needs clang-21's OWN resource-dir to find its builtin headers
     # (stddef.h / limits.h via include_next), else a libc++ DB fails to resolve them.

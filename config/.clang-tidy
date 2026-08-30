@@ -52,43 +52,6 @@ Checks:
   # is enforced, CLAUDE.md). Re-evaluate if a fixed clang-tidy lands AND we adopt owner<>.
   - -cppcoreguidelines-owning-memory
 
-  # CRASHES the tool on any TU that PRINTS a non-ASCII byte — not a style choice, and a
-  # DIFFERENT crash from the one above: this one is data-driven, not module-driven.
-  # modernize-use-std-print SIGSEGVs clang-tidy 21.1.8 inside
-  # clang::tidy::utils::FormatStringConverter::appendFormatText whenever the FORMAT-STRING
-  # LITERAL of a printf/fprintf call contains a byte >= 0x80 — then hangs symbolizing its own
-  # stack, so an unbounded run reads as "slow" rather than "dead" (the same second face as
-  # owning-memory above). Two-line reproducer, no modules, no compile database, measured
-  # 2026-08-30:
-  #     #include <cstdio>
-  #     void f(){ std::printf("a <U+2014> b\n"); }
-  # The BYTE is the trigger, not the character and not the specifier: U+2014, U+2500, U+00A7
-  # and a bare 0xFF all crash, with or without a %-conversion; the same text in a comment, or
-  # in a non-format argument, does not. NOLINT CANNOT SUPPRESS IT — the crash is inside
-  # check(), before any diagnostic exists to filter (measured, same day). Neither can a
-  # narrower scope: the sibling check modernize-use-std-format shares the converter but its
-  # default StrFormatLikeFunctions list is empty here, so it never matches and never crashes.
-  #
-  # DISABLING IT COSTS NOTHING TODAY, and that is a measurement rather than the owning-memory
-  # argument reused: printf/fprintf appears in exactly 3 of the workspace's 330 lint-scope
-  # translation units (202 call sites — insight-eidos sift/src/engine/diff_engine.cpp and
-  # engine/tools/{incident_episode_measure,tailshift_reach_measure}.cpp) and those 3 are
-  # PRECISELY the TUs it dies on. Its matchable population and its crashing population are
-  # the same set, so enabled it had zero live coverage while costing the other 234 checks on
-  # those 3 files — shipping Sift engine code among them. The cost of the disable is future
-  # code only: a new printf elsewhere loses one modernize nudge. Unblocking those three
-  # surfaced 257 findings on 2026-08-30, 207 of them error-grade (bugprone / performance /
-  # cppcoreguidelines are WarningsAsErrors below) — the first look any of them had had.
-  # 202 of the 207 are cppcoreguidelines-pro-type-vararg, one per printf call: converting
-  # those three files to std::print would clear them AND remove this crash's trigger, at
-  # which point this exclusion is dead weight rather than protection.
-  #
-  # EXPIRY + SUCCESSOR, and it is a mechanism rather than a hope: `malf lint` re-runs that
-  # reproducer on every invocation (0.2 s, symbolization off) behind an ASCII control, and
-  # FAILS naming this line the moment clang-tidy stops crashing. Successor: delete this line
-  # and delete that arm — neither alone. The arm is keyed on this exact spelling.
-  - -modernize-use-std-print
-
   # NOTE (modules) — misc-* is NOT enabled here, so this does not run today. If you ever
   # allowlist misc-*, disable misc-use-internal-linkage: on named-module code it wrongly
   # pushes a non-exported NAMED-namespace helper (which already has internal MODULE linkage,

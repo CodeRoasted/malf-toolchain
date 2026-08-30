@@ -428,7 +428,7 @@ rm -rf "$guard_tmp" "$fmt_iso"
 
 echo
 
-echo "[7j] lint tells a DEAD tool apart from a clean one, and the crash exclusion has an expiry"
+echo "[7j] lint tells a DEAD translation unit apart from a clean one"
 
 # Two subjects, one disease. On 2026-08-30 clang-tidy 21.1.8 was found to SIGSEGV on three
 # translation units in insight-eidos, and the way both of the first two were found is the point:
@@ -436,17 +436,21 @@ echo "[7j] lint tells a DEAD tool apart from a clean one, and the crash exclusio
 # zero checks — the crash dump merged into the findings list, where it reads as something the
 # SOURCE did wrong. A file can be clean, dirty, or UNREAD, and only the first two had a word.
 #
-# Pinned here and not trusted, because both halves fail SILENTLY:
-#   1. THE PREDICATE. `_malf_tidy_crashed` decides which of "reported" and "died" happened. It
-#      is exported into the fan-out children, so a regression in it turns every future crash
-#      back into a plausible-looking finding on a file nobody knows went unchecked.
-#   2. THE EXPIRY. config/.clang-tidy disables `modernize-use-std-print` because it crashes.
-#      That premise dies the day clang-tidy is fixed, and nothing about a fixed tool announces
-#      itself — a crash exclusion that outlives its bug is a permanently disabled check that
-#      reads forever as a policy choice. `_malf_lint_assert_crash_exclusion_live` is the arm
-#      that kills it; these arms are what keep the ARM honest.
-# No clang-tidy is needed for either: the predicate is pure, and the expiry arm is driven with
-# stub binaries whose exit status is the whole input. That matters — this suite runs on a hosted
+# Pinned here and not trusted, because it fails SILENTLY: `_malf_tidy_crashed` decides which of
+# "reported" and "died" happened, and it is exported into the fan-out children, so a regression in
+# it turns every future crash back into a plausible-looking finding on a file nobody knows went
+# unchecked.
+#
+# A SECOND subject stood here until 2026-08-30 — an expiry arm on config/.clang-tidy's
+# `-modernize-use-std-print` line, which disabled that check because clang-tidy 21.1.8 SIGSEGVs on
+# a printf/fprintf format literal carrying a byte >= 0x80. Exclusion and arm are both gone, and
+# the reason is NOT that the tool was fixed (it still crashes): the workspace's last 202
+# printf/fprintf calls became std::print, so the check has no matchable call site left to die on
+# and was re-enabled. A newly written printf carrying a non-ASCII format literal would still kill
+# its own TU — and the predicate below is what reports that, by name, instead of letting it read
+# as a finding.
+#
+# No clang-tidy is needed: the predicate is pure. That matters — this suite runs on a hosted
 # runner with no toolchain, and an arm that quietly skips there would be zero coverage in a green
 # shirt.
 
@@ -463,45 +467,6 @@ check "timeout (rc 124) reads as DIED — the crash HANGS symbolizing, so slow I
       "died" "$(crash_verdict 124 '')"
 check "rc 0 WITH the LLVM crash banner reads as DIED — the status alone is not the tell" \
       "died" "$(crash_verdict 0 'PLEASE submit a bug report to https://github.com/llvm/llvm-project/issues/')"
-
-# The expiry arm, driven by stub tools. `arm_tmp/cfg` carries the real disable line spelling,
-# because the arm is keyed on it: delete the exclusion and the arm must go inert in the same
-# edit rather than survive as a red with no owner.
-arm_fn="$(sed -n '/^_malf_lint_assert_crash_exclusion_live() {/,/^}/p' "$MALF_BIN")"
-arm_tmp="$(mktemp -d)"
-printf 'Checks:\n  - modernize-*\n  - -modernize-use-std-print\n' > "$arm_tmp/cfg"
-printf 'Checks:\n  - modernize-*\n'                               > "$arm_tmp/cfg_no_exclusion"
-# A stub that never crashes == the day the upstream bug is fixed.
-printf '#!/bin/bash\nexit 0\n' > "$arm_tmp/tidy_fixed"; chmod +x "$arm_tmp/tidy_fixed"
-# A stub whose CONTROL leg fails == an environment that cannot answer the question at all.
-printf '#!/bin/bash\necho "error: no such file <cstdio>"\nexit 1\n' > "$arm_tmp/tidy_broken"; chmod +x "$arm_tmp/tidy_broken"
-
-arm_run() { bash -c "MALF_SOURCE_MEM_LIMIT_KB=4194304; $arm_fn; _malf_lint_assert_crash_exclusion_live \"\$1\" \"\$2\" 2>\"$arm_tmp/err\"; echo \$?" _ "$1" "$2"; }
-
-arm_fixed_rc="$(arm_run "$arm_tmp/tidy_fixed" "$arm_tmp/cfg")"
-arm_fixed_err="$(cat "$arm_tmp/err")"
-check "arm FAILS when clang-tidy stops crashing (the mutation: it must be able to fire)" \
-      "rc=1" "rc=$arm_fixed_rc"
-check "arm names its own successor — the config line AND the arm, never one alone" \
-      "both named" \
-      "$([[ "$arm_fixed_err" == *"-modernize-use-std-print"* && "$arm_fixed_err" == *"_malf_lint_assert_crash_exclusion_live"* ]] \
-         && echo "both named" || echo "GOT: $arm_fixed_err")"
-
-arm_broken_rc="$(arm_run "$arm_tmp/tidy_broken" "$arm_tmp/cfg")"
-arm_broken_err="$(cat "$arm_tmp/err")"
-check "a failing ASCII control yields NEITHER verdict — an unrun arm never declares an expiry" \
-      "rc=0" "rc=$arm_broken_rc"
-check "...and says so out loud rather than passing quietly" \
-      "declared" \
-      "$([[ "$arm_broken_err" == *"UNVERIFIED"* ]] && echo declared || echo "GOT: $arm_broken_err")"
-
-arm_none_rc="$(arm_run "$arm_tmp/tidy_fixed" "$arm_tmp/cfg_no_exclusion")"
-arm_none_err="$(cat "$arm_tmp/err")"
-check "no exclusion in the config => arm is inert (no rule to police, so no red)" \
-      "rc=0 silent" \
-      "rc=$arm_none_rc $([[ -z "$arm_none_err" ]] && echo silent || echo "GOT: $arm_none_err")"
-
-rm -rf "$arm_tmp"
 
 echo
 
