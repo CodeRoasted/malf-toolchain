@@ -160,7 +160,7 @@ jobs:
 
       - name: C++ modules conformance
         if: ${{ inputs.module-conformance }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-module-conformance@042417dd86b9a597e071737a7845ddacf7180d1f
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-module-conformance@f2147f394a174e4f2997460d150d313fbd2ce48d
 
       # Last, because it provisions clang-21 to get a version-matched clang-format. On the
       # self-hosted fleet that provisioning is an idempotent no-op (the toolchain persists between
@@ -168,7 +168,7 @@ jobs:
       # above report first and a repo never pays for the toolchain to learn its workflows are broken.
       - name: C++ format conformance
         if: ${{ inputs.format-check }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-format-check@042417dd86b9a597e071737a7845ddacf7180d1f
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-format-check@f2147f394a174e4f2997460d150d313fbd2ce48d
 
       # Cheap (no toolchain, no build — it reads text), but placed last on purpose: it is the
       # newest gate here, and a repo should learn its workflows, modules and formatting are sound
@@ -176,7 +176,7 @@ jobs:
       # ordering costs nothing either way.
       - name: Dead symbol in comment
         if: ${{ inputs.dead-symbol-check }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dead-symbol@042417dd86b9a597e071737a7845ddacf7180d1f
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dead-symbol@f2147f394a174e4f2997460d150d313fbd2ce48d
 
       # LAST, and it runs even when a step above it FAILED — `!cancelled()`, not the default. That
       # is the ruling's operative half: lint and format must be answered by ONE run, because a
@@ -190,7 +190,7 @@ jobs:
       # comments are sound before it pays for a compiler.
       - name: C++ clang-tidy conformance
         if: ${{ !cancelled() && inputs.lint }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-lint-tidy@042417dd86b9a597e071737a7845ddacf7180d1f
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-lint-tidy@f2147f394a174e4f2997460d150d313fbd2ce48d
 
       # A SKIPPED GATE MUST NOT LOOK LIKE A PASSED ONE. Every other toggle here defaults true, so
       # `false` is always a deliberate written line in the caller — but the RUN shows a skipped step
