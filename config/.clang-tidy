@@ -76,7 +76,12 @@ Checks:
   # PRECISELY the TUs it dies on. Its matchable population and its crashing population are
   # the same set, so enabled it had zero live coverage while costing the other 234 checks on
   # those 3 files — shipping Sift engine code among them. The cost of the disable is future
-  # code only: a new printf elsewhere loses one modernize nudge.
+  # code only: a new printf elsewhere loses one modernize nudge. Unblocking those three
+  # surfaced 257 findings on 2026-08-30, 207 of them error-grade (bugprone / performance /
+  # cppcoreguidelines are WarningsAsErrors below) — the first look any of them had had.
+  # 202 of the 207 are cppcoreguidelines-pro-type-vararg, one per printf call: converting
+  # those three files to std::print would clear them AND remove this crash's trigger, at
+  # which point this exclusion is dead weight rather than protection.
   #
   # EXPIRY + SUCCESSOR, and it is a mechanism rather than a hope: `malf lint` re-runs that
   # reproducer on every invocation (0.2 s, symbolization off) behind an ASCII control, and
