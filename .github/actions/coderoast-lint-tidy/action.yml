@@ -12,8 +12,8 @@ description: |
   clang module BMIs (.pcm) the database's commands reference. Neither exists without a real
   compile. `malf format --check` needs neither — clang-format parses each file alone — which is why
   the two source gates were deliberately separated until this ruling reversed the split. So this
-  action carries the whole build stack the format gate does not need: CMake + Conan, the cross-repo
-  vendor restore, and a clang-21/libc++ build of every package in the repo.
+  action carries the whole build stack the format gate does not need: CMake + Conan and a
+  clang-21/libc++ build of every package in the repo.
 
   THE TOOLCHAIN IS clang-21, NOT the gcc-16 ship leg, and that is not a preference. `malf lint`
   REFUSES a database whose entries were produced by another compiler, because clang-tidy reading a
@@ -40,16 +40,23 @@ description: |
   the format gate uses, so the two share one version surface and the second call is that action's
   documented idempotent skip rather than a second install.
 
+  WHAT IT CANNOT DO YET, so that a caller is never surprised by it: resolve a first-party
+  requirement that lives in ANOTHER repo. `MALF_WORKSPACE_ROOT` is pointed at the checkout below,
+  which makes a repo's OWN members editables and covers every intra-repo graph — insight-canon's
+  four `semantic/*` packages on `insight_canon`, coderoast-ipc's members — but a standalone CI
+  checkout has no siblings. Vendoring cannot substitute, and that is measured rather than assumed:
+  `coderoast-vendor` restores conan cache artifacts built by the release workflow, and
+  `ci_fetch_conan_package.sh` states its own requirement — "the same `linux-gcc16-release` profile
+  already present in CONAN_HOME (otherwise the restored binary's settings won't match a consumer
+  install resolving against a different profile sha)". A clang-21 install does not match a gcc-16
+  package_id, so the restored binaries are unusable here by construction. The shape that DOES work
+  is `insight-twin/ci.yml`'s: check the sibling repos out beside `malf/`, reproducing the desk
+  layout, and let the recipe graph register them as editables — no dependency list to drift, and no
+  dependence on a release existing, which is the post-bump window that broke that repo's job. Until
+  that lands here, a cross-repo consumer sets `lint: false` in its own lint.yml with the reason
+  written at the site.
+
 inputs:
-  vendor:
-    description: |
-      Newline cross-repo Conan dep manifest, `coderoast-vendor` grammar:
-        <pkg> <version> <owner/repo> <public|private> [release-tag]
-      Blank = no cross-repo deps (a tower root such as coderoast-ipc). A repo whose recipes carry
-      first-party `requires` MUST pass the same rows its ci.yml passes, or `conan install` cannot
-      resolve them.
-    required: false
-    default: ''
   clang-tidy-major:
     description: 'Required clang-tidy major version. Must match the build clang; a different major does not merely differ, it produces findings that read as defects.'
     required: false
@@ -58,14 +65,6 @@ inputs:
     description: 'malf profile to build the lint database with. Must be a clang profile — `malf lint` refuses any other database.'
     required: false
     default: 'linux-clang21-libcxx-release'
-  github-token:
-    description: 'Token for PUBLIC-repo release reads — pass secrets.GITHUB_TOKEN. Required only if any vendor row is `public`.'
-    required: false
-    default: ''
-  release-token:
-    description: 'Token for PRIVATE-repo release reads — pass secrets.CR_RELEASE_TOKEN. Required only if any vendor row is `private`.'
-    required: false
-    default: ''
 
 runs:
   using: composite
@@ -117,13 +116,6 @@ runs:
       with:
         profile: ${{ inputs.profile }}
 
-    - name: Vendor cross-repo Conan deps (same manifest the repo's ci.yml uses)
-      uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-vendor@b54c7b69f937652bfcea3fb9813d28987909996c
-      with:
-        vendor: ${{ inputs.vendor }}
-        github-token: ${{ inputs.github-token }}
-        release-token: ${{ inputs.release-token }}
-
     - name: Build the clang-21 lint database (compile commands + module BMIs)
       shell: bash
       env:
@@ -135,7 +127,8 @@ runs:
         # multi-package repo (insight-canon's semantic/* on insight_canon, coderoast-ipc's members)
         # would then find zero editable siblings and `conan install` would demand packages that are
         # published nowhere yet. Pointing it at the checkout makes the repo's own members editables,
-        # exactly as at the desk; CROSS-repo deps still come from the vendor restore above.
+        # exactly as at the desk. A CROSS-repo first-party dep has no source here at all — see
+        # "WHAT IT CANNOT DO YET" in this action's description.
         MALF_WORKSPACE_ROOT: ${{ github.workspace }}
       run: |
         set -euo pipefail

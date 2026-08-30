@@ -64,54 +64,36 @@ on:
       lint:
         description: |
           Run `malf lint --all-files` (clang-tidy) over the caller repo's SHIPPING C++ sources, in
-          THIS job, beside `malf format --check` — see the ruling in the header. Set false only for
-          a repo with no C++.
+          THIS job, beside `malf format --check` — see the ruling in the header.
 
-          THIS IS THE EXPENSIVE ONE, and the number belongs where the toggle is. Measured on this
-          workflow's `checks` job: 10 s end to end on the self-hosted fleet (logcraft, 2026-08-17)
-          and 57 s hosted (insight-canon, 2026-08-22, of which 52 s is the clang-21 + clang-format
-          apt install). Adding this input adds CMake + Conan + a cross-repo vendor restore + a
-          full clang-21/libc++ build of every package in the repo, on a compiler whose conan
-          binaries are cached nowhere. The scale reference is each repo's own gcc ci.yml run, which
-          is the same build one toolchain cheaper and WITH a published binary cache:
-          coderoast-ipc 85 s · insight-twin 130 s · insight-metalog 170 s · coderoast-security
-          180 s · insight-canon 215 s · logcraft 990 s · coderoast-server 1400 s.
+          THIS IS THE EXPENSIVE ONE, and the number belongs where the toggle is. Measured
+          2026-08-30 on this workflow's own `checks` job, before and after, same commit:
+            · coderoast-ipc (hosted ubuntu-latest)  32 s -> 159 s   (+120 s in this step)
+            · coderoast-security (self-hosted fleet) 10 s -> 250 s  (+237 s in this step)
+          The multiplier is 5x hosted and 25x on the fleet, and both of those repos are TOWER ROOTS
+          — the two smallest builds in the workspace. The scale reference for the rest is each
+          repo's own gcc ci.yml run, which is the same build one toolchain cheaper and WITH a
+          published binary cache: insight-twin 130 s · insight-metalog 170 s · insight-canon 215 s ·
+          logcraft 990 s · coderoast-server 1400 s. There is no published clang binary cache, so
+          this leg builds its third-party closure from source.
 
-          TWO CONSEQUENCES THAT ARE NOT OBVIOUS FROM THE COST. First, every release.yaml runs
+          TWO CONSEQUENCES THAT ARE NOT OBVIOUS FROM THE COST. Every release.yaml runs
           `ci: needs: lint`, so this build now sits IN FRONT of the cut's own build, serially, and
-          the five private repos queue for one self-hosted box. Second, this gate inherits ci.yml's
-          vendor precondition: `lint-vendor` names first-party releases, and between the post-cut
-          bump and the next tag those versions are not published yet, so a mid-cycle dispatch or PR
-          run cannot resolve them. That window already breaks ci.yml identically — the gates run at
-          the tag by design — but it now reaches lint too.
+          the five private repos queue for ONE self-hosted box. And a repo whose first-party
+          requires live in ANOTHER repo cannot run this gate at all yet — the action's description
+          owns that limit and names the shape that closes it; such a repo sets `lint: false` here
+          with the reason written at the site.
+
+          Set false for a repo with no C++, or for the cross-repo case above. Never set it false to
+          silence findings: a red here is the gate working.
         type: boolean
         required: false
         default: true
-      lint-vendor:
-        description: |
-          Cross-repo Conan dep manifest for the `lint` build, `coderoast-vendor` grammar:
-          `<pkg> <version> <owner/repo> <public|private> [release-tag]`, one per line. Blank = a
-          tower root with no first-party deps (coderoast-ipc).
-
-          IT MUST MIRROR THE SAME REPO'S ci.yml `vendor` MANIFEST, and that duplication is a known
-          drift surface, declared rather than hidden: two hand-kept lists encoding one fact about a
-          dependency graph, and a hand-enumerated CI list does not follow the graph. It exists
-          because a reusable workflow cannot read a sibling workflow's inputs and a standalone CI
-          checkout has no siblings to walk. A stale row here fails LOUDLY (conan cannot resolve the
-          version) rather than silently, which is the only reason it is tolerable.
-        type: string
-        required: false
-        default: ''
       runs-on:
         description: 'Runner label for the checks job. Defaults to hosted ubuntu-latest. PUBLIC callers MUST omit it — a self-hosted runner reachable from a public repo fork PR is an RCE. PRIVATE callers pass vars.CI_RUNS_ON (fallback ubuntu-latest) to route to the self-hosted fleet.'
         type: string
         required: false
         default: 'ubuntu-latest'
-
-    secrets:
-      CR_RELEASE_TOKEN:
-        description: 'Fine-grained PAT (Contents:read) for PRIVATE-repo release reads during the `lint` build''s vendor restore. Required only if a `lint-vendor` row is `private`. Pass via `secrets: inherit`.'
-        required: false
 
 permissions:
   contents: read
@@ -201,10 +183,6 @@ jobs:
       - name: C++ clang-tidy conformance
         if: ${{ !cancelled() && inputs.lint }}
         uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-lint-tidy@2d31e1759ab565510012b2af42fba51138acf799
-        with:
-          vendor: ${{ inputs.lint-vendor }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          release-token: ${{ secrets.CR_RELEASE_TOKEN }}
 
       # A SKIPPED GATE MUST NOT LOOK LIKE A PASSED ONE. Every other toggle here defaults true, so
       # `false` is always a deliberate written line in the caller — but the RUN shows a skipped step
