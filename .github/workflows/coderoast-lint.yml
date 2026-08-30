@@ -170,7 +170,7 @@ jobs:
 
       - name: C++ modules conformance
         if: ${{ inputs.module-conformance }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-module-conformance@a6744b437680258b787e8e175b8e15790672af5c
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-module-conformance@2d31e1759ab565510012b2af42fba51138acf799
 
       # Last, because it provisions clang-21 to get a version-matched clang-format. On the
       # self-hosted fleet that provisioning is an idempotent no-op (the toolchain persists between
@@ -178,7 +178,7 @@ jobs:
       # above report first and a repo never pays for the toolchain to learn its workflows are broken.
       - name: C++ format conformance
         if: ${{ inputs.format-check }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-format-check@a6744b437680258b787e8e175b8e15790672af5c
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-format-check@2d31e1759ab565510012b2af42fba51138acf799
 
       # Cheap (no toolchain, no build — it reads text), but placed last on purpose: it is the
       # newest gate here, and a repo should learn its workflows, modules and formatting are sound
@@ -186,7 +186,7 @@ jobs:
       # ordering costs nothing either way.
       - name: Dead symbol in comment
         if: ${{ inputs.dead-symbol-check }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dead-symbol@a6744b437680258b787e8e175b8e15790672af5c
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dead-symbol@2d31e1759ab565510012b2af42fba51138acf799
 
       # LAST, and it runs even when a step above it FAILED — `!cancelled()`, not the default. That
       # is the ruling's operative half: lint and format must be answered by ONE run, because a
@@ -200,7 +200,7 @@ jobs:
       # comments are sound before it pays for a compiler.
       - name: C++ clang-tidy conformance
         if: ${{ !cancelled() && inputs.lint }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-lint-tidy@500ff5b02cd85cef12aed99d183ce39aaf5aeedd
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-lint-tidy@2d31e1759ab565510012b2af42fba51138acf799
         with:
           vendor: ${{ inputs.lint-vendor }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
