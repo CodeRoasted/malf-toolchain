@@ -484,6 +484,29 @@ _malf_run_inventory() {
     python3 "$MALF_DIR/build_inventory.py" build \
         --workspace "$MALF_WORKSPACE_ROOT" --repo "$repo" \
         --build-key "$(_malf_build_key)" --profile "$MALF_PROFILE_NAME" || return 1
+
+    # FOLD THE INVENTORY CELLS' DATABASES INTO THE REPO ROOT, exactly as a package build folds its
+    # own. An inventory cell configures into `<dir>/build-inventory-$(_malf_build_key)/` and emits a
+    # compile_commands.json there like any other CMake tree, but nothing merged it — so its sources
+    # were walked by `malf lint` and then found absent from the root database. Measured on
+    # insight-canon 2026-08-30: the root DB held 172 entries and ZERO for `proof/`, so
+    # `proof/det_proof.cpp` reported as an uncovered TU. That was invisible while an uncovered TU
+    # was only a note; now that --all-files treats it as the coverage hole it is, leaving this
+    # unmerged would make the gate unpassable on any repo carrying an inventory cell.
+    #
+    # The remedy is to GAIN the coverage, not to exclude the file. Adding `proof` to
+    # MALF_LINT_EXCLUDE_EXTRA would have silenced the same red by spending the coverage it reports,
+    # which is the trade this whole command refuses to make.
+    local _inv_root; _inv_root="$repo/build-$(_malf_build_key)"
+    if [[ -f "$_inv_root/compile_commands.json" ]]; then
+        local _inv_db
+        while IFS= read -r _inv_db; do
+            [[ -n "$_inv_db" ]] || continue
+            _malf_merge_db_tree "$_inv_root" "$(dirname "$_inv_db")"
+        done < <(find "$repo" -type d -name "build-inventory-$(_malf_build_key)" \
+                     -exec test -f '{}/compile_commands.json' \; -print 2>/dev/null \
+                 | sed 's|$|/compile_commands.json|')
+    fi
 }
 
 _malf_build_dir() {
@@ -1092,13 +1115,41 @@ cmd_lint() {
         tidy_config="$MALF_DIR/config/.clang-tidy"
     fi
 
-    # compile_commands.json: prefer CWD/compile_commands.json, then the default
-    # leg's named build root (where _malf_merge_compile_commands maintains the DB).
-    local comp_db=""
-    if [[ -f "$CWD/compile_commands.json" ]]; then
+    # compile_commands.json: THE PROFILE-KEYED BUILD ROOT WINS, and a bare $CWD copy is only a
+    # fallback. The order used to be the other way round, and it cost two months of silent
+    # zero-coverage: insight-eidos/llm/compile_commands.json was a gcc-produced, gitignored file
+    # from 2026-06-26 sitting beside the recipe, so `malf lint` in that directory read IT instead
+    # of llm/build-clang21-libcxx-release/, and insight_llm went unlinted from then until
+    # 2026-08-30 without one line of output saying so.
+    #
+    # The asymmetry that settles the order is PROVENANCE, not freshness: `malf` never writes a bare
+    # $CWD/compile_commands.json. `_malf_merge_compile_commands` and `_malf_merge_db_tree` both
+    # write `<dir>/build-$(_malf_build_key)/compile_commands.json` — keyed by the ACTIVE profile,
+    # which is what makes the toolchain claim checkable at all. So a file at $CWD is by
+    # construction something else: an editor symlink, a hand copy, or the residue of a tool that
+    # has since moved on. Preferring an artifact of unknown provenance over the one this program
+    # maintains has no reading under which it is right.
+    #
+    # The toolchain guard below does NOT subsume this. It catches a FOREIGN-compiler database —
+    # which is what saved the eidos case from being wrong rather than merely absent — but a stale
+    # CLANG database passes it while covering a subset of the tree, and a subset silently linted is
+    # the failure mode this whole command is built to refuse.
+    local comp_db="" comp_db_shadowed=""
+    local _build_root; _build_root="$(_malf_default_build_root "$CWD")"
+    if [[ -f "$_build_root/compile_commands.json" ]]; then
+        comp_db="$_build_root"
+        # Both exist: use the authoritative one and NAME the other. Silence here is what let the
+        # eidos file survive two months — nothing ever printed its path.
+        [[ -f "$CWD/compile_commands.json" ]] && comp_db_shadowed="$CWD/compile_commands.json"
+    elif [[ -f "$CWD/compile_commands.json" ]]; then
         comp_db="$CWD"
-    elif [[ -f "$(_malf_default_build_root "$CWD")/compile_commands.json" ]]; then
-        comp_db="$(_malf_default_build_root "$CWD")"
+        echo "malf lint: note: no database at $_build_root; falling back to $CWD/compile_commands.json," >&2
+        echo "malf lint: which malf does not write and cannot key to a profile. If it is stale or partial" >&2
+        echo "malf lint: this run covers less than it appears to. 'malf commands' rebuilds the keyed one." >&2
+    fi
+    if [[ -n "$comp_db_shadowed" ]]; then
+        echo "malf lint: note: using $comp_db/compile_commands.json (profile-keyed, malf-maintained)." >&2
+        echo "malf lint: ignoring $comp_db_shadowed — malf never writes that path; delete it if nothing needs it." >&2
     fi
 
     # No compile DB is not a "may miss context" warning — it is a total loss of context, and
@@ -1241,6 +1292,13 @@ PY
     # test/bench keep -Werror + sanitizers. Remove when clang's module ASTReader is fixed.
     extra_args+=("--header-filter=^${CWD}/(?!\.conan2|build|test_package|technical_docs|.*/tests/|.*/benchmarks/).*")
 
+    # THE VERDICT ACCUMULATOR, declared here rather than beside the xargs run below, because the
+    # DB-completeness filter above it can already have failed the run. `local lint_status=0` sat
+    # after that filter until 2026-08-30 and would have RESET a fatal partial-subject verdict to
+    # zero on its way past — an arm that sets a flag a later declaration wipes is an arm that
+    # never fires, and it would have looked exactly like the silence it was written to end.
+    local lint_status=0
+
     # Collect files: git-changed (default) or all
     local files=()
     if $all_files; then
@@ -1324,19 +1382,41 @@ PY
             local _rf
             for _f in "${files[@]}"; do
                 _rf="$(realpath -e "$_f" 2>/dev/null || echo "$_f")"
-                if [[ -n "${_db_files[$_rf]:-}" ]]; then
-                    _in_db+=("$_f")
-                elif [[ "$_f" == *.h || "$_f" == *.hpp ]]; then
-                    : # A header has no own compile command and never appears in the DB; it is
-                      # linted TRANSITIVELY via header-filter when a TU that includes it is checked.
-                      # Dropping it here is not a coverage gap, so it is silent (not a "missing TU").
-                else
-                    _missing_tu+=("$_f")   # a TU absent from the DB IS a real gap (unbuilt package)
-                fi
+                _malf_lint_db_verdict "$_rf" "$_f" "${_db_files[$_rf]:-}"
+                case "$_MALF_LINT_VERDICT" in
+                    in-db)   _in_db+=("$_f") ;;
+                    header)  : ;;
+                    missing) _missing_tu+=("$_f") ;;
+                esac
             done
             if [[ ${#_missing_tu[@]} -gt 0 ]]; then
-                echo "malf lint: ${#_missing_tu[@]} translation unit(s) with no usable compile command — skipped (absent from the DB, or their build dir is missing; run 'malf commands' or build their package):" >&2
+                echo "malf lint: ${#_missing_tu[@]} of $(( ${#_in_db[@]} + ${#_missing_tu[@]} )) translation unit(s) have no usable compile command (absent from the DB, or their build dir is missing):" >&2
                 printf '  %s\n' "${_missing_tu[@]#"$CWD"/}" >&2
+                # AND UNDER --all-files THAT IS FATAL, not a note. The two modes promise different
+                # things and only one of them can absorb this. The default set is `git diff`, so an
+                # unbuildable TU there is incidental — you are mid-edit and the file simply has not
+                # been compiled yet. `--all-files` promises the TREE; a TU in the walk that no
+                # compile command covers is a hole in exactly the subject the mode named, which is
+                # the same species as the crashed-TU hole below and gets the same verdict.
+                #
+                # IT IS ALSO THE ONLY THING STANDING BETWEEN THIS GATE AND A BUILD-ORDER-DEPENDENT
+                # GREEN. The repo-root database is an ACCUMULATION: `malf build <pkg>` merges that
+                # package's entries into `<repo>/build-<key>/`, additively, while only
+                # `malf commands` clears and rebuilds it whole. So after a partial build the root DB
+                # describes whichever packages happened to be built last, and a tree walk against it
+                # lints that subset and exits 0. Measured on insight-eidos 2026-08-30 with NO source
+                # change: the root DB held 34 distinct files while the sub-package databases held 83,
+                # 80 of them absent from the root — a 70% coverage hole that reported success. A gate
+                # whose coverage depends on build order is a gate whose green means something
+                # different every run, and nothing in the output distinguished the two.
+                if $all_files; then
+                    lint_status=1
+                    echo "malf lint: refusing to report success — --all-files walks the TREE, so these are a" >&2
+                    echo "malf lint: coverage hole in the subject this mode named, not files you chose to skip." >&2
+                    echo "malf lint: the root database is built up by 'malf build <pkg>' one package at a time," >&2
+                    echo "malf lint: so a partial build leaves a partial subject. Rebuild it whole: 'malf commands'" >&2
+                    echo "malf lint: (or 'malf build' with no argument, which sweeps every package here)." >&2
+                fi
             fi
             files=("${_in_db[@]}")
         fi
@@ -1373,7 +1453,7 @@ PY
     jobs="$(( $(nproc) < 4 ? $(nproc) : 4 ))"
     export _MALF_MEM_LIMIT="$MALF_SOURCE_MEM_LIMIT_KB"
 
-    local tmpdir lint_status=0
+    local tmpdir
     tmpdir="$(mktemp -d -t malf_lint.XXXXXX)"
 
     local counter_file="$tmpdir/_progress"
@@ -1492,6 +1572,30 @@ PY
 # an entry is unlintable regardless (no BMIs / modmap there either), so lint must drop it up
 # front rather than hand it to clang-tidy. Directory is load-bearing (commands carry relative
 # @modmap paths that resolve against it), so it cannot simply be rewritten to an existing dir.
+# Classify ONE walked file against the compile database: `in-db`, `header`, or `missing`.
+#
+# Split out of cmd_lint so it can be driven without a toolchain. The three-way answer is the
+# point: `missing` is a COVERAGE HOLE (a TU the walk named that no compile command covers, which
+# under --all-files fails the run), while `header` is not — a header has no own compile command and
+# never appears in a database, and it is linted TRANSITIVELY through --header-filter when a TU that
+# includes it is checked. Collapsing those two into "not linted" would red every run on every
+# header; collapsing them the other way is how a real hole hides. Callers pass the DB-membership
+# lookup they already did, so this stays pure and has no opinion about where the database lives.
+# Answers through the global `_MALF_LINT_VERDICT` rather than stdout, deliberately: this runs once
+# per WALKED FILE, and capturing stdout would mean a command substitution — a forked subshell per
+# file, on a walk that reaches 700+ files across the workspace. A predicate this cheap must not cost
+# a process. Testability is unaffected: a caller sets nothing up and reads the global afterwards.
+_malf_lint_db_verdict() {
+    local original="$2" db_hit="$3"
+    if [[ -n "$db_hit" ]]; then
+        _MALF_LINT_VERDICT="in-db"
+    elif [[ "$original" == *.h || "$original" == *.hpp ]]; then
+        _MALF_LINT_VERDICT="header"
+    else
+        _MALF_LINT_VERDICT="missing"
+    fi
+}
+
 _malf_db_lintable_files() {
     python3 -c "
 import json, os, sys

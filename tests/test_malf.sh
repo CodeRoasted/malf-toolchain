@@ -428,6 +428,88 @@ rm -rf "$guard_tmp" "$fmt_iso"
 
 echo
 
+echo "[7g2] lint's SUBJECT cannot be decided by build order or by a stray file"
+
+# TWO defects measured on insight-eidos 2026-08-30, one disease: the set of files `malf lint`
+# actually checks was decided by something other than the source tree, and neither said so.
+#
+#  * The repo-root compile database is an ACCUMULATION — `malf build <pkg>` merges one package's
+#    entries into it, additively, and only `malf commands` rebuilds it whole. Measured with NO
+#    source change between two runs: 73 files checked, then 32. Re-derived a second way the same
+#    day: the root DB held 34 distinct files while the sub-package databases held 83, 80 of them
+#    absent from the root. A 70% coverage hole, exit 0.
+#  * `insight-eidos/llm/compile_commands.json` — gcc-produced, gitignored, dated 2026-06-26 — sat
+#    beside the recipe and was PREFERRED over the profile-keyed build root, so insight_llm went
+#    unlinted for two months.
+#
+# Both arms below are INVERT-OR-DIE against the old behaviour: under the previous code the first
+# run exits 0 and the second reads the stray file. Neither needs clang-tidy, deliberately — this
+# suite runs where no toolchain exists, and an arm that skips there is zero coverage in a green
+# shirt.
+
+# --- arm 1: a TU the walk names but the database does not cover is FATAL under --all-files ------
+# Driven through the extracted predicate rather than a full run, so it is pure. The header case is
+# asserted in the same breath, because collapsing it into "missing" would red every run on every
+# header and is the obvious wrong fix.
+verdict_fn="$(sed -n '/^_malf_lint_db_verdict() {/,/^}/p' "$MALF_BIN")"
+# It publishes through a global (no fork per walked file), so each probe echoes the global back.
+v_in="$(bash -c "$verdict_fn; _malf_lint_db_verdict /w/a.cpp a.cpp 1; echo \"\$_MALF_LINT_VERDICT\"")"
+v_hdr="$(bash -c "$verdict_fn; _malf_lint_db_verdict /w/a.hpp a.hpp ''; echo \"\$_MALF_LINT_VERDICT\"")"
+v_miss="$(bash -c "$verdict_fn; _malf_lint_db_verdict /w/b.cpp b.cpp ''; echo \"\$_MALF_LINT_VERDICT\"")"
+check "db verdict: in-DB TU / uncovered HEADER / uncovered TU are three distinct answers" \
+      "in-db header missing" \
+      "$v_in $v_hdr $v_miss"
+
+# The verdict is only half of it — the wiring that turns `missing` into a red under --all-files is
+# the half that was absent, and it is a MODE-dependent rule, so both modes are pinned.
+# Located by LINE ARITHMETIC, not by a sed range over `if $all_files`: there are THREE such
+# blocks in cmd_lint (the walk, this one, the empty-set refusal) and a range anchored on the
+# pattern latches onto the first, walks out through a different block, and reports NOT WIRED about
+# correctly wired code. That false negative is exactly the thing this file exists to catch, so the
+# anchor is the refusal message — which is unique — and the assertion is that the verdict is set
+# in the three lines above it.
+refuse_line="$(grep -n 'refusing to report success — --all-files walks the TREE' "$MALF_BIN" | cut -d: -f1)"
+allfiles_fatal="$([[ -n "$refuse_line" ]] \
+  && sed -n "$((refuse_line - 3)),${refuse_line}p" "$MALF_BIN" | grep -q 'lint_status=1' \
+  && echo wired || echo "NOT WIRED (refusal at line ${refuse_line:-none})")"
+check "an uncovered TU fails --all-files (the mode promises the tree, so a partial subject is a hole)" \
+      "wired" \
+      "$allfiles_fatal"
+
+# And the accumulator must be declared BEFORE that site. It was not: `local lint_status=0` sat
+# below the DB filter and would have reset the fatal verdict to zero on the way past — an arm
+# setting a flag a later declaration wipes never fires, and looks exactly like the silence it ends.
+decl_line="$(grep -n '^    local lint_status=0$' "$MALF_BIN" | cut -d: -f1)"
+first_set="$(grep -n 'lint_status=1' "$MALF_BIN" | head -1 | cut -d: -f1)"
+check "lint_status is declared above every site that sets it (no later 'local' wipes the verdict)" \
+      "declared-first" \
+      "$([[ -n "$decl_line" && -n "$first_set" && "$decl_line" -lt "$first_set" ]] && echo declared-first || echo "GOT decl=$decl_line first_set=$first_set")"
+
+# --- arm 2: the profile-keyed build root beats a stray $CWD database --------------------------
+# The discriminator is chosen so it needs no toolchain and cannot pass by accident: the build root
+# gets a GCC database and $CWD gets a CLANG one. Under the old order $CWD wins, the toolchain guard
+# is satisfied, and the run proceeds; under the new order the build root wins and that guard REFUSES,
+# naming the g++ census. So the refusal itself is the proof of which file was read.
+shadow_tmp="$(mktemp -d)"
+shadow_root="$shadow_tmp/build-clang21-libcxx-release"
+mkdir -p "$shadow_root"
+printf 'export module probe;\n' > "$shadow_tmp/probe.cppm"
+printf '[{"directory":"%s","file":"%s/probe.cppm","command":"/usr/bin/g++-16 -c probe.cppm"}]\n' \
+       "$shadow_tmp" "$shadow_tmp" > "$shadow_root/compile_commands.json"
+printf '[{"directory":"%s","file":"%s/probe.cppm","command":"/usr/bin/clang++-21 -c probe.cppm"}]\n' \
+       "$shadow_tmp" "$shadow_tmp" > "$shadow_tmp/compile_commands.json"
+shadow_out="$(cd "$shadow_tmp" && bash "$MALF_BIN" lint --all-files --console 2>&1)"; shadow_rc=$?
+check "the profile-keyed build root is read, not the stray \$CWD database beside the recipe" \
+      "rc=1 read-build-root" \
+      "rc=$shadow_rc $([[ "$shadow_out" == *"not produced by clang"* && "$shadow_out" == *"g++-16"* ]] \
+         && echo read-build-root || echo "GOT: $shadow_out")"
+check "and the ignored stray file is NAMED, since silence is what let one survive two months" \
+      "named" \
+      "$([[ "$shadow_out" == *"malf never writes that path"* ]] && echo named || echo "GOT: $shadow_out")"
+rm -rf "$shadow_tmp"
+
+echo
+
 echo "[7j] lint tells a DEAD translation unit apart from a clean one"
 
 # Two subjects, one disease. On 2026-08-30 clang-tidy 21.1.8 was found to SIGSEGV on three
