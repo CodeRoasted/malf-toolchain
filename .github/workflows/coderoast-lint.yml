@@ -11,10 +11,21 @@ name: CodeRoast Lint
 # false, opt in — makes a missing gate indistinguishable from a deliberate one, and a new repo
 # silently ungated.
 #
-# `malf lint` (clang-tidy) is NOT here and cannot be: it needs a compile database and clang-21
-# module BMIs, so it needs a BUILD, and this workflow only checks out. `malf format --check` has no
-# such dependency — clang-format parses each file on its own — which is why the two source gates
-# split across two homes rather than landing together.
+# `malf lint` (clang-tidy) IS here since 2026-08-30, and the paragraph it replaced said it could
+# never be — so the reversal is recorded rather than quietly overwritten. That paragraph read: it
+# needs a compile database and clang-21 module BMIs, so it needs a BUILD, and this workflow only
+# checks out; `malf format --check` has no such dependency, which is why the two source gates split
+# across two homes. Every clause of that is still TRUE. What changed is the ruling about which cost
+# is worth paying (Founder, 2026-08-30): "lint and format go together, because adding nolint and
+# stuff tend to break formatting" — a `NOLINT` insertion reflows its own line, so the two questions
+# are coupled at the point of repair and ONE run must answer both. Split across workflows or
+# triggers, a lint fix passes the run that executed and breaks the one that did not.
+#
+# SO THIS WORKFLOW NOW BUILDS, and that is its largest cost by an order of magnitude. The build is
+# clang-21/libc++, not the gcc-16 ship leg, because `malf lint` refuses a foreign compile database
+# — clang-tidy reading a gcc database emits findings that are well-formed and wrong. Conan binaries
+# are package_id-keyed on the compiler, so the published gcc-16 cache warms nothing and the
+# third-party closure builds from source. Measured before/after is in the `lint` input below.
 #
 # Cross-repo determinism gates (wall-clock, RNG) are NOT here — they span multiple repos and only the
 # superproject can run them; it wires them as its own chained jobs.
@@ -50,11 +61,57 @@ on:
         type: boolean
         required: false
         default: true
+      lint:
+        description: |
+          Run `malf lint --all-files` (clang-tidy) over the caller repo's SHIPPING C++ sources, in
+          THIS job, beside `malf format --check` — see the ruling in the header. Set false only for
+          a repo with no C++.
+
+          THIS IS THE EXPENSIVE ONE, and the number belongs where the toggle is. Measured on this
+          workflow's `checks` job: 10 s end to end on the self-hosted fleet (logcraft, 2026-08-17)
+          and 57 s hosted (insight-canon, 2026-08-22, of which 52 s is the clang-21 + clang-format
+          apt install). Adding this input adds CMake + Conan + a cross-repo vendor restore + a
+          full clang-21/libc++ build of every package in the repo, on a compiler whose conan
+          binaries are cached nowhere. The scale reference is each repo's own gcc ci.yml run, which
+          is the same build one toolchain cheaper and WITH a published binary cache:
+          coderoast-ipc 85 s · insight-twin 130 s · insight-metalog 170 s · coderoast-security
+          180 s · insight-canon 215 s · logcraft 990 s · coderoast-server 1400 s.
+
+          TWO CONSEQUENCES THAT ARE NOT OBVIOUS FROM THE COST. First, every release.yaml runs
+          `ci: needs: lint`, so this build now sits IN FRONT of the cut's own build, serially, and
+          the five private repos queue for one self-hosted box. Second, this gate inherits ci.yml's
+          vendor precondition: `lint-vendor` names first-party releases, and between the post-cut
+          bump and the next tag those versions are not published yet, so a mid-cycle dispatch or PR
+          run cannot resolve them. That window already breaks ci.yml identically — the gates run at
+          the tag by design — but it now reaches lint too.
+        type: boolean
+        required: false
+        default: true
+      lint-vendor:
+        description: |
+          Cross-repo Conan dep manifest for the `lint` build, `coderoast-vendor` grammar:
+          `<pkg> <version> <owner/repo> <public|private> [release-tag]`, one per line. Blank = a
+          tower root with no first-party deps (coderoast-ipc).
+
+          IT MUST MIRROR THE SAME REPO'S ci.yml `vendor` MANIFEST, and that duplication is a known
+          drift surface, declared rather than hidden: two hand-kept lists encoding one fact about a
+          dependency graph, and a hand-enumerated CI list does not follow the graph. It exists
+          because a reusable workflow cannot read a sibling workflow's inputs and a standalone CI
+          checkout has no siblings to walk. A stale row here fails LOUDLY (conan cannot resolve the
+          version) rather than silently, which is the only reason it is tolerable.
+        type: string
+        required: false
+        default: ''
       runs-on:
         description: 'Runner label for the checks job. Defaults to hosted ubuntu-latest. PUBLIC callers MUST omit it — a self-hosted runner reachable from a public repo fork PR is an RCE. PRIVATE callers pass vars.CI_RUNS_ON (fallback ubuntu-latest) to route to the self-hosted fleet.'
         type: string
         required: false
         default: 'ubuntu-latest'
+
+    secrets:
+      CR_RELEASE_TOKEN:
+        description: 'Fine-grained PAT (Contents:read) for PRIVATE-repo release reads during the `lint` build''s vendor restore. Required only if a `lint-vendor` row is `private`. Pass via `secrets: inherit`.'
+        required: false
 
 permissions:
   contents: read
@@ -130,3 +187,32 @@ jobs:
       - name: Dead symbol in comment
         if: ${{ inputs.dead-symbol-check }}
         uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dead-symbol@a6744b437680258b787e8e175b8e15790672af5c
+
+      # LAST, and it runs even when a step above it FAILED — `!cancelled()`, not the default. That
+      # is the ruling's operative half: lint and format must be answered by ONE run, because a
+      # `NOLINT` inserted to satisfy lint reflows the line and breaks format. Under the default
+      # condition a red format gate would abort the job before lint ever ran, so the author would
+      # fix formatting, re-run, and only then meet the findings — two round trips, and the second
+      # fix re-breaks the first. Both verdicts, one run.
+      #
+      # It is also by far the most expensive step here (it builds; see the `lint` input), so it is
+      # placed after every cheap check: a repo learns its workflows, modules, formatting and
+      # comments are sound before it pays for a compiler.
+      - name: C++ clang-tidy conformance
+        if: ${{ !cancelled() && inputs.lint }}
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-lint-tidy@500ff5b02cd85cef12aed99d183ce39aaf5aeedd
+        with:
+          vendor: ${{ inputs.lint-vendor }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          release-token: ${{ secrets.CR_RELEASE_TOKEN }}
+
+      # A SKIPPED GATE MUST NOT LOOK LIKE A PASSED ONE. Every other toggle here defaults true, so
+      # `false` is always a deliberate written line in the caller — but the RUN shows a skipped step
+      # and a green job, and green is what a reader remembers. An exclusion composed with a silent
+      # skip is zero coverage wearing a green badge, which is the mechanism that let "silently
+      # unlinted" stand for five weeks before this gate existed. So the absence announces itself in
+      # the log, at the coordinate where the coverage is missing.
+      - name: Announce that clang-tidy did NOT run
+        if: ${{ !cancelled() && !inputs.lint }}
+        run: |
+          echo "::warning title=clang-tidy did not run::${{ github.repository }} passed lint with malf lint DISABLED (lint: false in its lint.yml). This run says nothing about clang-tidy conformance — its C++ sources were checked for formatting and module conformance only."

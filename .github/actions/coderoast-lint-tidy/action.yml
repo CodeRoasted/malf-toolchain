@@ -1,0 +1,165 @@
+name: 'CodeRoast clang-tidy lint'
+description: |
+  `malf lint --all-files` (clang-tidy) over the caller repo's SHIPPING C++ sources, in the same job
+  as `malf format --check`. Founder ruling 2026-08-30: "lint and format go together, because adding
+  nolint and stuff tend to break formatting" — a `NOLINT` insertion reflows the line it is added to,
+  so the two questions are coupled at the point of repair and ONE run has to answer both. Split
+  across workflows or triggers, a lint fix passes the run that executed and breaks the one that did
+  not, and the author learns later or never.
+
+  WHY THIS COSTS A BUILD, stated here because the workflow that calls it was designed on the
+  opposite premise. clang-tidy needs a compile database AND, on this module-first codebase, the
+  clang module BMIs (.pcm) the database's commands reference. Neither exists without a real
+  compile. `malf format --check` needs neither — clang-format parses each file alone — which is why
+  the two source gates were deliberately separated until this ruling reversed the split. So this
+  action carries the whole build stack the format gate does not need: CMake + Conan, the cross-repo
+  vendor restore, and a clang-21/libc++ build of every package in the repo.
+
+  THE TOOLCHAIN IS clang-21, NOT the gcc-16 ship leg, and that is not a preference. `malf lint`
+  REFUSES a database whose entries were produced by another compiler, because clang-tidy reading a
+  gcc database emits findings that are well-formed and wrong — real rule ids, real lines, real
+  symbols (measured 2026-08-26: 10 findings on a clean file, 4 of them naming a real rule at a real
+  line; 0 after re-indexing against clang). The consequence is a cost, not a detail: conan binaries
+  are package_id-keyed on the compiler, so the published gcc-16 binary cache warms nothing here and
+  the third-party closure is built from source.
+
+  ARMING. Three ways this gate could report green over unchecked code, all closed:
+    * NO DATABASE — `malf lint` refuses rather than running flag-less (it would emit phantom
+      clang-diagnostic-errors and could never pass).
+    * A MISMATCHED clang-tidy — if clang-tidy is not the one from clang-21's OWN install it cannot
+      read this build's BMIs, and `malf lint` responds by SKIPPING every `.cppm` and every TU that
+      imports a module, with a note on stderr and exit 0. On this codebase that is nearly the whole
+      subject, so the run would pass having inspected almost nothing. The version+location
+      assertion below turns that note into a hard failure BEFORE the gate runs.
+    * AN EMPTY FILE SET — `--all-files` walks the tree, so zero files means the walk or the DB
+      filter ate everything; `malf lint` refuses to report success in that mode.
+  And a translation unit clang-tidy DIES on is reported as NOT LINTED and is fatal — a file can be
+  clean, dirty, or UNREAD, and only the first two have a vocabulary in an ordinary lint gate.
+
+  Run after `actions/checkout`. Provisions clang-21 through the SAME `setup-clang21-libcxx` action
+  the format gate uses, so the two share one version surface and the second call is that action's
+  documented idempotent skip rather than a second install.
+
+inputs:
+  vendor:
+    description: |
+      Newline cross-repo Conan dep manifest, `coderoast-vendor` grammar:
+        <pkg> <version> <owner/repo> <public|private> [release-tag]
+      Blank = no cross-repo deps (a tower root such as coderoast-ipc). A repo whose recipes carry
+      first-party `requires` MUST pass the same rows its ci.yml passes, or `conan install` cannot
+      resolve them.
+    required: false
+    default: ''
+  clang-tidy-major:
+    description: 'Required clang-tidy major version. Must match the build clang; a different major does not merely differ, it produces findings that read as defects.'
+    required: false
+    default: '21'
+  profile:
+    description: 'malf profile to build the lint database with. Must be a clang profile — `malf lint` refuses any other database.'
+    required: false
+    default: 'linux-clang21-libcxx-release'
+  github-token:
+    description: 'Token for PUBLIC-repo release reads — pass secrets.GITHUB_TOKEN. Required only if any vendor row is `public`.'
+    required: false
+    default: ''
+  release-token:
+    description: 'Token for PRIVATE-repo release reads — pass secrets.CR_RELEASE_TOKEN. Required only if any vendor row is `private`.'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Provision clang-21 + libc++ (idempotent — the format gate already ran it)
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-clang21-libcxx@500ff5b02cd85cef12aed99d183ce39aaf5aeedd
+
+    - name: Provision the version-matched clang-tidy (and assert it is clang-21's OWN)
+      shell: bash
+      env:
+        WANT_MAJOR: ${{ inputs.clang-tidy-major }}
+      run: |
+        set -euo pipefail
+        # clang-tidy is not part of the compiler leg: `llvm.sh 21` installs clang/lldb/lld/clangd
+        # only, so clang-tidy ships in its own `clang-tidy-21` deb and must be installed here.
+        #
+        # WHY HERE AND NOT IN setup-clang21-libcxx, which this action already calls: that action
+        # opens with an idempotent-skip guard over a FIXED end-state set (clang++-21, libc++-21, the
+        # modules.json bridge, the alternatives). On a persistent self-hosted runner that guard
+        # returns before any install runs, so a clang-tidy folded in there would be skipped on
+        # exactly the boxes that already satisfy the old invariants — provisioned on hosted,
+        # silently absent on self-hosted. The format gate provisions clang-format in its own action
+        # for this same measured reason.
+        #
+        # LOCATION IS THE ASSERTION, not just the version. `malf lint` derives clang-tidy from
+        # clang-21's resolved install directory, and falls back to whatever is on PATH when that
+        # install ships none. The fallback is NOT a failure — it prints a note and continues,
+        # dropping every module interface unit and every importing TU from the file set, because a
+        # BMI is pinned to the exact clang build that produced it. A note on stderr with exit 0 is
+        # the shape a green run hides; assert the end state instead.
+        want_dir="$(dirname "$(readlink -f "$(command -v clang-21 || command -v clang)")")"
+        if ! "$want_dir/clang-tidy" --version 2>/dev/null | grep -qE "version ${WANT_MAJOR}\."; then
+          sudo apt-get update
+          sudo apt-get install -y "clang-tidy-${WANT_MAJOR}"
+        fi
+        if [ ! -x "$want_dir/clang-tidy" ]; then
+          echo "::error::clang-tidy is not in clang-21's own install dir ($want_dir). malf lint would fall back to a PATH clang-tidy, which cannot read this build's module BMIs, and would then SKIP every .cppm and every importing TU — passing while inspecting almost nothing. Fix the provisioning; do not let the run proceed."
+          exit 1
+        fi
+        got="$("$want_dir/clang-tidy" --version | grep -oE 'version [0-9]+' | grep -oE '[0-9]+')"
+        if [ "$got" != "$WANT_MAJOR" ]; then
+          echo "::error::clang-tidy major $got at $want_dir/clang-tidy, expected $WANT_MAJOR. A different major reads different BMIs and reports different checks, so this gate would fail on churn rather than on defects."
+          exit 1
+        fi
+        echo "clang-tidy $got — $want_dir/clang-tidy (clang-21's own install)"
+
+    - name: Setup build env (apt + CMake 4.3.x + Conan + dep cache + canonical profile)
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-env@500ff5b02cd85cef12aed99d183ce39aaf5aeedd
+      with:
+        profile: ${{ inputs.profile }}
+
+    - name: Vendor cross-repo Conan deps (same manifest the repo's ci.yml uses)
+      uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-vendor@500ff5b02cd85cef12aed99d183ce39aaf5aeedd
+      with:
+        vendor: ${{ inputs.vendor }}
+        github-token: ${{ inputs.github-token }}
+        release-token: ${{ inputs.release-token }}
+
+    - name: Build the clang-21 lint database (compile commands + module BMIs)
+      shell: bash
+      env:
+        MALF: ${{ github.action_path }}/../../../malf
+        PROFILE: ${{ inputs.profile }}
+        # THE REPO IS THE WORKSPACE HERE, and without this line an intra-repo first-party graph
+        # cannot resolve. malf derives MALF_WORKSPACE_ROOT from its OWN location — the parent of the
+        # toolchain checkout — which under `_actions/` holds nothing but SHA-named directories. A
+        # multi-package repo (insight-canon's semantic/* on insight_canon, coderoast-ipc's members)
+        # would then find zero editable siblings and `conan install` would demand packages that are
+        # published nowhere yet. Pointing it at the checkout makes the repo's own members editables,
+        # exactly as at the desk; CROSS-repo deps still come from the vendor restore above.
+        MALF_WORKSPACE_ROOT: ${{ github.workspace }}
+      run: |
+        set -euo pipefail
+        cd "$GITHUB_WORKSPACE"
+        echo "::group::malf build ($PROFILE) — the lint database"
+        bash "$MALF" build --profile "$PROFILE"
+        echo "::endgroup::"
+
+    - name: clang-tidy gate (malf lint --all-files)
+      shell: bash
+      env:
+        MALF: ${{ github.action_path }}/../../../malf
+        MALF_WORKSPACE_ROOT: ${{ github.workspace }}
+      run: |
+        set -euo pipefail
+        cd "$GITHUB_WORKSPACE"
+        # --console, deliberately: without it `malf lint` writes findings AND the NOT LINTED block
+        # to lint_output.txt and prints only "output written to ...", so a red run would name a file
+        # nobody fetches. The whole verdict must be in the log the reader already has open.
+        #
+        # --all-files, deliberately: the default mode is `git diff --name-only HEAD`, which on a
+        # clean CI checkout is EMPTY and passes. That is the can't-FAIL vacuity — a gate that
+        # inspects nothing and reports green. --all-files walks the tree and refuses an empty set.
+        if ! bash "$MALF" lint --all-files --console; then
+          echo "::error::clang-tidy findings, or translation units clang-tidy could not check, above. A 'NOT LINTED' block means those files went through ZERO checks — that is a coverage hole, not a finding, and it is fixed by removing the construct the check dies on or by a declared, reproducer-carrying exclusion in the config, never by a per-site NOLINT. Everything else: fix at the source, then re-run 'malf format' (a NOLINT insertion reflows its line and this job checks formatting too)."
+          exit 1
+        fi
