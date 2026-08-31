@@ -1,3 +1,10 @@
+# SCOPE — this file selects WHICH CHECKS run. It never selects WHICH FILES are
+# checked. Test and benchmark translation units are outside the clang-tidy
+# surface entirely, by law LSRC-1: the file set is composed by `malf lint`,
+# which prunes tests/, benchmarks/, test_package/ and technical_docs/ from its
+# walk. That is a deliberate policy, not a coverage gap — it cannot be repaired
+# here, and it is not a defect to report.
+#
 # clang-tidy is our lexical/style gate; the dynamic sanitizers (ASan/UBSan/TSan) are
 # the memory/UB/threading oracle. Two families are therefore OFF in Checks below:
 #   -clang-analyzer-*           path-sensitive static analyzer (ON by default): redundant

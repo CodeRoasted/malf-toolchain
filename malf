@@ -108,10 +108,31 @@ MALF_FORMAT_BATCH_SIZE="${MALF_FORMAT_BATCH_SIZE:-50}"
 # Add project-specific dirs via MALF_{FORMAT,LINT}_EXCLUDE_EXTRA, not here.
 MALF_SOURCE_EXCLUDE_DIRS="${MALF_SOURCE_EXCLUDE_DIRS:-build build-* .conan2 .cache .git data node_modules .venv venv third_party vendor _deps .model .model-build}"
 MALF_FORMAT_EXCLUDE_EXTRA="${MALF_FORMAT_EXCLUDE_EXTRA:-}"
-# `lint`'s additions are POLICY, not hazard: test_package/ and technical_docs/
-# are out of lint scope, and tests/ + benchmarks/ import the heavy re-export
-# aggregator BMIs that race clang's ASTReader under the parallel fan-out (see
-# cmd_lint's --header-filter note).
+# ─── D-LSRC-1 · test and benchmark TUs are OUTSIDE the clang-tidy surface ────
+# THE LAW, and it is unconditional. `lint` never walks test_package/,
+# technical_docs/, tests/ or benchmarks/. Founder, 2026-08-31: "excluding test
+# files is wanted. tidy the test is unecessary and adds compute time for
+# nothing." It rests on no implementation fact, so no implementation fix
+# retires it.
+#
+# Declared here because the exclusion was read as an accident and written up as
+# a coverage hole — "every arm written to guard the product is itself
+# unguarded." The only ground on record for tests/ and benchmarks/ was a
+# HAZARD: they import the heavy re-export aggregator BMIs that race clang's
+# ASTReader under the parallel fan-out (see cmd_lint's --header-filter note).
+# That hazard is real and still holds, but it is CONTINGENT — repair the race
+# and it stops arguing for anything, while the law above does not move. What
+# re-opening would cost is measured, not estimated: 430 test/bench translation
+# units across the eight C++ repos on 2026-08-31 — insight-eidos 143,
+# logcraft 101, insight-canon 68, coderoast-server 54, insight-metalog 37,
+# coderoast-ipc 13, coderoast-security 13, insight-twin 1.
+#
+# TWO MEASURED GAPS between the law and this line, both open on 2026-08-31.
+# The prune matches directory BASENAMES, so insight-canon's benchmark package —
+# spelled `bench`, not `benchmarks` — is still linted: 2 TUs, and it is the sole
+# outlier of the eight. And cmd_lint's incremental leg HARD-CODES these same
+# four spellings rather than reading this variable, so the two legs agree today
+# by copy and diverge the moment either is edited.
 MALF_LINT_EXCLUDE_EXTRA="${MALF_LINT_EXCLUDE_EXTRA:-test_package technical_docs tests benchmarks}"
 # Wall-clock ceiling for ONE clang-tidy translation unit. This is a WEDGE guard, not a
 # performance bar, and the two caps above do not cover the state it closes: a clang-tidy that
