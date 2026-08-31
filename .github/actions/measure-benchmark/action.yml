@@ -68,7 +68,7 @@ runs:
         # vendored deps into.
         # MALF_AUTO_WORKSPACE_DEPS=1 with MALF_WORKSPACE_ROOT=$GITHUB_WORKSPACE: the editable hunt is
         # confined to the TAG CHECKOUT, so a bench target's SAME-REPO first-party deps (a multi-package
-        # repo — e.g. canon's bench/ requiring core + the semantic packages) build as
+        # repo — e.g. canon's benchmarks/ requiring core + the semantic packages) build as
         # editables from the exact sources being released, while CROSS-REPO deps are never under the
         # checkout and keep resolving from the vendored cache. The old =0 assumed single-package repos
         # (deps always vendored) and broke multi-package benches, whose siblings at the tag cannot be

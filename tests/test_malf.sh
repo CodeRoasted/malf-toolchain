@@ -834,6 +834,194 @@ check "deps — the retired include_test_requires argument is REFUSED (exit 2), 
 
 rm -rf "$graph_tmp"
 
+echo "[7l] lint exclusion — ONE authoring, and the two legs agree on a tree where they did not"
+
+# `malf lint` selects its subject two ways: --all-files walks the tree and PRUNES with
+# `find -name <NAME> -prune`, the default leg filters `git diff --name-only` paths. Both must
+# apply the SAME policy (LSRC-1), and until 2026-08-31 the second one restated it as
+# `*/NAME/*` globs — which had already drifted, not merely risked drifting. A leading `*/`
+# demands a component ahead of the name and `git diff` emits REPO-RELATIVE paths, so an excluded
+# directory at a repo ROOT slipped through: 41 tracked TUs were in that shape.
+#
+# THE ARM IS NOT "THE TWO AGREE" EVALUATED ONCE. Both legs now derive from one variable, so an
+# agreement assertion alone could never fail. It is driven on a fixture built to make them
+# disagree — root-level AND nested instances of every excluded name — and the mutation below
+# restores the historical filter and requires the disagreement back, naming its exact residue.
+lx_tmp="$(mktemp -d)"   # cleaned inline below (a second `trap ... EXIT` would REPLACE [7d]'s)
+lx_files=(
+    tests/root_test.cpp                    # root-level: the four the old globs could not see
+    benchmarks/root_bench.cpp
+    test_package/root_pkg.cpp
+    technical_docs/root_doc.cpp
+    core/tests/nested_test.cpp             # nested: the shape both legs always agreed on
+    core/benchmarks/nested_bench.cpp
+    core/test_package/nested_pkg.cpp
+    build-gcc16-release/probe.cpp          # hazard baseline, keyed build dir (MALF_SOURCE_EXCLUDE_DIRS)
+    core/src/engine.cpp                    # product
+    core/src/build-helper.cpp              # product whose NAME matches `build-*` — the glob trap
+    semantic/test_frameworks/src/vocab.cpp # product whose DIRECTORY carries "test" — must stay linted
+)
+for lx_f in "${lx_files[@]}"; do mkdir -p "$lx_tmp/$(dirname "$lx_f")"; : > "$lx_tmp/$lx_f"; done
+
+mapfile -d '' -t lx_prune < <(_malf_prune_args $MALF_LINT_EXCLUDE_EXTRA)
+lx_walk() {   # leg A — the real --all-files prune, relative and sorted
+    find "$lx_tmp" \( -type d \( "${lx_prune[@]}" \) -prune \) -o \( -type f -name '*.cpp' -print \) \
+        | sed "s|^$lx_tmp/||" | sort | tr '\n' ' '
+}
+lx_incremental() {   # leg B — the real per-path predicate over the same subject
+    local f out=""
+    for f in $(printf '%s\n' "${lx_files[@]}" | sort); do
+        _malf_lint_path_excluded "$f" || out+="$f "
+    done
+    printf '%s' "$out"
+}
+lx_incremental_historical() {   # the pre-2026-08-31 authoring, restated here as the MUTANT
+    local f out=""
+    for f in $(printf '%s\n' "${lx_files[@]}" | sort); do
+        [[ "$f" != */test_package/* ]] && [[ "$f" != */technical_docs/* ]] \
+            && [[ "$f" != */tests/* ]] && [[ "$f" != */benchmarks/* ]] && out+="$f "
+    done
+    printf '%s' "$out"
+}
+
+lx_expected="core/src/build-helper.cpp core/src/engine.cpp semantic/test_frameworks/src/vocab.cpp "
+check "lint exclusion — the --all-files walk keeps exactly the product TUs" \
+      "$lx_expected" "$(lx_walk)"
+check "lint exclusion — the incremental leg keeps the SAME set (one authoring, two shapes)" \
+      "$(lx_walk)" "$(lx_incremental)"
+# Anti-vacuity: the historical filter must LOSE on this fixture, or the arm above proves nothing.
+check "lint exclusion — the historical globs disagree (proves the arm above can fail)" \
+      "benchmarks/root_bench.cpp build-gcc16-release/probe.cpp core/src/build-helper.cpp core/src/engine.cpp semantic/test_frameworks/src/vocab.cpp technical_docs/root_doc.cpp test_package/root_pkg.cpp tests/root_test.cpp " \
+      "$(lx_incremental_historical)"
+# The named not-a-leak: a PRODUCT directory carrying "test" in its name stays inside the surface.
+check "lint exclusion — semantic/test_frameworks/ is product code and stays linted" \
+      "kept kept" \
+      "$(_malf_lint_path_excluded semantic/test_frameworks/src/vocab.cpp && echo excluded || echo kept) \
+$(grep -q 'semantic/test_frameworks/src/vocab.cpp' <<< "$(lx_walk)" && echo kept || echo excluded)"
+
+# The --header-filter is the third consumer of the same list. It must DERIVE, not hold a copy:
+# changing the variable must change the output, which a frozen string could not do.
+check "lint exclusion — the header filter derives from the variable, position-free, regex-escaped" \
+      '(?:.*/)?alpha/|(?:.*/)?be\.ta/' \
+      "$(MALF_LINT_EXCLUDE_EXTRA='alpha be.ta' _malf_lint_header_filter)"
+
+rm -rf "$lx_tmp"
+
+echo "[7m] lint residue detector — the name list cannot see a spelling it does not carry"
+
+# MALF_LINT_EXCLUDE_EXTRA is a list of SPELLINGS and its blindness is silent: a bench directory
+# spelled something else is simply linted, which reads as coverage. _malf_lint_assert_no_test_tu
+# is the name-blind arm. Fixture uses `perf/` — a spelling the list does not carry.
+dt_tmp="$(mktemp -d)"
+mkdir -p "$dt_tmp/perf" "$dt_tmp/src"
+printf '#include <benchmark/benchmark.h>\nint main(){}\n'  > "$dt_tmp/perf/bench_hot.cpp"
+printf '#include <gtest/gtest.h>\nTEST(A,B){}\n'           > "$dt_tmp/perf/unit.cpp"
+printf 'module;\nimport logcraft.core.test;\n'             > "$dt_tmp/perf/agg.cppm"
+printf '#include <string>\nint f(){return 0;}\n'           > "$dt_tmp/src/engine.cpp"
+printf '// a comment mentioning benchmark/benchmark.h and gtest/gtest.h\n' > "$dt_tmp/src/prose.cpp"
+
+CWD="$dt_tmp" _malf_lint_assert_no_test_tu "$dt_tmp/src/engine.cpp" "$dt_tmp/src/prose.cpp" >/dev/null 2>&1
+check "detector — product TUs pass, and a mere MENTION of a framework header is not a dependency" \
+      "0" "$?"
+dt_out="$(CWD="$dt_tmp" _malf_lint_assert_no_test_tu "$dt_tmp/perf/bench_hot.cpp" \
+            "$dt_tmp/perf/unit.cpp" "$dt_tmp/perf/agg.cppm" "$dt_tmp/src/engine.cpp" 2>&1)"
+check "detector — refuses the run (exit 1) when a test/bench TU is inside the surface" \
+      "1" "$?"
+check "detector — names every offender and no product TU" \
+      "perf/agg.cppm perf/bench_hot.cpp perf/unit.cpp" \
+      "$(grep -oE 'perf/[a-z_]+\.(cpp|cppm)|src/engine\.cpp' <<< "$dt_out" | sort -u | tr '\n' ' ' | sed 's/ $//')"
+
+# ANTI-VACUITY. Strip the benchmark alternative from the pattern set in a COPY of malf and
+# re-run the identical probe in a subshell: the bench TU must stop being named. Without this,
+# the arm above could be passing on the gtest alternative alone. The mutation asserts its arity.
+dt_mutant="$dt_tmp/malf_no_bench_pattern"
+dt_mut_count="$(python3 - "$MALF_BIN" "$dt_mutant" <<'PY'
+import sys
+src = open(sys.argv[1]).read()
+old = "gtest/gtest\\.h|gmock/gmock\\.h|benchmark/benchmark\\.h"
+new = "gtest/gtest\\.h|gmock/gmock\\.h"
+print(src.count(old))
+open(sys.argv[2], "w").write(src.replace(old, new))
+PY
+)"
+check "detector — the anti-vacuity mutation applied to exactly one site (arming proof)" \
+      "1" "$dt_mut_count"
+check "detector — without the benchmark pattern the bench TU is MISSED (proves it can fail)" \
+      "unit.cpp agg.cppm" \
+      "$(bash -c 'MALF_SOURCE_ONLY=1 source "$1"; set +e
+                  CWD="$2" _malf_lint_assert_no_test_tu "$2/perf/bench_hot.cpp" "$2/perf/unit.cpp" "$2/perf/agg.cppm" 2>&1 \
+                    | grep -oE "[a-z_]+\.(cpp|cppm)" | tr "\n" " " | sed "s/ $//"' _ "$dt_mutant" "$dt_tmp")"
+
+rm -rf "$dt_tmp"
+
+echo "[7n] lint scratch — a corpse and a stall no longer read alike"
+
+# A killed `malf lint` left /tmp/malf_lint.*/ behind with a frozen _progress counter, which is
+# byte-identical to what a slow run leaves. The directory now carries its owner's identity.
+sc_tmp="$(mktemp -d)"
+cat > "$sc_tmp/owner_probe.sh" <<PROBE
+#!/usr/bin/env bash
+MALF_SOURCE_ONLY=1 source "$MALF_BIN"
+set +e; set -uo pipefail
+_malf_lint_open_scratch
+command sleep 60 &                 # an orphan-to-be: it inherits everything the owner holds
+printf '%s %s\n' "\$_MALF_LINT_SCRATCH" "\$!" > "\$1"
+wait
+PROBE
+chmod +x "$sc_tmp/owner_probe.sh"
+
+sc_wait_state() {   # the state file is written after the scratch exists; poll, never sleep blind
+    local i
+    for i in $(seq 1 500); do [[ -s "$1" ]] && return 0; command sleep 0.01; done
+    return 1
+}
+
+bash "$sc_tmp/owner_probe.sh" "$sc_tmp/state" & sc_owner=$!
+sc_wait_state "$sc_tmp/state"
+read -r sc_dir sc_child < "$sc_tmp/state"
+_malf_lint_owner_alive "$sc_dir"
+check "scratch — a running owner reads ALIVE" "0" "$?"
+check "scratch — _owner tells a reader the exact command that answers it" \
+      "yes" "$(grep -q "stat -c %Y /proc/" "$sc_dir/_owner" && echo yes || echo no)"
+
+# SIGKILL: no trap can run, so this is the case the recorded identity exists for. The orphaned
+# child is deliberately left RUNNING — an flock-based owner stamp reads ALIVE here, because a
+# bash {var} descriptor is not close-on-exec and the lock rides the inherited open file
+# description. Assert the orphan really is alive first, or a pass here is unattributable.
+kill -9 "$sc_owner"; wait "$sc_owner" 2>/dev/null
+check "scratch — the orphaned child is genuinely still running (the probe means something)" \
+      "0" "$(kill -0 "$sc_child" 2>/dev/null; echo $?)"
+_malf_lint_owner_alive "$sc_dir"
+check "scratch — after SIGKILL the corpse reads DEAD, orphaned child notwithstanding" \
+      "1" "$?"
+kill -9 "$sc_child" 2>/dev/null
+
+# The reaper's three guards, each isolated. Its own live directory must survive its own sweep.
+sc_corpse="$(mktemp -d -t malf_lint.XXXXXX)"; printf 'pid 4294967295 start 1\n' > "$sc_corpse/_owner"
+touch -d "5 minutes ago" "$sc_corpse"
+sc_fresh="$(mktemp -d -t malf_lint.XXXXXX)";  printf 'pid 4294967295 start 1\n' > "$sc_fresh/_owner"
+bash "$sc_tmp/owner_probe.sh" "$sc_tmp/state2" & sc_owner2=$!
+sc_wait_state "$sc_tmp/state2"
+read -r sc_dir2 sc_child2 < "$sc_tmp/state2"
+touch -d "5 minutes ago" "$sc_dir2"        # old enough to be swept; alive, so it must not be
+_malf_lint_reap_corpses
+check "scratch — the reaper removes a dead run's directory" \
+      "gone" "$([[ -d "$sc_corpse" ]] && echo survives || echo gone)"
+check "scratch — it spares a directory younger than the mtime floor (the mktemp/write window)" \
+      "survives" "$([[ -d "$sc_fresh" ]] && echo survives || echo gone)"
+check "scratch — it spares a LIVE run whose mtime is old (a quiet run is not a corpse)" \
+      "survives" "$([[ -d "$sc_dir2" ]] && echo survives || echo gone)"
+kill -9 "$sc_owner2" "$sc_child2" 2>/dev/null; wait "$sc_owner2" 2>/dev/null
+# A CATCHABLE death must leave nothing at all — the other half, which the identity never sees.
+bash "$sc_tmp/owner_probe.sh" "$sc_tmp/state3" & sc_owner3=$!
+sc_wait_state "$sc_tmp/state3"
+read -r sc_dir3 sc_child3 < "$sc_tmp/state3"
+kill -TERM "$sc_owner3"; wait "$sc_owner3" 2>/dev/null
+check "scratch — a catchable death (SIGTERM) leaves no directory behind at all" \
+      "gone" "$([[ -d "$sc_dir3" ]] && echo survives || echo gone)"
+kill -9 "$sc_child3" 2>/dev/null
+rm -rf "$sc_tmp" "$sc_corpse" "$sc_fresh" "$sc_dir" "$sc_dir2"
+
 echo
 echo "malf selftest: $pass_count passed, $fail_count failed"
 [[ $fail_count -eq 0 ]] || exit 1

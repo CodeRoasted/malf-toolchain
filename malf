@@ -127,12 +127,32 @@ MALF_FORMAT_EXCLUDE_EXTRA="${MALF_FORMAT_EXCLUDE_EXTRA:-}"
 # logcraft 101, insight-canon 68, coderoast-server 54, insight-metalog 37,
 # coderoast-ipc 13, coderoast-security 13, insight-twin 1.
 #
-# TWO MEASURED GAPS between the law and this line, both open on 2026-08-31.
-# The prune matches directory BASENAMES, so insight-canon's benchmark package —
-# spelled `bench`, not `benchmarks` — is still linted: 2 TUs, and it is the sole
-# outlier of the eight. And cmd_lint's incremental leg HARD-CODES these same
-# four spellings rather than reading this variable, so the two legs agree today
-# by copy and diverge the moment either is edited.
+# ENFORCEMENT IS ONE AUTHORING and these four names are it. Three consumers
+# derive from them and none restates them: `_malf_prune_args` builds the
+# --all-files walk's `find -prune` arguments, `_malf_lint_path_excluded` builds
+# the incremental leg's per-path test, and `_malf_lint_header_filter` builds
+# cmd_lint's --header-filter alternatives.
+#
+# The incremental leg used to hard-code the same four spellings as `*/NAME/*`
+# globs, and that copy had not merely been AT RISK of drifting — it HAD drifted.
+# A leading `*/` demands at least one path component ahead of the name, while
+# `git diff --name-only` emits REPO-RELATIVE paths, so an excluded directory
+# sitting at a repo ROOT was invisible to it. Measured 2026-08-31, before the
+# repair: 41 tracked translation units in exactly that shape (insight-metalog
+# tests/ 29, benchmarks/ 5, test_package/ 1 · insight-eidos test_package/ 1 ·
+# logcraft technical_docs/ 5) — pruned by --all-files and linted by the default
+# leg, off the same list. Component-exact matching is why the predicate splits a
+# path instead of globbing it.
+#
+# A NAME LIST CANNOT SEE A SPELLING IT DOES NOT CARRY, and that blindness is
+# silent: the TU is simply linted, which reads as coverage. So the names are
+# backed by a name-BLIND detector — `_malf_lint_assert_no_test_tu` fails the run
+# on any selected TU carrying a test or benchmark framework dependency. That is
+# what makes this list's residue LOUD. It reproduces the one leak the list has
+# actually had: insight-canon spelled its benchmark package `bench`, and its 2
+# TUs were linted for as long as the list stood. That directory is `benchmarks`
+# since 2026-08-31 — all eight C++ repos now spell it alike and the list stays
+# four names long.
 MALF_LINT_EXCLUDE_EXTRA="${MALF_LINT_EXCLUDE_EXTRA:-test_package technical_docs tests benchmarks}"
 # Wall-clock ceiling for ONE clang-tidy translation unit. This is a WEDGE guard, not a
 # performance bar, and the two caps above do not cover the state it closes: a clang-tidy that
@@ -1317,7 +1337,7 @@ PY
     # 64 library TUs lint clean (verified 2026-06-11); only the test/bench aggregator-imports
     # crash, and only in parallel. Excluded here so the gate covers 100% of SHIPPING source;
     # test/bench keep -Werror + sanitizers. Remove when clang's module ASTReader is fixed.
-    extra_args+=("--header-filter=^${CWD}/(?!\.conan2|build|test_package|technical_docs|.*/tests/|.*/benchmarks/).*")
+    extra_args+=("--header-filter=^${CWD}/(?!\.conan2|build|$(_malf_lint_header_filter)).*")
 
     # THE VERDICT ACCUMULATOR, declared here rather than beside the xargs run below, because the
     # DB-completeness filter above it can already have failed the run. `local lint_status=0` sat
@@ -1350,11 +1370,15 @@ PY
                    -size "-${MALF_SOURCE_MAX_FILE_KB}k" -print \)
         )
     else
+        # The SAME exclusion the --all-files walk prunes with, applied per path because this leg
+        # has no tree to prune — derived from the one list, never restated. See LSRC-1.
         while IFS= read -r f; do
-            [[ "$f" =~ \.(cpp|cc|cxx|h|hpp|cppm)$ ]] && [[ -f "$CWD/$f" ]] && [[ "$f" != */test_package/* ]] && [[ "$f" != */technical_docs/* ]] && [[ "$f" != */tests/* ]] && [[ "$f" != */benchmarks/* ]] && files+=("$CWD/$f")
+            [[ "$f" =~ \.(cpp|cc|cxx|h|hpp|cppm)$ ]] && [[ -f "$CWD/$f" ]] \
+                && ! _malf_lint_path_excluded "$f" && files+=("$CWD/$f")
         done < <(git -C "$CWD" diff --name-only HEAD 2>/dev/null || true)
         while IFS= read -r f; do
-            [[ "$f" =~ \.(cpp|cc|cxx|h|hpp|cppm)$ ]] && [[ -f "$CWD/$f" ]] && [[ "$f" != */test_package/* ]] && [[ "$f" != */technical_docs/* ]] && [[ "$f" != */tests/* ]] && [[ "$f" != */benchmarks/* ]] && files+=("$CWD/$f")
+            [[ "$f" =~ \.(cpp|cc|cxx|h|hpp|cppm)$ ]] && [[ -f "$CWD/$f" ]] \
+                && ! _malf_lint_path_excluded "$f" && files+=("$CWD/$f")
         done < <(git -C "$CWD" diff --name-only --cached 2>/dev/null || true)
         # dedupe — GUARDED, and the guard is the whole point. `printf '%s\n'` applies its format
         # once even with NO arguments, so on an EMPTY array this pipeline emits one blank line and
@@ -1470,6 +1494,11 @@ PY
         return 0
     fi
 
+    # LSRC-1's residue check, on the FINAL subject: the list above is a set of spellings and
+    # cannot see one it does not carry, so the run refuses before spending a single TU of the
+    # compute that law declines.
+    _malf_lint_assert_no_test_tu "${files[@]}" || exit 1
+
     echo "malf lint: checking ${#files[@]} file(s) ..."
 
     # Parallel execution via xargs -P. Cap at 4 jobs (a real TU peaks at ~436 MB,
@@ -1480,8 +1509,8 @@ PY
     jobs="$(( $(nproc) < 4 ? $(nproc) : 4 ))"
     export _MALF_MEM_LIMIT="$MALF_SOURCE_MEM_LIMIT_KB"
 
-    local tmpdir
-    tmpdir="$(mktemp -d -t malf_lint.XXXXXX)"
+    _malf_lint_open_scratch
+    local tmpdir="$_MALF_LINT_SCRATCH"
 
     local counter_file="$tmpdir/_progress"
     touch "$counter_file"
@@ -1580,7 +1609,8 @@ PY
         } >> "${output_file:-/dev/stdout}"
     fi
 
-    rm -rf "$tmpdir"
+    _malf_lint_scrub
+    trap - EXIT INT TERM HUP
     unset _MALF_TIDY _MALF_ARGS _MALF_TMP _MALF_CWD _MALF_TOTAL _MALF_COUNTER _MALF_MEM_LIMIT _MALF_TU_TIMEOUT
     export -nf _malf_tidy_crashed
 
@@ -1656,6 +1686,203 @@ _malf_prune_args() {
     (( _had_noglob )) || set +f
     unset "out[$((${#out[@]} - 1))]"   # drop the trailing -o
     printf '%s\0' "${out[@]}"
+}
+
+# Split MALF_SOURCE_EXCLUDE_DIRS and MALF_LINT_EXCLUDE_EXTRA into words ONCE, publishing two
+# views of the same source. Word-splitting happens under noglob for the reason `_malf_prune_args`
+# spells out: `build-*` must survive as a literal glob rather than resolve against the CWD.
+# Answers through globals rather than stdout, the `_malf_lint_db_verdict` idiom — the path
+# predicate below runs once per candidate file and must not cost a fork.
+#   _MALF_LINT_EXCL_NAMES   the full walk exclusion: hazard baseline + lint policy
+#   _MALF_LINT_POLICY_NAMES the lint policy alone (LSRC-1's four names)
+_malf_lint_load_exclude_names() {
+    local _had_noglob=1; [[ -o noglob ]] || _had_noglob=0
+    set -f
+    # shellcheck disable=SC2206
+    _MALF_LINT_POLICY_NAMES=($MALF_LINT_EXCLUDE_EXTRA)
+    # shellcheck disable=SC2206
+    _MALF_LINT_EXCL_NAMES=($MALF_SOURCE_EXCLUDE_DIRS $MALF_LINT_EXCLUDE_EXTRA)
+    (( _had_noglob )) || set +f
+}
+
+# Is PATH excluded by the same policy the --all-files walk prunes with? COMPONENT-EXACT, and
+# that is the whole design. A glob test — `[[ $p == */$name/* ]]`, which this replaced — fails
+# twice over: bash `*` crosses `/`, so the pattern for `build-*` also eats a source file named
+# build-helper.cpp; and the leading `*/` demands a component ahead of the name, so it misses
+# every excluded directory at the path's ROOT, which is where `git diff --name-only` puts a
+# repo's own tests/. Splitting the DIRECTORY part and matching each component whole is the only
+# shape that agrees with `find -type d -name PATTERN -prune` at every depth, root included.
+# The file's own basename is deliberately not tested: `find` prunes directories, and testing it
+# would exclude a TU whose NAME matched a pattern.
+_malf_lint_path_excluded() {
+    local path="$1"
+    local dir="${path%/*}"
+    [[ "$dir" == "$path" ]] && return 1   # a bare filename has no directory part to exclude
+    local -a comps
+    IFS=/ read -r -a comps <<< "$dir"     # read -a does not pathname-expand; a bare `for` would
+    _malf_lint_load_exclude_names
+    local comp name
+    for comp in "${comps[@]}"; do
+        [[ -n "$comp" ]] || continue
+        for name in "${_MALF_LINT_EXCL_NAMES[@]}"; do
+            # $name UNQUOTED: it is a glob pattern, matched against ONE whole component.
+            # shellcheck disable=SC2053
+            [[ "$comp" == $name ]] && return 0
+        done
+    done
+    return 1
+}
+
+# LSRC-1's four names as --header-filter alternatives: glob-translated to regex and made
+# position-free. `(?:.*/)?tests/` excludes a tests/ at ANY depth INCLUDING the walk root, which
+# the hand-written `.*/tests/` did not — the same off-by-one the incremental leg carried, in the
+# other of the two copies this replaced. The widening's domain is EMPTY on this workspace and
+# that is a measurement, not an assumption (2026-08-31): no header file exists under a nested
+# test_package/ or technical_docs/, and no repo-root tests/ or benchmarks/ holds one, so no
+# diagnostic moves. Only MALF_LINT_EXCLUDE_EXTRA feeds this. The `\.conan2|build` alternatives at
+# the call site stay written there on purpose — they are the "stay inside the project" guard, a
+# different mechanism with PREFIX semantics (`build` must also catch build-gcc16-release/), and
+# folding the whole hazard baseline in here would silently widen the filter over vendor/,
+# third_party/ and data/, whose headers a shipped TU legitimately includes.
+_malf_lint_header_filter() {
+    _malf_lint_load_exclude_names
+    local name rx out=""
+    for name in "${_MALF_LINT_POLICY_NAMES[@]}"; do
+        rx="${name//./\\.}"          # regex-escape, then translate the two glob metacharacters
+        rx="${rx//\*/[^/]*}"          # component-scoped: neither may cross a path separator
+        rx="${rx//\?/[^/]}"
+        out+="|(?:.*/)?${rx}/"
+    done
+    printf '%s' "${out#|}"
+}
+
+# THE NAME LIST'S RESIDUE, MADE LOUD. MALF_LINT_EXCLUDE_EXTRA is a list of SPELLINGS, so it is
+# blind by construction to a directory spelled something it does not carry — and blind reads as
+# clean, because the TU is simply linted. This is the arm that sees past the spelling: a
+# translation unit that DEPENDS on a test or benchmark framework IS test or bench code whatever
+# its directory is called, and LSRC-1 puts it outside this surface.
+#
+# THE PATTERN SET IS MEASURED, NOT GUESSED — it is the entire framework surface of the eight C++
+# repos on 2026-08-31: gtest/gtest.h (357 sites), benchmark/benchmark.h (23), and the module
+# aggregators `import <pkg>.test;` / `import <pkg>.bench;` (247). gmock rides gtest and is listed
+# with it. ARMING PROOF, on the real workspace rather than a fixture: run over the pre-rename
+# --all-files subject it named exactly the 2 TUs of insight-canon's `bench/` package out of 425
+# walked TUs, and nothing else — including insight-canon/semantic/test_frameworks/, which carries
+# "test" in its directory name and is product code that must stay linted.
+#
+# ITS LIMIT, DECLARED: a test TU that includes no framework and imports no aggregator is
+# invisible to it. It is a detector for the list's residue, never a replacement for the list.
+_malf_lint_assert_no_test_tu() {
+    local -a offenders=()
+    local hit
+    while IFS= read -r hit; do
+        [[ -n "$hit" ]] && offenders+=("$hit")
+    done < <(printf '%s\0' "$@" | xargs -0 -r grep -l -E \
+        -e '^[[:space:]]*#[[:space:]]*include[[:space:]]*[<"](gtest/gtest\.h|gmock/gmock\.h|benchmark/benchmark\.h)' \
+        -e '^[[:space:]]*(export[[:space:]]+)?import[[:space:]]+[A-Za-z0-9_.]+\.(test|bench)[[:space:]]*;' --)
+    (( ${#offenders[@]} > 0 )) || return 0
+    echo "malf lint: ${#offenders[@]} selected translation unit(s) carry a test/benchmark framework" >&2
+    echo "malf lint: dependency, so LSRC-1 puts them OUTSIDE this surface — and the walk selected" >&2
+    echo "malf lint: them anyway, which means their directory is spelled something the exclusion list" >&2
+    echo "malf lint: does not carry (it holds: $MALF_LINT_EXCLUDE_EXTRA):" >&2
+    printf '  %s\n' "${offenders[@]#"${CWD:-$PWD}"/}" >&2
+    echo "malf lint: two remedies and only two: rename the directory to the spelling the other repos" >&2
+    echo "malf lint: use, or add its spelling to MALF_LINT_EXCLUDE_EXTRA. Linting these is the compute" >&2
+    echo "malf lint: LSRC-1 declines, so the run stops here rather than spending it." >&2
+    return 1
+}
+
+# THE SCRATCH DIRECTORY MUST SAY WHETHER ITS RUN IS ALIVE. A killed `malf lint` left
+# /tmp/malf_lint.*/ behind with its _progress counter frozen mid-count, and a run that is merely
+# slow leaves the identical shape — so a lane inspecting the directory could not tell a stall
+# from a corpse, and the only answer available (find the owning pid) was derivable from nothing
+# IN the directory. Two parts, covering two different deaths: a trap removes the directory on
+# every CATCHABLE exit, and _owner records an identity that survives SIGKILL, which no trap can
+# reach.
+#
+# THE IDENTITY IS pid + PROCESS START TIME, NOT AN flock, and that is a measured choice rather
+# than a preference. The obvious lock — an exclusive flock held for the run's lifetime — is
+# WRONG here: a bash `{var}` descriptor is not close-on-exec, an flock belongs to the open file
+# DESCRIPTION, and every child of the parallel fan-out inherits both. Measured 2026-08-31 while
+# building this: SIGKILL the owner and the lock stayed held by an orphaned child, so the probe
+# read ALIVE — for as long as one clang-tidy survived, bounded only by MALF_LINT_TU_TIMEOUT_S
+# per remaining TU. Closing the descriptor on the fan-out does not repair it either: bash forks
+# an intermediate subshell to run a function in a pipeline, and that subshell holds the
+# descriptor while its child runs. `stat -c %Y /proc/<pid>` is inheritable by nothing, and
+# comparing it against the value recorded at birth also closes the pid-reuse hole a bare
+# `kill -0 <pid>` has: a recycled pid carries a different start time.
+#
+# RESIDUAL, stated: that stamp has one-second resolution, so a pid recycled inside the same
+# second as the dead owner's start would read as alive. Bounded and far narrower than the two
+# holes above; the alternative is parsing field 22 of /proc/<pid>/stat, whose comm field can
+# contain the delimiter.
+_malf_lint_open_scratch() {
+    _MALF_LINT_SCRATCH="$(mktemp -d -t malf_lint.XXXXXX)"
+    local owner="$_MALF_LINT_SCRATCH/_owner"
+    local start; start="$(stat -c %Y "/proc/$$")"
+    {
+        # Line 1 is the MACHINE line and its shape is a contract — _malf_lint_owner_alive parses it.
+        echo "pid $$ start $start"
+        echo "malf lint scratch — started $(date -Is), host $(uname -n), cwd ${CWD:-$PWD}"
+        echo
+        echo "IS THAT RUN STILL ALIVE?   stat -c %Y /proc/$$"
+        echo "  prints $start -> ALIVE: that is the owner, still running; _progress advances."
+        echo "  anything else, or an error -> DEAD: the owner is gone. This directory is a"
+        echo "                                corpse and 'rm -rf' on it is safe."
+    } > "$owner"
+    # Catchable death leaves nothing at all. INT/TERM/HUP re-raise after scrubbing so the shell
+    # actually dies: a bare trap would return to the interrupted line and read the directory it
+    # had just deleted.
+    trap '_malf_lint_scrub' EXIT
+    trap '_malf_lint_scrub; trap - INT;  kill -INT  $$' INT
+    trap '_malf_lint_scrub; trap - TERM; kill -TERM $$' TERM
+    trap '_malf_lint_scrub; trap - HUP;  kill -HUP  $$' HUP
+    _malf_lint_reap_corpses
+}
+
+# Is the run that created this scratch directory still running? Reads the machine line written
+# above; anything it cannot parse is reported DEAD, because an unreadable owner stamp is exactly
+# the state a corpse is in and refusing to answer would restore the ambiguity this closes.
+_malf_lint_owner_alive() {          # <scratch dir>
+    local d="$1" tag pid key start live
+    [[ -r "$d/_owner" ]] || return 1
+    read -r tag pid key start _ < "$d/_owner" || return 1
+    [[ "$tag" == "pid" && "$key" == "start" && -n "$pid" && -n "$start" ]] || return 1
+    [[ -d "/proc/$pid" ]] || return 1
+    live="$(stat -c %Y "/proc/$pid")" || return 1
+    [[ "$live" == "$start" ]]
+}
+
+# Idempotent: it is both the normal exit path and every trap's body, so the two cannot diverge.
+_malf_lint_scrub() {
+    [[ -n "${_MALF_LINT_SCRATCH:-}" && -d "${_MALF_LINT_SCRATCH:-}" ]] && rm -rf "$_MALF_LINT_SCRATCH"
+    _MALF_LINT_SCRATCH=""
+    return 0
+}
+
+# Remove the scratch directories of runs that are GONE. Guarded four ways, because this is an
+# `rm -rf` under a shared /tmp: the mktemp name pattern, our own uid, an mtime older than a
+# minute, and a dead owner. The mtime and the owner check are not redundant — the owner check
+# alone would reap a sibling run in the microseconds between its mktemp and its _owner write,
+# and the mtime alone would reap a run that is merely quiet. Without a reaper the corpses the
+# _owner file makes identifiable would still accumulate, one per killed run, forever.
+_malf_lint_reap_corpses() {
+    local d now age
+    now="$(date +%s)"
+    # A GLOB, not `find`. `find "${TMPDIR:-/tmp}" -maxdepth 1` writes "Permission denied" for
+    # every root-owned systemd-private-* directory in /tmp — four lines of stderr on this box,
+    # on EVERY lint run, from a sweep that was never going to look inside them. Measured
+    # 2026-08-31. Silencing that stderr would have hidden a real failure of the sweep as well,
+    # so the sweep stops generating it instead.
+    for d in "${TMPDIR:-/tmp}"/malf_lint.*; do
+        [[ -d "$d" ]] || continue                        # no match: the literal pattern
+        [[ "$d" == "${_MALF_LINT_SCRATCH:-}" ]] && continue
+        [[ -O "$d" ]] || continue                        # ours only
+        age="$(stat -c %Y "$d")" || continue
+        (( now - age > 60 )) || continue                 # the mktemp/_owner-write window
+        _malf_lint_owner_alive "$d" && continue
+        rm -rf "$d"
+    done
 }
 
 cmd_format() {
