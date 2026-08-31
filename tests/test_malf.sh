@@ -743,6 +743,97 @@ check "bump chain — rc=0 and every hygiene step precedes the verification" \
       "$("$bump_tmp/probe.sh" "$bump_tmp")"
 rm -rf "$bump_tmp"
 
+echo "[7k] malf_graph deps — the BUILD closure, not the LINK closure"
+
+# malf configures every workspace dependency as the TOP-LEVEL project of its own cmake preset, so
+# that dependency's PROJECT_IS_TOP_LEVEL test/bench subtrees turn ON and its own test_requires
+# become resolution requirements of THIS run — while conan's `test` trait never propagates them to
+# the target. Emitting what the target LINKS therefore left such a package unregistered, and
+# `malf build insight-twin/core` died inside `conan install logcraft/core` with "Package
+# 'coderoast_ipc_consumer/1.10.3' not resolved" — a package the target's own recipe never mentions.
+# Silent at a desk whose editable registry earlier work had already populated; fatal on a fresh one.
+#
+# The fixture is SYNTHETIC on purpose. The real workspace exposed exactly ONE target->dependency
+# pair of this shape (17 others carried the needed package through an unrelated ordinary `require`),
+# so an arm keyed on the real graph would go vacuous the next time a recipe moves an edge.
+graph_tmp="$(mktemp -d)"   # cleaned inline below (a second `trap ... EXIT` would REPLACE [7d]'s)
+GRAPH_PY="$MALF_ROOT/malf_graph.py"
+
+# ONE recipe writer, so every arm below reads the same four-recipe graph:
+#   probe_target --requires--> probe_dep --test_requires--> probe_testonly --test_requires--> probe_deep
+#                                        --test_requires--> gtest/1.17.0 (third-party, must NOT appear)
+write_probe_recipe() {   # <subdir> <name> <requires…> | <subdir> <name> "" <test_requires…>
+    local d="$graph_tmp/ws/$1" n="$2" r="$3" t="${4:-}" x
+    mkdir -p "$d"
+    {
+        printf 'from conan import ConanFile\n\n\nclass Probe(ConanFile):\n'
+        printf '    name = "%s"\n    version = "1.0"\n' "$n"
+        if [[ -n "$r" ]]; then
+            printf '    requires = ['
+            for x in $r; do printf '"%s", ' "$x"; done
+            printf ']\n'
+        fi
+        if [[ -n "$t" ]]; then
+            printf '    test_requires = ['
+            for x in $t; do printf '"%s", ' "$x"; done
+            printf ']\n'
+        fi
+    } > "$d/conanfile.py"
+    : > "$d/CMakeLists.txt"
+}
+
+write_probe_recipe target   probe_target   "probe_dep/1.0" ""
+write_probe_recipe dep      probe_dep      ""              "probe_testonly/1.0 gtest/1.17.0"
+write_probe_recipe testonly probe_testonly ""              "probe_deep/1.0"
+write_probe_recipe deep     probe_deep     ""              ""
+
+graph_refs() {   # <malf_graph.py path> -> the emitted refs, space-separated, IN ORDER
+    python3 "$1" deps "$graph_tmp/ws" "$graph_tmp/ws/target" 2>&1 | cut -f1 | tr '\n' ' ' | sed 's/ $//'
+}
+
+# (a) the closure reaches a DEPENDENCY's test_requires and follows them TRANSITIVELY, in
+# dependency-first order — probe_deep must be built before probe_testonly, which must be built
+# before the probe_dep whose tests link it.
+check "deps — a dependency's first-party test_requires enter the closure, transitively and in order" \
+      "probe_deep/1.0 probe_testonly/1.0 probe_dep/1.0" \
+      "$(graph_refs "$GRAPH_PY")"
+
+# (b) the widening stays FIRST-PARTY: a third-party test_requires is conan's to resolve and must
+# never be emitted as a workspace editable. Without this, (a) could pass by emitting everything.
+check "deps — a third-party test_requires (gtest) is NOT emitted as a workspace member" \
+      "absent" \
+      "$(grep -q 'gtest' <<< "$(graph_refs "$GRAPH_PY")" && echo "LEAKED: $(graph_refs "$GRAPH_PY")" || echo absent)"
+
+# (c) ANTI-VACUITY. Restore the pre-fix walk (test_requires followed from the ROOT only) in a copy
+# and re-run the identical probe: it must lose both extra members. If this ever reports the full
+# closure the probe has stopped being able to detect the regression and (a) proves nothing.
+# The mutation asserts its own arity first — a sed that silently matched nothing would green here.
+mutant="$graph_tmp/malf_graph_linkclosure.py"
+mutation_count="$(python3 - "$GRAPH_PY" "$mutant" <<'PY'
+import sys
+src = open(sys.argv[1]).read()
+old = '            deps = recipe["requires"] + recipe["test_requires"]\n'
+new = ('            deps = list(recipe["requires"])\n'
+       '            if ref == target_ref:\n'
+       '                deps += recipe["test_requires"]\n')
+print(src.count(old))
+open(sys.argv[2], "w").write(src.replace(old, new))
+PY
+)"
+check "deps — the anti-vacuity mutation applied to exactly one site (arming proof)" \
+      "1" "$mutation_count"
+check "deps — the LINK-closure walk DROPS them (proves the arm above can fail)" \
+      "probe_dep/1.0" \
+      "$(graph_refs "$mutant")"
+
+# (d) the retired third argument is GONE, not merely ignored. It was dormant plumbing whose comment
+# described a caller that never existed, and a silently-accepted extra arg would let it grow back.
+python3 "$GRAPH_PY" deps "$graph_tmp/ws" "$graph_tmp/ws/target" 1 >/dev/null 2>&1
+check "deps — the retired include_test_requires argument is REFUSED (exit 2), not ignored" \
+      "2" "$?"
+
+rm -rf "$graph_tmp"
+
 echo
 echo "malf selftest: $pass_count passed, $fail_count failed"
 [[ $fail_count -eq 0 ]] || exit 1

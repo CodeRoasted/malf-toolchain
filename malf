@@ -372,15 +372,14 @@ print(get("name")+"/"+get("version"))' "$conanfile"
 }
 
 # All three recipe-graph queries live in malf_graph.py (one AST recipe parser,
-# no conan invocation): `deps` = a target's transitive workspace requires in
-# dependency order (+ the target's own test_requires as non-transitive roots);
-# `all` = every workspace recipe (what `editables sync` re-registers);
-# `members` = every recipe under a dir, topo-sorted member-to-member (the
-# no-arg multi-package sweep order).
+# no conan invocation): `deps` = the target's BUILD CLOSURE in dependency order
+# (requires AND test_requires followed from every node — mode_deps' docstring
+# owns why that is wider than what the target links); `all` = every workspace
+# recipe (what `editables sync` re-registers); `members` = every recipe under a
+# dir, topo-sorted member-to-member (the no-arg multi-package sweep order).
 _malf_workspace_dep_entries() {
     local target="$1"
-    local include_test_requires="${2:-1}"
-    python3 "$MALF_DIR/malf_graph.py" deps "$MALF_WORKSPACE_ROOT" "$target" "$include_test_requires"
+    python3 "$MALF_DIR/malf_graph.py" deps "$MALF_WORKSPACE_ROOT" "$target"
 }
 
 _malf_workspace_packages() {
@@ -769,18 +768,25 @@ _malf_build_editable_package_locked() {
     _malf_restore_user_presets "$pkg_dir" "$user_presets_backup"
 }
 
+# ONE list drives BOTH loops below, and it is the BUILD closure — every member this run
+# will configure — never the narrower link closure. malf configures each dependency as the
+# TOP-LEVEL project of its own `cmake --preset`, so that dependency's PROJECT_IS_TOP_LEVEL
+# is true and its own test_requires become resolution requirements of THIS run even though
+# conan's `test` trait never propagates them to the target. Emitting what the target links
+# left one such package unregistered, and `malf build insight-twin/core` died inside
+# `conan install logcraft/core` naming a package the target's recipe never mentions. There
+# is deliberately no knob to narrow this: _malf_build_flow compiles the FULL target surface
+# (package + tests + benches) and so does every editable dep it configures, so a caller that
+# wanted less would be asking for a build that cannot link.
 _malf_bootstrap_workspace_deps() {
     local target="$1"
-    # 1 (default) includes the target's test_requires editables in the rebuild
-    # set; cmd_build passes 0 since a non-test build never links them.
-    local include_test_requires="${2:-1}"
 
     if [[ "$MALF_AUTO_WORKSPACE_DEPS" == "0" ]]; then
         return 0
     fi
 
     local entries=()
-    mapfile -t entries < <(_malf_workspace_dep_entries "$target" "$include_test_requires")
+    mapfile -t entries < <(_malf_workspace_dep_entries "$target")
     if [[ ${#entries[@]} -eq 0 ]]; then
         return 0
     fi
@@ -2607,6 +2613,11 @@ Local dev dependency bootstrap:
     run conan install + CMake/Ninja for those editable deps in dependency
     order. This keeps rebuilds incremental and lets CMakeDeps find libraries
     from each dependency's package-anchored build tree.
+    The set is the BUILD closure, which is wider than what the target links: the
+    target's transitive workspace requires, PLUS the workspace test_requires of
+    every member in it. Each dep is configured as the top-level project of its own
+    cmake preset, so its tests and benches are ON and its own test_requires must
+    resolve too.
     Override the scan root with MALF_WORKSPACE_ROOT or disable with MALF_AUTO_WORKSPACE_DEPS=0.
 
 Editables:

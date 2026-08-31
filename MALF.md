@@ -83,7 +83,7 @@ gone. The merged clangd DB lands at the repo root's default-leg tree
 
 ### Workspace bootstrap
 
-`build`, `test`, and `bench` automatically register sibling workspace packages whose exact `name/version` refs are required by the target recipe as Conan editables, and build them in dependency order into their own package-anchored trees. Override the scan root with `MALF_WORKSPACE_ROOT` or disable it with `MALF_AUTO_WORKSPACE_DEPS=0`. (The recipe-graph queries live in `malf_graph.py` — one AST parser for deps / whole-workspace / member enumeration.)
+`build`, `test`, and `bench` automatically register the target's sibling workspace packages as Conan editables and build them in dependency order into their own package-anchored trees. The set is the **build closure**, not the link closure: the target's transitive workspace `requires`, plus the workspace `test_requires` of *every member in the closure* — each dependency is configured as the top-level project of its own CMake preset, so its `PROJECT_IS_TOP_LEVEL` test and bench subtrees are ON and its own `test_requires` must resolve as well. Override the scan root with `MALF_WORKSPACE_ROOT` or disable it with `MALF_AUTO_WORKSPACE_DEPS=0`. (The recipe-graph queries live in `malf_graph.py` — one AST parser for deps / whole-workspace / member enumeration.)
 
 Any `scripts/conan_hooks/hook_*.py` files found under `MALF_WORKSPACE_ROOT` are copied into `CONAN_HOME/extensions/hooks` and activated automatically — the mechanism for applying any repo-local Conan source/build patch without manual Conan cache setup. (No such hooks ship today.)
 

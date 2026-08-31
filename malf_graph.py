@@ -5,14 +5,14 @@ One AST parse of every `conanfile.py` (no conan invocation, no recipe execution)
 feeding three query modes. All modes emit tab-separated `name/version<TAB>dir`
 lines on stdout.
 
-  deps <workspace_root> <target_dir> <include_test_requires 0|1>
-      Every workspace recipe the target's recipe transitively requires,
-      dependency order, target excluded. Regular requires walk transitively;
-      the TARGET's test_requires are extra roots (when enabled) but are never
-      followed transitively — a dependency's test_requires belong to *its*
-      test build, not ours. A test_requires-only editable (e.g. the e2e
-      harness's scenario corpus) is otherwise never rebuilt, so an integration
-      gate would silently link a stale upstream.
+  deps <workspace_root> <target_dir>
+      The target's BUILD CLOSURE: every workspace recipe this run must register
+      as an editable and configure, dependency order, target excluded. Both
+      `requires` and `test_requires` are followed, from EVERY node — see
+      `mode_deps` for why the build closure is wider than the link closure. A
+      test_requires-only editable (e.g. the e2e harness's scenario corpus) is
+      otherwise never rebuilt, so an integration gate would silently link a
+      stale upstream.
 
   all <workspace_root>
       EVERY workspace recipe, path-sorted — what `malf editables sync`
@@ -126,7 +126,7 @@ def resolve_ref(dep: str, recipes: dict) -> str | None:
     `insight_scenarios/1.9.0`, so `dep in recipes` was False and the corpus package
     was never returned as a dependency — never registered as an editable, and
     therefore unresolvable to its consumer on any checkout without a stale prior
-    registration. `mode_deps`' own docstring names that exact case ("a
+    registration. This module's own `deps` docstring names that exact case ("a
     test_requires-only editable (e.g. the e2e harness's scenario corpus) is otherwise
     never rebuilt") — the intent was written and the matcher defeated it.
 
@@ -156,7 +156,40 @@ def resolve_ref(dep: str, recipes: dict) -> str | None:
     return matches[0]
 
 
-def mode_deps(workspace: pathlib.Path, target_dir: pathlib.Path, include_test_requires: bool):
+def mode_deps(workspace: pathlib.Path, target_dir: pathlib.Path):
+    """The target's BUILD closure — what THIS RUN configures, not what the target links.
+
+    Two different questions share this graph, and conflating them was a live cold-cache
+    build failure:
+
+      LINK closure  — transitive `requires` plus the TARGET's own `test_requires`.
+                      What the target's binaries link. conan's `test` trait does not
+                      propagate, so a dependency's `test_requires` are correctly absent.
+      BUILD closure — the above, plus the first-party `test_requires` of every member
+                      this run will configure, transitively. What must be editable-
+                      registered and compiled.
+
+    malf configures each dependency as the TOP-LEVEL project of its own
+    `cmake --preset`, so that dependency's `PROJECT_IS_TOP_LEVEL` is true, its test and
+    benchmark subtrees turn ON, and its own `test_requires` become resolution
+    requirements of this run. Emitting the link closure therefore left a package
+    unregistered and unresolvable — reproduced 2026-08-31 on an empty editable registry,
+    workspace at 1.10.3: `malf build insight-twin/core` died inside
+    `conan install logcraft/core` with "Package 'coderoast_ipc_consumer/1.10.3' not
+    resolved: Unable to find … in remotes", naming a package the target's own recipe
+    never mentions. Invisible at a desk whose registry earlier work had populated.
+
+    So the walk follows `test_requires` from EVERY node, not only from the root. Measured
+    the same day over all 27 workspace members: the closure grew for exactly 1 target by
+    exactly 1 edge — 17 other target→dependency pairs of the same shape already carried
+    the needed package as an ordinary `require` through an unrelated edge. That is a
+    property of the graph on that day, not a bound on the mechanism.
+
+    The rule is uniform rather than restricted to members that own a CMakeLists.txt (the
+    ones actually configured): the three content-only members declare no `test_requires`
+    at all, so the narrower rule would emit the same set today while adding a branch no
+    input exercises.
+    """
     recipes = scan(workspace)
     t_name, t_version, t_requires, t_test_requires = recipe_info(target_dir / "conanfile.py")
     target_ref = f"{t_name}/{t_version}"
@@ -172,15 +205,13 @@ def mode_deps(workspace: pathlib.Path, target_dir: pathlib.Path, include_test_re
     seen = set()
     visiting = set()
 
-    def visit(ref: str, is_target: bool = False):
+    def visit(ref: str):
         if ref in seen or ref in visiting:
             return
         visiting.add(ref)
         recipe = recipes.get(ref)
         if recipe:
-            deps = list(recipe["requires"])
-            if is_target and include_test_requires:
-                deps += recipe["test_requires"]
+            deps = recipe["requires"] + recipe["test_requires"]
             for dep in deps:
                 resolved = resolve_ref(dep, recipes)
                 if resolved is not None:
@@ -190,7 +221,7 @@ def mode_deps(workspace: pathlib.Path, target_dir: pathlib.Path, include_test_re
         visiting.remove(ref)
         seen.add(ref)
 
-    visit(target_ref, is_target=True)
+    visit(target_ref)
     emit(order)
 
 
@@ -230,12 +261,11 @@ def main() -> int:
         return 2
     mode = sys.argv[1]
     if mode == "deps":
-        if len(sys.argv) != 5 or sys.argv[4] not in ("0", "1"):
-            sys.stderr.write("usage: malf_graph.py deps <workspace_root> <target_dir> <0|1>\n")
+        if len(sys.argv) != 4:
+            sys.stderr.write("usage: malf_graph.py deps <workspace_root> <target_dir>\n")
             return 2
         mode_deps(pathlib.Path(sys.argv[2]).resolve(),
-                  pathlib.Path(sys.argv[3]).resolve(),
-                  sys.argv[4] == "1")
+                  pathlib.Path(sys.argv[3]).resolve())
     elif mode == "all":
         mode_all(pathlib.Path(sys.argv[2]).resolve())
     elif mode == "members":
