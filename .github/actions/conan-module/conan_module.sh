@@ -47,7 +47,7 @@ TOOLCHAIN_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
 # Build-time codegen reachability. logcraft/core's CMake FATALs unless it can find
 # intent_library_codegen.py, and its fallback — the sibling <workspace>/malf — is unreachable under
 # `conan create` / `--build=missing`, which build from sources exported into the conan cache. This
-# path does not go through malf, so malf's own export (malf:63) never reaches it.
+# path does not go through malf, so malf's own export of MALF_TOOLCHAIN_DIR never reaches it.
 export MALF_TOOLCHAIN_DIR="${MALF_TOOLCHAIN_DIR:-$TOOLCHAIN_ROOT}"
 
 # Lockfile args, shared by the install and create phases below so the two can never

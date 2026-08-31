@@ -88,7 +88,7 @@ runs:
         # layout alone and is unreachable under `conan create`, which builds from sources exported
         # into the conan cache. CI is the environment that can declare, so it declares.
         #
-        # WHY HERE, when `conan_module.sh:51` already exports it. That script is the single source
+        # WHY HERE, when `conan_module.sh` already exports it. That script is the single source
         # of truth for PER-MODULE build logic, and the claim written at its site — "it is the one
         # thing every path goes through" — is false for exactly one live path: this repo's own
         # `coderoast-release.yml` runs a bare `conan create` in a `run:` block, never through

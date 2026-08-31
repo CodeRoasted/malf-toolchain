@@ -54,8 +54,9 @@ tools.build:sharedlinkflags=["-Wl,-rpath,/opt/gcc-16.2/lib64"]
 # malf still sets MALF_EDITABLE_BUILD_DIR (takes precedence; covers sanitizer profiles).
 user.malf:editable_build_dir=build-gcc16-release
 # gcc-16's -Wmaybe-uninitialized false positive on constructor initializer lists (GCC PR 125203,
-# a [16 Regression]) fires inside redis-plus-plus 1.3.15's OWN -Werror build (reply.h:54
-# ParseError / sentinel.h:130 StopIterError — the diagnostic cannot even name a variable).
+# a [16 Regression]) fires inside redis-plus-plus 1.3.15's OWN -Werror build
+# (`F-SRC-redis-plus-plus:reply.h:ParseError` / `F-SRC-redis-plus-plus:sentinel.h:StopIterError`,
+# pinned 1.3.15 — the diagnostic cannot even name a variable).
 # Upstream confirmed + fixed on master (sewenew/redis-plus-plus#678, 2026-07-18: _err_info/_to_msg
 # made static), but NO release carries it and conancenter's head is 1.3.15. Desk-verified
 # 2026-08-16: without this line the package REDS on exactly those two sites; with it, the build is
