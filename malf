@@ -107,7 +107,66 @@ MALF_FORMAT_BATCH_SIZE="${MALF_FORMAT_BATCH_SIZE:-50}"
 # full llama.cpp checkout (thousands of TUs), the former the GGUF asset.
 # Add project-specific dirs via MALF_{FORMAT,LINT}_EXCLUDE_EXTRA, not here.
 MALF_SOURCE_EXCLUDE_DIRS="${MALF_SOURCE_EXCLUDE_DIRS:-build build-* .conan2 .cache .git data node_modules .venv venv third_party vendor _deps .model .model-build}"
-MALF_FORMAT_EXCLUDE_EXTRA="${MALF_FORMAT_EXCLUDE_EXTRA:-}"
+# ─── D-LSRC-2 · the corpus EVIDENCE shelf is OUTSIDE the clang-format surface ─
+# THE LAW. `format` never walks a directory named `sift_assessment`.
+# `coderoast-corpora/sift_assessment/<version>/` holds Sift measurement runs —
+# "evidence, not tooling" (`coderoast-corpora/README.md`). A `.cpp` sitting there
+# is the program that produced the `census_output.txt` and `RESULTS.md` beside
+# it, kept so those numbers have a provenance. Reformatting it edits a record to
+# satisfy a gate that has no consumer for the result.
+#
+# Measured 2026-08-31, four legs and none of them quoted:
+#   * `coderoast-corpora` carries NO conanfile.py and NO CMakeLists.txt anywhere.
+#     It is not a package. `format` reaches it only because it walks directories
+#     by file EXTENSION — so nothing compiles the file, and no reviewer reads it
+#     as source.
+#   * exactly ONE file in the whole repository carries a source extension:
+#     `sift_assessment/1.10.2/m3_where_anchor/m3_where_anchor_census_test.cpp`,
+#     12 clang-format violations, committed red long before this ruling. It could
+#     not build here anyway: it imports `insight.sift.test`, a module owned by
+#     another repo, with no build file within reach.
+#   * its own first line declares what it is — "throwaway measurement code
+#     (`DN-59.O2` M3) … its source and its numbers live beside each other" — and
+#     its author had already taken the LINT arm off it by hand: NOLINTBEGIN at
+#     line 1, NOLINTEND at line 283. `format` has no per-file escape that does not
+#     itself rewrite the file, which is the whole difficulty.
+#   * a SECOND workspace instrument already classifies this exact prefix as a
+#     record shelf — `scripts/registry_grammar_lint.py`'s LEGACY_RECORD_PREFIXES,
+#     331 record exemptions on its 2026-08-31 run. This line makes the two agree
+#     instead of leaving one gate rewriting what the other protects.
+#
+# THE BOUNDARY IS THE README'S, NOT THE REPOSITORY'S. A corpus's `scripts/` holds
+# real collector tooling and stays fully in scope; only the evidence shelf leaves
+# it. So what is excluded is the DIRECTORY NAME `sift_assessment` — glob-matched
+# at any depth by `_malf_prune_args`, one directory in the workspace today — and
+# never the repo. A future C++ collector under `<platform>_corpora/…/scripts/` is
+# formatted like any other source.
+#
+# LINT NEEDS NO COUNTERPART, and that is a fact about the mechanism rather than a
+# second policy: `lint --all-files` filters its walk against the compile database,
+# and a file no package builds has no entry, so it is dropped before clang-tidy
+# is spent on it. Read out of cmd_lint on 2026-08-31, NOT measured by running —
+# re-derive it before relying on it if that filter ever moves.
+#
+# ITS ONE HOLE, declared because an env default is not a config file and malf
+# reads none: an operator who sets MALF_FORMAT_EXCLUDE_EXTRA for a reason of their
+# own REPLACES this default and silently loses the exclusion. That is the same
+# override shape MALF_SOURCE_EXCLUDE_DIRS already carries. What the default buys
+# is that the exclusion lives in git and needs nobody to remember it — before this
+# line, `malf format --check coderoast-corpora` was red for everyone who ran it,
+# and so was a no-arg sweep from the workspace root.
+#
+# WHAT THIS DOES NOT MAKE GREEN, because the surprise is worth pre-empting:
+# `malf format --check coderoast-corpora` — an EXPLICIT pathspec — still exits 1,
+# now saying "no source file under". That is cmd_format's anti-vacuity rule, not
+# a residue of this exclusion: an explicit path matching nothing is a typo or a
+# wrong directory, and reporting it as a clean format is the silent-green shape.
+# `coderoast-web` has answered exactly that way for as long as it has existed, so
+# this line moves `coderoast-corpora` into a class that was already declared
+# rather than inventing a state. The two invocations that carry a verdict are
+# both green and both measured 2026-08-31: a no-arg sweep INSIDE the repo exits 0
+# ("nothing to do"), and the workspace-root sweep no longer walks the shelf.
+MALF_FORMAT_EXCLUDE_EXTRA="${MALF_FORMAT_EXCLUDE_EXTRA:-sift_assessment}"
 # ─── D-LSRC-1 · test and benchmark TUs are OUTSIDE the clang-tidy surface ────
 # THE LAW, and it is unconditional. `lint` never walks test_package/,
 # technical_docs/, tests/ or benchmarks/. Founder, 2026-08-31: "excluding test
