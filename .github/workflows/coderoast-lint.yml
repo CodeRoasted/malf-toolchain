@@ -186,7 +186,7 @@ jobs:
 
       - name: C++ modules conformance
         if: ${{ inputs.module-conformance }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-module-conformance@28764d64e16fc4f8afff541e62bff06bf09ab4dd
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-module-conformance@1467fe12e3613c8fbeeecafe9155de752ca03730
 
       # Last, because it provisions clang-21 to get a version-matched clang-format. On the
       # self-hosted fleet that provisioning is an idempotent no-op (the toolchain persists between
@@ -194,7 +194,7 @@ jobs:
       # above report first and a repo never pays for the toolchain to learn its workflows are broken.
       - name: C++ format conformance
         if: ${{ inputs.format-check }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-format-check@28764d64e16fc4f8afff541e62bff06bf09ab4dd
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-format-check@1467fe12e3613c8fbeeecafe9155de752ca03730
 
       # Cheap (no toolchain, no build — it reads text), but placed last on purpose: it is the
       # newest gate here, and a repo should learn its workflows, modules and formatting are sound
@@ -244,7 +244,7 @@ jobs:
 
       - name: Dead symbol in comment
         if: ${{ inputs.dead-symbol-check }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dead-symbol@28764d64e16fc4f8afff541e62bff06bf09ab4dd
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dead-symbol@1467fe12e3613c8fbeeecafe9155de752ca03730
         with:
           range: ${{ steps.dead-symbol-range.outputs.range }}
 
@@ -260,7 +260,7 @@ jobs:
       # comments are sound before it pays for a compiler.
       - name: C++ clang-tidy conformance
         if: ${{ !cancelled() && inputs.lint }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-lint-tidy@28764d64e16fc4f8afff541e62bff06bf09ab4dd
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-lint-tidy@1467fe12e3613c8fbeeecafe9155de752ca03730
 
       # A SKIPPED GATE MUST NOT LOOK LIKE A PASSED ONE. Every other toggle here defaults true, so
       # `false` is always a deliberate written line in the caller — but the RUN shows a skipped step
