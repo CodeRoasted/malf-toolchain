@@ -33,6 +33,7 @@
         "glaze/7.4.0#00d1e516eee87ae8861a81a9f0a65056%1777279425.34",
         "fmt/12.1.0#6baf0fb8351783472b94ee6e36232391%1785754553.994",
         "drogon/1.9.13#251680a44562cf10050d53c0259876d5%1778471907.643",
+        "coderoast_server_logging/1.10.3",
         "coderoast_server_catalogs/1.10.3",
         "coderoast_ipc_producer/1.10.3",
         "coderoast_ipc_core/1.10.3",
