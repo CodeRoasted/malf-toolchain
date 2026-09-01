@@ -156,3 +156,49 @@ runs:
           echo "::error::clang-tidy findings, or translation units clang-tidy could not check, above. A 'NOT LINTED' block means those files went through ZERO checks — that is a coverage hole, not a finding, and it is fixed by removing the construct the check dies on or by a declared, reproducer-carrying exclusion in the config, never by a per-site NOLINT. Everything else: fix at the source, then re-run 'malf format' (a NOLINT insertion reflows its line and this job checks formatting too). READING THIS RED FROM THE CLI: 'gh run view <run> --log-failed' returns EXIT 0 AND ZERO LINES for this job and always will — it is a job from a CALLED reusable workflow, which gh's run-level log views cannot resolve out of the archive (measured on insight-canon run 33318425771: --log emitted the two repo-local jobs and not one line of this one). The verdict above is retrievable, but only by job id: gh api repos/OWNER/REPO/actions/runs/RUN/jobs --jq '.jobs[]|select(.name|test(\"checks\"))|.id' then gh api repos/OWNER/REPO/actions/jobs/JOBID/logs."
           exit 1
         fi
+
+    - name: Clear the editable registry — a lint database must not change what a BUILD resolves
+      if: always()
+      shell: bash
+      run: |
+        set -euo pipefail
+        # WHY THIS STEP EXISTS — measured at the v1.10.3 cut, 2026-09-01.
+        #
+        # The two steps above deliberately point MALF_WORKSPACE_ROOT at the checkout so an
+        # intra-repo first-party graph can resolve (the rationale is in this action's own
+        # description). malf implements that by registering every repo member as a conan
+        # EDITABLE, and the registry it writes — $CONAN_HOME/editable_packages.json — lives in
+        # the CONAN_HOME that `setup-build-env` owns at <workspace>/.conan2. On the self-hosted
+        # fleet that workspace PERSISTS ACROSS JOBS, so the registry outlived this job: the
+        # repo's later BUILD job resolved its own members as `- Editable` instead of `- Cache`,
+        # an editable emits no CMake package config, and `find_package(<sibling>)` then failed
+        # at configure time in a job that had done nothing wrong.
+        #
+        # malf already declares the counter-invariant twice — `_malf_editables_clear`, and
+        # cut-verify's "CLEAN-EXPORT invariant: no editables", whose comment names this very
+        # consequence ("pollutes CMAKE_PREFIX_PATH -> find_package fails") and asserts that
+        # "Real CI (conan-module / release-publish) runs with it UNSET; match that exactly."
+        # That assertion held until this action began writing the registry. This step makes it
+        # true again; it does not change what lint itself resolves.
+        #
+        # The measurement, same code, same repo, one cut apart:
+        #   coderoast-ipc v1.10.2 run 33255985932 -> `coderoast_ipc_core/1.10.2 - Cache`, PASS
+        #   coderoast-ipc v1.10.3 run 33558688226 -> `coderoast_ipc_core/1.10.3 - Editable`,
+        #     "CMake Error at CMakeLists.txt:15 (find_package)" for the consumer module
+        #   insight-canon v1.10.3 run 33558684800 failed identically on `insight_canon`.
+        # It surfaced at a TAG rather than at a desk because no CI fires on a `main` push for
+        # the C++ repos (ADR-2.D3) — the tag was this regression's first execution.
+        #
+        # `always()` is load-bearing: a RED lint must not leave the registry behind either, or
+        # the next job fails for a reason that has nothing to do with its own code.
+        home="${CONAN_HOME:-}"
+        if [ -z "$home" ]; then
+          echo "CONAN_HOME is unset (setup-build-env owns it) — no registry to clear."
+          exit 0
+        fi
+        if [ -f "$home/editable_packages.json" ]; then
+          rm -f "$home/editable_packages.json"
+          echo "cleared $home/editable_packages.json — lint's intra-repo editables do not outlive this job"
+        else
+          echo "no editable registry at $home — nothing to clear"
+        fi
