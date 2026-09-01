@@ -141,6 +141,43 @@ runs:
         restore-keys: |
           conan-gcc162-${{ runner.os }}-
 
+    - name: Drop any editable registry the cache just restored (CONAN_HOME is cached WHOLE)
+      shell: bash
+      run: |
+        set -euo pipefail
+        # THE CACHE STEP ABOVE RESTORES ALL OF $CONAN_HOME, editable_packages.json included, and
+        # that file decides how first-party requirements RESOLVE. A home saved while any editable
+        # was registered therefore re-registers it in every later job that restores the entry —
+        # across runs and across repos, since the restore-key is a prefix.
+        #
+        # Measured at the v1.10.3 cut, 2026-09-01. coderoast-ipc run 33558688226 and insight-canon
+        # run 33558684800 failed `ci / ci / build` at configure time with "CMake Error at
+        # CMakeLists.txt:15 (find_package)" for the repo's OWN sibling module, because the graph
+        # resolved it as `- Editable` instead of `- Cache` and an editable emits no CMake package
+        # config. Control: the same repo one cut earlier, run 33255985932, resolved `- Cache` and
+        # passed. Clearing the registry where it is WRITTEN is not sufficient and that was proven,
+        # not assumed: coderoast-lint-tidy's teardown ran and logged "cleared
+        # .../.conan2/editable_packages.json" at 21:29:53, and run 33561230249's build job still
+        # resolved `- Editable` at 21:31:54 — restored from the cache in between.
+        #
+        # So the invariant is asserted HERE, at the point of USE, where it cannot depend on what
+        # any earlier job, run or cache entry happened to leave behind. malf states the same rule
+        # for the same reason: cut-verify's "CLEAN-EXPORT invariant: no editables" names this exact
+        # consequence ("pollutes CMAKE_PREFIX_PATH -> find_package fails") and asserts that "Real
+        # CI (conan-module / release-publish) runs with it UNSET; match that exactly."
+        #
+        # Safe for the lint path, which also calls this action: malf registers the editables it
+        # needs AFTER this step (coderoast-lint-tidy builds the lint database in a later step), so
+        # this clears a stale registry and never the one lint is about to create.
+        reg="${CONAN_HOME:?CONAN_HOME must be set by the step above}/editable_packages.json"
+        if [ -f "$reg" ]; then
+          echo "restored conan home carried an editable registry — removing it:"
+          cat "$reg" || true
+          rm -f "$reg"
+        else
+          echo "no editable registry in the restored conan home (expected)"
+        fi
+
     - name: Install the conan profile + global.conf into $CONAN_HOME
       shell: bash
       env:
