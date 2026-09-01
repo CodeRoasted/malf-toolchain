@@ -70,7 +70,7 @@ runs:
   using: composite
   steps:
     - name: Provision clang-21 + libc++ (idempotent — the format gate already ran it)
-      uses: CodeRoasted/malf-toolchain/.github/actions/setup-clang21-libcxx@7f33b6bd0a61d379ce3e06714ee3a1bfbd6ce0c4
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-clang21-libcxx@d22d3d4bb514abd65ceef45591493d0cbe533da8
 
     - name: Provision the version-matched clang-tidy (and assert it is clang-21's OWN)
       shell: bash
@@ -112,7 +112,7 @@ runs:
         echo "clang-tidy $got — $want_dir/clang-tidy (clang-21's own install)"
 
     - name: Setup build env (apt + CMake 4.3.x + Conan + dep cache + canonical profile)
-      uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-env@7f33b6bd0a61d379ce3e06714ee3a1bfbd6ce0c4
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-env@d22d3d4bb514abd65ceef45591493d0cbe533da8
       with:
         profile: ${{ inputs.profile }}
 
