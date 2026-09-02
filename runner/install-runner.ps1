@@ -296,8 +296,12 @@ if (-not (Test-Path $configCmd)) {
     # .assets[].digest. Agreement means a blob swap had to edit both. The notes are free-form
     # prose, so a parse MISS degrades to UNCHECKED and never fails the install — a working
     # runner box must not be hostage to an upstream markdown edit.
-    # What would buy more, and is a ruling rather than a fix: pin the runner VERSION and its
-    # reviewed digest as constants here; `releases/latest` installs whatever shipped today.
+    # The wider hole is `releases/latest` — this box installs whatever shipped today — and the
+    # Founder RULED 2026-09-02 to keep it: "latest is fine". Pinning the VERSION plus a reviewed
+    # digest as constants here was the alternative, raised and declined for the maintenance
+    # burden of manual bumps. DO NOT RE-PROPOSE IT. The residual is accepted, not overlooked:
+    # what bounds the blast radius is README.md's workflow-layer rule — a self-hosted runner
+    # never runs a public or fork-exposed repo — not this check.
     $asset = $release.assets | Where-Object { $_.name -eq $zip } | Select-Object -First 1
     # Lowercased on every side below. PowerShell's -eq/-ne on strings are case-INSENSITIVE, so
     # this comparison would pass without it — but a security comparison must not depend on that

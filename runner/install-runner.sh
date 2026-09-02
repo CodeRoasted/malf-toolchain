@@ -69,9 +69,14 @@ fi
 # prose, so a parse MISS degrades to UNCHECKED and never reds — failing the install on
 # upstream's markdown would make a working box hostage to an editorial change, and these two
 # boxes are ones the Founder depends on.
-# WHAT WOULD BUY MORE, and is a ruling rather than a fix: pin the runner VERSION and its
-# reviewed digest as constants in this file. `releases/latest` is the wider hole — as written,
-# this box installs whatever actions/runner published today, with no human in the loop.
+# THE WIDER HOLE IS `releases/latest` — this box installs whatever actions/runner published
+# today, with no human in the loop — and the Founder RULED 2026-09-02 to keep it: *"latest is
+# fine"*. Pinning the VERSION plus a reviewed digest as constants here was the alternative; it
+# was raised, and it was declined for the maintenance burden of manual bumps on two boxes he
+# depends on. DO NOT RE-PROPOSE IT. The residual risk is stated and accepted, not overlooked:
+# a compromised upstream release reaches these boxes, and the control that bounds the blast
+# radius is the workflow-layer rule in README.md — a self-hosted runner never runs a public or
+# fork-exposed repo — not this check.
 mkdir -p "$RUNNER_DIR"
 cd "$RUNNER_DIR"
 if [[ ! -x ./config.sh ]]; then
