@@ -29,10 +29,23 @@ malf/runner/start-runner.sh          # run it in the foreground — Ctrl+C to st
 `install-runner.sh` mints an org registration token (via `gh`), downloads the latest
 runner into **`~/actions-runner-malf`**, and configures it against `github.com/CodeRoasted`
 with name **`malf-runner`** and label **`malf-local`**. It does **not** start anything —
-`start-runner.sh` runs it in the foreground so you watch jobs stream and `Ctrl+C` to stop
-(cleaner than a service under WSL2). Override via env: `ORG`, `LABELS`, `RUNNER_NAME`,
-`RUNNER_DIR`, `RUNNER_ARCH`, `RUNNER_TOKEN=…` (skip the gh mint), or `AS_SERVICE=true`
-(install a background systemd service instead of running foreground).
+`start-runner.sh` runs it in the foreground so you watch jobs stream and `Ctrl+C` to stop.
+**Foreground is for watching a job, not for keeping a runner up.** A foreground listener is a child
+of the terminal that launched it and dies with it — under a VS Code remote that is every server
+restart, mid-job included. For a runner that stays up use `AS_SERVICE=true`. **The parenthetical
+that stood here — *"cleaner than a service under WSL2"* — was FALSE and is withdrawn** (measured
+2026-09-02: `actions.runner.CodeRoasted.malf-runner.service` is `enabled` and `active`, `runsvc.sh`
+is parented to PID 1, and GitHub reports the runner online).
+
+**Under WSL2 the unit is only HALF the fix, and the half it is not is the one that decides.** A
+system unit runs only while the distro is up, and Windows stops the distro when its last client
+detaches — so the unit cures the terminal-restart death and not the distro-shutdown death. The other
+half is a Windows-side keepalive: a logon task holding `wsl.exe -d <distro> -u root --exec
+/usr/bin/sleep infinity`. Verify BOTH, separately: `systemctl is-active …` after killing the VS Code
+server, and again after a `wsl --shutdown`.
+
+Override via env: `ORG`, `LABELS`, `RUNNER_NAME`, `RUNNER_DIR`, `RUNNER_ARCH`, `RUNNER_TOKEN=…`
+(skip the gh mint), or `AS_SERVICE=true`.
 
 ## Run / stop
 
@@ -100,6 +113,9 @@ installs the MSVC 14.52 toolset itself, so you do **not** pre-install Visual Stu
 ```powershell
 pwsh -ExecutionPolicy Bypass -File malf\runner\install-runner.ps1      # registers "malf-runner-win" (label malf-windows)
 pwsh -ExecutionPolicy Bypass -File malf\runner\start-runner.ps1        # foreground; Ctrl+C to stop
+# NOTE: on Windows, AS_SERVICE=true is NOT usable today — install-runner.ps1 configures without
+# --runasservice, so the svc.cmd it then calls is never minted. Tracked as ROADMAP N119; until it
+# is repaired, a Windows runner that must survive a logout is configured by hand (see that row).
 ```
 ```bash
 gh variable set WIN_RUNS_ON --org CodeRoasted --body malf-windows --visibility private   # → local
