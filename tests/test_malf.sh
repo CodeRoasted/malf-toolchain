@@ -552,6 +552,107 @@ check "rc 0 WITH the LLVM crash banner reads as DIED — the status alone is not
 
 echo
 
+echo "[7j2] lint's changed-file set resolves from any directory of the repo, or refuses"
+
+# THE FALSE ZERO, measured by Kleio 2026-09-02 on insight-canon/core with one changed TU: `malf
+# lint` from the package subdirectory printed "no files to check" and exited 0; from the repo root
+# it checked 1 file. `git diff --name-only` emits REPO-ROOT-relative paths whatever `-C` says, and
+# the default leg prepended $CWD to them, so from a subdirectory every path failed the existence
+# test and the set came out empty — "could not look" sharing the exit path of "found nothing", the
+# class CLAUDE.md § Searching hunts. The leg now lets git resolve (`--relative`: cwd-relative AND
+# scoped to the cwd's subtree, a no-op at the root), refuses when git itself fails, and refuses on
+# a listed path that does not resolve. Pinned end to end, because the resolution is one flag on one
+# git call and a flag is one edit from being "simplified" back.
+#
+# No clang-tidy is needed: a FAKE clang-21/clang-tidy pair on PATH records the arguments it was
+# handed, which is the observable — WHICH files reached the tool. The compile databases are
+# per-directory as malf keys them, one entry per product TU, so the DB-completeness filter passes
+# exactly what the resolution selected and nothing else.
+
+lk_tmp="$(realpath "$(mktemp -d)")"
+lk_key="${MALF_DEFAULT_PROFILE#linux-}"      # the build-<key>/ malf reads a database from
+lk_bin="$lk_tmp/bin"; mkdir -p "$lk_bin"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$lk_bin/clang-21"                       # -print-resource-dir -> nothing
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" >> "$LK_TIDY_LOG"\nexit 0\n' > "$lk_bin/clang-tidy"
+chmod +x "$lk_bin/clang-21" "$lk_bin/clang-tidy"
+
+lk_repo="$lk_tmp/repo"
+mkdir -p "$lk_repo/core/src" "$lk_repo/core/tests" "$lk_repo/sift/src"
+git -C "$lk_repo" init -q 2>/dev/null
+git -C "$lk_repo" -c user.email=t@t -c user.name=t checkout -q -b main 2>/dev/null || true
+printf 'int engine() { return 1; }\n'  > "$lk_repo/core/src/engine.cpp"
+printf 'int probe() { return 1; }\n'   > "$lk_repo/core/tests/engine_probe.cpp"
+printf 'int other() { return 1; }\n'   > "$lk_repo/sift/src/other.cpp"
+git -C "$lk_repo" add -A
+git -C "$lk_repo" -c user.email=t@t -c user.name=t commit -q -m fixture
+# The change under test: every TU edited in the worktree, none staged.
+printf 'int engine() { return 2; }\n'  > "$lk_repo/core/src/engine.cpp"
+printf 'int probe() { return 2; }\n'   > "$lk_repo/core/tests/engine_probe.cpp"
+printf 'int other() { return 2; }\n'   > "$lk_repo/sift/src/other.cpp"
+
+lk_db() {   # <dir> <file>... — a clang database covering exactly these TUs, keyed as malf keys it
+    local dir="$1"; shift
+    local build="$dir/build-$lk_key"; mkdir -p "$build"
+    python3 - "$build" "$@" <<'PYDB'
+import json, sys
+build, files = sys.argv[1], sys.argv[2:]
+json.dump([{"directory": build, "command": f"clang++-21 -std=c++23 -c {f} -o out.o", "file": f}
+           for f in files], open(f"{build}/compile_commands.json", "w"))
+PYDB
+}
+lk_db "$lk_repo/core" "$lk_repo/core/src/engine.cpp"
+lk_db "$lk_repo"      "$lk_repo/core/src/engine.cpp" "$lk_repo/sift/src/other.cpp"
+
+lk_run() {   # <dir> <log> — malf lint (default mode, console) from <dir> with the fake toolchain
+    (cd "$1" && PATH="$lk_bin:$PATH" LK_TIDY_LOG="$2" MALF_PROFILE_NAME="" bash "$MALF_BIN" lint --console 2>&1)
+}
+lk_checked() {   # <log> — the files the fake clang-tidy was handed, relative to the repo, sorted
+    [[ -f "$1" ]] || return 0
+    grep -E '\.cpp$' "$1" | sed "s|^$lk_repo/||" | sort | tr '\n' ' '
+}
+
+lk_sub_out="$(lk_run "$lk_repo/core" "$lk_tmp/tidy.subdir.log")"; lk_sub_rc=$?
+check "lint from a package SUBDIRECTORY checks the changed TU under it (the Kleio case)" \
+      "rc=0 core/src/engine.cpp " "rc=$lk_sub_rc $(lk_checked "$lk_tmp/tidy.subdir.log")"
+check "lint from the subdirectory says how many it checked (never 'no files to check')" \
+      "checking 1 file(s)" "$(grep -oE 'checking [0-9]+ file\(s\)|no files to check' <<< "$lk_sub_out" | head -1)"
+
+lk_root_out="$(lk_run "$lk_repo" "$lk_tmp/tidy.root.log")"; lk_root_rc=$?
+check "lint from the repo ROOT checks both product TUs and not the tests/ one (unchanged behaviour)" \
+      "rc=0 core/src/engine.cpp sift/src/other.cpp " "rc=$lk_root_rc $(lk_checked "$lk_tmp/tidy.root.log")"
+
+# Anti-vacuity: the historical authoring, restated as the MUTANT, must LOSE on this fixture from
+# the subdirectory — or the first arm above proves nothing about the resolution.
+lk_historical() {   # the pre-2026-09-02 leg: $CWD prepended to git's repo-relative paths
+    local cwd="$1" f out=""
+    while IFS= read -r f; do
+        [[ "$f" =~ \.(cpp|cc|cxx|h|hpp|cppm)$ ]] && [[ -f "$cwd/$f" ]] \
+            && ! _malf_lint_path_excluded "$f" && out+="$f "
+    done < <(git -C "$cwd" diff --name-only HEAD 2>/dev/null || true)
+    printf '%s' "$out"
+}
+check "the historical leg selects NOTHING from the subdirectory (the false zero, reproduced)" \
+      "" "$(lk_historical "$lk_repo/core")"
+check "the historical leg selects both product TUs from the root (the asymmetry Kleio measured)" \
+      "core/src/engine.cpp sift/src/other.cpp " "$(lk_historical "$lk_repo")"
+
+# The two refusals: an empty set reached by a FAILED listing is never a pass.
+lk_nonrepo="$lk_tmp/nonrepo"; mkdir -p "$lk_nonrepo"
+lk_db "$lk_nonrepo" "$lk_nonrepo/x.cpp"            # a database, so the DB guard is not what refuses
+lk_nr_out="$(lk_run "$lk_nonrepo" "$lk_tmp/tidy.nonrepo.log")"; lk_nr_rc=$?
+check "lint outside a git checkout REFUSES (rc 1, named) instead of 'no files to check' rc 0" \
+      "rc=1 refused" "rc=$lk_nr_rc $([[ "$lk_nr_out" == *"could not list the changed files"* ]] && echo refused || echo "GOT: $lk_nr_out")"
+
+printf 'int ghost() { return 1; }\n' > "$lk_repo/core/src/ghost.cpp"
+git -C "$lk_repo" add core/src/ghost.cpp
+rm "$lk_repo/core/src/ghost.cpp"                    # staged, then gone: listed by the index leg, unresolvable
+lk_gh_out="$(lk_run "$lk_repo/core" "$lk_tmp/tidy.ghost.log")"; lk_gh_rc=$?
+check "a listed path that does not resolve REFUSES by name instead of being skipped" \
+      "rc=1 refused:src/ghost.cpp" "rc=$lk_gh_rc $([[ "$lk_gh_out" == *"git lists 'src/ghost.cpp' as changed"* ]] && echo refused:src/ghost.cpp || echo "GOT: $lk_gh_out")"
+
+rm -rf "$lk_tmp"
+echo
+
 echo "[7h] build_inventory — the ADR-3.D10 shape gate on workspace-grain cells"
 
 # A cell whose defines dereference \${workspace} beyond the repo root is workspace-grain.

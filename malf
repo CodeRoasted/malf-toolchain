@@ -1431,14 +1431,47 @@ PY
     else
         # The SAME exclusion the --all-files walk prunes with, applied per path because this leg
         # has no tree to prune — derived from the one list, never restated. See LSRC-1.
-        while IFS= read -r f; do
-            [[ "$f" =~ \.(cpp|cc|cxx|h|hpp|cppm)$ ]] && [[ -f "$CWD/$f" ]] \
-                && ! _malf_lint_path_excluded "$f" && files+=("$CWD/$f")
-        done < <(git -C "$CWD" diff --name-only HEAD 2>/dev/null || true)
-        while IFS= read -r f; do
-            [[ "$f" =~ \.(cpp|cc|cxx|h|hpp|cppm)$ ]] && [[ -f "$CWD/$f" ]] \
-                && ! _malf_lint_path_excluded "$f" && files+=("$CWD/$f")
-        done < <(git -C "$CWD" diff --name-only --cached 2>/dev/null || true)
+        #
+        # THE PATHS ARE RESOLVED BY GIT, NOT BY THIS SCRIPT. `git diff --name-only` emits paths
+        # relative to the REPO ROOT whatever `-C` says, and this leg used to prepend $CWD to them:
+        # from a package subdirectory every path failed the existence test, the set came out empty,
+        # and the run exited 0 as "no files to check" — a could-not-look wearing the exit status of
+        # found-nothing. Measured by Kleio 2026-09-02 on insight-canon/core with one changed TU:
+        # 0 files from the subdirectory, 1 from the repo root. `--relative` makes git emit paths
+        # relative to $CWD AND scope the listing to $CWD's subtree — which is this run's whole
+        # subject anyway, since the compile DB and the header filter are both $CWD-keyed — and at a
+        # repo root it is a no-op. `--diff-filter=d` drops deletions, so every listed path MUST
+        # exist on disk, and one that does not is a resolution failure this leg REFUSES on rather
+        # than skips. Git's own failure (outside a checkout, an unborn HEAD) is a status, not an
+        # empty list: it used to be swallowed by `2>/dev/null || true`, the same false zero one
+        # layer down. Pinned by tests/test_malf.sh [7j2].
+        local _leg _listing _listing_rc
+        local -a _diff_args
+        for _leg in worktree index; do
+            _diff_args=(diff --relative --name-only --diff-filter=d)
+            if [[ "$_leg" == index ]]; then _diff_args+=(--cached); else _diff_args+=(HEAD); fi
+            _listing_rc=0
+            _listing="$(git -C "$CWD" "${_diff_args[@]}" 2>&1)" || _listing_rc=$?
+            if (( _listing_rc != 0 )); then
+                echo "malf lint: error: could not list the changed files — 'git -C $CWD ${_diff_args[*]}' exited $_listing_rc:" >&2
+                sed 's/^/malf lint:   /' <<< "$_listing" >&2
+                echo "malf lint: refusing to report success — an empty set reached through a failed listing is" >&2
+                echo "malf lint: not a clean tree. Run from inside a git checkout with at least one commit." >&2
+                exit 1
+            fi
+            while IFS= read -r f; do
+                [[ -n "$f" ]] || continue
+                [[ "$f" =~ \.(cpp|cc|cxx|h|hpp|cppm)$ ]] || continue
+                if [[ ! -f "$CWD/$f" ]]; then
+                    echo "malf lint: error: git lists '$f' as changed (in the $_leg) but no such file resolves under $CWD." >&2
+                    echo "malf lint: the listing and this directory disagree — refusing rather than passing over a file" >&2
+                    echo "malf lint: that was never looked at. A deletion cannot be it: deletions are filtered out, so" >&2
+                    echo "malf lint: this is a path staged and then removed, or a broken resolution of git's paths." >&2
+                    exit 1
+                fi
+                _malf_lint_path_excluded "$f" || files+=("$CWD/$f")
+            done <<< "$_listing"
+        done
         # dedupe — GUARDED, and the guard is the whole point. `printf '%s\n'` applies its format
         # once even with NO arguments, so on an EMPTY array this pipeline emits one blank line and
         # mapfile turns "no changed files" into a one-element array holding "". That element then
