@@ -3073,7 +3073,7 @@ Commands:
                                    conan graph (malf/sbom_gen.py). --check writes nothing and
                                    fails if a committed SBOM has drifted from the graph.
     run     <exe-name> [args...]
-    bin-dir [subdir] [--asan|--profile <name>]   print the build-type-keyed build dir for a target
+    bin-dir [subdir] [--asan|--profile <name>]   print the PROFILE-keyed build dir for a target
 
 Verbs (one compile surface):
     `build` compiles EVERYTHING — the package + its tests + its benches.
