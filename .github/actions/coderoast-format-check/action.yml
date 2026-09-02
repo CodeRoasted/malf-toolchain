@@ -34,7 +34,7 @@ runs:
   using: composite
   steps:
     - name: Provision clang-21 (the compiler leg; adds the apt.llvm.org source)
-      uses: CodeRoasted/malf-toolchain/.github/actions/setup-clang21-libcxx@07fd3daaf39f878e3e63d57c263992c36f84be6d
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-clang21-libcxx@f8cf57734ea59667ccb007ff35d43514aebdddea
 
     - name: Provision the version-matched clang-format
       shell: bash
