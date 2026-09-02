@@ -39,8 +39,10 @@ RUNNER_ARCH="${RUNNER_ARCH:-x64}"   # x64 | arm64
 log() { printf '\033[1;34m[runner]\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[runner] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
-command -v curl >/dev/null || die "curl is required"
-command -v tar  >/dev/null || die "tar is required"
+command -v curl      >/dev/null || die "curl is required"
+command -v tar       >/dev/null || die "tar is required"
+command -v jq        >/dev/null || die "jq is required — the release JSON is parsed for the download's SHA-256 (apt install jq)"
+command -v sha256sum >/dev/null || die "sha256sum is required (coreutils) — the runner tarball is never unpacked unverified"
 
 # 1) Registration token — minted via gh unless RUNNER_TOKEN is provided.
 if [[ -z "${RUNNER_TOKEN:-}" ]]; then
@@ -50,18 +52,74 @@ if [[ -z "${RUNNER_TOKEN:-}" ]]; then
     || die "could not mint a token — is gh authed as an admin of org '$ORG'?"
 fi
 
-# 2) Download the runner once (skip if already extracted).
+# 2) Download the runner once (skip if already extracted), and never unpack it unverified.
+#
+# WHAT THIS CHECK IS WORTH — stated here because a checksum invites more trust than this one
+# earns, and over-trusting it is the real hazard. The digest comes from the same
+# api.github.com response that names the download URL, so it is SELF-CERTIFYING: whoever can
+# replace the release asset can replace the digest alongside it, and TLS already covers the
+# wire. This is NOT a defence against a compromised upstream.
+# What it does buy: it fails CLOSED on a truncated or CDN-corrupted body (a half-unpacked
+# runner directory is worse than no runner) and on an asset/URL mismatch, instead of handing
+# whatever arrived to `tar`.
+# The corroboration is a SECOND PRODUCER. actions/runner's release notes carry a
+# `## SHA-256 Checksums` table emitted by its release BUILD, while `.assets[].digest` is
+# computed by the storage layer serving the bytes. Agreement means a blob swap had to edit
+# both, through two different paths; disagreement is a loud stop. The notes are free-form
+# prose, so a parse MISS degrades to UNCHECKED and never reds — failing the install on
+# upstream's markdown would make a working box hostage to an editorial change, and these two
+# boxes are ones the Founder depends on.
+# WHAT WOULD BUY MORE, and is a ruling rather than a fix: pin the runner VERSION and its
+# reviewed digest as constants in this file. `releases/latest` is the wider hole — as written,
+# this box installs whatever actions/runner published today, with no human in the loop.
 mkdir -p "$RUNNER_DIR"
 cd "$RUNNER_DIR"
 if [[ ! -x ./config.sh ]]; then
   log "Resolving the latest actions/runner release…"
-  VER="$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest \
-         | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p' | head -1)"
-  [[ -n "$VER" ]] || die "could not resolve the latest runner version"
+  # ONE fetch, three reads off it: version, asset digest and notes checksum must describe the
+  # SAME response — re-fetching would let the release move between reads. It also spends one
+  # unauthenticated call rather than three, and the budget is 60/hour PER IP, shared with the
+  # desk (this box is both).
+  RELEASE_JSON="$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest)" \
+    || die "could not read api.github.com/repos/actions/runner/releases/latest — rate limited? (unauthenticated: 60 requests/hour per IP, and the desk shares this box's IP)"
+
+  VER="$(printf '%s' "$RELEASE_JSON" | jq -r '.tag_name // empty' | sed 's/^v//')"
+  [[ -n "$VER" ]] || die "no tag_name in the release reply — rate limited, or the API shape changed"
   TARBALL="actions-runner-linux-${RUNNER_ARCH}-${VER}.tar.gz"
-  log "Downloading $TARBALL…"
+
+  # Primary: the digest GitHub publishes for the exact asset about to be downloaded. Absent or
+  # malformed is a REFUSAL, never a skip — a soft-skip would print the same "downloading" in
+  # the world where the check works and the world where it silently stopped checking.
+  WANT="$(printf '%s' "$RELEASE_JSON" \
+          | jq -r --arg n "$TARBALL" '.assets[] | select(.name == $n) | .digest // empty' \
+          | sed 's/^sha256://')"
+  [[ "$WANT" =~ ^[0-9a-f]{64}$ ]] \
+    || die "no sha256 digest published for asset '$TARBALL' (RUNNER_ARCH=$RUNNER_ARCH) — refusing to download something that cannot be verified"
+
+  # Corroboration from the release notes. The pattern is deliberately EXACT so that an upstream
+  # format change misses and degrades to UNCHECKED, rather than half-matching and killing a
+  # legitimate install.
+  NOTES_SHA="$(printf '%s' "$RELEASE_JSON" \
+               | jq -r --arg n "$TARBALL" '.body // "" | split("\n")[] | select(startswith("- " + $n + " "))' \
+               | grep -oiE '\b[0-9a-f]{64}\b' | head -1 || true)"
+  if [[ -z "$NOTES_SHA" ]]; then
+    log "NOTE: release notes carry no SHA-256 line for $TARBALL — corroboration UNCHECKED, continuing on the published asset digest alone."
+  elif [[ "${NOTES_SHA,,}" != "$WANT" ]]; then
+    die "the release DISAGREES WITH ITSELF for $TARBALL: asset digest $WANT, release-notes checksum ${NOTES_SHA,,}. Two producers that should agree do not — refusing to download."
+  fi
+
+  log "Downloading $TARBALL (expecting sha256 $WANT)…"
   curl -fsSL -o "$TARBALL" \
-    "https://github.com/actions/runner/releases/download/v${VER}/${TARBALL}"
+    "https://github.com/actions/runner/releases/download/v${VER}/${TARBALL}" \
+    || die "download failed for $TARBALL"
+
+  GOT="$(sha256sum "$TARBALL" | cut -d' ' -f1)"
+  if [[ "$GOT" != "$WANT" ]]; then
+    rm -f "$TARBALL"
+    die "SHA-256 MISMATCH on $TARBALL — expected $WANT, got $GOT. The download was deleted and nothing was unpacked."
+  fi
+  log "SHA-256 verified ($WANT)."
+
   tar xzf "$TARBALL"
   rm -f "$TARBALL"
 else

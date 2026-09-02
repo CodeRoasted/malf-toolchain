@@ -26,8 +26,13 @@ malf/runner/install-runner.sh        # registers a runner named "malf-runner"
 malf/runner/start-runner.sh          # run it in the foreground — Ctrl+C to stop
 ```
 
+Host tools it needs beyond `gh`: `curl`, `tar`, **`jq`** and **`sha256sum`** — the last two
+because the download is SHA-256-verified before it is unpacked, and the script refuses to
+run rather than skip that check. It fails at the preflight, naming the missing one.
+
 `install-runner.sh` mints an org registration token (via `gh`), downloads the latest
-runner into **`~/actions-runner-malf`**, and configures it against `github.com/CodeRoasted`
+runner into **`~/actions-runner-malf`** — **verifying its SHA-256 against the digest the
+release publishes, and unpacking nothing on a mismatch** — and configures it against `github.com/CodeRoasted`
 with name **`malf-runner`** and label **`malf-local`**. It does **not** start anything —
 `start-runner.sh` runs it in the foreground so you watch jobs stream and `Ctrl+C` to stop.
 **Foreground is for watching a job, not for keeping a runner up.** A foreground listener is a child

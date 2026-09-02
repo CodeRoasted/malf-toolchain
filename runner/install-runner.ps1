@@ -284,12 +284,60 @@ if (-not (Test-Path $configCmd)) {
     $downloadUrl =
         "https://github.com/actions/runner/releases/download/v$ver/$zip"
 
-    Log "Downloading $zip..."
+    # WHAT THIS CHECK IS WORTH — same reasoning as the Linux twin, kept here rather than
+    # cross-referenced because whoever reads one of these scripts is on that box.
+    # The digest comes from the same api.github.com response that named $downloadUrl, so it is
+    # SELF-CERTIFYING: whoever can replace the asset can replace the digest with it, and TLS
+    # already covers the wire. It is NOT a defence against a compromised upstream.
+    # What it buys: Expand-Archive is never handed a truncated or CDN-corrupted body, and an
+    # asset/URL mismatch stops here instead of half-populating $RunnerDir.
+    # Corroboration is a SECOND PRODUCER: the `## SHA-256 Checksums` table that actions/runner's
+    # release BUILD writes into the notes, versus the storage layer that computes
+    # .assets[].digest. Agreement means a blob swap had to edit both. The notes are free-form
+    # prose, so a parse MISS degrades to UNCHECKED and never fails the install — a working
+    # runner box must not be hostage to an upstream markdown edit.
+    # What would buy more, and is a ruling rather than a fix: pin the runner VERSION and its
+    # reviewed digest as constants here; `releases/latest` installs whatever shipped today.
+    $asset = $release.assets | Where-Object { $_.name -eq $zip } | Select-Object -First 1
+    # Lowercased on every side below. PowerShell's -eq/-ne on strings are case-INSENSITIVE, so
+    # this comparison would pass without it — but a security comparison must not depend on that
+    # default surviving someone later "tightening" it to -cne. Get-FileHash returns UPPERCASE.
+    $wantSha = if ($asset -and $asset.digest) { ($asset.digest -replace '^sha256:', '').ToLowerInvariant() } else { $null }
+
+    # Absent or malformed is a REFUSAL, never a skip: a soft-skip prints the same "Downloading"
+    # in the world where the check works and the world where it silently stopped checking.
+    if (-not ($wantSha -and $wantSha -match '^[0-9a-fA-F]{64}$')) {
+        Fail "No sha256 digest published for asset '$zip' (RunnerArch=$RunnerArch) - refusing to download something that cannot be verified."
+    }
+
+    # Deliberately EXACT so an upstream format change misses and degrades to UNCHECKED, rather
+    # than half-matching and killing a legitimate install.
+    $notesLine = ($release.body -split "`n") |
+        Where-Object { $_.StartsWith("- $zip ") } |
+        Select-Object -First 1
+    $notesSha = if ($notesLine -and $notesLine -match '\b([0-9a-fA-F]{64})\b') { $Matches[1].ToLowerInvariant() } else { $null }
+
+    if (-not $notesSha) {
+        Log "NOTE: release notes carry no SHA-256 line for $zip - corroboration UNCHECKED, continuing on the published asset digest alone."
+    } elseif ($notesSha -ne $wantSha) {
+        Fail "The release DISAGREES WITH ITSELF for ${zip}: asset digest $wantSha, release-notes checksum $notesSha. Two producers that should agree do not - refusing to download."
+    }
+
+    Log "Downloading $zip (expecting sha256 $wantSha)..."
 
     Invoke-WebRequest `
         -Uri $downloadUrl `
         -OutFile $zipPath `
         -UseBasicParsing
+
+    $gotSha = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+
+    if ($gotSha -ne $wantSha) {
+        Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+        Fail "SHA-256 MISMATCH on ${zip} - expected $wantSha, got $gotSha. The download was deleted and nothing was extracted."
+    }
+
+    Log "SHA-256 verified ($wantSha)."
 
     Log "Extracting runner..."
 
