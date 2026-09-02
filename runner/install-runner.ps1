@@ -168,8 +168,22 @@ if (-not $Token) {
         '-q', '.token'
     )
 
+    # Named separately because gh's own 403 conflates them: being an org OWNER is not
+    # enough if the stored token was granted without admin:org, and gh's first line
+    # ("you must be an org admin") sends an owner looking at the wrong thing.
     if ($LASTEXITCODE -ne 0 -or -not $Token) {
-        Fail "Could not mint a registration token. Is gh authenticated as an org admin?"
+        Fail @"
+Could not mint a registration token for org '$Org' (gh exit $LASTEXITCODE).
+
+gh's output above names the cause. The usual one is a stored token without the
+admin:org scope, which an org OWNER hits too:
+
+    gh auth refresh -h github.com -s admin:org
+
+Otherwise mint the registration token yourself and pass it in:
+
+    `$env:RUNNER_TOKEN='XXXX'
+"@
     }
 }
 
