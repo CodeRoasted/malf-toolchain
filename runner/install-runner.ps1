@@ -123,6 +123,20 @@ function Invoke-Native {
     }
 }
 
+# The actions.runner.* Windows service(s) executing from $Directory, as an array. Identified
+# by the binary path each one RUNS, never by its name: the runner sanitizes a service name
+# by rules this script would otherwise have to reproduce, and a bare `actions.runner.*` glob
+# would match a co-resident runner installed from another directory.
+function Get-RunnerService {
+    param([Parameter(Mandatory = $true)][string]$Directory)
+
+    Get-CimInstance -ClassName Win32_Service -Filter "Name LIKE 'actions.runner.%'" |
+        Where-Object {
+            $_.PathName -and
+            $_.PathName.IndexOf($Directory, [StringComparison]::OrdinalIgnoreCase) -ge 0
+        }
+}
+
 # ---------------------------------------------------------------------------
 # 0) Preconditions
 # ---------------------------------------------------------------------------
@@ -219,7 +233,11 @@ Log "Runner directory: $RunnerDir"
 
 New-Item -ItemType Directory -Force -Path $RunnerDir | Out-Null
 
-Set-Location $RunnerDir
+# Resolved once, after creation: every service lookup below compares against this exact
+# string, so a relative or trailing-slash -RunnerDir cannot make a service invisible.
+$runnerDirFull = (Resolve-Path -LiteralPath $RunnerDir).ProviderPath.TrimEnd('\')
+
+Set-Location $runnerDirFull
 
 # ---------------------------------------------------------------------------
 # 4) Delete the legacy logon Scheduled Task
@@ -256,7 +274,7 @@ if (-not (Test-Path $configCmd)) {
     # missing tag is checked before it is trimmed — otherwise the report is a null-method
     # error naming neither the rate limit nor the URL.
     if (-not $release.tag_name) {
-        Fail "Could not resolve the latest actions/runner version (no tag_name in the API reply — rate limited?)."
+        Fail "Could not resolve the latest actions/runner version (no tag_name in the API reply - rate limited?)."
     }
 
     $ver = $release.tag_name.TrimStart('v')
@@ -292,26 +310,63 @@ if (-not (Test-Path $configCmd)) {
 }
 
 # ---------------------------------------------------------------------------
-# 6) Remove an existing service before reconfiguration
+# 6) Remove any service already serving this runner directory
 #
-# This makes re-registration deterministic.
+# What config.cmd --runasservice does when its service already exists is not something this
+# script should depend on: whichever way it behaves, deleting first makes re-registration
+# deterministic, and this is the second run of the installer on a working box — the normal
+# case, not the exotic one.
 # ---------------------------------------------------------------------------
 
-$svcCmd = Join-Path $RunnerDir 'svc.cmd'
+$stale = @(Get-RunnerService -Directory $runnerDirFull)
 
-if (Test-Path $svcCmd) {
+foreach ($staleService in $stale) {
+    Log "Removing the existing service '$($staleService.Name)'..."
 
-    Log "Existing runner service script found — stopping and uninstalling it."
+    Stop-Service -Name $staleService.Name -Force -ErrorAction SilentlyContinue
 
-    # Both are best-effort: the service may be stopped, or never have been installed. The
-    # exit code is read and discarded on purpose, so that a later real failure is not
-    # attributed to this teardown.
-    Invoke-Native $svcCmd @('stop') | Out-Null
-    Invoke-Native $svcCmd @('uninstall') | Out-Null
+    Invoke-Native 'sc.exe' @('delete', $staleService.Name)
+
+    if ($LASTEXITCODE -ne 0) {
+        Fail "sc.exe delete $($staleService.Name) failed ($LASTEXITCODE)"
+    }
+}
+
+if ($stale.Count -gt 0) {
+    # sc.exe delete only MARKS a service for deletion while any handle to it is still open,
+    # and a create against a marked service fails with "marked for deletion". Wait the mark
+    # out here rather than hand config.cmd that failure.
+    $removalDeadlineSeconds = 30
+    $removalDeadline = (Get-Date).AddSeconds($removalDeadlineSeconds)
+
+    while (@(Get-RunnerService -Directory $runnerDirFull).Count -gt 0 -and
+           (Get-Date) -lt $removalDeadline) {
+        Start-Sleep -Seconds 1
+    }
+
+    $remaining = @(Get-RunnerService -Directory $runnerDirFull)
+
+    if ($remaining.Count -gt 0) {
+        Fail @"
+Service '$($remaining[0].Name)' is still registered ${removalDeadlineSeconds}s after
+sc.exe delete - Windows has it marked for deletion with a handle still open.
+
+Close any Services console or running runner process and re-run the installer.
+"@
+    }
+
+    Log "Existing service removed."
 }
 
 # ---------------------------------------------------------------------------
 # 7) Configure runner
+#
+# On Windows --runasservice is the whole service lifecycle: config.cmd grants file
+# permissions to the logon account, registers the service with sc.exe, sets its recovery
+# options and delayed auto-start, and starts it. So there is no install step after this one
+# — measured 2026-09-02 on the target host, where this single call printed "successfully
+# installed" and "started successfully". --replace covers a runner already registered under
+# the same name; step 6 covered the service.
 # ---------------------------------------------------------------------------
 
 Log "Configuring org runner '$RunnerName'..."
@@ -341,76 +396,66 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # ---------------------------------------------------------------------------
-# 8) Verify that service support was actually generated
+# 8) Locate the Windows service that configuration created
 #
-# `.service` holds the Windows service name and is what svc.cmd itself reads; without it
-# there is no service identity to install, start or check, whatever config.cmd reported.
+# NOT by file, and NOT by name. `svc.cmd` and `.service` are the Linux/macOS svc.sh
+# artifacts and are never written by the Windows layout — measured 2026-09-02, where a
+# config.cmd run that printed "Service actions.runner.CodeRoasted.malf-runner-win
+# successfully installed" and "started successfully" left neither file behind, so an
+# earlier file-existence check here failed a working install after the fact.
+#
+# The service is identified by what it EXECUTES: the one actions.runner.* service whose
+# binary path lies inside $RunnerDir. That holds under whatever sanitization the runner
+# applies to the service name, and it cannot match a co-resident runner installed from a
+# different directory — which a bare `actions.runner.*` glob would.
 # ---------------------------------------------------------------------------
 
-$serviceNameFile = Join-Path $RunnerDir '.service'
+$candidates = @(Get-RunnerService -Directory $runnerDirFull)
 
-if (-not (Test-Path $svcCmd) -or -not (Test-Path $serviceNameFile)) {
+if ($candidates.Count -eq 0) {
     Fail @"
-Runner configuration succeeded, but svc.cmd and/or .service was not generated in
+config.cmd reported success, but no actions.runner.* Windows service executes from
 
-    $RunnerDir
+    $runnerDirFull
 
-The runner was NOT accepted as a service installation. Refusing to continue.
+The runner was NOT installed as a service. Refusing to continue.
 "@
 }
 
-$serviceName = (Get-Content -Path $serviceNameFile -Raw).Trim()
+if ($candidates.Count -gt 1) {
+    Fail @"
+$($candidates.Count) actions.runner.* services execute from ${runnerDirFull}:
 
-if (-not $serviceName) {
-    Fail "$serviceNameFile is empty — no Windows service name to install."
+    $($candidates.Name -join "`n    ")
+
+One runner directory serves one service. Remove the stale ones before re-running.
+"@
 }
 
-Log "Service support generated: $serviceName"
-
-# ---------------------------------------------------------------------------
-# 9) Install the service if configuration did not already do it
-#
-# config.cmd --runasservice registers the service itself on Windows; svc.cmd install is the
-# path for a runner configured without it. Installing twice fails on an existing service, so
-# the service registry — not the configuration flag — decides which step is still owed.
-# ---------------------------------------------------------------------------
+$serviceName = $candidates[0].Name
 
 $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 
 if (-not $service) {
-    Log "Installing Windows service..."
-
-    Invoke-Native $svcCmd @('install')
-
-    if ($LASTEXITCODE -ne 0) {
-        Fail "svc.cmd install failed ($LASTEXITCODE)"
-    }
-
-    $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-
-    if (-not $service) {
-        Fail "svc.cmd install reported success but service '$serviceName' does not exist."
-    }
-} else {
-    Log "Windows service '$serviceName' already registered by config.cmd."
+    Fail "Win32_Service reports '$serviceName' but Get-Service cannot open it."
 }
 
+Log "Windows service: $serviceName"
+
 # ---------------------------------------------------------------------------
-# 10) Start the service
+# 9) Start the service if configuration left it stopped
+#
+# config.cmd starts it itself, so this is the path for a service that was already
+# registered and down. Start-Service is the Windows primitive; there is no svc.cmd to call.
 # ---------------------------------------------------------------------------
 
 if ($service.Status -ne 'Running') {
-    Log "Starting Windows runner service..."
-
-    Invoke-Native $svcCmd @('start')
-
-    if ($LASTEXITCODE -ne 0) {
-        Fail "svc.cmd start failed ($LASTEXITCODE)"
-    }
+    Log "Service is $($service.Status) - starting it..."
+    Start-Service -Name $serviceName
 }
 
 # ---------------------------------------------------------------------------
-# 11) Verify service state
+# 10) Verify service state
 #
 # A bounded wait, not a fixed sleep: a service reporting StartPending is starting, and
 # asserting Running against a single 2 s sample fails an install that is merely slow.
@@ -434,7 +479,7 @@ if ($service.Status -ne 'Running') {
 }
 
 # ---------------------------------------------------------------------------
-# 12) Final state
+# 11) Final state
 # ---------------------------------------------------------------------------
 
 Write-Host ""

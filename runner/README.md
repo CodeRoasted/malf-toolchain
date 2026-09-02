@@ -115,13 +115,19 @@ installs the MSVC 14.52 toolset itself, so you do **not** pre-install Visual Stu
 pwsh -ExecutionPolicy Bypass -File malf\runner\install-runner.ps1     # registers "malf-runner-win" (label malf-windows)
 ```
 The installer configures with `--runasservice` under `NT AUTHORITY\SYSTEM` (override with
-`WINDOWS_LOGON_ACCOUNT` + `WINDOWS_LOGON_PASSWORD`), refuses a `\\wsl.localhost\…` runner
-directory, verifies that `svc.cmd` **and** `.service` were minted, then starts the service and
-waits up to 60 s for `Running` before it reports success. It also deletes the legacy logon
-Scheduled Task `CodeRoast Runner Win` (override with `LEGACY_TASK_NAME`), which would otherwise
-claim the same registration at logon. **Do not run `start-runner.ps1` against a
-service-installed runner** — that is the foreground launcher, and only for a runner you
-deliberately configured without a service.
+`WINDOWS_LOGON_ACCOUNT` + `WINDOWS_LOGON_PASSWORD`) and refuses a `\\wsl.localhost\…` runner
+directory. On Windows that one `config.cmd` call *is* the whole service lifecycle — it grants
+file permissions, registers the service, sets delayed auto-start and recovery, and starts it;
+there is no `svc.cmd` and no `.service` file, those being the Linux `svc.sh` artifacts. The
+installer then deletes any service already executing from the runner directory (so a second
+run is deterministic), confirms afterwards that exactly one `actions.runner.*` service runs
+from it — matched on the binary path, not the name, so a co-resident runner is never
+mistaken for this one — and waits up to 60 s for `Running` before reporting success. It also
+deletes the legacy logon Scheduled Task `CodeRoast Runner Win` (override with
+`LEGACY_TASK_NAME`), which would otherwise claim the same registration at logon.
+**Do not run `start-runner.ps1` against a service-installed runner** — that is the foreground
+launcher, and only for a runner you deliberately configured without a service.
+
 ```bash
 gh variable set WIN_RUNS_ON --org CodeRoasted --body malf-windows --visibility private   # → local
 gh variable delete WIN_RUNS_ON --org CodeRoasted                                          # → windows-2025
