@@ -117,14 +117,20 @@ pwsh -ExecutionPolicy Bypass -File malf\runner\install-runner.ps1     # register
 The installer configures with `--runasservice` under `NT AUTHORITY\SYSTEM` (override with
 `WINDOWS_LOGON_ACCOUNT` + `WINDOWS_LOGON_PASSWORD`) and refuses a `\\wsl.localhost\…` runner
 directory. On Windows that one `config.cmd` call *is* the whole service lifecycle — it grants
-file permissions, registers the service, sets delayed auto-start and recovery, and starts it;
-there is no `svc.cmd` and no `.service` file, those being the Linux `svc.sh` artifacts. The
-installer then deletes any service already executing from the runner directory (so a second
-run is deterministic), confirms afterwards that exactly one `actions.runner.*` service runs
-from it — matched on the binary path, not the name, so a co-resident runner is never
-mistaken for this one — and waits up to 60 s for `Running` before reporting success. It also
-deletes the legacy logon Scheduled Task `CodeRoast Runner Win` (override with
-`LEGACY_TASK_NAME`), which would otherwise claim the same registration at logon.
+file permissions, registers the service, sets delayed auto-start and recovery, and starts it.
+There is no `svc.cmd` in the Windows layout (that is the Linux `svc.sh` wrapper), so nothing
+here calls one.
+
+A second run on a working box is the normal case, and `--replace` does not cover it:
+`--replace` settles the *server-side* name collision, while a runner **directory** that is
+already configured is refused outright. So the installer first runs `config.cmd remove
+--local` — the token-free half of removal, which deletes `.runner` and `.credentials` without
+contacting GitHub — then deletes any `actions.runner.*` service executing from that
+directory. Afterwards it confirms exactly one such service runs from it, matched on the
+binary path rather than the name so a co-resident runner is never mistaken for this one, and
+waits up to 60 s for `Running` before reporting success. It also deletes the legacy logon
+Scheduled Task `CodeRoast Runner Win` (override with `LEGACY_TASK_NAME`), which would
+otherwise claim the same registration at logon.
 **Do not run `start-runner.ps1` against a service-installed runner** — that is the foreground
 launcher, and only for a runner you deliberately configured without a service.
 

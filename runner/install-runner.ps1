@@ -310,13 +310,39 @@ if (-not (Test-Path $configCmd)) {
 }
 
 # ---------------------------------------------------------------------------
-# 6) Remove any service already serving this runner directory
+# 6) Unconfigure whatever is already installed here
 #
-# What config.cmd --runasservice does when its service already exists is not something this
-# script should depend on: whichever way it behaves, deleting first makes re-registration
-# deterministic, and this is the second run of the installer on a working box — the normal
-# case, not the exotic one.
+# `--replace` covers only the SERVER-side name collision. A runner DIRECTORY that is already
+# configured is refused outright — ConfigurationManager.ConfigureAsync throws "Cannot
+# configure the runner because it is already configured" whenever `.runner` exists (measured
+# on the target host, and the guard is ConfigurationManager.cs:124-127 at v2.337.0). So a
+# second run of this installer on a working box — the normal case — must unconfigure first.
+#
+# `remove --local` is the token-free half of removal: Runner.cs:170-175 routes it straight to
+# DeleteLocalRunnerConfig(), which deletes `.credentials`, the RSA key and `.runner` and
+# returns success without contacting GitHub. Plain `remove` would instead need a *deletion*
+# token, a second API call and a second scope; the server-side registration it would clean up
+# is exactly what `--replace` overwrites on the next line anyway.
+#
+# It leaves the Windows service alone, which is why the sc.exe sweep below is a separate act
+# and not a belt-and-braces duplicate.
 # ---------------------------------------------------------------------------
+
+$runnerConfigFile = Join-Path $runnerDirFull '.runner'
+
+if (Test-Path -LiteralPath $runnerConfigFile) {
+    Log "Runner directory is already configured - unconfiguring it locally..."
+
+    Invoke-Native $configCmd @('remove', '--local')
+
+    if ($LASTEXITCODE -ne 0) {
+        Fail "config.cmd remove --local failed ($LASTEXITCODE)"
+    }
+
+    if (Test-Path -LiteralPath $runnerConfigFile) {
+        Fail "config.cmd remove --local reported success but $runnerConfigFile is still present."
+    }
+}
 
 $stale = @(Get-RunnerService -Directory $runnerDirFull)
 
@@ -365,8 +391,8 @@ Close any Services console or running runner process and re-run the installer.
 # permissions to the logon account, registers the service with sc.exe, sets its recovery
 # options and delayed auto-start, and starts it. So there is no install step after this one
 # — measured 2026-09-02 on the target host, where this single call printed "successfully
-# installed" and "started successfully". --replace covers a runner already registered under
-# the same name; step 6 covered the service.
+# installed" and "started successfully". --replace covers the runner already registered
+# SERVER-side under the same name; step 6 covered the local configuration and the service.
 # ---------------------------------------------------------------------------
 
 Log "Configuring org runner '$RunnerName'..."
@@ -398,16 +424,18 @@ if ($LASTEXITCODE -ne 0) {
 # ---------------------------------------------------------------------------
 # 8) Locate the Windows service that configuration created
 #
-# NOT by file, and NOT by name. `svc.cmd` and `.service` are the Linux/macOS svc.sh
-# artifacts and are never written by the Windows layout — measured 2026-09-02, where a
-# config.cmd run that printed "Service actions.runner.CodeRoasted.malf-runner-win
-# successfully installed" and "started successfully" left neither file behind, so an
-# earlier file-existence check here failed a working install after the fact.
+# NOT by file, and NOT by name. `svc.cmd` does not exist in the Windows layout at all — it
+# is the Linux/macOS svc.sh wrapper — so an earlier check for it here failed a working
+# install after the fact. (`.service` IS written on Windows, as a HIDDEN file, by
+# WindowsServiceControlManager.SaveServiceSettings at v2.337.0; only svc.cmd was missing.
+# It is still not what is read below: it holds a name, and a name cannot say which directory
+# the service actually serves.)
 #
 # The service is identified by what it EXECUTES: the one actions.runner.* service whose
 # binary path lies inside $RunnerDir. That holds under whatever sanitization the runner
-# applies to the service name, and it cannot match a co-resident runner installed from a
-# different directory — which a bare `actions.runner.*` glob would.
+# applies to the service name, it survives a `.service` deleted by hand, and it cannot match
+# a co-resident runner installed from a different directory — which a bare
+# `actions.runner.*` glob would.
 # ---------------------------------------------------------------------------
 
 $candidates = @(Get-RunnerService -Directory $runnerDirFull)
