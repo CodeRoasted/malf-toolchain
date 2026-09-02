@@ -17,13 +17,13 @@ ln -sf /path/to/coderoast/malf/malf ~/.local/bin/malf
 Run `malf` from any directory that contains a `conanfile.py`, or from any parent of dirs that contain one (a repo root, the workspace root).
 
 ```
-malf build   [target] [--debug|--release]
-malf test    [target] [--debug|--release] [--verbose] [--filter PATTERN]
+malf build   [target] [--asan|--profile <name>]
+malf test    [target] [--asan|--profile <name>] [--verbose] [--filter PATTERN]
 malf lint    [--all-files] [-c|--console]
 malf format  [--check]
 malf commands
 malf compile-commands
-malf bench   [target] [--quick] [--filter REGEX] [--compare] [--repetitions N] [--threshold F] [--debug|--release]
+malf bench   [target] [--quick] [--filter REGEX] [--compare] [--repetitions N] [--threshold F] [--asan|--profile <name>]
 malf clean   <build|conan|editables|stale|all>   # no default; `all` is the nuclear form
 malf run     <exe-name> [args...]
 ```
@@ -101,6 +101,8 @@ Use `commands` or `compile-commands` only when you want that merged DB rebuilt f
 - the merged DB carries stale entries from deleted/renamed packages
 
 ### Conan profile
+
+**The build type is a coordinate of the profile, and there is no verb-level build-type flag.** A profile's `[settings] build_type` is the only declaration of it: it is read at load for the default profile and re-read by `--profile` / `--asan`, and every verb inherits it. `--debug` and `--release` were removed on 2026-09-02 — they were the mechanism by which a build tree came to carry a configuration the profile it is *named* for does not declare, and the tree name is the only thing anyone reads. Measured that day: **all 23** `build-clang21-libcxx-release` trees that a `malf build` / `malf test` had ever configured carried `CMAKE_BUILD_TYPE=Debug`, under a profile declaring `Release`, so the shipped translation units compiled with **no `-DNDEBUG`** and at `SPDLOG_ACTIVE_LEVEL=TRACE` while the directory name said `release`. It bought no compile time either: `-O3` comes from the profile's own `tools.build:cxxflags` whatever the build type. Every `cmake --preset` configure now asserts the tree's `CMAKE_BUILD_TYPE` against the profile file on disk and aborts **before** the compile on a mismatch, so the drift cannot come back silently. Want a Debug leg? Add a profile — `--asan` (`linux-clang21-asan`) is one today.
 
 The dev-default profile `linux-clang21-libcxx-release` (and any `--profile <name>` selection) is resolved from `malf/profiles/` (copied into `$CONAN_HOME/profiles/` on every run so an edit always propagates). Override the default with `MALF_DEFAULT_PROFILE` or the active name with `MALF_PROFILE_NAME`; `malf profiles` lists the registry.
 

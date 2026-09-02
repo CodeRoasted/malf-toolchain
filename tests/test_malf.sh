@@ -799,7 +799,7 @@ write_probe_repo "$ws/repoA"
 check "A: arrangement applied — the sibling is genuinely absent (single-repo)" \
       "absent" "$([[ ! -e "$solo/insight-sib" ]] && echo absent || echo PRESENT)"
 solo_out="$(python3 -B "$BI" build --workspace "$solo" --repo "$solo" \
-            --build-key probe --profile probe 2>&1)"; solo_rc=$?
+            --build-key probe --profile probe --build-type Release 2>&1)"; solo_rc=$?
 check "A: single-repo + absent sibling exits 0" "0" "$solo_rc"
 check "A: the skip line is PRESENT, matched via the imported needle" \
       "present" "$(grep -qF "$skip_needle" <<< "$solo_out" && echo present || echo "ABSENT: $solo_out")"
@@ -837,7 +837,7 @@ check "B': lint DISCOVERS the child repo and counts its cell in the workspace sh
 check "C: arrangement applied — the sibling is genuinely absent (workspace)" \
       "absent" "$([[ ! -e "$ws/insight-sib" ]] && echo absent || echo PRESENT)"
 ws_out="$(python3 -B "$BI" build --workspace "$ws" --repo "$ws/repoA" \
-          --build-key probe --profile probe 2>&1)"; ws_rc=$?
+          --build-key probe --profile probe --build-type Release 2>&1)"; ws_rc=$?
 check "C: workspace + absent sibling FAILS (exit 1)" "1" "$ws_rc"
 check "C: the FAIL names the cell" \
       "named" "$(grep -qF "cell probe_cell" <<< "$ws_out" && echo named || echo "unnamed: $ws_out")"
@@ -861,6 +861,9 @@ exit 0
 STUB
 cat > "$stub_bin/cmake" <<'STUB'
 #!/usr/bin/env bash
+# Record the argv when asked. Without this the suite can prove the cell BUILDS and cannot prove
+# WHAT IT WAS CONFIGURED AS — which is the whole of the build-type question (`N120`).
+[[ -n "${MALF_STUB_CMAKE_LOG:-}" ]] && printf '%s\n' "$*" >> "$MALF_STUB_CMAKE_LOG"
 build=""; target=""; prev=""
 for a in "$@"; do
     case "$prev" in
@@ -879,15 +882,29 @@ check "D: stub toolchain applied (conan resolves to the stub, not the real one)"
       "$stub_bin/conan" "$(PATH="$stub_bin:$PATH" command -v conan)"
 
 mkdir -p "$ws/insight-sib" "$solo/insight-sib"
-ws_sat_out="$(PATH="$stub_bin:$PATH" python3 -B "$BI" build --workspace "$ws" \
-              --repo "$ws/repoA" --build-key probe --profile probe 2>&1)"; ws_sat_rc=$?
+ws_sat_out="$(PATH="$stub_bin:$PATH" MALF_STUB_CMAKE_LOG="$inv_tmp/cmake_argv.log" \
+              python3 -B "$BI" build --workspace "$ws" \
+              --repo "$ws/repoA" --build-key probe --profile probe --build-type Debug 2>&1)"; ws_sat_rc=$?
 check "D: workspace shape + sibling present -> the cell configures and links (exit 0)" \
       "rc=0 linked" \
       "rc=$ws_sat_rc $(grep -qF "linked:" <<< "$ws_sat_out" && echo linked || echo "GOT: $ws_sat_out")"
 check "D: no skip line when the path is satisfiable (workspace shape)" \
       "absent" "$(grep -qF "$skip_needle" <<< "$ws_sat_out" && echo "LEAKED: $ws_sat_out" || echo absent)"
+
+# THE BUILD TYPE REACHED THE CONFIGURE, and the arm is deliberately run at Debug — a cell whose
+# cmake line was checked for `Release` would pass against the LITERAL this parameter replaced
+# (build_inventory.py hardcoded `-DCMAKE_BUILD_TYPE=Release` until 2026-09-02) and prove nothing.
+# Both directions are asserted: the requested type is present AND the old literal is absent.
+inv_cmake_argv="$(cat "$inv_tmp/cmake_argv.log" 2>/dev/null || echo "NO LOG")"
+check "D: the cell is CONFIGURED at the build type it was handed, not at a literal" \
+      "Debug-present Release-absent" \
+      "$(grep -qF -- "-DCMAKE_BUILD_TYPE=Debug" <<< "$inv_cmake_argv" && echo Debug-present || echo "DEBUG-ABSENT: $inv_cmake_argv") \
+$(grep -qF -- "-DCMAKE_BUILD_TYPE=Release" <<< "$inv_cmake_argv" && echo "RELEASE-LEAKED: $inv_cmake_argv" || echo Release-absent)"
+check "D: build mode REFUSES with no --build-type (no default — a default is a second declaration)" \
+      "2" "$(PATH="$stub_bin:$PATH" python3 -B "$BI" build --workspace "$ws" --repo "$ws/repoA" \
+             --build-key probe --profile probe >/dev/null 2>&1; echo $?)"
 solo_sat_out="$(PATH="$stub_bin:$PATH" python3 -B "$BI" build --workspace "$solo" \
-              --repo "$solo" --build-key probe --profile probe 2>&1)"; solo_sat_rc=$?
+              --repo "$solo" --build-key probe --profile probe --build-type Release 2>&1)"; solo_sat_rc=$?
 check "D: single-repo shape + sibling STAGED -> the cell builds, no skip (the D6 staging clause)" \
       "rc=0 linked no-skip" \
       "rc=$solo_sat_rc $(grep -qF "linked:" <<< "$solo_sat_out" && echo linked || echo "GOT: $solo_sat_out") $(grep -qF "$skip_needle" <<< "$solo_sat_out" && echo "LEAKED" || echo no-skip)"
@@ -1309,6 +1326,125 @@ check "clean <unknown target> refuses with usage — rc 1" \
       "1 usage" "$cl_bad_rc $([[ "$cl_bad" == *"unknown target 'nonsense'"* && "$cl_bad" == *"usage:"* ]] && echo usage || echo "GOT: $(head -c 200 <<< "$cl_bad")")"
 check "clean <unknown target> removes nothing" "$cl_all" "$(cl_state)"
 rm -rf "$cl_tmp"
+
+echo "[7p] build type — a tree's configuration is the PROFILE's, and a drifting tree reds BEFORE the compile"
+
+# WHAT THIS PINS (`N120`). Until 2026-09-02 the build type was a per-INVOCATION variable while the
+# build tree is a per-PROFILE coordinate: `cmd_build`/`cmd_test`/`cmd_commands` seeded `Debug`,
+# `cmd_bench`/`cmd_inventory` seeded `Release`, and `--debug`/`--release` moved it again. The
+# default profile never goes through `_malf_apply_profile`, so on the dev default the seed was the
+# ONLY writer — and all 23 `build-clang21-libcxx-release` trees carried `CMAKE_BUILD_TYPE=Debug`
+# under a profile declaring `Release`. Nothing failed; the trees simply were not the configuration
+# their names announce, so every green taken in one was a claim about a leg nobody ran.
+#
+# THREE ARMS, and they are three different kinds. (1) the DERIVATION: every registry profile
+# declares a build_type and `_malf_profile_build_type` returns it, refusing a profile that declares
+# none. (2) the GATE: `_malf_assert_tree_matches_profile` compares the CMakeCache the configure
+# produced against the profile FILE, and must be seen to RED. (3) the STRUCTURAL arm: no verb may
+# write MALF_CONFIG again, and no `--debug`/`--release` arm may come back — read from the source,
+# because that is the only form that catches the regression rather than the symptom.
+
+bt_tmp="$(mktemp -d)"
+
+# ── (1) THE DERIVATION ───────────────────────────────────────────────────────────────────────
+# The roster is DERIVED from the registry directory, never listed here: a profile added tomorrow
+# is covered without anyone remembering this file.
+bt_profiles=(); bt_missing=()
+for bt_p in "$MALF_ROOT"/profiles/*; do
+    [[ -f "$bt_p" ]] || continue
+    bt_profiles+=("$(basename "$bt_p")")
+    grep -qE '^[[:space:]]*build_type[[:space:]]*=' "$bt_p" || bt_missing+=("$(basename "$bt_p")")
+done
+check "every registry profile declares a build_type (roster derived, ${#bt_profiles[@]} profiles)" \
+      "none-missing" "$([[ ${#bt_missing[@]} -eq 0 ]] && echo none-missing || echo "MISSING: ${bt_missing[*]}")"
+check "the profile roster is non-empty (a vacuous sweep would pass the arm above)" \
+      "non-empty" "$([[ ${#bt_profiles[@]} -gt 0 ]] && echo non-empty || echo EMPTY)"
+
+# `_malf_profile_build_type` reads the ACTIVE profile, so drive it through _malf_apply_profile —
+# the same seam every verb uses. Compared against the file read independently, two ways of asking.
+bt_derived_mismatch=()
+for bt_name in "${bt_profiles[@]}"; do
+    bt_expect="$(sed -nE 's/^[[:space:]]*build_type[[:space:]]*=[[:space:]]*([A-Za-z]+).*/\1/p' \
+                 "$MALF_ROOT/profiles/$bt_name" | head -n1)"
+    bt_got="$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1
+                       _malf_apply_profile "$2" >/dev/null 2>&1
+                       echo "$MALF_CONFIG"' _ "$MALF_BIN" "$bt_name" 2>/dev/null)"
+    [[ "$bt_got" == "$bt_expect" ]] || bt_derived_mismatch+=("$bt_name(got=$bt_got want=$bt_expect)")
+done
+check "--profile <name> takes the build type FROM that profile, for every registry profile" \
+      "all-match" "$([[ ${#bt_derived_mismatch[@]} -eq 0 ]] && echo all-match || echo "MISMATCH: ${bt_derived_mismatch[*]}")"
+
+# THE DEFAULT PATH, which is where N120 lived: no --profile is named, nothing calls
+# _malf_apply_profile, and MALF_CONFIG must still be the default profile's declared type.
+bt_default_expect="$(sed -nE 's/^[[:space:]]*build_type[[:space:]]*=[[:space:]]*([A-Za-z]+).*/\1/p' \
+                     "$MALF_ROOT/profiles/linux-clang21-libcxx-release" | head -n1)"
+bt_default_got="$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; echo "$MALF_CONFIG"' \
+                  _ "$MALF_BIN" 2>/dev/null)"
+check "the DEFAULT path (no --profile) carries the default profile's build type, not a verb's seed" \
+      "$bt_default_expect" "$bt_default_got"
+
+# A profile declaring no build_type is FATAL, not a silent carry-over of the previous value.
+mkdir -p "$bt_tmp/profiles"
+printf '[settings]\narch=x86_64\ncompiler=gcc\n' > "$bt_tmp/profiles/probe-no-build-type"
+bt_nb_rc=0
+bt_nb_out="$(MALF_DIR="$bt_tmp" bash -c '
+    MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1
+    MALF_DIR="$2"; _malf_apply_profile probe-no-build-type' _ "$MALF_BIN" "$bt_tmp" 2>&1)" || bt_nb_rc=$?
+check "a profile declaring no build_type is FATAL (exit 1), never a carried-over default" \
+      "1 named" \
+      "$bt_nb_rc $([[ "$bt_nb_out" == *"declares no [settings] build_type"* ]] && echo named || echo "GOT: $(head -c 200 <<< "$bt_nb_out")")"
+
+# ── (2) THE GATE ─────────────────────────────────────────────────────────────────────────────
+# Drive _malf_assert_tree_matches_profile against three hand-written caches. The subject is the
+# CMakeCache on disk versus the profile file on disk — two independent artifacts, which is what
+# makes this more than malf agreeing with its own variable.
+bt_gate() {   # $1 = cache body or the literal NONE; echoes "<rc> <output>"
+    local dir="$bt_tmp/tree"; rm -rf "$dir"; mkdir -p "$dir"
+    [[ "$1" == "NONE" ]] || printf '%s\n' "$1" > "$dir/CMakeCache.txt"
+    local out rc=0
+    out="$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1
+                    _malf_apply_profile linux-gcc16-release >/dev/null 2>&1
+                    _malf_assert_tree_matches_profile "$2"' _ "$MALF_BIN" "$dir" 2>&1)" || rc=$?
+    printf '%s\n%s' "$rc" "$out"
+}
+bt_ok="$(bt_gate 'CMAKE_BUILD_TYPE:STRING=Release')"
+check "the gate PASSES when the cache matches the profile (linux-gcc16-release declares Release)" \
+      "0" "$(head -n1 <<< "$bt_ok")"
+bt_bad="$(bt_gate 'CMAKE_BUILD_TYPE:STRING=Debug')"
+check "the gate REDS (exit 1) on a Debug cache under a Release profile — the exact N120 shape" \
+      "1" "$(head -n1 <<< "$bt_bad")"
+check "the red NAMES both values and the profile, so the reader needs no second command" \
+      "complete" \
+      "$([[ "$bt_bad" == *"CMAKE_BUILD_TYPE=Debug"* && "$bt_bad" == *"linux-gcc16-release"* \
+            && "$bt_bad" == *"build_type=Release"* ]] && echo complete || echo "INCOMPLETE: $bt_bad")"
+bt_empty="$(bt_gate 'CMAKE_BUILD_TYPE:STRING=')"
+check "an EMPTY cache value reds too (a multi-config tree is not a pass here)" \
+      "1" "$(head -n1 <<< "$bt_empty")"
+bt_none="$(bt_gate NONE)"
+check "an ABSENT CMakeCache.txt reds rather than passing vacuously" \
+      "1 named" \
+      "$(head -n1 <<< "$bt_none") $([[ "$bt_none" == *"no CMakeCache.txt"* ]] && echo named || echo "GOT: $bt_none")"
+
+# ── (3) THE STRUCTURAL ARM ───────────────────────────────────────────────────────────────────
+# Read from the source, because the symptom (a tree with the wrong type) is downstream of the
+# mechanism (a second writer of MALF_CONFIG), and only the mechanism can be pinned in a no-build
+# suite. Comments are stripped first so this file's own prose about the flags cannot satisfy it.
+bt_src="$(sed 's/#.*$//' "$MALF_BIN")"
+bt_writers="$(grep -cE '^[[:space:]]*MALF_CONFIG=' <<< "$bt_src" || true)"
+check "MALF_CONFIG has exactly TWO writers, both _malf_profile_build_type (load seed + --profile)" \
+      "2" "$bt_writers"
+bt_writer_lines="$(grep -E '^[[:space:]]*MALF_CONFIG=' <<< "$bt_src" | grep -vc '_malf_profile_build_type' || true)"
+check "neither writer is a literal — a verb-level seed is what N120 was" "0" "$bt_writer_lines"
+bt_flags="$(grep -cE '^[[:space:]]*--(debug|release)\)' <<< "$bt_src" || true)"
+check "no verb carries a --debug/--release case arm (the flags that moved the type off the profile)" \
+      "0" "$bt_flags"
+# The gate must be WIRED, not merely defined: an assertion nothing calls is the shape this whole
+# section exists to refuse.
+bt_calls="$(grep -cE '_malf_assert_tree_matches_profile[[:space:]]+"' <<< "$bt_src" || true)"
+check "the tree/profile assertion is actually CALLED (a defined-but-unwired gate checks nothing)" \
+      "1" "$bt_calls"
+rm -rf "$bt_tmp"
+
 
 echo
 echo

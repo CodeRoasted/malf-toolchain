@@ -2,8 +2,8 @@
 # malf — unified build system for coderoast C++ projects
 #
 # Usage:
-#   malf build   [subdir] [--debug|--release|--asan|--profile <name>]
-#   malf test    [subdir] [--debug|--release] [--filter PATTERN]
+#   malf build   [subdir] [--asan|--profile <name>]
+#   malf test    [subdir] [--asan|--profile <name>] [--filter PATTERN]
 #   malf lint    [--all-files] [-c|--console]
 #   malf format  [--check]
 #   malf commands|compile-commands
@@ -270,12 +270,26 @@ _malf_profile_path() {
 # type FROM the profile so the cmake preset matches, and — for a sanitizer profile — points
 # the BUILD context at a clean profile so build tools (m4/autoconf/cmake) are never
 # instrumented (an ASan/MSan-built m4 breaks libcurl/autotools autoreconf).
+# THE BUILD TYPE IS A COORDINATE OF THE PROFILE AND OF NOTHING ELSE — the one reader.
+# It is FATAL on a profile declaring no build_type rather than silently leaving the previous
+# value standing: an undeclared build type is what let a tree carry a configuration its name
+# does not name, and a fallback here is the same defect wearing a default.
+_malf_profile_build_type() {
+    local bt
+    bt="$(sed -nE 's/^[[:space:]]*build_type[[:space:]]*=[[:space:]]*([A-Za-z]+).*/\1/p' "$MALF_PROFILE" | head -n1)"
+    if [[ -z "$bt" ]]; then
+        echo "malf: error: profile '$MALF_PROFILE_NAME' ($MALF_PROFILE) declares no [settings] build_type." >&2
+        echo "       Every malf profile must declare one — the build tree is named for the profile," >&2
+        echo "       so a profile with no build type produces a tree nothing can adjudicate." >&2
+        exit 1
+    fi
+    echo "$bt"
+}
+
 _malf_apply_profile() {
     MALF_PROFILE_NAME="$1"
     MALF_PROFILE="$(_malf_profile_path)" || exit 1
-    local bt
-    bt="$(sed -nE 's/^[[:space:]]*build_type[[:space:]]*=[[:space:]]*([A-Za-z]+).*/\1/p' "$MALF_PROFILE" | head -n1)"
-    [[ -n "$bt" ]] && MALF_CONFIG="$bt"
+    MALF_CONFIG="$(_malf_profile_build_type)"
     # Match the actual conf FLAG lines (tools.build:...-fsanitize=...), not a comment that
     # merely mentions -fsanitize (e.g. the libc++ profile's "NOT a sanitizer profile" note).
     if grep -qE '^[[:space:]]*tools\.build:.*-fsanitize=' "$MALF_PROFILE"; then
@@ -402,14 +416,30 @@ _malf_use_keyed_cache() {
     mkdir -p "$CONAN_HOME/profiles"
     _malf_sync_conan_conf
     # re-resolve the host + clean-build-context profiles INTO the keyed cache (paths live under
-    # CONAN_HOME/profiles); preserve any explicit --debug/--release the caller set.
-    local _saved_config="$MALF_CONFIG"
+    # CONAN_HOME/profiles). This used to save and restore MALF_CONFIG around the call, to protect
+    # an explicit --debug/--release from being overwritten by the profile. Those flags are gone
+    # and so is the save: the build type is the profile's, and re-applying the SAME profile
+    # cannot move it.
     _malf_apply_profile "$MALF_PROFILE_NAME"
-    MALF_CONFIG="$_saved_config"
     _malf_install_workspace_hooks
 }
 MALF_PROFILE="$(_malf_profile_path)"
 MALF_PROFILE_NAME="$(basename "$MALF_PROFILE")"
+# THE DEFAULT PATH READS THE PROFILE TOO, and its absence here is the whole of `N120`. The default
+# profile never goes through _malf_apply_profile (nothing names it on the command line), so until
+# 2026-09-02 the only writer of MALF_CONFIG on that path was each verb's own hardcoded seed —
+# `Debug` in build/test/commands, `Release` in bench/inventory. The dev default
+# `linux-clang21-libcxx-release` declares build_type=Release and every one of its 24 build trees
+# carried CMAKE_BUILD_TYPE=Debug, under a directory name saying `release`. The cost was not
+# cosmetic: the shipped TU coderoast-server/infra/redis/src/redis_session_store.cpp compiled at
+# -DSPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_TRACE with NO -DNDEBUG (measured from compile_commands.json),
+# so every $<CONFIG:Debug> generator expression in the workspace evaluated TRUE under "release" and
+# an arm asking "is the compile-time-elided log branch really elided" had nothing to test — which
+# is exactly how a real mutation (an elided REDIS_LOG_DEBUG still evaluating its arguments) reddened
+# on the gcc16 ship leg and GREENED on the dev default. It bought no compile time either: -O3 comes
+# from the profile's own tools.build:cxxflags whatever the build type, so the Debug default was
+# -O3 -g with asserts, never a debug build.
+MALF_CONFIG="$(_malf_profile_build_type)"
 # Seed the default-path value (the default profile never goes through _malf_apply_profile). NOT
 # exported — see _malf_apply_profile: conan must not inherit this (cached cross-repo deps' package_info
 # would prepend a bogus build-<key> path → find_package fails); recipe layouts use the profile conf.
@@ -583,7 +613,8 @@ _malf_run_inventory() {
     python3 "$MALF_DIR/build_inventory.py" lint --workspace "$MALF_WORKSPACE_ROOT" || return 1
     python3 "$MALF_DIR/build_inventory.py" build \
         --workspace "$MALF_WORKSPACE_ROOT" --repo "$repo" \
-        --build-key "$(_malf_build_key)" --profile "$MALF_PROFILE_NAME" || return 1
+        --build-key "$(_malf_build_key)" --profile "$MALF_PROFILE_NAME" \
+        --build-type "$MALF_CONFIG" || return 1
 
     # FOLD THE INVENTORY CELLS' DATABASES INTO THE REPO ROOT, exactly as a package build folds its
     # own. An inventory cell configures into `<dir>/build-inventory-$(_malf_build_key)/` and emits a
@@ -945,6 +976,42 @@ _malf_build_jobs() {
     echo "$jobs"
 }
 
+# THE TREE'S CONFIGURATION IS CHECKED AGAINST THE PROFILE IT IS NAMED FOR (`N120`).
+#
+# WHY A CHECK AT ALL, when the build type is now derived from the profile in one place: because
+# that derivation is a claim about malf's own variables, and the thing every reader trusts is the
+# DIRECTORY NAME. This reads the two ends instead — the profile FILE on disk, and the CMakeCache
+# the configure just produced — so it is two independent artifacts, not malf agreeing with itself.
+# It is what makes the binding provable rather than argued, and it is why the mislabel cannot come
+# back silently: any future path that forces a build type reds here, on the first configure.
+#
+# IT RUNS BEFORE `cmake --build`, deliberately. A mismatch is not a result to report at the end of
+# a compile that took minutes and produced the wrong configuration; the build is the expensive part
+# and it is exactly what must not happen.
+#
+# IT CANNOT GO VACUOUS ON A MISSING CACHE: a configure that emitted no CMakeCache.txt has already
+# failed and `set -e` has already carried that failure out of this function, so reaching this point
+# with no cache is impossible rather than tolerated — and it is asserted, not assumed.
+_malf_assert_tree_matches_profile() {
+    local build_dir="$1"
+    local cache="$build_dir/CMakeCache.txt"
+    if [[ ! -f "$cache" ]]; then
+        echo "malf: FATAL: $build_dir has no CMakeCache.txt after a successful configure." >&2
+        exit 1
+    fi
+    local declared cached
+    declared="$(_malf_profile_build_type)"
+    cached="$(sed -nE 's/^CMAKE_BUILD_TYPE:[A-Za-z]+=(.*)$/\1/p' "$cache" | head -n1)"
+    [[ "$cached" == "$declared" ]] && return 0
+    echo "malf: FATAL: build-type drift — $build_dir is configured" >&2
+    echo "       CMAKE_BUILD_TYPE=${cached:-<empty>}, but the profile it is NAMED for" >&2
+    echo "       ($MALF_PROFILE_NAME) declares build_type=$declared." >&2
+    echo "       A tree whose configuration is not the one its name announces makes every green" >&2
+    echo "       taken in it a claim about a leg nobody ran. Delete the tree and rebuild:" >&2
+    echo "         rm -rf $build_dir" >&2
+    exit 1
+}
+
 _malf_configure_and_build() {
     local target="$1"
     local build_dir="$2"
@@ -954,6 +1021,7 @@ _malf_configure_and_build() {
     cmake --preset "$preset" -S "$target" -B "$build_dir" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         "$@"
+    _malf_assert_tree_matches_profile "$build_dir"
     local jobs; jobs="$(_malf_build_jobs)"
     if [[ "${MALF_IS_SANITIZER:-0}" == "1" ]]; then
         # The companion to the -j cap: give the clang frontend stack headroom for the deep
@@ -1107,11 +1175,12 @@ _malf_build_flow_locked() {
 
 cmd_build() {
     local subdir="" fwd=()
-    MALF_CONFIG="Debug"
+    # NO BUILD-TYPE SEED AND NO --debug/--release. MALF_CONFIG is already the active profile's
+    # declared build_type (seeded at load, re-derived by _malf_apply_profile). A verb that seeded
+    # it, or a flag that moved it, put a configuration into a tree named for a profile that
+    # declares a different one — and the tree name is the only thing anyone reads (`N120`).
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --debug)   MALF_CONFIG="Debug"; fwd+=("$1") ;;
-            --release) MALF_CONFIG="Release"; fwd+=("$1") ;;
             # Select any registry profile (malf/profiles/<name>): build type + clean
             # build-context for sanitizers are derived from the profile.
             --profile) fwd+=("$1" "$2"); shift; _malf_apply_profile "$1" ;;
@@ -1138,11 +1207,9 @@ cmd_test() {
     local subdir="" fwd=()
     local gtest_filter=""
     local verbose=false
-    MALF_CONFIG="Debug"
+    # No build-type seed and no --debug/--release — see cmd_build.
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --debug)   MALF_CONFIG="Debug"; fwd+=("$1") ;;
-            --release) MALF_CONFIG="Release"; fwd+=("$1") ;;
             --profile) fwd+=("$1" "$2"); shift; _malf_apply_profile "$1" ;;
             --asan)    _malf_apply_profile "$MALF_ASAN_PROFILE"; fwd+=("$1") ;;
             --verbose) verbose=true; fwd+=("$1") ;;
@@ -1162,20 +1229,17 @@ cmd_test() {
 
     _malf_use_keyed_cache
 
-    # End-to-end packages whose tests rely on optimized producer code paths
-    # cannot meaningfully run under -O0/Debug (throughput drops 10–30x and
-    # the in-test drain watchdog times out before the scenario completes).
-    # Force such packages to Release so `malf test` produces meaningful
-    # results regardless of MALF_CONFIG.
-    case "$(basename "$target")" in
-        insight-e2e)
-            if [[ "$MALF_CONFIG" != "Release" ]]; then
-                echo "malf test: insight-e2e requires Release (e2e throughput-sensitive); overriding MALF_CONFIG=$MALF_CONFIG -> Release" >&2
-                MALF_CONFIG="Release"
-            fi
-            ;;
-    esac
-
+    # THE insight-e2e RELEASE OVERRIDE IS GONE, and it was the second half of `N120` rather than a
+    # convenience. It existed because `malf test` seeded Debug: an e2e package whose in-test drain
+    # watchdog times out under a slow build had to be rescued per package. The rescue wrote Release
+    # into a tree named for whatever profile was active — so under the dev default one package
+    # carried Release while its 23 siblings carried Debug, and under linux-clang21-asan (build_type
+    # Debug) `malf test insight-e2e` still produced a Release tree named `build-clang21-asan`.
+    # A per-package divergence cannot be reasoned about at all without opening the cache, which is
+    # strictly worse than a uniform mislabel. With the build type taken from the profile the reason
+    # for the override is gone: the dev default IS Release. A profile that declares Debug is a
+    # deliberate choice by whoever named it on the command line, and silently building one package
+    # some other way is not malf's call to make.
     echo "=== malf test: $target ($MALF_CONFIG) ==="
 
     _malf_build_flow "$target"
@@ -2214,7 +2278,7 @@ for r in re.findall(r\"(?:test_)?requires\\s*\\(\\s*['\\\"]([^'\\\"]+)['\\\"]\\s
         --profile:build="$MALF_PROFILE" \
         --build=missing \
         -c "tools.cmake.cmaketoolchain:generator=Ninja" \
-        -s "build_type=Debug" \
+        -s "build_type=$MALF_CONFIG" \
         2>&1 | grep -vE "^$|^======|^Requirements|^Packages|^Build" || true
 
     local tp_toolchain="$tp_build/conan_toolchain.cmake"
@@ -2231,7 +2295,7 @@ for r in re.findall(r\"(?:test_)?requires\\s*\\(\\s*['\\\"]([^'\\\"]+)['\\\"]\\s
                  -G Ninja \
                  "-DCMAKE_TOOLCHAIN_FILE=$tp_toolchain" \
                  "-DCMAKE_PREFIX_PATH=$main_build_dir" \
-                 -DCMAKE_BUILD_TYPE=Debug \
+                 -DCMAKE_BUILD_TYPE="$MALF_CONFIG" \
                  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ) \
              > "$tp_build/cmake_configure.log" 2>&1; then
         echo "malf commands: test_package configure FAILED:" >&2
@@ -2297,10 +2361,11 @@ cmd_compile_commands() {
     # member enumeration — a root recipe is a member too), so there is NO single-
     # vs-multi branch: each package is conan-installed, configured via its conan
     # preset (the SAME compiler/flags `malf build` uses), its test_package is
-    # configured, and every emitted DB is merged. Debug config so test
-    # targets match `malf build` / `malf test`.
+    # configured, and every emitted DB is merged. The build type is the profile's, so the DB
+    # clangd reads is the configuration `malf build` / `malf test` actually produce — this line
+    # used to force Debug "so test targets match malf build / malf test", which was true only
+    # because those verbs forced Debug too, and stopped being true the moment either moved.
     local build_root; build_root="$(_malf_build_dir "$CWD")"
-    MALF_CONFIG="Debug"
     mkdir -p "$build_root"
     # Rebuild the editor DB from scratch: clear the merged output so a single-package
     # repo's own DB (whose build dir IS the merge root) is the only copy the
@@ -2426,7 +2491,11 @@ _malf_pkg_declares_bench() {
 cmd_bench() {
     local subdir="" quick=false filter="" compare=false threshold="0.10" baseline="" extra=()
     local repetitions="" fwd=() no_build=false
-    MALF_CONFIG="Release"
+    # No build-type seed and no --debug/--release — see cmd_build. A benchmark run is meaningful
+    # only under an optimized profile, and that is now a property of the profile you name: the dev
+    # default declares Release, and `--asan` declares Debug because an instrumented -O1 build is
+    # what that leg IS. Seeding Release here silently produced an optimized tree inside
+    # build-clang21-asan/ when a caller combined the two.
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --compare)   compare=true; fwd+=("$1") ;;
@@ -2440,8 +2509,6 @@ cmd_bench() {
             # a slow build reports a "presumed DEADLOCK" that never happened.
             --no-build)  no_build=true; fwd+=("$1") ;;
             --filter)    filter="$2"; fwd+=("$1" "$2"); shift ;;
-            --debug)     MALF_CONFIG="Debug"; fwd+=("$1") ;;
-            --release)   MALF_CONFIG="Release"; fwd+=("$1") ;;
             --profile)   fwd+=("$1" "$2"); shift; _malf_apply_profile "$1" ;;
             --asan)      _malf_apply_profile "$MALF_ASAN_PROFILE"; fwd+=("$1") ;;
             --)          shift; extra+=("$@"); fwd+=(-- "$@"); break ;;
@@ -2946,8 +3013,8 @@ cmd_help() {
 malf — coderoast build system
 
 Commands:
-    build   [target] [--debug|--release|--asan|--profile <name>]
-    test    [target] [--debug|--release|--asan|--profile <name>] [--verbose] [--filter PATTERN]
+    build   [target] [--asan|--profile <name>]
+    test    [target] [--asan|--profile <name>] [--verbose] [--filter PATTERN]
     lint    [--all-files] [-c|--console]
                                a translation unit clang-tidy DIES on is reported as NOT LINTED,
                                by name and separately from the findings, and fails the run —
@@ -2961,7 +3028,7 @@ Commands:
                                extension can otherwise take the whole machine down. Prune extra
                                directories with MALF_FORMAT_EXCLUDE_EXTRA="dir1 dir2".
     commands | compile-commands
-    bench   [target] [--quick] [--filter REGEX] [--debug|--release|--asan|--profile <name>] [--compare] [--threshold N] [--baseline path] [-- <benchmark args>]
+    bench   [target] [--quick] [--filter REGEX] [--asan|--profile <name>] [--compare] [--threshold N] [--baseline path] [-- <benchmark args>]
     clean   <build|conan|editables|stale|all>
                                    NO DEFAULT and exactly one target: a bare `malf clean` REFUSES
                                    and removes nothing. It used to mean `all`, so one missing word
@@ -3081,15 +3148,17 @@ cmd_profiles() {
     echo "  (--asan == --profile $MALF_ASAN_PROFILE)"
 }
 
-# Print the build directory for a target under the active profile (build-type-keyed). Lets
-# scripts locate built binaries without hardcoding build/<pkg> (which breaks under --asan etc.):
+# Print the build directory for a target under the active profile. Lets scripts locate built
+# binaries without hardcoding build/<pkg> (which breaks under --asan etc.):
 #   "$(malf bin-dir --asan fuzz)/parse_fuzzer"
+# THE HEADER USED TO SAY "build-type-keyed" AND THAT WAS NEVER TRUE: _malf_build_dir keys on the
+# PROFILE alone. The claim was harmless only while nothing depended on it, and it is the same
+# misreading `N120` is about — a name that encodes one axis of a configuration gets read as
+# encoding all of them.
 cmd_bin_dir() {
     local subdir=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --debug)   MALF_CONFIG="Debug" ;;
-            --release) MALF_CONFIG="Release" ;;
             --profile) shift; _malf_apply_profile "$1" ;;
             --asan)    _malf_apply_profile "$MALF_ASAN_PROFILE" ;;
             -*)        _malf_refuse_option bin-dir "$1" ;;
@@ -3222,14 +3291,15 @@ cmd_bump() {
 # daily gate feel complete.
 cmd_inventory() {
     local subdir=""
-    MALF_CONFIG="Release"   # an inventory cell is a Release compile-and-link check
     # The SAME flag grammar as build/test — not a subset. A verb that silently ignored
     # `--profile` would run the wrong leg and report success for it, which is the species of
     # false claim this whole file exists to remove.
+    # This used to seed Release, described as "an inventory cell is a Release compile-and-link
+    # check". A compile-and-link check is a check of the leg you asked for: under `--asan` the
+    # cell's conan install already resolved at the profile's Debug (it passes no -s build_type),
+    # while the cmake configure was handed Release — the two halves of one cell disagreeing.
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --debug)   MALF_CONFIG="Debug" ;;
-            --release) MALF_CONFIG="Release" ;;
             --profile) shift; _malf_apply_profile "$1" ;;
             --asan)    _malf_apply_profile "$MALF_ASAN_PROFILE" ;;
             -*) _malf_refuse_option inventory "$1" ;;
@@ -3294,7 +3364,12 @@ cmd_cut_verify() {
     local profile_args=(
         --profile:host="$MALF_PROFILE"
         --profile:build="$MALF_BUILD_PROFILE"
-        -s build_type=Release
+        # The profile's own build_type, not a literal `Release`. The default cut-verify profile
+        # linux-gcc16-release declares Release, so this is byte-identical there; it stops being
+        # identical the moment someone passes `--profile` (the header offers exactly that for a
+        # clang-only box), where a hardcoded Release would configure a build type the named
+        # profile does not declare.
+        -s build_type="$MALF_CONFIG"
     )
 
     local name path deps total=0 ok=0

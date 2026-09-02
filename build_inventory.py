@@ -319,7 +319,8 @@ def workspace_grain_absences(entry: dict, workspace: Path, repo: Path) -> list[t
     return absent
 
 
-def run_build(workspace: Path, repo_root: Path, build_key: str, profile: str) -> int:
+def run_build(workspace: Path, repo_root: Path, build_key: str, profile: str,
+              build_type: str) -> int:
     inventory = load_inventory(repo_root)
     if not inventory:
         return 0
@@ -374,8 +375,14 @@ def run_build(workspace: Path, repo_root: Path, build_key: str, profile: str) ->
         if not toolchains:
             print(f"malf inventory: no conan_toolchain.cmake under {conan_out}", file=sys.stderr)
             return 1
+        # THE CELL'S BUILD TYPE IS THE PROFILE'S, passed in by malf, and this line used to read a
+        # literal "Release". The two halves of one cell then disagreed whenever the profile was not
+        # a Release one: the `conan install` above passes NO `-s build_type`, so the dependencies
+        # resolved at the profile's build type while the cmake configure was handed Release. Under
+        # linux-clang21-asan (build_type Debug) that produced a Release cell inside a directory
+        # named build-inventory-clang21-asan, which is the `N120` mislabel one level down.
         configure = ["cmake", "-S", str(source), "-B", str(build_dir), "-G", "Ninja",
-                     "-DCMAKE_BUILD_TYPE=Release",
+                     f"-DCMAKE_BUILD_TYPE={build_type}",
                      f"-DCMAKE_TOOLCHAIN_FILE={toolchains[0]}"]
         for key, value in entry.get("defines", {}).items():
             configure.append(f"-D{key}={substitute(value, workspace, repo_root)}")
@@ -424,6 +431,12 @@ def main() -> int:
     parser.add_argument("--repo", help="repo root (build mode)")
     parser.add_argument("--build-key", default="default")
     parser.add_argument("--profile", default="")
+    # NO DEFAULT, and required in `build` mode only (checked below, beside --repo — `lint` mode
+    # reads inventory declarations and configures nothing). A default here would be a second
+    # declaration of the build type, and the one thing this argument exists to remove is a second
+    # declaration of the build type.
+    parser.add_argument("--build-type",
+                        help="the active profile's declared build_type (malf passes it)")
     args = parser.parse_args()
     workspace = Path(args.workspace)
     # A bad path is a MISTAKE and must say so, not raise. A traceback here reads as "the tool is
@@ -437,7 +450,10 @@ def main() -> int:
         return run_lint(workspace, None)
     if not args.repo:
         parser.error("build mode needs --repo")
-    return run_build(workspace, Path(args.repo).resolve(), args.build_key, args.profile)
+    if not args.build_type:
+        parser.error("build mode needs --build-type (the active profile's declared build_type)")
+    return run_build(workspace, Path(args.repo).resolve(), args.build_key, args.profile,
+                     args.build_type)
 
 
 if __name__ == "__main__":
