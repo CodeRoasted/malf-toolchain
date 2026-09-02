@@ -223,7 +223,8 @@ MALF_LINT_EXCLUDE_EXTRA="${MALF_LINT_EXCLUDE_EXTRA:-test_package technical_docs 
 # cost is the stack walk. The ceiling sits roughly twenty times above the worst legitimate TU
 # measured here: run serially on an idle box, insight-eidos/sift/src/engine/diff_engine.cpp
 # costs 30.3 s and coderoast-server/server/src/main.cpp 14.7 s (2026-08-30).
-MALF_LINT_TU_TIMEOUT_S="${MALF_LINT_TU_TIMEOUT_S:-600}"
+MALF_LINT_TU_TIMEOUT_DEFAULT_S=600
+MALF_LINT_TU_TIMEOUT_S="${MALF_LINT_TU_TIMEOUT_S:-$MALF_LINT_TU_TIMEOUT_DEFAULT_S}"
 
 # ─── Cache resolution ────────────────────────────────────────────────────────
 # Local cache: workspace-shared .conan2 by default so sibling repos reuse the
@@ -1633,6 +1634,7 @@ PY
             # by the parent — see its definition for the two tells and why both are needed.
             if _malf_tidy_crashed "$rc" "$out"; then
                 printf "%s\n" "$f"   > "$_MALF_TMP/${key}.crash"
+                printf "%s\n" "$rc"  > "$_MALF_TMP/${key}.crashrc"
                 printf "%s\n" "$out" > "$_MALF_TMP/${key}.crashlog"
             else
                 filtered=$(printf "%s\n" "$out" \
@@ -1673,29 +1675,56 @@ PY
     # gone through zero checks; both TUs it was true of on 2026-08-30 had been discovered by
     # accident, by lanes doing other work. An unlinted file must never be able to pass for a
     # linted one, so the count is reported separately and the run cannot exit 0.
-    local -a crashed=()
-    local ckey
+    # THE CAUSE IS READ FROM THE STATUS THE CHILD RECORDED, never re-derived from the crash text.
+    # `timeout` exits 124 when the per-TU cap fires, and `_malf_tidy_crashed` counts that as died —
+    # correctly: the TU went through zero checks either way. But this report used to say
+    # "clang-tidy died on them" for BOTH causes, which misattributes a slow TU under a lowered cap
+    # as a checker death, and a reader then hunts a crash that never happened. Measured by
+    # Hephaïstos 2026-09-02 on logcraft under MALF_LINT_TU_TIMEOUT_S=60: engine_manager.cpp and
+    # http_sink.cpp read NOT LINTED as crashes; at the default cap they were 0 findings in 72 s
+    # and 57 s. Same class as the empty-set false zero above: a verdict naming the wrong cause.
+    local -a crashed=() timed_out=() died=()
+    local ckey crc
     for file in "${files[@]}"; do
         ckey="$(printf '%s' "$file" | md5sum | cut -c1-8)"
-        [[ -f "$tmpdir/${ckey}.crash" ]] && crashed+=("$file")
+        [[ -f "$tmpdir/${ckey}.crash" ]] || continue
+        crashed+=("$file")
+        crc="$(cat "$tmpdir/${ckey}.crashrc" 2>/dev/null || echo '?')"
+        if [[ "$crc" == 124 ]]; then timed_out+=("$file"); else died+=("$file"); fi
     done
     if (( ${#crashed[@]} > 0 )); then
         lint_status=1
-        echo "malf lint: ${#crashed[@]} of ${#files[@]} translation unit(s) NOT LINTED — clang-tidy died on them:" >&2
-        printf '  %s\n' "${crashed[@]#"$CWD"/}" >&2
-        echo "malf lint: these files were checked by ZERO checks. This is a coverage hole, not a" >&2
-        echo "malf lint: finding, and not a slow run. The crash dump below names the culprit on its" >&2
-        echo "malf lint: \"ASTMatcher: Processing '<check>'\" line. Two remedies, and only two: remove" >&2
-        echo "malf lint: the construct the check dies on, or disable that check in the config this run" >&2
-        echo "malf lint: used (${tidy_config:-none}) with a reproducer, the coverage the disable costs," >&2
-        echo "malf lint: and an expiry. A per-site NOLINT is NOT a third option: the crash happens" >&2
-        echo "malf lint: inside the check, before any diagnostic exists to suppress." >&2
+        echo "malf lint: ${#crashed[@]} of ${#files[@]} translation unit(s) NOT LINTED — clang-tidy died on ${#died[@]}, TIMED OUT on ${#timed_out[@]}:" >&2
+        for file in "${timed_out[@]}"; do
+            echo "  ${file#"$CWD"/} — TIMED OUT at ${MALF_LINT_TU_TIMEOUT_S} s (MALF_LINT_TU_TIMEOUT_S)" >&2
+        done
+        for file in "${died[@]}"; do
+            ckey="$(printf '%s' "$file" | md5sum | cut -c1-8)"
+            echo "  ${file#"$CWD"/} — died (exit $(cat "$tmpdir/${ckey}.crashrc" 2>/dev/null || echo '?'))" >&2
+        done
+        echo "malf lint: these files were checked by ZERO checks. This is a coverage hole, not a finding." >&2
+        if (( ${#timed_out[@]} > 0 )); then
+            echo "malf lint: A TIMED OUT unit is a slow TU under THIS RUN's per-TU cap, not a checker death:" >&2
+            echo "malf lint: re-run it under a higher MALF_LINT_TU_TIMEOUT_S (default ${MALF_LINT_TU_TIMEOUT_DEFAULT_S} s) before" >&2
+            echo "malf lint: reading it as a crash — a 60 s cap has read 72 s translation units as dead." >&2
+        fi
+        if (( ${#died[@]} > 0 )); then
+            echo "malf lint: A DIED unit's crash dump below names the culprit on its" >&2
+            echo "malf lint: \"ASTMatcher: Processing '<check>'\" line. Two remedies, and only two: remove" >&2
+            echo "malf lint: the construct the check dies on, or disable that check in the config this run" >&2
+            echo "malf lint: used (${tidy_config:-none}) with a reproducer, the coverage the disable costs," >&2
+            echo "malf lint: and an expiry. A per-site NOLINT is NOT a third option: the crash happens" >&2
+            echo "malf lint: inside the check, before any diagnostic exists to suppress." >&2
+        fi
         {
             echo
-            echo "=== NOT LINTED (clang-tidy crashed) — ${#crashed[@]} translation unit(s) ==="
-            for file in "${crashed[@]}"; do
+            echo "=== NOT LINTED — ${#died[@]} crashed, ${#timed_out[@]} timed out at ${MALF_LINT_TU_TIMEOUT_S} s ==="
+            for file in "${timed_out[@]}"; do
+                echo "--- ${file#"$CWD"/}: TIMED OUT at ${MALF_LINT_TU_TIMEOUT_S} s (MALF_LINT_TU_TIMEOUT_S)"
+            done
+            for file in "${died[@]}"; do
                 ckey="$(printf '%s' "$file" | md5sum | cut -c1-8)"
-                echo "--- ${file#"$CWD"/}"
+                echo "--- ${file#"$CWD"/}: died"
                 head -n 40 "$tmpdir/${ckey}.crashlog"
             done
         } >> "${output_file:-/dev/stdout}"

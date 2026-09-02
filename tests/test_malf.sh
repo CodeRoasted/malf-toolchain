@@ -573,7 +573,16 @@ lk_tmp="$(realpath "$(mktemp -d)")"
 lk_key="${MALF_DEFAULT_PROFILE#linux-}"      # the build-<key>/ malf reads a database from
 lk_bin="$lk_tmp/bin"; mkdir -p "$lk_bin"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$lk_bin/clang-21"                       # -print-resource-dir -> nothing
-printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" >> "$LK_TIDY_LOG"\nexit 0\n' > "$lk_bin/clang-tidy"
+cat > "$lk_bin/clang-tidy" <<'LKTIDY'
+#!/usr/bin/env bash
+# Records every argument it is handed (the observable: WHICH files reached the tool), then either
+# answers clean, sleeps past the per-TU cap on the named TU ([7j3]), or dies with 139 on it.
+printf '%s\n' "$@" >> "$LK_TIDY_LOG"
+last="${*: -1}"
+[[ -n "${LK_TIDY_SLEEP_ON:-}" && "$last" == *"$LK_TIDY_SLEEP_ON" ]] && exec sleep 5
+[[ -n "${LK_TIDY_DIE_ON:-}" && "$last" == *"$LK_TIDY_DIE_ON" ]] && exit 139
+exit 0
+LKTIDY
 chmod +x "$lk_bin/clang-21" "$lk_bin/clang-tidy"
 
 lk_repo="$lk_tmp/repo"
@@ -642,6 +651,29 @@ lk_db "$lk_nonrepo" "$lk_nonrepo/x.cpp"            # a database, so the DB guard
 lk_nr_out="$(lk_run "$lk_nonrepo" "$lk_tmp/tidy.nonrepo.log")"; lk_nr_rc=$?
 check "lint outside a git checkout REFUSES (rc 1, named) instead of 'no files to check' rc 0" \
       "rc=1 refused" "rc=$lk_nr_rc $([[ "$lk_nr_out" == *"could not list the changed files"* ]] && echo refused || echo "GOT: $lk_nr_out")"
+
+echo "[7j3] lint's NOT LINTED verdict names the cause — a per-TU timeout is not a checker death"
+
+# `_malf_tidy_crashed` counts timeout's exit 124 as died, correctly: the TU went through zero
+# checks either way. But the report used to say "clang-tidy died on them" for both causes, and a
+# reader then hunts a crash that never happened. Measured by Hephaïstos 2026-09-02 on logcraft
+# under MALF_LINT_TU_TIMEOUT_S=60: engine_manager.cpp and http_sink.cpp read as dead; at the
+# default cap they were 0 findings in 72 s and 57 s. The cause is read from the exit status the
+# fan-out child records, never re-derived from the crash text. Same fixture, same fake toolchain:
+# told to sleep past a 1 s cap on one TU, then told to exit 139 on it.
+lk_to_out="$(cd "$lk_repo/core" && PATH="$lk_bin:$PATH" LK_TIDY_LOG="$lk_tmp/tidy.timeout.log" \
+    LK_TIDY_SLEEP_ON=engine.cpp MALF_LINT_TU_TIMEOUT_S=1 MALF_PROFILE_NAME="" bash "$MALF_BIN" lint --console 2>&1)"; lk_to_rc=$?
+check "a TU past the per-TU cap reads TIMED OUT at N s (MALF_LINT_TU_TIMEOUT_S), by name, rc 1" \
+      "rc=1 timed-out:src/engine.cpp" \
+      "rc=$lk_to_rc $([[ "$lk_to_out" == *"src/engine.cpp — TIMED OUT at 1 s (MALF_LINT_TU_TIMEOUT_S)"* ]] && echo timed-out:src/engine.cpp || echo "GOT: $lk_to_out")"
+check "the timed-out verdict counts 0 deaths and never calls that TU dead" \
+      "no-crash-wording" \
+      "$([[ "$lk_to_out" == *"died on 0, TIMED OUT on 1"* && "$lk_to_out" != *"src/engine.cpp — died"* ]] && echo no-crash-wording || echo "GOT: $lk_to_out")"
+lk_die_out="$(cd "$lk_repo/core" && PATH="$lk_bin:$PATH" LK_TIDY_LOG="$lk_tmp/tidy.die.log" \
+    LK_TIDY_DIE_ON=engine.cpp MALF_PROFILE_NAME="" bash "$MALF_BIN" lint --console 2>&1)"; lk_die_rc=$?
+check "a TU whose checker exits 139 reads died (exit 139), never timed out" \
+      "rc=1 died:src/engine.cpp" \
+      "rc=$lk_die_rc $([[ "$lk_die_out" == *"src/engine.cpp — died (exit 139)"* && "$lk_die_out" != *"TIMED OUT at"* ]] && echo died:src/engine.cpp || echo "GOT: $lk_die_out")"
 
 printf 'int ghost() { return 1; }\n' > "$lk_repo/core/src/ghost.cpp"
 git -C "$lk_repo" add core/src/ghost.cpp
