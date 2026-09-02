@@ -1410,6 +1410,207 @@ PY
         exit 1
     fi
 
+    # ── A FIRST-PARTY HEADER IS NOT A SYSTEM HEADER, AND THE BUILD SAYS IT IS ─────────
+    # Every dependency reaches a consumer as a CMake IMPORTED target, and CMake's default for an
+    # IMPORTED target is that its INTERFACE_INCLUDE_DIRECTORIES are SYSTEM directories. So the
+    # generator emits `-isystem` for our own editable packages exactly as it does for a conan
+    # cache package, and clang-tidy — which suppresses every diagnostic whose location is in a
+    # system header — cannot see our own headers. `--header-filter` does not reach this: the
+    # filter chooses among diagnostics that were EMITTED, and a system-header diagnostic is never
+    # emitted at all.
+    #
+    # MEASURED 2026-09-02 AT SUPERPROJECT fbf385c, BOTH DIRECTIONS, ON coderoast-server: an
+    # explicit `throw 1;` outside the guard in `server-logging/include/coderoast/log_seat/
+    # log_seat.hpp`'s `flush_logger` (a `noexcept` frame) is SILENT through
+    # `server/src/app/trantor_bridge.cpp` — rc 0, no output; the identical `throw 1;` in a
+    # `noexcept` lambda in that same `.cpp` fires `bugprone-exception-escape`, rc 1. Same check,
+    # same config, same filter: only which side of `-isystem` the frame sits on differs.
+    #
+    # THE DAMAGE IS NOT THE MISSING DIAGNOSTICS, IT IS THE SENTENCES LEFT BEHIND THEM. That seat
+    # header asserted "the body is total, so `bugprone-exception-escape` stays ARMED on this
+    # frame" — a true-sounding guarantee about a check that could not see the frame.
+    #
+    # WHY THIS SEAT. The first-party/third-party distinction exists in three places and only one
+    # of them is total and derivable:
+    #   * the PRODUCING package's CMake (`EXPORT_NO_SYSTEM` on the exported target) cannot reach
+    #     `coderoast_server_logging` or `coderoast_server_catalogs` AT ALL — they are conan
+    #     header-libraries with no CMakeLists, whose imported target is written by CMakeDeps. The
+    #     header this finding started from is one of theirs.
+    #   * the CONSUMER's CMake needs a hand-written list of first-party target names, and a
+    #     hand-written census can only be wrong silently.
+    #   * here, the distinction is a FACT ON THE PATH: an include directory inside
+    #     MALF_WORKSPACE_ROOT and inside no conan home IS a first-party editable. Both halves are
+    #     already computed by this program; neither is a list anyone maintains.
+    # Blast radius settles it. Flipping SYSTEM off in the BUILD would change the flags of every TU
+    # in every repo on both toolchains — a build-policy question (do our own headers face
+    # -Wall -Wextra in their consumers?) that is the Founder's, not something a lint repair rides
+    # in on. This rewrite is read at lint time, written into this run's own scratch directory, and
+    # destroyed with it: nothing that ships changes.
+    #
+    # THIRD-PARTY STAYS `-isystem`, and that is asserted rather than intended — the scan below
+    # counts third-party `-isystem` references before and after and refuses if the two differ.
+    # `--system-headers` was measured as the alternative and is WEAKER, not simpler: it
+    # un-suppresses everything and leans on `--header-filter`, which keys on a diagnostic's own
+    # location — so a diagnostic raised inside a THIRD-PARTY macro (spdlog's `SPDLOG_FUNCTION`
+    # expanding `__FUNCTION__` inside a first-party lambda) lands on a first-party line and walks
+    # straight through it. Same tree, same probe, 2026-09-02: `--system-headers` produced that
+    # finding, this rewrite did not, and both armed the seat header.
+    #
+    # A ZERO IS A LEGITIMATE ANSWER AND IS NAMED. coderoast-ipc and coderoast-security have no
+    # first-party editable include root at all, so their count is 0 and must pass — but a run that
+    # rewrote nothing must not read like a run that failed to look, which is why the line prints
+    # either way. A DERIVATION FAILURE REFUSES: falling back to the original database would
+    # restore exactly the blindness this step exists to remove, and report a clean tree it never
+    # inspected.
+    _malf_lint_open_scratch
+    local lint_db="$_MALF_LINT_SCRATCH/db"
+    mkdir -p "$lint_db"
+    local -a _lint_conan_homes=()
+    mapfile -t _lint_conan_homes < <(_malf_conan_homes)
+    local desystem_report
+    if ! desystem_report="$(python3 - "$comp_db/compile_commands.json" "$lint_db/compile_commands.json" \
+            "$MALF_WORKSPACE_ROOT" "${_lint_conan_homes[@]}" <<'PY'
+import json, os, re, sys
+
+src, dst, workspace = sys.argv[1], sys.argv[2], sys.argv[3]
+caches = [os.path.realpath(p) for p in sys.argv[4:] if p]
+workspace = os.path.realpath(workspace)
+
+
+def under(path, parent):
+    return path == parent or path.startswith(parent + os.sep)
+
+
+def first_party(raw):
+    # isdir() is load-bearing twice: it keeps a stale entry naming a directory that no longer
+    # exists out of the rewrite, and it is what makes a path CONTAINING A SPACE safe — the
+    # command-string form tokenises on whitespace, so such a path comes back truncated, and a
+    # truncated path is not a directory.
+    if not os.path.isdir(raw):
+        return False
+    real = os.path.realpath(raw)
+    return under(real, workspace) and not any(under(real, cache) for cache in caches)
+
+
+def tokens_of(entry):
+    args = entry.get("arguments")
+    return list(args) if args is not None else re.findall(r"\S+", entry.get("command", ""))
+
+
+def scan(entries):
+    """(first-party, third-party) -isystem references, over the same tokenisation the rewrite uses."""
+    fp = tp = 0
+    for entry in entries:
+        toks = tokens_of(entry)
+        i = 0
+        while i < len(toks):
+            tok, path, step = toks[i], None, 1
+            if tok == "-isystem" and i + 1 < len(toks):
+                path, step = toks[i + 1], 2
+            elif tok.startswith("-isystem") and len(tok) > len("-isystem"):
+                path = tok[len("-isystem"):]
+            if path is not None:
+                if first_party(path):
+                    fp += 1
+                else:
+                    tp += 1
+                i += step
+                continue
+            i += 1
+    return fp, tp
+
+
+try:
+    entries = json.load(open(src, encoding="utf-8"))
+except Exception as exc:
+    print(f"{src}: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+before_fp, before_tp = scan(entries)
+files_before = [e.get("file") for e in entries]
+roots = {}
+
+
+def rewrite_command(cmd):
+    def one(match):
+        path = match.group(1)
+        if first_party(path):
+            roots[path] = roots.get(path, 0) + 1
+            return "-I" + path
+        return match.group(0)
+
+    return re.sub(r"-isystem\s+(\S+)", one, cmd)
+
+
+def rewrite_arguments(args):
+    out, i = [], 0
+    while i < len(args):
+        tok, path, step = args[i], None, 1
+        if tok == "-isystem" and i + 1 < len(args):
+            path, step = args[i + 1], 2
+        elif tok.startswith("-isystem") and len(tok) > len("-isystem"):
+            path = tok[len("-isystem"):]
+        if path is not None and first_party(path):
+            roots[path] = roots.get(path, 0) + 1
+            out.append("-I" + path)
+            i += step
+            continue
+        out.append(tok)
+        i += 1
+    return out
+
+
+for entry in entries:
+    if "command" in entry:
+        entry["command"] = rewrite_command(entry["command"])
+    if "arguments" in entry:
+        entry["arguments"] = rewrite_arguments(entry["arguments"])
+
+after_fp, after_tp = scan(entries)
+rewritten = sum(roots.values())
+problems = []
+if after_fp != 0:
+    problems.append(f"{after_fp} first-party -isystem reference(s) survived the rewrite")
+if after_tp != before_tp:
+    problems.append(f"third-party -isystem count moved {before_tp} -> {after_tp}")
+if rewritten != before_fp:
+    problems.append(f"rewrote {rewritten} of {before_fp} first-party reference(s)")
+if [e.get("file") for e in entries] != files_before:
+    problems.append("the entry list changed shape")
+if problems:
+    print("; ".join(problems), file=sys.stderr)
+    raise SystemExit(1)
+
+try:
+    with open(dst, "w", encoding="utf-8") as handle:
+        json.dump(entries, handle)
+except Exception as exc:
+    print(f"{dst}: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+# "left as system headers" counts every -isystem reference this run did NOT touch: the
+# third-party ones, and any path that no longer resolves to a directory. Both are correct to
+# leave alone and neither is first-party, so they are one number rather than two.
+if rewritten == 0:
+    print(f"no first-party include root reaches this database as -isystem; "
+          f"{before_tp} reference(s) left as system headers.")
+else:
+    named = ", ".join(f"{path} (x{count})" for path, count in sorted(roots.items()))
+    print(f"first-party headers de-systemed: {rewritten} include reference(s) over "
+          f"{len(roots)} root(s); {before_tp} reference(s) left as system headers. "
+          f"Roots: {named}")
+PY
+    )"; then
+        echo "malf lint: error: could not derive this run's compile database from $comp_db." >&2
+        echo "malf lint: refusing to run — the derivation turns the -isystem entries naming our own" >&2
+        echo "malf lint: editable packages into -I, without which clang-tidy treats every first-party" >&2
+        echo "malf lint: header as system code and reports nothing about it. Falling back to the" >&2
+        echo "malf lint: original database would restore that blindness and green a tree it never" >&2
+        echo "malf lint: inspected. Re-index with 'malf commands' if the database is the problem." >&2
+        exit 1
+    fi
+    echo "malf lint: $desystem_report" >&2
+
     local output_file=""
     if ! $console; then
         output_file="$CWD/lint_output.txt"
@@ -1448,7 +1649,8 @@ PY
         [[ -n "$res_dir" && -d "$res_dir" ]] && extra_args+=("-extra-arg=-resource-dir=${res_dir}")
     fi
 
-    [[ -n "$comp_db" ]] && extra_args+=("-p" "$comp_db")
+    # -p names the DERIVED database (first-party -isystem -> -I), never the build tree's own.
+    extra_args+=("-p" "$lint_db")
     [[ -n "$tidy_config" ]] && extra_args+=("--config-file=$tidy_config")
     # Restrict diagnostic output to files under the project root only.
     # Without this clang-tidy follows #includes into Conan/system headers
@@ -1668,7 +1870,6 @@ PY
     jobs="$(( $(nproc) < 4 ? $(nproc) : 4 ))"
     export _MALF_MEM_LIMIT="$MALF_SOURCE_MEM_LIMIT_KB"
 
-    _malf_lint_open_scratch
     local tmpdir="$_MALF_LINT_SCRATCH"
 
     local counter_file="$tmpdir/_progress"

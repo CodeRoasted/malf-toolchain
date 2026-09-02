@@ -50,6 +50,21 @@ Diagnostics:
   # disables it. (The gate's own CheckOptions — PrivateMemberSuffix '_', UseAssignment false,
   # the cognitive-complexity Threshold — now reach the IDE through .clang-tidy, not a
   # duplicated copy here.)
+  #
+  # WHERE THE IDE AND THE GATE NOW DIFFER, AND IT IS REACH RATHER THAN SELECTION. Every
+  # dependency arrives as a CMake IMPORTED target, whose include directories CMake marks
+  # SYSTEM — so the database says `-isystem` for our OWN editable packages, and clang-tidy
+  # reports nothing whose location is a system header. Since 2026-09-02 `malf lint` rewrites
+  # those first-party `-isystem` entries to `-I` in a database it derives into its own scratch
+  # directory (see cmd_lint); clangd reads `compile_commands.json` straight off disk and has no
+  # equivalent knob — `CompileFlags.Remove` cannot discriminate first-party from third-party,
+  # and reconstructing the split here would need a hand-kept list of package paths, which is the
+  # census that can only be wrong silently. So the EDITOR under-reports on first-party headers
+  # that reach a TU through another package (measured: `coderoast-server`'s
+  # `server-logging/include/coderoast/log_seat/log_seat.hpp` and `server-catalogs/include/core/*
+  # .hpp` — the two packages with no CMakeLists at all, which arrive `-isystem` at every
+  # coordinate in the workspace). `malf lint` is the authority on those files; a clean editor
+  # is not evidence about them.
 
 ---
 

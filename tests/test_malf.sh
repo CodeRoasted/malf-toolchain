@@ -640,7 +640,17 @@ cat > "$lk_bin/clang-tidy" <<'LKTIDY'
 #!/usr/bin/env bash
 # Records every argument it is handed (the observable: WHICH files reached the tool), then either
 # answers clean, sleeps past the per-TU cap on the named TU ([7j3]), or dies with 139 on it.
+# With LK_TIDY_DB_LOG set it also records the DATABASE it was pointed at ([7j4]): the flags a TU
+# is checked under are not visible in the argument list — `-p` names a directory, and what that
+# directory holds is the whole subject of the -isystem/-I question.
 printf '%s\n' "$@" >> "$LK_TIDY_LOG"
+if [[ -n "${LK_TIDY_DB_LOG:-}" ]]; then
+    for _i in $(seq 1 $#); do
+        if [[ "${!_i}" == "-p" ]]; then
+            _n=$((_i + 1)); cat "${!_n}/compile_commands.json" >> "$LK_TIDY_DB_LOG" 2>/dev/null
+        fi
+    done
+fi
 last="${*: -1}"
 [[ -n "${LK_TIDY_SLEEP_ON:-}" && "$last" == *"$LK_TIDY_SLEEP_ON" ]] && exec sleep 5
 [[ -n "${LK_TIDY_DIE_ON:-}" && "$last" == *"$LK_TIDY_DIE_ON" ]] && exit 139
@@ -737,6 +747,94 @@ lk_die_out="$(cd "$lk_repo/core" && PATH="$lk_bin:$PATH" LK_TIDY_LOG="$lk_tmp/ti
 check "a TU whose checker exits 139 reads died (exit 139), never timed out" \
       "rc=1 died:src/engine.cpp" \
       "rc=$lk_die_rc $([[ "$lk_die_out" == *"src/engine.cpp — died (exit 139)"* && "$lk_die_out" != *"TIMED OUT at"* ]] && echo died:src/engine.cpp || echo "GOT: $lk_die_out")"
+
+echo "[7j4] lint de-systems FIRST-PARTY include roots, and leaves third-party ones alone"
+
+# WHY THIS EXISTS. Every dependency reaches a consumer as a CMake IMPORTED target, and CMake's
+# default is that an IMPORTED target's include directories are SYSTEM directories — so the
+# generator emits `-isystem` for our own editable packages exactly as it does for a conan cache
+# package, and clang-tidy suppresses every diagnostic whose location is in a system header.
+# Measured 2026-09-02 on coderoast-server: a `throw 1;` outside the guard in the log seat's
+# `noexcept` `flush_logger` was SILENT through a consumer TU; the identical throw in that TU's own
+# `.cpp` fired `bugprone-exception-escape`. The cost was not the missing diagnostics but the
+# header comment asserting the check "stays ARMED on this frame", which had been reading as a
+# guarantee. `malf lint` now rewrites `-isystem <first-party>` to `-I<first-party>` in a database
+# derived into the run's own scratch directory; nothing that ships changes.
+#
+# THE OBSERVABLE IS THE DATABASE, NOT THE ARGUMENT LIST. `-p` names a directory, so the fake
+# clang-tidy above records what that directory HELD when it was handed one (LK_TIDY_DB_LOG).
+#
+# The fixture puts a workspace root and a conan home under $lk_tmp so the classification has all
+# four shapes to separate: a first-party root inside the workspace, a conan-cache root inside the
+# workspace, a root OUTSIDE the workspace, and a first-party-looking path that is not a directory
+# at all. The last is the precision arm: a stale database entry must not be rewritten, and it is
+# also what keeps a path containing a space (which the command-string form returns truncated)
+# out of the rewrite.
+
+lk_ws_api="$lk_repo/api"                                   # first-party: in the workspace, in no cache
+lk_ws_cache="$lk_tmp/.conan2/p/dep/include"                # third-party: inside the conan home
+lk_ws_out="$(realpath "$(mktemp -d)")/include"             # third-party: outside the workspace root
+lk_ws_gone="$lk_repo/api-that-was-removed"                 # first-party SHAPE, no directory
+mkdir -p "$lk_ws_api" "$lk_ws_cache" "$lk_ws_out"
+printf 'inline int seat() { return 1; }\n' > "$lk_ws_api/seat.hpp"
+
+lk_ws_db() {   # a database for core/ whose one entry carries all four -isystem shapes
+    local build="$lk_repo/core/build-$lk_key"; mkdir -p "$build"
+    python3 - "$build" "$lk_repo/core/src/engine.cpp" "$1" "$2" "$3" "$4" <<'PYWS'
+import json, sys
+build, tu, api, cache, out, gone = sys.argv[1:7]
+cmd = (f"clang++-21 -std=c++23 -isystem {api} -isystem {cache} -isystem {out} "
+       f"-isystem {gone} -c {tu} -o out.o")
+json.dump([{"directory": build, "command": cmd, "file": tu}], open(f"{build}/compile_commands.json", "w"))
+PYWS
+}
+lk_ws_db "$lk_ws_api" "$lk_ws_cache" "$lk_ws_out" "$lk_ws_gone"
+
+lk_ws_run() {   # <dblog> — malf lint from core/ with the fixture's own workspace root and conan home
+    (cd "$lk_repo/core" && PATH="$lk_bin:$PATH" \
+        LK_TIDY_LOG="$lk_tmp/tidy.ws.log" LK_TIDY_DB_LOG="$1" \
+        MALF_WORKSPACE_ROOT="$lk_tmp" CONAN_HOME="$lk_tmp/.conan2" MALF_PROFILE_NAME="" \
+        bash "$MALF_BIN" lint --console 2>&1)
+}
+
+rm -f "$lk_tmp/tidy.ws.log"
+lk_ws_out_txt="$(lk_ws_run "$lk_tmp/db.ws.json")"; lk_ws_rc=$?
+lk_ws_db_seen="$(cat "$lk_tmp/db.ws.json" 2>/dev/null)"
+
+check "the first-party root reaches clang-tidy as -I, not -isystem (the whole subject)" \
+      "de-systemed" \
+      "$([[ "$lk_ws_db_seen" == *"-I$lk_ws_api "* && "$lk_ws_db_seen" != *"-isystem $lk_ws_api "* ]] \
+         && echo de-systemed || echo "GOT: $lk_ws_db_seen")"
+check "a root inside the CONAN HOME stays -isystem (third-party must not be un-suppressed)" \
+      "system" \
+      "$([[ "$lk_ws_db_seen" == *"-isystem $lk_ws_cache "* ]] && echo system || echo "GOT: $lk_ws_db_seen")"
+check "a root OUTSIDE the workspace stays -isystem (the workspace test is half the classifier)" \
+      "system" \
+      "$([[ "$lk_ws_db_seen" == *"-isystem $lk_ws_out "* ]] && echo system || echo "GOT: $lk_ws_db_seen")"
+check "a first-party-SHAPED path that is not a directory is left alone (precision, and the space guard)" \
+      "system" \
+      "$([[ "$lk_ws_db_seen" == *"-isystem $lk_ws_gone "* ]] && echo system || echo "GOT: $lk_ws_db_seen")"
+check "the run says what it de-systemed and what it left — a silent rewrite is unauditable" \
+      "reported" \
+      "$([[ "$lk_ws_out_txt" == *"first-party headers de-systemed: 1 include reference(s) over 1 root(s); 3 reference(s) left as system headers"* ]] \
+         && echo reported || echo "GOT: $lk_ws_out_txt")"
+check "the run still checks the changed TU (the rewrite is not allowed to lose the subject), rc 0" \
+      "rc=0 core/src/engine.cpp " "rc=$lk_ws_rc $(lk_checked "$lk_tmp/tidy.ws.log")"
+
+# THE ZERO CASE PASSES AND IS NAMED. coderoast-ipc and coderoast-security carry no first-party
+# editable include root at all, so a fatal-on-empty rule here would make the step unusable — but a
+# run that rewrote nothing must not read like a run that failed to look.
+lk_ws_db "$lk_ws_cache" "$lk_ws_cache" "$lk_ws_out" "$lk_ws_out"
+rm -f "$lk_tmp/tidy.ws0.log"
+lk_ws0_txt="$(cd "$lk_repo/core" && PATH="$lk_bin:$PATH" LK_TIDY_LOG="$lk_tmp/tidy.ws0.log" \
+    LK_TIDY_DB_LOG="$lk_tmp/db.ws0.json" MALF_WORKSPACE_ROOT="$lk_tmp" CONAN_HOME="$lk_tmp/.conan2" \
+    MALF_PROFILE_NAME="" bash "$MALF_BIN" lint --console 2>&1)"; lk_ws0_rc=$?
+check "a database with no first-party root PASSES and says so (an empty seat is not a failure)" \
+      "rc=0 named" \
+      "rc=$lk_ws0_rc $([[ "$lk_ws0_txt" == *"no first-party include root reaches this database as -isystem; 4 reference(s) left as system headers"* ]] \
+         && echo named || echo "GOT: $lk_ws0_txt")"
+
+echo
 
 printf 'int ghost() { return 1; }\n' > "$lk_repo/core/src/ghost.cpp"
 git -C "$lk_repo" add core/src/ghost.cpp
