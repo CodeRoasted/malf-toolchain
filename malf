@@ -1117,6 +1117,7 @@ cmd_build() {
             --profile) fwd+=("$1" "$2"); shift; _malf_apply_profile "$1" ;;
             # Sugar: ASan/UBSan(+libFuzzer-via-target) gate profile (canon→eidos parse path).
             --asan)    _malf_apply_profile "$MALF_ASAN_PROFILE"; fwd+=("$1") ;;
+            -*) _malf_refuse_option build "$1" ;;
             *) subdir="$1" ;;
         esac
         shift
@@ -1150,6 +1151,7 @@ cmd_test() {
                 [[ $# -gt 0 ]] || { echo "malf test: --filter requires a pattern" >&2; exit 1; }
                 gtest_filter="$1"; fwd+=(--filter "$1")
                 ;;
+            -*) _malf_refuse_option test "$1" ;;
             *) subdir="$1" ;;
         esac
         shift
@@ -1209,7 +1211,7 @@ cmd_lint() {
         case "$1" in
             -c|--console)   console=true ;;
             --all-files)    all_files=true ;;
-            *) echo "malf lint: unknown option $1" >&2; exit 1 ;;
+            *) _malf_refuse_option lint "$1" ;;
         esac
         shift
     done
@@ -2023,7 +2025,7 @@ cmd_format() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --check) check=true ;;
-            -*) echo "malf format: unknown option $1" >&2; exit 1 ;;
+            -*) _malf_refuse_option format "$1" ;;
             *)
                 if [[ ! -e "$1" ]]; then
                     # A typo'd path must NOT format nothing and exit 0 — that is a silent no-op
@@ -2288,6 +2290,7 @@ PY
 }
 
 cmd_compile_commands() {
+    [[ $# -eq 0 ]] || _malf_refuse_option commands "$1"
     # Generate the repo-level compile_commands.json that .clangd reads
     # (CompilationDatabase: build-clang21-libcxx-release — the default leg's named
     # build root at the repo root). A repo is just a LIST of package dirs (the
@@ -2442,7 +2445,7 @@ cmd_bench() {
             --profile)   fwd+=("$1" "$2"); shift; _malf_apply_profile "$1" ;;
             --asan)      _malf_apply_profile "$MALF_ASAN_PROFILE"; fwd+=("$1") ;;
             --)          shift; extra+=("$@"); fwd+=(-- "$@"); break ;;
-            -*)          extra+=("$1"); fwd+=("$1") ;;
+            -*)          _malf_refuse_option bench "$1" ;;   # benchmark flags go after `--`
             *)           subdir="$1" ;;
         esac
         shift
@@ -2638,7 +2641,7 @@ cmd_sbom() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --check) check="--check" ;;
-            *) echo "malf sbom: unknown option $1 (--check)" >&2; exit 1 ;;
+            *) _malf_refuse_option sbom "$1" ;;
         esac
         shift
     done
@@ -2659,7 +2662,7 @@ cmd_lock() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --update) update="--update" ;;
-            *) echo "malf lock: unknown option $1 (--update)" >&2; exit 1 ;;
+            *) _malf_refuse_option lock "$1" ;;
         esac
         shift
     done
@@ -2864,6 +2867,7 @@ cmd_clean() {
 
 cmd_run() {
     local exe_name="${1:-}"
+    case "$exe_name" in -*) _malf_refuse_option run "$exe_name" ;; esac
     [[ -n "$exe_name" ]] || { echo "malf run: specify an executable name" >&2; exit 1; }
     local found="" dir
     while IFS= read -r dir; do
@@ -2876,6 +2880,42 @@ cmd_run() {
     fi
     echo "malf run: $found"
     exec "$found" "${@:2}"
+}
+
+# The usage of ONE verb, extracted from `cmd_help`'s own text — its line and the indented
+# continuation lines under it, up to the next verb line, a blank line or a section header. One
+# authoring: the help text is the registry, and a verb without a line there says so by name.
+_malf_usage_of() {
+    local verb="$1" pat
+    case "$verb" in
+        commands|compile-commands) pat='^    commands [|] compile-commands' ;;
+        *)                         pat="^    ${verb}( |\$)" ;;
+    esac
+    local block
+    block="$(cmd_help | awk -v pat="$pat" '
+        !found && $0 ~ pat { found = 1; print; next }
+        found && ($0 ~ /^    [a-z][a-z-]*( |$|\|)/ || $0 ~ /^$/ || $0 !~ /^ /) { exit }
+        found { print }')"
+    if [[ -n "$block" ]]; then
+        echo "usage:"; printf '%s\n' "$block"
+    else
+        echo "usage: malf $verb — no usage line in 'malf help' for this verb"
+    fi
+}
+
+# THE ONE REFUSAL EVERY VERB SHARES: name the option, print the verb's usage, exit 1. Never a
+# fall-through. Measured 2026-09-02 (N113): `malf bench --help` — no such flag — was forwarded to
+# the benchmark binaries as an extra argument, the target stayed empty, and the empty target is
+# the WORKSPACE-WIDE sweep: started beside a live `malf lint`, outside the build-slot protocol,
+# and stopped only by a closed pipe. `build`/`test`/`bin-dir` did the other wrong thing (the
+# unknown flag became the TARGET — and bin-dir's exit died inside a `$(…)`, so a script reading
+# it got exit 0 and a wrong path), `commands`/`profiles` dropped every argument. An unknown flag
+# is an error and exits 1; `-h`/`--help` is a usage request and exits 0 — the dispatch answers it
+# before any verb runs. tests/test_malf.sh [2b] proves both for every dispatched verb.
+_malf_refuse_option() {
+    echo "malf $1: unknown option '$2'" >&2
+    _malf_usage_of "$1" >&2
+    exit 1
 }
 
 cmd_help() {
@@ -2898,7 +2938,7 @@ Commands:
                                extension can otherwise take the whole machine down. Prune extra
                                directories with MALF_FORMAT_EXCLUDE_EXTRA="dir1 dir2".
     commands | compile-commands
-    bench   [target] [--quick] [--filter REGEX] [--debug|--release|--asan|--profile <name>] [--compare] [--threshold N] [--baseline path]
+    bench   [target] [--quick] [--filter REGEX] [--debug|--release|--asan|--profile <name>] [--compare] [--threshold N] [--baseline path] [-- <benchmark args>]
     clean   [build|conan|editables|stale|all]
                                    stale = surgically prune old-version/ghost first-party packages
                                    from every cache (base + keyed + stray ~/.conan2); third-party
@@ -2916,6 +2956,8 @@ Commands:
                                    release:true package (packages.yml), dep order, clean export —
                                    catches conan-create-only drift (test_package / sibling) before
                                    the tag. --list prints the canonical released set and exits.
+    inventory [subdir] [--profile <name>]
+                                   the build-inventory gate (ADR-3.D10) over the repo that owns subdir
     lock    [--update]             regenerate malf/conan.lock by accumulating EVERY workspace
                                    root into one lockfile (one file serves all profiles —
                                    `requires` is profile-independent). Third-party is pinned by
@@ -2990,6 +3032,7 @@ EOF
 }
 
 cmd_profiles() {
+    [[ $# -eq 0 ]] || _malf_refuse_option profiles "$1"
     echo "malf build profiles (registry: malf/profiles/) — use: malf build <subdir> --profile <name>"
     local seen=" " d f n desc
     for d in "$MALF_DIR/profiles" "$MALF_DIR"; do
@@ -3017,11 +3060,14 @@ cmd_bin_dir() {
             --release) MALF_CONFIG="Release" ;;
             --profile) shift; _malf_apply_profile "$1" ;;
             --asan)    _malf_apply_profile "$MALF_ASAN_PROFILE" ;;
+            -*)        _malf_refuse_option bin-dir "$1" ;;
             *)         subdir="$1" ;;
         esac
         shift
     done
-    _malf_build_dir "$(_malf_resolve_target "$subdir")"
+    local target
+    target="$(_malf_resolve_target "$subdir")" || exit 1
+    _malf_build_dir "$target"
 }
 
 # Coordinated workspace version bump: rewrite every version axis to X.Y.Z via
@@ -3038,6 +3084,7 @@ cmd_bin_dir() {
 # Tested for 1.5.0; from then on the founder owns pulling this trigger.
 cmd_bump() {
     local target="${1:-}"
+    case "$target" in -*) _malf_refuse_option bump "$target" ;; esac
     if [[ ! "$target" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
         echo "malf bump: usage: malf bump X.Y.Z   (coordinated workspace version bump)" >&2
         return 1
@@ -3153,7 +3200,7 @@ cmd_inventory() {
             --release) MALF_CONFIG="Release" ;;
             --profile) shift; _malf_apply_profile "$1" ;;
             --asan)    _malf_apply_profile "$MALF_ASAN_PROFILE" ;;
-            -*) echo "malf inventory: unknown option $1" >&2; exit 1 ;;
+            -*) _malf_refuse_option inventory "$1" ;;
             *) subdir="$1" ;;
         esac
         shift
@@ -3174,7 +3221,7 @@ cmd_cut_verify() {
             --profile) shift; _malf_apply_profile "$1" ;;
             --list)    list_only=true ;;
             --only)    shift; only="$1" ;;
-            -*)        echo "malf cut-verify: unknown option '$1'" >&2; exit 1 ;;
+            -*)        _malf_refuse_option cut-verify "$1" ;;
             *)         only="$1" ;;   # positional scope filter: a package NAME
         esac
         shift
@@ -3285,16 +3332,29 @@ fi
 COMMAND="${1:-help}"
 shift || true
 
+# ANY verb: `-h`/`--help` anywhere in its arguments (before a `--`, which hands what follows to
+# the benchmark binary) prints THAT verb's usage and exits 0. The verb never runs — see
+# _malf_refuse_option for the sweep this replaces.
+if [[ "$COMMAND" != help ]]; then
+    for _arg in "$@"; do
+        case "$_arg" in
+            -h|--help) _malf_usage_of "$COMMAND"; exit 0 ;;
+            --)        break ;;
+        esac
+    done
+    unset _arg
+fi
+
 case "$COMMAND" in
     build)            cmd_build "$@" ;;
     test)             cmd_test "$@" ;;
     lint)             cmd_lint "$@" ;;
     format)           cmd_format "$@" ;;
-    commands|compile-commands) cmd_compile_commands ;;
+    commands|compile-commands) cmd_compile_commands "$@" ;;
     bench)            cmd_bench "$@" ;;
     clean)            cmd_clean "$@" ;;
     editables)        cmd_editables "$@" ;;
-    profiles)         cmd_profiles ;;
+    profiles)         cmd_profiles "$@" ;;
     bump)             cmd_bump "$@" ;;
     inventory)        cmd_inventory "$@" ;;
     cut-verify)       cmd_cut_verify "$@" ;;

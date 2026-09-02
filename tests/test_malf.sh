@@ -97,6 +97,69 @@ for fn in "${defined[@]}"; do
     fi
 done
 
+echo "[2b] every verb refuses an unknown flag and answers --help — and runs nothing either way"
+
+# THE HAZARD THAT DID NOT FIRE, measured 2026-09-02 (N113): `./malf/malf bench --help` — no such
+# flag — started a WORKSPACE-WIDE bench sweep beside a live `malf lint`, outside the build-slot
+# protocol, and touched no build tree only because a closed pipe killed it first. bench forwarded
+# the unknown flag to the benchmark binaries and swept the empty target; build/test/bin-dir made
+# it the TARGET; commands/profiles dropped every argument on the floor. The fixture is a package
+# the resolver WOULD find (a conanfile) with nothing it could build (no CMakeLists), under a
+# scratch workspace root and conan home so a regressed verb reaches no real cache. The observables:
+# the exit status, the refusal text, the absence of any `=== malf` banner, and no build tree
+# appearing. Derived over the dispatch block, so a verb added without the guard reds here the day
+# it is written; `--` is exempt from the --help scan because what follows it belongs to the
+# benchmark binary, and that is checked too.
+
+vb_tmp="$(mktemp -d)"; mkdir -p "$vb_tmp/pkg" "$vb_tmp/home"
+cat > "$vb_tmp/pkg/conanfile.py" <<'PYR'
+from conan import ConanFile
+class Probe(ConanFile):
+    name = "vb_probe"
+    version = "0.0.1"
+PYR
+vb_run() {   # <verb> <args...> — the verb, from the fixture package, sandboxed and bounded
+    local verb="$1"; shift
+    (cd "$vb_tmp/pkg" && MALF_WORKSPACE_ROOT="$vb_tmp" CONAN_HOME="$vb_tmp/home" MALF_SKIP_INVENTORY=1 \
+        timeout 60 bash "$MALF_BIN" "$verb" "$@" 2>&1)
+}
+vb_built() { compgen -G "$vb_tmp/pkg/build-*" >/dev/null && echo built || echo none; }
+
+# The verbs, read from the dispatch block — the same derivation [2] uses; help's spellings excluded.
+mapfile -t vb_verbs < <(sed -n '/─── Dispatch ───/,$p' "$MALF_BIN" | grep -oE '^    [a-z|-]+\)' \
+    | tr -d ' )' | tr '|' '\n' | grep -vE '^(help|-h|--help)$' | sort -u)
+check "verb list derived from the dispatch block (guards a silent zero)" \
+      "many" "$( ((${#vb_verbs[@]} >= 12)) && echo many || echo "only ${#vb_verbs[@]}")"
+
+for vb in "${vb_verbs[@]}"; do
+    vb_out="$(vb_run "$vb" --no-such-flag)"; vb_rc=$?
+    check "malf $vb --no-such-flag refuses (rc≠0), prints no run banner, builds nothing" \
+          "refused/none" \
+          "$( [[ $vb_rc -ne 0 && "$vb_out" != *"=== malf"* ]] && echo "refused/$(vb_built)" || echo "rc=$vb_rc GOT: $(head -c 240 <<< "$vb_out")")"
+    vb_help="$(vb_run "$vb" --help)"; vb_help_rc=$?
+    check "malf $vb --help prints usage, exits 0, prints no run banner" \
+          "usage" \
+          "$( [[ $vb_help_rc -eq 0 && "$vb_help" == "usage:"* && "$vb_help" != *"=== malf"* ]] && echo usage || echo "rc=$vb_help_rc GOT: $(head -c 240 <<< "$vb_help")")"
+done
+
+# The four verbs the hazard reached name the option they refused — a reader re-derives nothing.
+# Captured, then compared: under this suite's pipefail a `| grep -q` that exits on its first match
+# closes the pipe while malf is still printing the usage block, and the writer's SIGPIPE reads as
+# "unnamed" — the very closed-pipe shape that stopped the N113 sweep.
+for vb in bench build test lint; do
+    vb_named="$(vb_run "$vb" --no-such-flag)"
+    check "malf $vb names the unknown option it refused" \
+          "named" "$([[ "$vb_named" == *"malf $vb: unknown option '--no-such-flag'"* ]] && echo named || echo unnamed)"
+done
+
+# bench's `--` still hands what follows to the benchmark binary: `--help` AFTER it is not a usage
+# request, so the verb runs (and reaches its own no-target-built refusal in this fixture).
+vb_pass="$(vb_run bench --no-build -- --help)"
+check "bench: --help after -- is the benchmark binary's, not malf's (the verb runs)" \
+      "ran" "$([[ "$vb_pass" == *"=== malf bench"* || "$vb_pass" == *"no benchmark"* ]] && echo ran || echo "GOT: $(head -c 240 <<< "$vb_pass")")"
+rm -rf "$vb_tmp"
+echo
+
 echo "[3] profile key — which CONAN_HOME a build reads"
 
 # The default profile is the UNKEYED base cache. This empty string is load-bearing, not an
