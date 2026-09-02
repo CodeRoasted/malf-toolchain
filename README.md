@@ -119,6 +119,7 @@ tool, on our CI and on your fork. Usage: **[MALF.md](MALF.md)**.
   - `linux-gcc16-release` — gcc-16.2 / libstdc++ (ship + determinism reference)
   - `linux-clang21-libcxx-release` — clang-21 / libc++ (dev default; the cross-stdlib leg)
   - `linux-clang21-release` — clang-21 / libstdc++ (keyed, for isolating the compiler axis from the stdlib axis)
+  - `linux-clang21-libcxx-debug` — clang-21 / libc++ at `build_type=Debug`, no sanitizer (the desk debug leg: log elision off, `assert()` live, insight-canon's arena reset-poison armed; `linux-clang21-asan` is the same build type with AddressSanitizer attached)
   - `windows-msvc-release` — MSVC 14.52 (`compiler.version=195` → conan maps to vs_version 18 + `vcvars_ver=14.5` → the 14.52 toolset; Ninja generator; `vcvars` pointed at `MSVC1452_INSTALL`)
 - `config/` — the canonical developer/editor config (`.clang-format`, `.clang-tidy`, `.clangd`).
   Each repo symlinks these, so there is one source of truth and drift is impossible; `malf lint`
