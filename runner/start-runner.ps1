@@ -1,10 +1,16 @@
 # start-runner.ps1 — run the malf-windows self-hosted runner in the FOREGROUND so you
-# can watch jobs stream and Ctrl+C to stop. Pairs with install-runner.ps1.
+# can watch jobs stream and Ctrl+C to stop.
+#
+# NOT for a runner installed by install-runner.ps1: that one is a Windows service, and a
+# foreground run.cmd would claim the same registration the service already holds. Use this
+# only for a runner deliberately configured without a service.
 #
 #   pwsh malf\runner\start-runner.ps1
 #   $env:RUNNER_DIR='C:\path\to\runner'; pwsh malf\runner\start-runner.ps1
 param(
-  [string]$RunnerDir = $(if ($env:RUNNER_DIR) { $env:RUNNER_DIR } else { Join-Path $env:USERPROFILE 'actions-runner-malf-win' })
+  # Same default as install-runner.ps1 — outside any user profile, since the service runs
+  # under a machine account.
+  [string]$RunnerDir = $(if ($env:RUNNER_DIR) { $env:RUNNER_DIR } else { 'C:\actions-runner-malf-win' })
 )
 $ErrorActionPreference = 'Stop'
 

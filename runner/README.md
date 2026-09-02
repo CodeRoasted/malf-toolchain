@@ -94,9 +94,9 @@ workflows). The heavy cross-package gates are the biggest savings.
 ## Windows runner (eidos Windows Portability Probe)
 
 MSVC needs a **native Windows** host — the Linux runner above (in WSL2) can't serve it.
-`install-runner.ps1` + `start-runner.ps1` are the Windows twin: run them in a Windows
-PowerShell on the host (same machine, outside WSL2) to register an org runner with the
-label **`malf-windows`**, then route the eidos probe to it:
+`install-runner.ps1` is the Windows twin: run it from an **elevated** PowerShell on the host
+(same machine, outside WSL2) to register an org runner with the label **`malf-windows`** **as
+a Windows service**, then route the eidos probe to it:
 
 **Host prerequisites** — the GitHub-hosted `windows-2025` image pre-bakes these; a fresh
 host doesn't. The probe steps use `shell: pwsh` (**PowerShell 7**, not the built-in
@@ -111,12 +111,17 @@ Without `pwsh` the very first probe step fails with `pwsh: command not found`. s
 installs the MSVC 14.52 toolset itself, so you do **not** pre-install Visual Studio.
 
 ```powershell
-pwsh -ExecutionPolicy Bypass -File malf\runner\install-runner.ps1      # registers "malf-runner-win" (label malf-windows)
-pwsh -ExecutionPolicy Bypass -File malf\runner\start-runner.ps1        # foreground; Ctrl+C to stop
-# NOTE: on Windows, AS_SERVICE=true is NOT usable today — install-runner.ps1 configures without
-# --runasservice, so the svc.cmd it then calls is never minted. Tracked as ROADMAP N119; until it
-# is repaired, a Windows runner that must survive a logout is configured by hand (see that row).
+# ELEVATED PowerShell (Run as Administrator) — this installs a Windows SERVICE.
+pwsh -ExecutionPolicy Bypass -File malf\runner\install-runner.ps1     # registers "malf-runner-win" (label malf-windows)
 ```
+The installer configures with `--runasservice` under `NT AUTHORITY\SYSTEM` (override with
+`WINDOWS_LOGON_ACCOUNT` + `WINDOWS_LOGON_PASSWORD`), refuses a `\\wsl.localhost\…` runner
+directory, verifies that `svc.cmd` **and** `.service` were minted, then starts the service and
+waits up to 60 s for `Running` before it reports success. It also deletes the legacy logon
+Scheduled Task `CodeRoast Runner Win` (override with `LEGACY_TASK_NAME`), which would otherwise
+claim the same registration at logon. **Do not run `start-runner.ps1` against a
+service-installed runner** — that is the foreground launcher, and only for a runner you
+deliberately configured without a service.
 ```bash
 gh variable set WIN_RUNS_ON --org CodeRoasted --body malf-windows --visibility private   # → local
 gh variable delete WIN_RUNS_ON --org CodeRoasted                                          # → windows-2025
