@@ -24,7 +24,7 @@ malf format  [--check]
 malf commands
 malf compile-commands
 malf bench   [target] [--quick] [--filter REGEX] [--compare] [--repetitions N] [--threshold F] [--debug|--release]
-malf clean   [build|conan|editables|stale|all]
+malf clean   <build|conan|editables|stale|all>   # no default; `all` is the nuclear form
 malf run     <exe-name> [args...]
 ```
 
@@ -72,7 +72,7 @@ gone. The merged clangd DB lands at the repo root's default-leg tree
 | `lint` | clang-tidy on git-changed files (or `--all-files`). Requires a compile database — it refuses to run without one, because a flag-less clang-tidy reports phantom errors it cannot be right about. Under `--all-files` an empty file set is a scoping failure, not a pass. A TU clang-tidy **dies** on is reported as **NOT LINTED** by name, apart from the findings, and fails the run: a crash dump carries real paths and real line numbers, so merged into the findings it reads as a source defect while the file's zero coverage leaves no trace |
 | `format` | clang-format all C++ files in-place (`--check` = `--dry-run --Werror`, non-zero on any violation). Resolves the style explicitly and refuses to run if it cannot, rather than let clang-format fall back to LLVM style unannounced |
 | `commands` / `compile-commands` | configure every member package (+ its `test_package`) and merge all `compile_commands.json` into the repo root's default-leg DB |
-| `clean` | remove build trees (CWD + every member package) and/or local Conan cache packages |
+| `clean` | remove build trees (CWD + every member package), cached Conan packages, or the editable registry — **one explicit target, no default**. A bare `malf clean` refuses and removes nothing; `malf clean all` is the nuclear form (all three at once). It defaulted to `all` until 2026-09-02, so one missing word wiped the workspace |
 | `run` | execute a binary from any member package's build tree |
 
 ### Cache discovery

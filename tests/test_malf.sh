@@ -1218,6 +1218,99 @@ check "scratch — a catchable death (SIGTERM) leaves no directory behind at all
 kill -9 "$sc_child3" 2>/dev/null
 rm -rf "$sc_tmp" "$sc_corpse" "$sc_fresh" "$sc_dir" "$sc_dir2"
 
+echo '[7o] clean — the bare verb destroys NOTHING, and only the word all is nuclear'
+
+# `malf clean` DEFAULTED TO `all` until 2026-09-02 (Founder: "N114 : Yes, semantic change
+# approved"), so one missing word wiped every build tree under the cwd, every cached conan package
+# (third-party included — the gcc-16 toolchain has no ConanCenter binary, so the next build is a
+# from-source rebuild of the world) and the editable registry. Last verb carrying the N113 class:
+# a bare invocation performing a workspace-wide destructive act, with no confirmation and no undo.
+#
+# The fixture holds one artifact of each thing `all` removes, so a regression is proved by an
+# ABSENCE on disk rather than by output text: two build trees under the cwd, a package dir in the
+# base conan cache AND one in a keyed subdir (the `*/p` half of the glob — a lane wiping only the
+# base would otherwise pass), and the editable registry file. Everything is under a scratch
+# CONAN_HOME and MALF_WORKSPACE_ROOT, so a regressed verb reaches no real cache.
+cl_tmp="$(mktemp -d)"
+cl_seed() {   # rebuild the full fixture — each arm starts from the same known-populated state
+    rm -rf "$cl_tmp"/pkg "$cl_tmp"/home
+    mkdir -p "$cl_tmp/pkg/build-probe" "$cl_tmp/pkg/build" "$cl_tmp/home/p/pkgdir" "$cl_tmp/home/keyed/p/pkgdir"
+    cat > "$cl_tmp/pkg/conanfile.py" <<'PYR'
+from conan import ConanFile
+class Probe(ConanFile):
+    name = "n114_probe"
+    version = "0.0.1"
+PYR
+    touch "$cl_tmp/pkg/build-probe/artifact.o" "$cl_tmp/pkg/build/artifact.o" \
+          "$cl_tmp/home/editable_packages.json" "$cl_tmp/home/settings.yml" "$cl_tmp/home/keyed/settings.yml"
+}
+cl_run() {   # <args...> — clean, from the fixture package, sandboxed and bounded
+    (cd "$cl_tmp/pkg" && MALF_WORKSPACE_ROOT="$cl_tmp" CONAN_HOME="$cl_tmp/home" MALF_SKIP_INVENTORY=1 \
+        timeout 60 bash "$MALF_BIN" clean "$@" 2>&1)
+}
+# One string naming every fixture artifact still on disk: the whole verdict in one comparable value.
+cl_state() {
+    local p out=""
+    for p in pkg/build-probe pkg/build home/p home/keyed/p home/editable_packages.json; do
+        [[ -e "$cl_tmp/$p" ]] && out+="$p "
+    done
+    echo "${out:-EMPTY}"
+}
+cl_all="pkg/build-probe pkg/build home/p home/keyed/p home/editable_packages.json "
+
+# 1. THE REGRESSION ARM. If a bare `clean` ever destroys again, this goes red on the survivors,
+#    not on a message — the message could be reworded, the deletion cannot be faked.
+cl_seed
+cl_bare="$(cl_run)"; cl_bare_rc=$?
+check "clean (bare) refuses — rc 1" "1" "$cl_bare_rc"
+check "clean (bare) removes NOTHING: build trees, both conan caches, the editable registry" \
+      "$cl_all" "$(cl_state)"
+check "clean (bare) prints no run banner" \
+      "none" "$([[ "$cl_bare" != *"=== malf"* ]] && echo none || echo "GOT: $(head -c 200 <<< "$cl_bare")")"
+
+#    The refusal must name the nuclear form as the operator would TYPE it. An instrument reports
+#    state, and its message is what the operator acts on: a refusal that does not spell the next
+#    command has moved the work, not removed it. Compared as a captured string — a `| grep -q`
+#    under this suite's pipefail closes the pipe mid-usage and reads the writer's SIGPIPE as a miss.
+check "clean (bare) spells the nuclear form the operator must type" \
+      "named" "$([[ "$cl_bare" == *"malf clean all"* ]] && echo named || echo "GOT: $(head -c 300 <<< "$cl_bare")")"
+check "clean (bare) says nothing was removed" \
+      "said" "$([[ "$cl_bare" == *"nothing was removed"* ]] && echo said || echo "GOT: $(head -c 300 <<< "$cl_bare")")"
+
+# 2. THE CAPABILITY ARM. The nuclear form must still be nuclear — a refusal that also broke `all`
+#    would pass arm 1 and leave the workspace with no way to reset itself.
+cl_seed
+cl_all_out="$(cl_run all)"; cl_all_rc=$?
+check "clean all succeeds — rc 0" "0" "$cl_all_rc"
+check "clean all still wipes EVERYTHING (both caches included)" "EMPTY" "$(cl_state)"
+
+# 3. Each named target removes ITS OWN artifact and leaves the others — the reason `all` is a word
+#    and not the default: the surgical forms are the common ones.
+cl_seed; cl_run build      >/dev/null
+check "clean build removes build trees only" "home/p home/keyed/p home/editable_packages.json " "$(cl_state)"
+cl_seed; cl_run conan      >/dev/null
+check "clean conan removes cached packages only (base AND keyed)" "pkg/build-probe pkg/build home/editable_packages.json " "$(cl_state)"
+cl_seed; cl_run editables  >/dev/null
+check "clean editables removes the registry only" "pkg/build-probe pkg/build home/p home/keyed/p " "$(cl_state)"
+
+# 4. A second target used to be dropped on the floor — `clean build conan` ran `build` and reported
+#    "build done", which reads as a cache wipe that never happened. It is refused, and refusing
+#    must not destroy anything either.
+cl_seed
+cl_two="$(cl_run build conan)"; cl_two_rc=$?
+check "clean with two targets refuses rather than silently drop one — rc 1" "1" "$cl_two_rc"
+check "clean with two targets removes nothing" "$cl_all" "$(cl_state)"
+
+# 5. An unknown target and an unknown option both refuse WITH the usage block, so the operator
+#    reading the terminal is handed the five targets either way.
+cl_seed
+cl_bad="$(cl_run nonsense)"; cl_bad_rc=$?
+check "clean <unknown target> refuses with usage — rc 1" \
+      "1 usage" "$cl_bad_rc $([[ "$cl_bad" == *"unknown target 'nonsense'"* && "$cl_bad" == *"usage:"* ]] && echo usage || echo "GOT: $(head -c 200 <<< "$cl_bad")")"
+check "clean <unknown target> removes nothing" "$cl_all" "$(cl_state)"
+rm -rf "$cl_tmp"
+
+echo
 echo
 echo "malf selftest: $pass_count passed, $fail_count failed"
 [[ $fail_count -eq 0 ]] || exit 1

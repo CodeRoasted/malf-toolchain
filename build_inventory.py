@@ -350,7 +350,7 @@ def run_build(workspace: Path, repo_root: Path, build_key: str, profile: str) ->
         # scripts use. Their clean room is load-bearing for a DIGEST; this cell's job is to
         # answer "does it still compile", and an incremental tree is what makes that
         # affordable to run every day. Same directory shape as a package's build-<key>, so
-        # `malf clean` already reaches it.
+        # `malf clean build` already reaches it.
         build_dir = source / f"build-inventory-{build_key}"
         toolchain_pkg = repo_root / entry["toolchain_from"]
         print(f"── malf inventory: {repo_root.name}/{entry['path']} "
