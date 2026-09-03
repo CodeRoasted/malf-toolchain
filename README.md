@@ -121,6 +121,16 @@ tool, on our CI and on your fork. Usage: **[MALF.md](MALF.md)**.
   - `linux-clang21-release` — clang-21 / libstdc++ (keyed, for isolating the compiler axis from the stdlib axis)
   - `linux-clang21-libcxx-debug` — clang-21 / libc++ at `build_type=Debug`, no sanitizer (the desk debug leg: log elision off, `assert()` live, insight-canon's arena reset-poison armed; `linux-clang21-asan` is the same build type with AddressSanitizer attached)
   - `windows-msvc-release` — MSVC 14.52 (`compiler.version=195` → conan maps to vs_version 18 + `vcvars_ver=14.5` → the 14.52 toolset; Ninja generator; `vcvars` pointed at `MSVC1452_INSTALL`)
+
+  **What switching profiles costs, once.** Every profile other than the dev default keys its own
+  Conan cache (`_malf_profile_key` → `.conan2/<key>/`), and *every* profile — the default included —
+  keys its own build tree (`build-<key>/`). So the FIRST run on a profile you have not used builds
+  the third-party dependency set from source into a fresh cache and recompiles the first-party tree
+  from scratch; the second run is incremental. Measured for `linux-clang21-libcxx-debug` on the
+  reference desk on 2026-09-02, third-party population only, before any first-party compile: **7
+  packages built from source in 173 s, 573 MB of cache**. The first-party recompile is on top of
+  that and is not included in the figure. Budget the switch; do not read a slow first run as a
+  broken tree.
 - `config/` — the canonical developer/editor config (`.clang-format`, `.clang-tidy`, `.clangd`).
   Each repo symlinks these, so there is one source of truth and drift is impossible; `malf lint`
   falls back to `config/.clang-tidy`.
