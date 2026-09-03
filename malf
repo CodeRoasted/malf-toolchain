@@ -2616,12 +2616,57 @@ for fname in ('CMakePresets.json', 'CMakeUserPresets.json'):
 " "$1" 2>/dev/null || true
 }
 
+# THE TESTED REFERENCE IS THE ONE FACT A STANDALONE CONFIGURE CANNOT DERIVE, and it is handed over
+# as `MALF_TESTED_VERSION`.
+#
+# `conan create` runs the test_package's OWN recipe: its `generate()` executes, so anything that
+# method computes from `self.tested_reference_str` reaches CMake. This function does not run that
+# recipe — it installs a SYNTHETIC consumer (`conan install --requires=<ref>`) and configures the
+# directory directly, because running the real one means `conan test`, which BUILDS. So every
+# cache variable the recipe's `generate()` would have set is absent here, and a test_package that
+# refuses without one does not configure at all: measured 2026-09-03 in insight-metalog, whose
+# CMakeLists FATAL_ERRORs when the version under test is missing (its consumer smoke asserts the
+# emitted `producer.version` against the RELEASED reference, and that assertion has no oracle
+# without it). Its one translation unit was absent from the editor database, and the run still
+# exited 0.
+#
+# malf cannot reproduce arbitrary Python, so it hands over the one input that distinguishes a
+# `conan create` test_package configure from a standalone one: the reference under test. The name
+# is already in the directory path; the VERSION is not derivable from the test_package source at
+# all. So ONE variable, `MALF_TESTED_VERSION`, with TWO producers and ONE consumer — malf sets it
+# here, the test_package recipe sets the same name from `tested_reference_str` in its `generate()`,
+# and the CMakeLists reads it. The guard cannot be satisfied on one path and not the other: a
+# recipe that forgets it reds `conan create` at exactly the message that reds `malf commands`.
+#
+# REJECTED, each with the reason:
+#   * malf derives the package's own variable name (`<NAME>_TESTED_VERSION`, uppercased). No recipe
+#     change, and an UNDECLARED convention: a recipe naming it anything else gets a cache variable
+#     nobody reads plus the same refusal, with malf's log now claiming it supplied the value.
+#   * The test_package CMakeLists defaults the variable when absent. That is the assertion's whole
+#     oracle; a default makes it compare the emitted version against a literal typed in the same
+#     file, which measures the typist. Under `conan create` — the run that gates the release — the
+#     degradation would be silent, and a silent oracle is worse than a loud refusal.
+#   * `malf commands` skips test_package directories. Cheapest, and it drops NINE translation units
+#     to fix one — counted 2026-09-03: every test_package holding a CMakeLists.txt in the workspace
+#     (insight-canon/core, insight-eidos, insight-metalog, logcraft/core, coderoast-security/auth,
+#     coderoast-server/server-logging, and coderoast-server/infra's clickhouse, postgres and redis)
+#     carries exactly one. A test_package is the only consumer-shaped code a package has; losing
+#     the editor on it is losing it on the only TU that compiles the package as an outsider does.
+#   * Read the version off the package config that `find_package` loads. insight_metalog sets
+#     `cmake_find_mode = "none"` and ships its own native config (it carries FILE_SET CXX_MODULES,
+#     which conan's generator does not emit), and that config has no version — the CMake project()
+#     declares none. Adding one would introduce a THIRD literal to keep in step with the recipe
+#     version and the C++ constant, which is more authorities, not fewer.
 _malf_configure_test_package() {
     # Configure a package's test_package so clangd indexes it too. conan create
     # builds it in a temp dir that the editor never sees, so we re-install its deps
     # and configure it in-tree. The COMPILER comes from the profile buildenv
     # (CC/CXX) — sourced below — not the toolchain (which only adds stdlib flags like
     # -stdlib=libc++); without it a libc++ profile would fall back to system g++.
+    #
+    # Returns non-zero when the directory did not configure. The caller turns that into a refusal:
+    # the database's one reader is an editor, which reports a missing TU as an unknown symbol
+    # rather than as a missing TU, so an exit code is the only place a truncation can be seen.
     local subdir="$1" tp_build="$2"
     local main_ref
     main_ref="$(_malf_pkg_ref "$subdir/conanfile.py")"
@@ -2655,7 +2700,11 @@ for r in re.findall(r\"(?:test_)?requires\\s*\\(\\s*['\\\"]([^'\\\"]+)['\\\"]\\s
         2>&1 | grep -vE "^$|^======|^Requirements|^Packages|^Build" || true
 
     local tp_toolchain="$tp_build/conan_toolchain.cmake"
-    [[ -f "$tp_toolchain" ]] || return 0
+    if [[ ! -f "$tp_toolchain" ]]; then
+        echo "malf commands: test_package deps FAILED for $(basename "$subdir"): the install wrote no" >&2
+        echo "malf commands: $tp_toolchain, so there is nothing to configure against." >&2
+        return 1
+    fi
     # The tested module package ships its native config (FILE_SET CXX_MODULES) into the dir
     # malf JUST configured it in — the PARENT of tp_build (= _malf_build_dir "$subdir", the
     # package-anchored tree, which IS the editable build dir the recipe's builddir resolves
@@ -2668,12 +2717,15 @@ for r in re.findall(r\"(?:test_)?requires\\s*\\(\\s*['\\\"]([^'\\\"]+)['\\\"]\\s
                  -G Ninja \
                  "-DCMAKE_TOOLCHAIN_FILE=$tp_toolchain" \
                  "-DCMAKE_PREFIX_PATH=$main_build_dir" \
+                 "-DMALF_TESTED_VERSION=${main_ref#*/}" \
                  -DCMAKE_BUILD_TYPE="$MALF_CONFIG" \
                  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ) \
              > "$tp_build/cmake_configure.log" 2>&1; then
         echo "malf commands: test_package configure FAILED:" >&2
         tail -20 "$tp_build/cmake_configure.log" >&2
+        return 1
     fi
+    return 0
 }
 
 _malf_merge_db_tree() {
@@ -2831,6 +2883,17 @@ _malf_commands_tree_role() {          # <build_dir> -> _MALF_TREE_ROLE, _MALF_TR
 #   configured   the members that reached a target-role `cmake --preset`
 #   content-only selected minus configured — a conanfile with no CMakeLists.txt has no TU to index,
 #                so `selected = configured + content-only` is an identity verifiable on the line
+#   test_package a CENSUS — every test_package/CMakeLists.txt under a selected member — split into
+#                configured, failed (the configure ran and refused) and unreached (the member left
+#                the loop before the configure was attempted). The denominator is what EXISTS
+#                rather than what the run got to, because those two differ TODAY: measured
+#                2026-09-03, coderoast-server holds four test_package directories and the run
+#                attempts three. A line counting attempts would have printed "3" beside a repo
+#                holding 4 and read as complete.
+#                It needs its own line because a test_package is configured OUTSIDE the member's
+#                preset (a synthetic conan consumer, then a direct cmake -S) and so contributes no
+#                CMakeCache for _malf_commands_tree_role to read — the per-member role verdict is
+#                blind to it by construction.
 #   entries      the merged database's size, SPLIT first-party (under the invocation root) versus
 #                external (a standard-library module unit, a dependency in a SIBLING repo). The
 #                split is the load-bearing half: `N146` moved the first-party count while leaving
@@ -2841,18 +2904,20 @@ _malf_commands_tree_role() {          # <build_dir> -> _MALF_TREE_ROLE, _MALF_TR
 # NEST (insight-eidos is a package and also the parent of insight-eidos/sift), so a shortest-prefix
 # attribution bills every subpackage's TU to the parent and reports full coverage for a member that
 # contributed nothing.
-_malf_commands_summary() {            # <db> <root> <selected> <content_only> [<role> <dir>]...
+_malf_commands_summary() {            # <db> <root> <sel> <content_only> <tp_present> <tp_conf> <tp_failed> [<role> <dir>]...
     local db="$1" root="$2" selected="$3" content_only="$4"
-    shift 4
+    local tp_present="$5" tp_configured="$6" tp_failed="$7"
+    shift 7
     if [[ ! -f "$db" ]]; then
         echo "malf commands: SUMMARY · root=$root · db=$db · NO DATABASE WAS WRITTEN — nothing was indexed" >&2
         return 1
     fi
-    python3 - "$db" "$root" "$selected" "$content_only" "$@" <<'PY'
+    python3 - "$db" "$root" "$selected" "$content_only" \
+              "$tp_present" "$tp_configured" "$tp_failed" "$@" <<'PY'
 import json, os, sys
 
-db, root, selected, content_only = sys.argv[1:5]
-rows = [a.split(" ", 1) for a in sys.argv[5:]]
+db, root, selected, content_only, tp_present, tp_configured, tp_failed = sys.argv[1:8]
+rows = [a.split(" ", 1) for a in sys.argv[8:]]
 
 files = [e.get("file", "") for e in json.loads(open(db).read())]
 prefix = root.rstrip("/") + "/"
@@ -2873,6 +2938,8 @@ for f in files:
 print(f"malf commands: SUMMARY · root={root} · db={db}")
 print(f"malf commands:   members {selected} selected = {len(rows)} configured + {content_only} content-only "
       f"(a conanfile with no CMakeLists.txt has no TU to index)")
+print(f"malf commands:   test_package {tp_present} present = {tp_configured} configured + {tp_failed} failed + "
+      f"{int(tp_present) - int(tp_configured) - int(tp_failed)} unreached (the member never configured)")
 print(f"malf commands:   entries {len(files)} = first-party {first} (under {root}) + external {len(files) - first}")
 width = max((len(os.path.relpath(d, root)) for _, d in rows), default=1)
 for role, d in rows:
@@ -2917,6 +2984,9 @@ cmd_compile_commands() {
     local configured=()            # members that reached a target-role configure, in visit order
     local -A demoted_by_bootstrap=()   # every member dir a dependency bootstrap re-configured
     local content_only=0
+    local tp_present=0 tp_configured=0
+    local tp_failed=()             # members whose test_package configure ran and refused
+    local tp_unreached=()          # members holding a test_package the loop never got to
     local pkg_dir
     for pkg_dir in "${members[@]}"; do
         local subdir subdir_name subdir_build
@@ -2927,6 +2997,13 @@ cmd_compile_commands() {
             echo "malf commands: $subdir_name is content-only — skipped"
             content_only=$((content_only + 1))
             continue
+        fi
+        # The test_package CENSUS is taken HERE, before any of the gates below can drop this
+        # member, so the denominator is what exists rather than what the run reached.
+        local has_test_package=false
+        if [[ -f "$subdir/test_package/CMakeLists.txt" ]]; then
+            has_test_package=true
+            tp_present=$((tp_present + 1))
         fi
         # Canonical build dir, mirroring `malf build` — package-anchored
         # (<pkg>/build-<key>), the ONE tree per (package, profile).
@@ -2944,7 +3021,17 @@ cmd_compile_commands() {
                 $(_malf_conan_install_args) \
                 2>&1 | grep -vE "^$|^======|^Requirements|^Packages|^Build" || true
         fi
-        [[ -f "$subdir_build/CMakePresets.json" ]] || continue
+        if [[ ! -f "$subdir_build/CMakePresets.json" ]]; then
+            # The member itself cannot be configured — a header-library recipe with no CMakeLists
+            # generates no preset. Its test_package needs none of that (it installs its own
+            # synthetic consumer and its own toolchain), but it is configured further down this
+            # same iteration, so leaving here drops it. Recorded rather than silently skipped:
+            # measured 2026-09-03, coderoast-server/server-logging leaves exactly here and its
+            # test_package translation unit — the ONLY arm proving that header-only seat's
+            # contract — has never been in the editor database.
+            if [[ "$has_test_package" == true ]]; then tp_unreached+=("$subdir"); fi
+            continue
+        fi
 
         # Register/build the editable workspace deps this package needs.
         _malf_bootstrap_workspace_deps "$subdir"
@@ -2977,8 +3064,12 @@ cmd_compile_commands() {
         done < <(_malf_workspace_dep_entries "$subdir")
 
         # test_package (if any) -> its own compile_commands.json.
-        if [[ -f "$subdir/test_package/CMakeLists.txt" ]]; then
-            _malf_configure_test_package "$subdir" "$subdir_build/test_package"
+        if [[ "$has_test_package" == true ]]; then
+            if _malf_configure_test_package "$subdir" "$subdir_build/test_package"; then
+                tp_configured=$((tp_configured + 1))
+            else
+                tp_failed+=("$subdir")
+            fi
         fi
 
         # Point the source dir's CMakeUserPresets.json at the canonical build dir.
@@ -3052,7 +3143,30 @@ cmd_compile_commands() {
     done
 
     _malf_commands_summary "$build_root/compile_commands.json" "$CWD" \
-        "${#members[@]}" "$content_only" "${rows[@]}" || commands_rc=1
+        "${#members[@]}" "$content_only" \
+        "$tp_present" "$tp_configured" "${#tp_failed[@]}" "${rows[@]}" || commands_rc=1
+
+    # A test_package that did not configure is a truncation of the same database the role gate
+    # guards, reached by the one path that gate cannot see: the directory is configured outside the
+    # member's preset, so it leaves no CMakeCache for _malf_commands_tree_role to read. Before
+    # this, the failure printed and the command exited 0 — loud on a console nobody is reading and
+    # invisible to every caller.
+    local tp_pkg
+    for tp_pkg in "${tp_failed[@]}"; do
+        commands_rc=1
+        echo "malf commands: FATAL: $(basename "$tp_pkg")/test_package did not configure, so NONE of its" >&2
+        echo "malf commands: translation units are in the database — the only code in the package that" >&2
+        echo "malf commands: compiles it the way an outside consumer does. The configure output is in" >&2
+        echo "malf commands: $(_malf_build_dir "$tp_pkg")/test_package/cmake_configure.log." >&2
+    done
+    for tp_pkg in "${tp_unreached[@]}"; do
+        commands_rc=1
+        echo "malf commands: FATAL: $(basename "$tp_pkg")/test_package was never configured, so its" >&2
+        echo "malf commands: translation units are absent from the database. The member itself has no" >&2
+        echo "malf commands: $(_malf_build_dir "$tp_pkg")/CMakePresets.json — a recipe with no" >&2
+        echo "malf commands: CMakeLists.txt generates none — and this loop leaves before reaching the" >&2
+        echo "malf commands: test_package configure, which would not have needed that preset." >&2
+    done
 
     if (( ${#demoted[@]} > 0 )); then
         commands_rc=1

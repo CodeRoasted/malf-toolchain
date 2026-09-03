@@ -1799,7 +1799,7 @@ cat > "$cm_tmp/db.json" <<JSON
  {"file": "$cm_root/sub/benchmarks/bench_child.cpp"},
  {"file": "/usr/lib/llvm-21/share/libc++/v1/std.cppm"}]
 JSON
-cm_sum="$(_malf_commands_summary "$cm_tmp/db.json" "$cm_root" 2 0 "target $cm_root" "target $cm_root/sub" 2>&1)"
+cm_sum="$(_malf_commands_summary "$cm_tmp/db.json" "$cm_root" 2 0 3 2 1 "target $cm_root" "target $cm_root/sub" 2>&1)"
 cm_parent_line="$(grep -E '^malf commands:   \.[[:space:]]' <<< "$cm_sum" | tr -s ' ')"
 cm_child_line="$(grep -E '^malf commands:   sub[[:space:]]' <<< "$cm_sum" | tr -s ' ')"
 
@@ -1815,10 +1815,27 @@ check "the member line states the identity selected = configured + content-only"
       "members 2 selected = 2 configured + 0 content-only" \
       "$(grep -oE 'members [0-9]+ selected = [0-9]+ configured \+ [0-9]+ content-only' <<< "$cm_sum")"
 
+# A test_package is configured OUTSIDE the member's preset — a synthetic conan consumer and a
+# direct `cmake -S` — so it leaves no CMakeCache and _malf_commands_tree_role is blind to it by
+# construction. This line is where a dropped one becomes visible, and its DENOMINATOR is the census
+# (every test_package/CMakeLists.txt under a selected member), never the number of configures
+# attempted: measured 2026-09-03, coderoast-server holds FOUR test_package directories and the run
+# attempts THREE, so a line counting attempts prints "3" and reads as complete. The arm feeds
+# 3 present / 2 configured / 1 failed so that `unreached` is DERIVED rather than echoed — an
+# unreached count that were simply passed in could not go wrong and would measure nothing.
+check "the test_package line is a CENSUS, and unreached is derived from it" \
+      "test_package 3 present = 2 configured + 1 failed + 0 unreached" \
+      "$(grep -oE 'test_package [0-9]+ present = [0-9]+ configured \+ [0-9]+ failed \+ [0-9]+ unreached' <<< "$cm_sum")"
+
+cm_sum_unreached="$(_malf_commands_summary "$cm_tmp/db.json" "$cm_root" 2 0 4 3 0 "target $cm_root" "target $cm_root/sub" 2>&1)"
+check "a test_package the run never reached is counted apart from one that configured and refused" \
+      "test_package 4 present = 3 configured + 0 failed + 1 unreached" \
+      "$(grep -oE 'test_package [0-9]+ present = [0-9]+ configured \+ [0-9]+ failed \+ [0-9]+ unreached' <<< "$cm_sum_unreached")"
+
 # A database that was never written is not a zero-entry database, and the two must not print the
 # same sentence: the merge failing leaves the previous file OR no file, and both read as "clean"
 # from a count alone.
-cm_nodb_out="$(_malf_commands_summary "$cm_tmp/does-not-exist.json" "$cm_root" 1 0 "target $cm_root" 2>&1)"; cm_nodb_rc=$?
+cm_nodb_out="$(_malf_commands_summary "$cm_tmp/does-not-exist.json" "$cm_root" 1 0 1 1 0 "target $cm_root" 2>&1)"; cm_nodb_rc=$?
 check "a missing database reds and says so, rather than summarising a file that is not there" \
       "rc=1 named" \
       "rc=$cm_nodb_rc $([[ "$cm_nodb_out" == *"NO DATABASE WAS WRITTEN"* ]] && echo named || echo "GOT: $cm_nodb_out")"
@@ -1849,6 +1866,57 @@ check "the demotion set is recorded where the dependency entries are read (one e
 check "a member in dependency role is FATAL, and the verdict reaches the exit status" \
       "fatal wired" \
       "$(grep -q 'is in the database as a DEPENDENCY' <<< "$cm_src" && echo fatal || echo "NOT-FATAL") $(grep -q 'commands_rc=1' <<< "$cm_src" && grep -q 'exit "\$commands_rc"' <<< "$cm_src" && echo wired || echo "NOT-WIRED")"
+
+# --- THE TESTED REFERENCE REACHES A DIRECTLY-CONFIGURED test_package ---------------------------
+# `conan create` runs the test_package's own recipe, so its generate() can put anything derived
+# from `self.tested_reference_str` into the CMake cache. `malf commands` does NOT run that recipe —
+# it installs a synthetic consumer and configures the directory itself — so every such variable is
+# absent, and a test_package that refuses without one does not configure at all. Measured
+# 2026-09-03 in insight-metalog, whose test_package CMakeLists FATAL_ERRORs without the version of
+# the package under test: its translation unit was missing from the merged database (108 entries
+# where the complete database is 109) and `malf commands` still exited 0.
+#
+# The repair is ONE cache variable with TWO producers — `MALF_TESTED_VERSION`, set here by malf and
+# by the test_package recipe's generate() under `conan create` — so the CMakeLists reads one name
+# and neither producer can satisfy its refusal while the other does not. Pinned STRUCTURALLY
+# because reproducing the symptom needs conan, a toolchain and a network, while the mechanism is
+# one flag on one command line.
+cm_tp_src="$(awk '/^_malf_configure_test_package\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$MALF_BIN")"
+check "a directly-configured test_package is handed the version of the package under test" \
+      "passed derived-from-ref" \
+      "$(grep -q -- '-DMALF_TESTED_VERSION=' <<< "$cm_tp_src" && echo passed || echo "NOT-PASSED") $(grep -q -- '-DMALF_TESTED_VERSION=${main_ref#\*/}' <<< "$cm_tp_src" && echo derived-from-ref || echo "NOT-DERIVED-FROM-REF")"
+
+# The value has to come from the reference malf ALREADY requires the test_package against, never
+# from a second reading of the conanfile: two derivations of one fact are two chances to disagree,
+# and the disagreement would be a version assertion passing against the wrong oracle.
+check "the version and the --requires come from the SAME reference reading" \
+      "one reading" \
+      "$(grep -c 'main_ref="$(_malf_pkg_ref' <<< "$cm_tp_src" | grep -q '^1$' && echo "one reading" || echo "GOT $(grep -c 'main_ref="$(_malf_pkg_ref' <<< "$cm_tp_src") readings")"
+
+# The function has to REPORT the failure, not just print it: before this it returned 0 on a failed
+# configure and the caller had nothing to test.
+check "a failed test_package configure is returned to the caller, not only printed" \
+      "returns" \
+      "$(awk '/test_package configure FAILED/{f=1} f&&/return 1/{print "returns"; exit} f&&/^\}$/{print "SWALLOWED"; exit}' <<< "$cm_tp_src")"
+
+# --- and it reaches the EXIT STATUS -----------------------------------------------------------
+# The same argument as the dependency-role verdict above: the database's one reader is an editor,
+# which reports a missing TU as an unknown SYMBOL rather than as a missing TU. A truncation that
+# only prints is a truncation nothing downstream can see. Both doors are pinned — the configure
+# that ran and refused, and the member the loop left before the configure was attempted.
+check "a test_package that did not configure is FATAL, and the verdict reaches the exit status" \
+      "failed-fatal unreached-fatal" \
+      "$(grep -q 'test_package did not configure' <<< "$cm_src" && echo failed-fatal || echo "NOT-FATAL") $(grep -q 'test_package was never configured' <<< "$cm_src" && echo unreached-fatal || echo "UNREACHED-NOT-FATAL")"
+
+# The CENSUS has to be taken BEFORE the gates that can drop the member, or the denominator is the
+# number of configures attempted and the line reads as complete on a repo that is missing one.
+# Line arithmetic against the preset gate, for the same reason the re-assertion is pinned that way:
+# the ordering IS the property.
+cm_census_ln="$(grep -n 'tp_present=$((tp_present + 1))' <<< "$cm_src" | head -1 | cut -d: -f1)"
+cm_preset_gate_ln="$(grep -n 'CMakePresets.json" \]\]; then' <<< "$cm_src" | head -1 | cut -d: -f1)"
+check "the test_package census is taken BEFORE the gate that can drop the member" \
+      "counted before" \
+      "$([[ -n "$cm_census_ln" ]] && echo counted || echo "NOT-COUNTED") $([[ -n "$cm_census_ln" && -n "$cm_preset_gate_ln" && "$cm_census_ln" -lt "$cm_preset_gate_ln" ]] && echo before || echo "AFTER(census=${cm_census_ln:-none} gate=${cm_preset_gate_ln:-none})")"
 
 # An unused predicate tests nothing, and the fixture arms above would still be green.
 check "the role verdict and the scope summary are both CALLED by the command" \
