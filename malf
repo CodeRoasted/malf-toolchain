@@ -2325,6 +2325,69 @@ _malf_lint_reap_corpses() {
     done
 }
 
+# THE RUN'S OWN SCOPE, STATED — the format twin of _malf_lint_summary, deliberately in the SAME
+# vocabulary, because two adjacent gates reporting in two grammars is a second thing for a reader
+# to learn and one of them will be misread. Measured 2026-09-03: `malf format --check` from the
+# workspace root inspected 887 files and printed exactly ONE line, the banner. It was already
+# better off than lint was — its zero case IS named — but a GREEN still stated no population, so
+# "malf format --check, exit 0" is the same sentence whether 887 files were checked, or 3, or
+# none, and nothing in the output separated them.
+#
+# THE COUNTS ARE THE ONES THIS PATH ACTUALLY HOLDS, and they are not lint's three.
+#   selected = every file the walk matched by extension, BOTH size classes
+#   checked  = the files handed to clang-format (selected minus the oversized skips)
+#   skipped  = the MALF_SOURCE_MAX_FILE_KB overruns, already listed by name above
+# so `selected = checked + skipped` is an identity a reader can verify on the line itself, and a
+# non-zero `skipped` is this path's ONE coverage gap — the analogue of lint's `selected > checked`.
+# There is no further selected/checked split to invent: unlike lint there is no compile database
+# and no lintability filter here, every checked file reaches the tool, and a distinction the path
+# does not have must not be printed as though it did.
+#
+# `misformatted` is counted in CHECK mode only, from the DISTINCT paths clang-format names in
+# `<file>:<line>:<col>: error: code should be clang-formatted` — one file with six violations is
+# one misformatted file. WRITE mode has no such measurement: `clang-format -i` is silent and never
+# reports which files it changed, so that field is ABSENT there rather than guessed, and the word
+# is `formatted` (the post-state -i guarantees for those files), never "changed".
+#
+# rc IS PRINTED BECAUSE IT IS NOT 1. The tool runs under `xargs -n`, so any failing batch makes
+# the run exit 123 — xargs's "some invocation exited 1-125" — and 123 is what an offender run
+# returns today. Paired with the count it separates two states the status alone cannot: rc != 0
+# with N > 0 is formatting, while rc != 0 with N == 0 is clang-format FAILING for a reason that is
+# not formatting (the ulimit -v address-space cap, an unreadable file) — a coverage hole wearing a
+# violation's exit status.
+_malf_format_summary() {
+    local mode="$1" dir="$2" selected="$3" checked="$4" misformatted="$5" skipped="$6" rc="$7"
+    if (( checked == 0 )); then
+        # Deliberately not phrased as a pass, for the same reason lint's is not (Founder,
+        # 2026-09-03). The verb differs because the act differs: a check that read nothing
+        # inspected nothing; a write that touched nothing rewrote nothing.
+        if [[ "$mode" == check-* ]]; then
+            echo "malf format: SUMMARY · mode=$mode · dir=$dir · selected $selected, CHECKED 0 — NOTHING WAS INSPECTED, $skipped skipped · rc=$rc"
+            echo "malf format: this run read no source, so it is NOT a clean verdict. A tree with no C++ is a"
+            echo "malf format: real state (the TypeScript repos); the wrong directory looks identical from here."
+        else
+            echo "malf format: SUMMARY · mode=$mode · dir=$dir · selected $selected, FORMATTED 0 — NOTHING WAS REWRITTEN, $skipped skipped · rc=$rc"
+            echo "malf format: this run wrote no file. A tree with no C++ is a real state; the wrong directory"
+            echo "malf format: looks identical from here."
+        fi
+        return 0
+    fi
+    if [[ "$mode" == check-* ]]; then
+        echo "malf format: SUMMARY · mode=$mode · dir=$dir · selected $selected, checked $checked, $misformatted misformatted, $skipped skipped · rc=$rc"
+        if (( rc != 0 && misformatted == 0 )); then
+            echo "malf format: rc=$rc with ZERO violations counted — clang-format failed for a reason that is" >&2
+            echo "malf format: NOT formatting (the ${MALF_SOURCE_MEM_LIMIT_KB}KB address-space cap, an unreadable file). Those" >&2
+            echo "malf format: files were not checked at all; read the output above." >&2
+        fi
+        return 0
+    fi
+    echo "malf format: SUMMARY · mode=$mode · dir=$dir · selected $selected, formatted $checked, $skipped skipped · rc=$rc"
+    if (( rc != 0 )); then
+        echo "malf format: rc=$rc — at least one clang-format batch FAILED, so some of those $checked files" >&2
+        echo "malf format: were not rewritten. Read the output above." >&2
+    fi
+}
+
 cmd_format() {
     local check=false
     # PATHSPEC (Founder, 2026-08-08): `malf format [--check] [PATH...]`. A lane formats what it
@@ -2357,6 +2420,14 @@ cmd_format() {
     done
     local explicit_paths=true
     if [[ ${#roots[@]} -eq 0 ]]; then explicit_paths=false; roots=("$CWD"); fi
+
+    # The two axes that decide what a green covers, spelled out rather than labelled: what the run
+    # DID (check / write) and where its population came from (a no-arg sweep of $CWD, or the paths
+    # the caller named). Both are invisible in the output otherwise, and a reader who assumes the
+    # wrong one on either axis reads the verdict as wider than it is.
+    local fmt_mode
+    if $check; then fmt_mode=check; else fmt_mode=write; fi
+    if $explicit_paths; then fmt_mode="$fmt_mode-paths"; else fmt_mode="$fmt_mode-sweep"; fi
 
     # Use the clang-format from the SAME install as the build compiler (clang-21) for
     # consistency. clang-format is a pure formatter — a version skew can't error like
@@ -2435,6 +2506,11 @@ cmd_format() {
         echo "$oversized" >&2
         echo "malf format: these are not formatted. Exclude their directory (MALF_FORMAT_EXCLUDE_EXTRA) if they are not source." >&2
     fi
+    # One line per skipped file (the -printf above), so the line count IS the count. Guarded by
+    # the -n test rather than let `grep -c` see an empty string: it would print 1 for the single
+    # empty line, and `set -e` would kill the run on its exit status.
+    local skipped=0
+    if [[ -n "$oversized" ]]; then skipped="$(grep -c . <<< "$oversized")"; fi
 
     # `ulimit -v` applies to the clang-format child, so an overrun aborts the
     # formatter instead of the machine. Batched (-n) so one pathological file
@@ -2452,16 +2528,50 @@ cmd_format() {
         if $explicit_paths; then
             echo "malf format: error: no source file under: ${roots[*]}" >&2
             echo "malf format: (looked for .cpp .cxx .cc .h .hpp .cppm)" >&2
+            _malf_format_summary "$fmt_mode" "${roots[*]}" "$skipped" 0 0 "$skipped" 1
             exit 1
         fi
-        echo "malf format: no source files found under $CWD — nothing to do."
+        # This replaces "no source files found under … — nothing to do.", which was accurate and
+        # still read as a pass. The summary says the same fact in the vocabulary every other run
+        # of this verb uses, so the zero case and a real green are told apart by their SHAPE and
+        # not by remembering which sentence means which.
+        _malf_format_summary "$fmt_mode" "${roots[*]}" "$skipped" 0 0 "$skipped" 0
         return 0
     fi
 
+    # The run's own output is CAPTURED so the violations can be counted, then reprinted in full —
+    # buffered, never swallowed. Measured 2026-09-03: the workspace-root sweep is 887 files in
+    # 5.9 s, so the delay this costs a reader is bounded by the whole run, and a verdict that
+    # states its population is worth those seconds. Write mode prints nothing at all, so it loses
+    # no streaming whatsoever.
+    local fmt_log
+    fmt_log="$(mktemp -t malf_format.XXXXXX)"
+    # Both halves: the trap covers a Ctrl-C mid-run, the explicit rm below covers the ordinary
+    # path. A trap alone would leak the file on every normal exit, since EXIT fires after it.
+    trap 'rm -f "$fmt_log"' EXIT INT TERM HUP
+
+    local fmt_rc=0
     printf '%s\0' "${targets[@]}" \
     | xargs -0 -r -n "$MALF_FORMAT_BATCH_SIZE" \
         bash -c 'ulimit -v "$0"; exec "$@"' \
-        "$MALF_SOURCE_MEM_LIMIT_KB" "$clang_format_bin" "${format_args[@]}"
+        "$MALF_SOURCE_MEM_LIMIT_KB" "$clang_format_bin" "${format_args[@]}" \
+        > "$fmt_log" 2>&1 || fmt_rc=$?
+    cat "$fmt_log" >&2
+
+    # DISTINCT paths, not diagnostics. clang-format emits one `error:` per violation, so a file
+    # with six of them is ONE misformatted file and counting lines would report the severity of a
+    # file as the size of the population. The path is everything before the trailing `:LINE:COL:`.
+    local misformatted=0
+    misformatted="$(grep -E ': error: code should be clang-formatted' "$fmt_log" \
+                    | sed -E 's/:[0-9]+:[0-9]+: error: code should be clang-formatted.*$//' \
+                    | sort -u | grep -c . || true)"
+
+    rm -f "$fmt_log"
+    trap - EXIT INT TERM HUP
+
+    _malf_format_summary "$fmt_mode" "${roots[*]}" "$(( ${#targets[@]} + skipped ))" \
+        "${#targets[@]}" "$misformatted" "$skipped" "$fmt_rc"
+    return "$fmt_rc"
 }
 
 _malf_resolve_preset() {

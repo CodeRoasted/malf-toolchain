@@ -1614,6 +1614,125 @@ check "the tree/profile assertion is actually CALLED (a defined-but-unwired gate
 rm -rf "$bt_tmp"
 
 
+echo "[7q] every format run STATES ITS OWN SCOPE — mode, population, misformatted, skipped"
+
+# THE SAME DEFECT [7j5] closed for lint, one verb away. Measured 2026-09-03: `malf format --check`
+# from the workspace root inspected 887 files and printed exactly ONE line, the banner. Its zero
+# case was already named ("no source files found … nothing to do") where lint's was not, so this
+# verb was the less bad of the two — but a GREEN still stated no population, and "malf format
+# --check, exit 0" is one sentence about 887 files, or 3, or none. The counts here are NOT lint's
+# three: there is no compile database and no lintability filter on this path, so every checked
+# file reaches the tool and the only coverage gap is the oversized SKIP. The arms below pin the
+# identity `selected = checked + skipped`, the zero case, the two modes, and the one property a
+# reader would otherwise have to trust — that a file with many violations is ONE misformatted file.
+#
+# These use the REAL clang-format, as [7g] arm 3 already does, but assert nothing that depends on
+# the STYLE: population counts, the mode string, an all-garbage file set, and an idempotence round
+# trip are the same answer under any configuration.
+
+fq_tmp="$(mktemp -d)"
+fq_sum() { grep -oE 'malf format: SUMMARY .*' <<< "$1" | head -1; }
+fq_run() {   # <dir> [env...] — malf format from <dir>, everything after it prefixed as env
+    local d="$1"; shift
+    (cd "$d" && env "$@" bash "$MALF_BIN" format --check 2>&1)
+}
+
+# 1/4 — ZERO POPULATION. A directory with no C++ at all. This is a real, declared state (the
+# TypeScript repos rest on it), and it must not read as a verdict about any source.
+mkdir -p "$fq_tmp/empty"
+fq_zero_out="$(fq_run "$fq_tmp/empty")"; fq_zero_rc=$?
+check "STATE 1/4 — a run with NO source says so instead of reading as a clean check, rc 0" \
+      "rc=0 declared" \
+      "rc=$fq_zero_rc $([[ "$fq_zero_out" == *"selected 0, CHECKED 0 — NOTHING WAS INSPECTED"* \
+          && "$fq_zero_out" == *"NOT a clean verdict"* ]] && echo declared || echo "GOT: $fq_zero_out")"
+check "the zero-population run never says 'nothing to do' — the phrase that read as a pass" \
+      "gone" \
+      "$([[ "$fq_zero_out" != *"nothing to do"* ]] && echo gone || echo "GOT: $fq_zero_out")"
+
+# 2/4 — A REAL POPULATION, ALL OF IT MISFORMATTED. Three files of deliberate garbage: no
+# configuration formats them, so the expected count is 3 whatever .clang-format says.
+mkdir -p "$fq_tmp/bad/sub"
+printf 'int  main( ){int   x=1;return   x;}\n' > "$fq_tmp/bad/a.cpp"
+printf 'void  g( ){int   y=2;(void)y;}\n'      > "$fq_tmp/bad/b.cpp"
+printf 'struct  S{int   a;};\n'                > "$fq_tmp/bad/sub/c.hpp"
+fq_bad_out="$(fq_run "$fq_tmp/bad")"; fq_bad_rc=$?
+check "STATE 2/4 — three misformatted files are counted as three, and the run is red" \
+      "red selected 3, checked 3, 3 misformatted, 0 skipped" \
+      "$([[ $fq_bad_rc -ne 0 ]] && echo red || echo "rc=$fq_bad_rc") $(grep -oE 'selected [0-9]+, checked [0-9]+, [0-9]+ misformatted, [0-9]+ skipped' <<< "$fq_bad_out" | head -1)"
+
+# THE COUNT IS FILES, NOT DIAGNOSTICS, and that is the one number a reader cannot re-derive from
+# the output without counting by hand. clang-format emits one `error:` per violation, so counting
+# lines would report the SEVERITY of one file as the SIZE of the population — "10 misformatted"
+# for a single bad line. One garbage file, many violations, one file.
+mkdir -p "$fq_tmp/one"
+printf 'int  main( ){int   x=1;return   x;}\n' > "$fq_tmp/one/a.cpp"
+fq_one_out="$(fq_run "$fq_tmp/one")"
+fq_one_diags="$(grep -c 'code should be clang-formatted' <<< "$fq_one_out")"
+check "ONE file with many violations is ONE misformatted file (the count is files, not diagnostics)" \
+      "1 misformatted / many diagnostics" \
+      "$(grep -oE '[0-9]+ misformatted' <<< "$fq_one_out" | head -1) / $( ((fq_one_diags >= 2)) && echo "many diagnostics" || echo "only $fq_one_diags diagnostics — the fixture no longer proves the distinction")"
+
+# 3/4 — THE WRITE MODE. It reports a population too, because in a shared worktree that number is
+# how many files this run just made dirty. It must NOT report a misformatted count: clang-format
+# -i is silent about what it changed, so any such number would be invented.
+fq_write_out="$(cd "$fq_tmp/bad" && bash "$MALF_BIN" format . 2>&1)"; fq_write_rc=$?
+check "STATE 3/4 — the write mode states its population, and names the mode as a write" \
+      "rc=0 mode=write-paths selected 3, formatted 3, 0 skipped" \
+      "rc=$fq_write_rc $(grep -oE 'mode=write-paths' <<< "$fq_write_out" | head -1) $(grep -oE 'selected [0-9]+, formatted [0-9]+, [0-9]+ skipped' <<< "$fq_write_out" | head -1)"
+check "the write summary claims NO misformatted count — clang-format -i never reports one" \
+      "absent" \
+      "$([[ "$(fq_sum "$fq_write_out")" != *misformatted* ]] && echo absent || echo "INVENTED: $(fq_sum "$fq_write_out")")"
+# The round trip is what makes the count above a measurement rather than a coincidence: the same
+# three files, checked after being written, are zero.
+fq_after_out="$(fq_run "$fq_tmp/bad")"; fq_after_rc=$?
+check "after the write, the same three files check clean — so the count of 3 was a measurement" \
+      "rc=0 selected 3, checked 3, 0 misformatted, 0 skipped" \
+      "rc=$fq_after_rc $(grep -oE 'selected [0-9]+, checked [0-9]+, [0-9]+ misformatted, [0-9]+ skipped' <<< "$fq_after_out" | head -1)"
+
+# 4/4 — THE COVERAGE GAP. An oversized file is walked, reported, and NOT formatted. It must appear
+# in `selected` and not in `checked`, because `selected = checked + skipped` is the identity that
+# lets a reader see the hole on the line itself. MALF_SOURCE_MAX_FILE_KB is lowered rather than a
+# multi-megabyte file written: the subject is the accounting, not the size.
+# NOT MALF_SOURCE_MAX_FILE_KB=1, and the reason is a `find` trap worth pinning here rather than
+# rediscovering: `-size -Nk` rounds a file UP to whole 1K blocks, so a 21-byte file is ONE block
+# and `-size -1k` is false for it — at N=1 the whole population is "oversized" and the arm
+# measures nothing. 4 KB leaves a real gap between the two files on both sides of the cut.
+mkdir -p "$fq_tmp/skip"
+printf 'int  h( ){return 0;}\n' > "$fq_tmp/skip/small.cpp"
+head -c 8192 /dev/zero | tr '\0' 'x' | sed 's/^/\/\/ /' > "$fq_tmp/skip/big.cpp"
+fq_skip_out="$(fq_run "$fq_tmp/skip" MALF_SOURCE_MAX_FILE_KB=4)"
+check "STATE 4/4 — a skipped file is SELECTED but not CHECKED (selected = checked + skipped)" \
+      "selected 2, checked 1, 1 misformatted, 1 skipped" \
+      "$(grep -oE 'selected [0-9]+, checked [0-9]+, [0-9]+ misformatted, [0-9]+ skipped' <<< "$fq_skip_out" | head -1)"
+# And when the skip eats the WHOLE population, the zero case must still fire and still carry the
+# reason — otherwise it reads as "this tree has no C++", which is a different fact.
+rm -f "$fq_tmp/skip/small.cpp"
+fq_allskip_out="$(fq_run "$fq_tmp/skip" MALF_SOURCE_MAX_FILE_KB=4)"
+check "a population entirely skipped is a zero run that still names the skip" \
+      "selected 1, CHECKED 0 — NOTHING WAS INSPECTED, 1 skipped" \
+      "$(grep -oE 'selected [0-9]+, CHECKED 0 — NOTHING WAS INSPECTED, [0-9]+ skipped' <<< "$fq_allskip_out" | head -1)"
+
+# THE MODE IS PART OF THE VERDICT. A sweep of $CWD and a named pathspec produce different
+# populations from the same directory, and a reader who assumes the wrong one reads the green as
+# wider than it is. Both spellings must appear, and they must differ.
+fq_sweep_out="$(fq_run "$fq_tmp/one")"
+fq_paths_out="$(cd "$fq_tmp/one" && bash "$MALF_BIN" format --check a.cpp 2>&1)"
+check "the summary names BOTH axes — check/write and sweep/paths — and the two spellings differ" \
+      "check-sweep check-paths" \
+      "$(grep -oE 'mode=check-[a-z]+' <<< "$fq_sweep_out" | head -1 | sed 's/mode=//') $(grep -oE 'mode=check-[a-z]+' <<< "$fq_paths_out" | head -1 | sed 's/mode=//')"
+
+# rc != 0 WITH ZERO VIOLATIONS IS A COVERAGE HOLE WEARING A VIOLATION'S EXIT STATUS. The run
+# exits 123 either way (xargs: "some invocation exited 1-125"), so the status alone cannot tell a
+# formatting failure from clang-format never starting. A 2 MB address-space cap is far below what
+# any clang-format needs, so the tool cannot run at all and the count is necessarily zero.
+fq_dead_out="$(fq_run "$fq_tmp/one" MALF_SOURCE_MEM_LIMIT_KB=2048)"; fq_dead_rc=$?
+check "clang-format that never RAN reds with 0 violations, and the run says that is not formatting" \
+      "red 0 misformatted named" \
+      "$([[ $fq_dead_rc -ne 0 ]] && echo red || echo "rc=$fq_dead_rc") $(grep -oE '[0-9]+ misformatted' <<< "$fq_dead_out" | head -1) $([[ "$fq_dead_out" == *"ZERO violations counted"* ]] && echo named || echo "UNNAMED: $(fq_sum "$fq_dead_out")")"
+
+rm -rf "$fq_tmp"
+echo
+
 echo
 echo
 echo "malf selftest: $pass_count passed, $fail_count failed"
