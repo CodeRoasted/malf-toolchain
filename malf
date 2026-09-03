@@ -1269,6 +1269,30 @@ _malf_tidy_crashed() {
     return 1
 }
 
+# THE RUN'S OWN SCOPE, STATED — printed at every exit that reached a file set.
+# A LINT GATE'S GREEN IS SILENT ABOUT WHAT IT LOOKED AT, and that silence is the defect this
+# closes. With no arguments `lint`'s subject is `git diff` against HEAD, so on a CLEAN worktree it
+# printed "no files to check" and returned 0 having read zero bytes of source. Measured 2026-09-02
+# in coderoast-ipc and insight-twin: both exited 0 on an empty set and the real verdict needed
+# --all-files. The failure is in the READER, not the tool — "malf lint, 0 findings" is the same
+# sentence whether 0 files or 400 were checked, so a report of the first is indistinguishable from
+# the second and nothing in the output separates them. Three counts do separate them, and they are
+# three because each answers a different question: `selected` is the population the MODE produced,
+# `checked` is what actually reached clang-tidy after the module-lintability and compile-DB filters
+# dropped the rest (selected > checked is a coverage gap the mode's own subject did not cover), and
+# the findings/not-linted pair is the verdict. The mode is named because it is the fact that was
+# invisible. The zero-file line is deliberately not phrased as a pass: it is the whole reason for
+# the rule (Founder, 2026-09-03).
+_malf_lint_summary() {
+    local mode="$1" dir="$2" selected="$3" checked="$4" findings="$5" not_linted="$6" rc="$7"
+    if (( checked == 0 )); then
+        echo "malf lint: SUMMARY · mode=$mode · dir=$dir · selected $selected, CHECKED 0 — NOTHING WAS INSPECTED · rc=$rc"
+        echo "malf lint: this run read no source, so it is NOT a clean verdict. 'malf lint --all-files' checks the tree."
+        return 0
+    fi
+    echo "malf lint: SUMMARY · mode=$mode · dir=$dir · selected $selected, checked $checked, $findings finding(s), $not_linted not linted · rc=$rc"
+}
+
 cmd_lint() {
     local console=false all_files=false
     while [[ $# -gt 0 ]]; do
@@ -1279,6 +1303,16 @@ cmd_lint() {
         esac
         shift
     done
+
+    # The file-selection mode, spelled out rather than named, because the summary below is read by
+    # someone who does not have this file open: "default" alone does not say that the subject is a
+    # diff and therefore empty on a clean tree, which is the fact that went unstated.
+    local lint_mode
+    if $all_files; then
+        lint_mode="--all-files (walk of source extensions under the tree)"
+    else
+        lint_mode="default (git diff --name-only HEAD, worktree+index, --relative)"
+    fi
 
     # clang-tidy config: prefer CWD, fall back to the canonical config in this repo (config/)
     local tidy_config=""
@@ -1752,6 +1786,12 @@ PY
         fi
     fi
 
+    # THE POPULATION THE MODE PRODUCED, frozen here — before the module-lintability filter and the
+    # compile-DB filter below narrow it. Both of those DROP files silently by design (a .cppm under
+    # a mismatched clang-tidy, a TU absent from the database), so the count that reaches clang-tidy
+    # is not the count the mode selected, and reporting only the second hides the gap between them.
+    local lint_selected=${#files[@]}
+
     # C++ module files are lintable ONLY when clang-tidy is the same build as the
     # project's compiler: a module BMI (.pcm) is pinned to the exact clang build, so a
     # mismatched clang-tidy errors out ("module file '…' built from a different
@@ -1849,9 +1889,10 @@ PY
             echo "malf lint: refusing to report success — this mode walks the tree, so an empty set is a" >&2
             echo "malf lint: scoping failure (wrong directory, MALF_LINT_EXCLUDE_EXTRA too broad, or the" >&2
             echo "malf lint: package is not built so every TU was dropped as absent from the compile DB)." >&2
+            _malf_lint_summary "$lint_mode" "$CWD" "$lint_selected" 0 0 0 1
             exit 1
         fi
-        echo "malf lint: no files to check"
+        _malf_lint_summary "$lint_mode" "$CWD" "$lint_selected" 0 0 0 0
         return 0
     fi
 
@@ -1925,9 +1966,15 @@ PY
         [[ -f "$slot" ]] && cat "$slot" >> "$merged"
     done
 
+    # Counted from the DEDUPED text, which is what a reader is handed: a header included by 40 TUs
+    # produces 40 identical diagnostics and is one finding, not 40. A diagnostic is a `warning:` or
+    # `error:` at a file:line:col — never a `note:`, which is a continuation of the finding above it,
+    # nor the source snippet and caret lines clang-tidy prints under each one.
+    local lint_findings=0
     if [[ -f "$merged" ]]; then
         local deduped
         deduped="$(awk '!seen[$0]++' "$merged")"
+        lint_findings="$(grep -cE ':[0-9]+:[0-9]+: (warning|error):' <<< "$deduped" || true)"
         if [[ -n "$output_file" ]]; then
             printf '%s\n' "$deduped" >> "$output_file"
         else
@@ -2005,6 +2052,11 @@ PY
     if [[ -n "$output_file" ]]; then
         echo "malf lint: output written to $output_file"
     fi
+    # On stdout, and NOT into $output_file: without --console the findings go to a file and the
+    # terminal keeps only "output written to ...", so the one line stating what this run covered
+    # must be the one the reader already has in front of them.
+    _malf_lint_summary "$lint_mode" "$CWD" "$lint_selected" "${#files[@]}" \
+        "$lint_findings" "${#crashed[@]}" "$lint_status"
     return "$lint_status"
 }
 

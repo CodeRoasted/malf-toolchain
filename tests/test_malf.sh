@@ -652,6 +652,14 @@ if [[ -n "${LK_TIDY_DB_LOG:-}" ]]; then
     done
 fi
 last="${*: -1}"
+# One diagnostic plus its two note lines ([7j5]): a note is a CONTINUATION of the finding above
+# it, never a finding of its own, and a summary that counted lines would report three.
+if [[ -n "${LK_TIDY_WARN_ON:-}" && "$last" == *"$LK_TIDY_WARN_ON" ]]; then
+    printf '%s:1:1: warning: fixture finding [fixture-check]\n' "$last"
+    printf '%s:2:1: note: +1, nesting level increased to 1\n' "$last"
+    printf '%s:3:1: note: +2, nesting level increased to 2\n' "$last"
+    exit 0
+fi
 [[ -n "${LK_TIDY_SLEEP_ON:-}" && "$last" == *"$LK_TIDY_SLEEP_ON" ]] && exec sleep 5
 [[ -n "${LK_TIDY_DIE_ON:-}" && "$last" == *"$LK_TIDY_DIE_ON" ]] && exit 139
 exit 0
@@ -842,6 +850,68 @@ rm "$lk_repo/core/src/ghost.cpp"                    # staged, then gone: listed 
 lk_gh_out="$(lk_run "$lk_repo/core" "$lk_tmp/tidy.ghost.log")"; lk_gh_rc=$?
 check "a listed path that does not resolve REFUSES by name instead of being skipped" \
       "rc=1 refused:src/ghost.cpp" "rc=$lk_gh_rc $([[ "$lk_gh_out" == *"git lists 'src/ghost.cpp' as changed"* ]] && echo refused:src/ghost.cpp || echo "GOT: $lk_gh_out")"
+
+echo "[7j5] every lint run STATES ITS OWN SCOPE — mode, population, checked, findings"
+
+# THE RULING (Founder, 2026-09-03) and the measurement under it. `malf lint` with no arguments
+# takes its subject from `git diff` against HEAD, so on a CLEAN worktree it selected nothing,
+# printed "no files to check" and returned 0 having read zero bytes of source. Measured 2026-09-02
+# in coderoast-ipc and insight-twin: both exited 0 that way once an unrelated guard stopped
+# refusing, and the real verdict needed --all-files. NOTHING IN THE OUTPUT SEPARATED THAT FROM A
+# RUN THAT CHECKED EVERYTHING AND FOUND NOTHING, so "malf lint, 0 findings" was one sentence about
+# two opposite facts and a reader could not tell which he had. The defect was in what the green
+# FAILED TO SAY, which is why the fix is an output line and why it needs pinning: a summary line is
+# exactly what a later edit trims as noise, and the loss would be silent — every run still passes.
+# The arms below are the three states a run can be in, plus the two facts that must never merge.
+
+lk_sum() { grep -oE 'malf lint: SUMMARY .*' <<< "$1" | head -1; }
+lk_counts() { grep -oE 'selected [0-9]+, checked [0-9]+, [0-9]+ finding\(s\), [0-9]+ not linted' <<< "$1" | head -1; }
+lk_af_run() {   # <log> [env...] — malf lint --all-files from core/ with the fake toolchain
+    (cd "$lk_repo/core" && PATH="$lk_bin:$PATH" LK_TIDY_LOG="$1" MALF_PROFILE_NAME="" \
+        env "${@:2}" bash "$MALF_BIN" lint --all-files --console 2>&1)
+}
+
+git -C "$lk_repo" reset -q                                    # drop the ghost arm's staged path
+git -C "$lk_repo" -c user.email=t@t -c user.name=t commit -aq -m clean
+lk_clean_out="$(lk_run "$lk_repo/core" "$lk_tmp/tidy.clean.log")"; lk_clean_rc=$?
+check "STATE 1/3 — a CLEAN tree checks nothing, and the summary says so instead of reading as a pass" \
+      "rc=0 declared" \
+      "rc=$lk_clean_rc $([[ "$lk_clean_out" == *"selected 0, CHECKED 0 — NOTHING WAS INSPECTED"* \
+          && "$lk_clean_out" == *"NOT a clean verdict"* ]] && echo declared || echo "GOT: $lk_clean_out")"
+check "the zero-file summary NAMES the selection mode that produced the empty set" \
+      "named" \
+      "$([[ "$lk_clean_out" == *"mode=default (git diff --name-only HEAD, worktree+index, --relative)"* ]] \
+         && echo named || echo "GOT: $lk_clean_out")"
+check "the zero-file run never says 'no files to check' — the phrase that read as a verdict" \
+      "gone" \
+      "$([[ "$lk_clean_out" != *"no files to check"* ]] && echo gone || echo "GOT: $lk_clean_out")"
+
+lk_af_out="$(lk_af_run "$lk_tmp/tidy.af.log")"; lk_af_rc=$?
+check "STATE 2/3 — --all-files on that SAME clean tree checks the TU and finds nothing, rc 0" \
+      "rc=0 selected 1, checked 1, 0 finding(s), 0 not linted" \
+      "rc=$lk_af_rc $(lk_counts "$lk_af_out")"
+check "the two states are DISTINGUISHABLE — the clean-run summary and the zero-run summary differ" \
+      "distinct" \
+      "$([[ "$(lk_sum "$lk_af_out")" != "$(lk_sum "$lk_clean_out")" \
+          && "$lk_af_out" != *"NOTHING WAS INSPECTED"* ]] && echo distinct || echo "GOT: $(lk_sum "$lk_af_out")")"
+check "--all-files names ITS mode, so the fact that was invisible is on both paths" \
+      "named" \
+      "$([[ "$lk_af_out" == *"mode=--all-files (walk of source extensions under the tree)"* ]] \
+         && echo named || echo "GOT: $(lk_sum "$lk_af_out")")"
+
+lk_warn_out="$(lk_af_run "$lk_tmp/tidy.warn.log" LK_TIDY_WARN_ON=engine.cpp)"; lk_warn_rc=$?
+check "STATE 3/3 — a run WITH findings counts them, and a diagnostic's note lines are not findings" \
+      "rc=0 selected 1, checked 1, 1 finding(s), 0 not linted" \
+      "rc=$lk_warn_rc $(lk_counts "$lk_warn_out")"
+
+# A TU THE CHECKER NEVER READ IS ITS OWN COLUMN. Clean, dirty and UNREAD are three states and the
+# summary must not fold the third into either of the first two — 1 finding and 1 not-linted are
+# opposite facts about coverage. [7j3] pins the NOT LINTED block itself; this pins that the
+# one-line summary carries the same count, since that line is what a reader stops at.
+lk_nl_out="$(lk_af_run "$lk_tmp/tidy.nl.log" LK_TIDY_DIE_ON=engine.cpp)"; lk_nl_rc=$?
+check "a TU clang-tidy never read is counted NOT LINTED in the summary, not as 0 findings, rc 1" \
+      "rc=1 selected 1, checked 1, 0 finding(s), 1 not linted" \
+      "rc=$lk_nl_rc $(lk_counts "$lk_nl_out")"
 
 rm -rf "$lk_tmp"
 echo
