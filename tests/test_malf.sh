@@ -1733,6 +1733,129 @@ check "clang-format that never RAN reds with 0 violations, and the run says that
 rm -rf "$fq_tmp"
 echo
 
+echo "[7q2] malf commands STATES ITS OWN SCOPE, and a member left in DEPENDENCY role is FATAL"
+
+# `N146`. A package is configured TWICE in one `malf commands` pass — once as the indexed TARGET
+# (`_malf_cmake_feature_args <pkg> ON ON`) and once as a sibling member's DEPENDENCY
+# (`_malf_dependency_cmake_args`, both OFF) via _malf_bootstrap_workspace_deps — and BOTH writes
+# land in the same `<pkg>/build-<key>` tree, because that key is `(package, profile)` and carries
+# no dimension for ROLE. The dependency configure is the later one, so the merge reads a database
+# from which the target's test and bench TUs have already been removed.
+#
+# MEASURED 2026-09-03 at profile clang21-libcxx-release, both repos, against the same command run
+# with the repair in place:
+#   coderoast-ipc   15 entries where the complete database is  19 —  4 first-party TUs lost, 0 external
+#   insight-canon   60 entries where the complete database is 123 — 63 first-party TUs lost, 0 external
+# All 67 lost entries were test or bench TUs; both runs printed only "(N entries)" and exited 0.
+# That file's one reader is the editor index, which reports a missing TU as an unknown SYMBOL
+# rather than as a missing TU, so nothing anywhere said half the database was gone.
+#
+# NO ARM BELOW NEEDS A TOOLCHAIN, deliberately — this suite runs where none exists and an arm that
+# skips there is zero coverage in a green shirt. The role verdict is driven against fixture
+# CMakeCache files; the repair is pinned STRUCTURALLY, by line arithmetic against the merge it has
+# to precede, because the symptom needs two members and a compiler while the mechanism does not.
+
+cm_tmp="$(mktemp -d)"
+mkdir -p "$cm_tmp/target" "$cm_tmp/dep" "$cm_tmp/plain" "$cm_tmp/half"
+printf 'CMAKE_BUILD_TYPE:STRING=Release\nFOO_BUILD_TESTS:BOOL=ON\nFOO_BUILD_BENCH:BOOL=ON\n'   > "$cm_tmp/target/CMakeCache.txt"
+printf 'CMAKE_BUILD_TYPE:STRING=Release\nFOO_BUILD_TESTS:BOOL=OFF\nFOO_BUILD_BENCH:BOOL=OFF\n' > "$cm_tmp/dep/CMakeCache.txt"
+printf 'CMAKE_BUILD_TYPE:STRING=Release\nCMAKE_CXX_COMPILER:FILEPATH=/usr/bin/clang++-21\n'    > "$cm_tmp/plain/CMakeCache.txt"
+printf 'CMAKE_BUILD_TYPE:STRING=Release\nFOO_BUILD_TESTS:BOOL=ON\nFOO_BUILD_BENCH:BOOL=OFF\n'  > "$cm_tmp/half/CMakeCache.txt"
+
+# `plain` is the OBVIOUS WRONG FIX, pinned as an arm: a package that declares no test or bench
+# option cannot be demoted, so answering anything but `target` there would red every option-less
+# package in the workspace while measuring nothing. `absent` is the failed-configure case — a
+# member with no CMakeCache contributed NOTHING to the database, which is a truncation too and
+# must not read as a pass.
+_malf_commands_tree_role "$cm_tmp/target"; cm_role_target="$_MALF_TREE_ROLE"
+_malf_commands_tree_role "$cm_tmp/dep";    cm_role_dep="$_MALF_TREE_ROLE"; cm_vars_dep="$_MALF_TREE_ROLE_VARS"
+_malf_commands_tree_role "$cm_tmp/plain";  cm_role_plain="$_MALF_TREE_ROLE"
+_malf_commands_tree_role "$cm_tmp/absent"; cm_role_absent="$_MALF_TREE_ROLE"
+
+check "tree role: ON/ON, OFF/OFF, no such option at all, and no cache are FOUR distinct answers" \
+      "target dependency target no-cache" \
+      "$cm_role_target $cm_role_dep $cm_role_plain $cm_role_absent"
+
+check "a demoted tree NAMES the variables that demoted it (the message has to be the repro)" \
+      "FOO_BUILD_BENCH FOO_BUILD_TESTS" \
+      "$cm_vars_dep"
+
+_malf_commands_tree_role "$cm_tmp/half"
+check "one variable OFF is enough to demote, and only the OFF one is named" \
+      "dependency FOO_BUILD_BENCH" \
+      "$_MALF_TREE_ROLE $_MALF_TREE_ROLE_VARS"
+
+# --- the summary: nested members, and the first-party/external split --------------------------
+# Members NEST — insight-eidos is a package AND the parent of insight-eidos/sift — so every entry
+# is billed to the LONGEST matching member prefix. Under a shortest-prefix attribution the parent
+# absorbs each subpackage's TUs and a member that contributed NOTHING still reports coverage,
+# which is precisely the misreading this section exists to make impossible.
+cm_root="$cm_tmp/repo"
+mkdir -p "$cm_root/sub"
+cat > "$cm_tmp/db.json" <<JSON
+[{"file": "$cm_root/api/parent.cppm"},
+ {"file": "$cm_root/sub/api/child.cppm"},
+ {"file": "$cm_root/sub/tests/test_child.cpp"},
+ {"file": "$cm_root/sub/benchmarks/bench_child.cpp"},
+ {"file": "/usr/lib/llvm-21/share/libc++/v1/std.cppm"}]
+JSON
+cm_sum="$(_malf_commands_summary "$cm_tmp/db.json" "$cm_root" 2 0 "target $cm_root" "target $cm_root/sub" 2>&1)"
+cm_parent_line="$(grep -E '^malf commands:   \.[[:space:]]' <<< "$cm_sum" | tr -s ' ')"
+cm_child_line="$(grep -E '^malf commands:   sub[[:space:]]' <<< "$cm_sum" | tr -s ' ')"
+
+check "entries are billed to the LONGEST member prefix, so a nested member is not absorbed" \
+      "malf commands: . role=target 1 entries, 0 test/bench | malf commands: sub role=target 3 entries, 2 test/bench" \
+      "$cm_parent_line | $cm_child_line"
+
+check "the summary splits first-party from external — the half N146 moved while the total held" \
+      "entries 5 = first-party 4 (under $cm_root) + external 1" \
+      "$(grep -oE 'entries [0-9]+ = first-party [0-9]+ \(under [^)]*\) \+ external [0-9]+' <<< "$cm_sum")"
+
+check "the member line states the identity selected = configured + content-only" \
+      "members 2 selected = 2 configured + 0 content-only" \
+      "$(grep -oE 'members [0-9]+ selected = [0-9]+ configured \+ [0-9]+ content-only' <<< "$cm_sum")"
+
+# A database that was never written is not a zero-entry database, and the two must not print the
+# same sentence: the merge failing leaves the previous file OR no file, and both read as "clean"
+# from a count alone.
+cm_nodb_out="$(_malf_commands_summary "$cm_tmp/does-not-exist.json" "$cm_root" 1 0 "target $cm_root" 2>&1)"; cm_nodb_rc=$?
+check "a missing database reds and says so, rather than summarising a file that is not there" \
+      "rc=1 named" \
+      "rc=$cm_nodb_rc $([[ "$cm_nodb_out" == *"NO DATABASE WAS WRITTEN"* ]] && echo named || echo "GOT: $cm_nodb_out")"
+
+rm -rf "$cm_tmp"
+
+# --- the repair is WIRED, and it runs BEFORE the merge -----------------------------------------
+# A repair that ran AFTER `_malf_merge_db_tree` would re-configure the trees having already
+# published the wrong file — indistinguishable from no repair at all in every artifact except the
+# trees themselves, which nobody reads.
+cm_src="$(awk '/^cmd_compile_commands\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$MALF_BIN")"
+cm_reassert_ln="$(grep -n 'demoted_by_bootstrap\[\$pkg_dir\]' <<< "$cm_src" | head -1 | cut -d: -f1)"
+cm_merge_ln="$(grep -n '_malf_merge_db_tree "\$build_root"' <<< "$cm_src" | head -1 | cut -d: -f1)"
+check "the target-role re-assertion exists and runs BEFORE the merge reads the trees" \
+      "wired before" \
+      "$([[ -n "$cm_reassert_ln" ]] && echo wired || echo "NOT-WIRED") $([[ -n "$cm_reassert_ln" && -n "$cm_merge_ln" && "$cm_reassert_ln" -lt "$cm_merge_ln" ]] && echo before || echo "AFTER(reassert=${cm_reassert_ln:-none} merge=${cm_merge_ln:-none})")"
+
+# The demotion set is recorded from the SAME loop that reads the dependency entries, so a member
+# demoted by a bootstrap cannot be missed by the repair. Pinned because the two are one loop by
+# choice, not by accident: a second enumeration would be a second chance to disagree.
+check "the demotion set is recorded where the dependency entries are read (one enumeration)" \
+      "same loop" \
+      "$(awk '/while IFS=\$.\\t. read -r _dep_ref _dep_dir/{f=1} f&&/demoted_by_bootstrap\[/{print "same loop"; exit} f&&/^        done </{print "SEPARATE"; exit}' <<< "$cm_src")"
+
+# --- the verdict reaches the exit status -------------------------------------------------------
+# Without this the summary is a nicer-looking silence: a demoted member would be printed and the
+# command would still exit 0, which is the state N146 was already in.
+check "a member in dependency role is FATAL, and the verdict reaches the exit status" \
+      "fatal wired" \
+      "$(grep -q 'is in the database as a DEPENDENCY' <<< "$cm_src" && echo fatal || echo "NOT-FATAL") $(grep -q 'commands_rc=1' <<< "$cm_src" && grep -q 'exit "\$commands_rc"' <<< "$cm_src" && echo wired || echo "NOT-WIRED")"
+
+# An unused predicate tests nothing, and the fixture arms above would still be green.
+check "the role verdict and the scope summary are both CALLED by the command" \
+      "verdict summary" \
+      "$(grep -q '_malf_commands_tree_role "\$(_malf_build_dir "\$m")"' <<< "$cm_src" && echo verdict || echo "VERDICT-UNCALLED") $(grep -q '_malf_commands_summary "\$build_root/compile_commands.json"' <<< "$cm_src" && echo summary || echo "SUMMARY-UNCALLED")"
+
+echo
 echo "[7r] the build slot carries an OWNERSHIP PROOF — a corpse and a holder between runs differ"
 
 # THE INCIDENT, 2026-09-03. The workspace rule is that one LANE builds at a time, because

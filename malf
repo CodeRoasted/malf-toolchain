@@ -2726,6 +2726,161 @@ print(f"malf commands: merged {len(dbs)} database(s) -> {root_output} "
 PY
 }
 
+# ── THE ROLE COLLISION, AND WHY THE BUILD-TREE KEY DOES NOT GAIN A ROLE DIMENSION (`N146`) ──
+#
+# A package can be configured TWICE in one `malf commands` pass, under two ROLES: as the indexed
+# TARGET (`_malf_cmake_feature_args <pkg> ON ON` — tests and benches ON), and as a sibling
+# member's DEPENDENCY (`_malf_dependency_cmake_args` — both OFF) through
+# `_malf_bootstrap_workspace_deps`. Both writes land in `<pkg>/build-<key>`, because that key is
+# `(package, profile)` and carries NO DIMENSION FOR ROLE — so the second configure replaces the
+# first's compile_commands.json, and the merge below reads whatever the last visit left.
+#
+# MEASURED, coderoast-ipc at profile clang21-libcxx-release, 2026-09-03: `coderoast_ipc_core` is a
+# dependency of BOTH `consumer` and `producer`, so its ON/ON configure was overwritten twice and
+# the merged root database came out at 15 entries against a complete 19. The 4 missing were ALL
+# first-party and 0 external — core/tests/unit/test_channel_shutdown.cpp,
+# core/tests/unit/test_shared_memory_channel.cpp, core/tests/core.test.cppm and
+# core/benchmarks/bench_ipc.cpp. The editor index is the only consumer of that file and it had no
+# gate, so the loss was silent in both directions: a 15-entry database reads exactly like a
+# complete one.
+#
+# THE KEY DOES NOT GAIN A ROLE DIMENSION, and that is a decision rather than an omission:
+#   * The recipes bind a consumer to its dependency's build directory BY NAME (the recipe layout
+#     reads MALF_EDITABLE_BUILD_DIR — see _malf_editable_build_dir), so a second role-keyed tree
+#     would be the one consumers LINK while the other is the one `malf test` greens: a green about
+#     a tree nobody links. That is exactly the "second, inconsistent build tree" footgun the
+#     one-tree rule in _malf_build_dir exists to kill, re-entered through another door.
+#   * It doubles compile time and disk for every package that is both a target and a dependency,
+#     and in this workspace that is most of them (21 of the 28 workspace packages, measured 2026-09-03,
+#     are an intra- or cross-repo dependency of another package).
+#   * It would not even fix the editor: clangd reads ONE database, so the merge would still have
+#     to choose a role per package. The choice does not disappear, it only moves.
+#
+# WHAT MAKES ONE TREE SUFFICIENT is that the two roles are NOT SYMMETRIC — the dependency
+# configuration is a strict SUBSET of the target one. VERIFIED 2026-09-03 by diffing the two
+# CMakeCache.txt of coderoast-ipc/core: they differ in the two feature variables
+# (CODEROAST_IPC_CORE_BUILD_TESTS, CODEROAST_IPC_CORE_BUILD_BENCH) and in one variable CMake
+# itself derives from them (CMAKE_CTEST_COMMAND-ADVANCED, added by enable_testing()); compiler,
+# flags, standard library, build type and every dependency path are byte-identical. So the rule is
+# not "keep both trees", it is THE RICHER ROLE WINS THE TREE: a pass that INDEXES must leave every
+# member configured as a target, and the target configure must be the LAST writer.
+#
+# REJECTED, each with the reason:
+#   * Merge instead of overwrite — teach the merge to keep entries a later configure dropped. It
+#     cannot tell a TU that vanished because the ROLE changed from one that vanished because it
+#     was DELETED from the package, so the database would accumulate entries clangd then fails to
+#     open. A stale entry is worse than a missing one: it is wrong rather than absent.
+#   * Configure dependencies with tests ON so nothing is ever demoted. `cmake --build` builds every
+#     target in the tree, so this compiles every dependency's tests and benches on every consumer
+#     build — precisely the cost _malf_dependency_cmake_args exists to avoid.
+#   * Snapshot each target-role database to a role-tagged sidecar and merge from sidecars. Robust
+#     to ordering, but it adds a second artifact per package carrying its own staleness question
+#     ("is this sidecar older than the tree it describes?") that nothing can answer. The
+#     re-assertion below needs no new artifact.
+#
+# So the repair is PASS 2 in cmd_compile_commands — re-assert the target role on every member that
+# another member's dependency bootstrap demoted — and the gate is _malf_commands_tree_role, which
+# reads the CMakeCache the configure actually wrote (the tree's own artifact, never malf's intent),
+# so the class cannot come back silently the next time something is inserted between a member's
+# configure and the merge.
+
+# THE TREE'S ROLE, READ FROM ITS OWN CMakeCache — the role twin of _malf_assert_tree_matches_profile,
+# and two independent ends for the same reason: malf's intent agreeing with itself proves nothing.
+# Pure and side-effect-free so the selftest can drive it against a fixture cache with no toolchain
+# present; it publishes through globals because the caller wants the offending variable NAMES as
+# well as the verdict.
+#
+#   target      every BUILD_TESTS/BUILD_BENCH variable in the cache is ON (or there is none)
+#   dependency  at least one is OFF — the tree was last written by a dependency configure
+#   no-cache    no CMakeCache.txt: this member never configured, so it is absent from the database
+#
+# A tree that declares NO BUILD_TESTS/BUILD_BENCH variable at all answers `target`, deliberately: a
+# package with no test or bench option cannot be demoted, and reding on it would be the obvious
+# wrong fix — it would make every option-less package unpassable while measuring nothing.
+_malf_commands_tree_role() {          # <build_dir> -> _MALF_TREE_ROLE, _MALF_TREE_ROLE_VARS
+    local cache="$1/CMakeCache.txt"
+    _MALF_TREE_ROLE="no-cache"
+    _MALF_TREE_ROLE_VARS=""
+    [[ -f "$cache" ]] || return 0
+    local off
+    off="$(sed -nE 's/^([A-Za-z0-9_]*(BUILD_TESTS|BUILD_BENCH)[A-Za-z0-9_]*):BOOL=(OFF|FALSE|NO|0)$/\1/p' \
+             "$cache" | sort -u | tr '\n' ' ')"
+    off="${off% }"
+    if [[ -n "$off" ]]; then
+        _MALF_TREE_ROLE="dependency"
+        _MALF_TREE_ROLE_VARS="$off"
+    else
+        _MALF_TREE_ROLE="target"
+    fi
+    return 0
+}
+
+# THE RUN'S OWN SCOPE, STATED — the `commands` member of the family _malf_lint_summary and
+# _malf_format_summary opened, in the SAME grammar for the same reason: two adjacent gates
+# reporting in two vocabularies is a second thing for a reader to learn and one of them gets
+# misread.
+#
+# `malf commands` printed exactly ONE line — "merged N database(s) -> <path> (E entries)" — and E
+# alone cannot separate a complete database from a truncated one. Measured 2026-09-03 in
+# coderoast-ipc: the run that dropped four first-party TUs printed "(15 entries)" and the correct
+# run prints "(19 entries)". Nothing in either line says which is which, and the file's only reader
+# is an editor, which reports a missing TU as an unknown symbol rather than as a missing TU.
+#
+# THE COUNTS ARE THE ONES THIS PATH HOLDS, and they are not lint's three:
+#   selected     every member `_malf_member_packages` produced
+#   configured   the members that reached a target-role `cmake --preset`
+#   content-only selected minus configured — a conanfile with no CMakeLists.txt has no TU to index,
+#                so `selected = configured + content-only` is an identity verifiable on the line
+#   entries      the merged database's size, SPLIT first-party (under the invocation root) versus
+#                external (a standard-library module unit, a dependency in a SIBLING repo). The
+#                split is the load-bearing half: `N146` moved the first-party count while leaving
+#                the external one untouched, and a total alone cannot show that.
+#   per member   its entries and how many of those are test/bench TUs — where a demotion shows up.
+#
+# Entries are attributed to the LONGEST matching member prefix, never the first match: members
+# NEST (insight-eidos is a package and also the parent of insight-eidos/sift), so a shortest-prefix
+# attribution bills every subpackage's TU to the parent and reports full coverage for a member that
+# contributed nothing.
+_malf_commands_summary() {            # <db> <root> <selected> <content_only> [<role> <dir>]...
+    local db="$1" root="$2" selected="$3" content_only="$4"
+    shift 4
+    if [[ ! -f "$db" ]]; then
+        echo "malf commands: SUMMARY · root=$root · db=$db · NO DATABASE WAS WRITTEN — nothing was indexed" >&2
+        return 1
+    fi
+    python3 - "$db" "$root" "$selected" "$content_only" "$@" <<'PY'
+import json, os, sys
+
+db, root, selected, content_only = sys.argv[1:5]
+rows = [a.split(" ", 1) for a in sys.argv[5:]]
+
+files = [e.get("file", "") for e in json.loads(open(db).read())]
+prefix = root.rstrip("/") + "/"
+first = sum(1 for f in files if f.startswith(prefix))
+
+TEST_HEADS = {"tests", "test", "test_package", "benchmarks", "benchmark", "bench"}
+by_len = sorted((d for _, d in rows), key=len, reverse=True)
+per = {d: [0, 0] for _, d in rows}
+for f in files:
+    for d in by_len:
+        base = d.rstrip("/")
+        if f.startswith(base + "/"):
+            per[d][0] += 1
+            if f[len(base) + 1:].split("/", 1)[0] in TEST_HEADS:
+                per[d][1] += 1
+            break
+
+print(f"malf commands: SUMMARY · root={root} · db={db}")
+print(f"malf commands:   members {selected} selected = {len(rows)} configured + {content_only} content-only "
+      f"(a conanfile with no CMakeLists.txt has no TU to index)")
+print(f"malf commands:   entries {len(files)} = first-party {first} (under {root}) + external {len(files) - first}")
+width = max((len(os.path.relpath(d, root)) for _, d in rows), default=1)
+for role, d in rows:
+    n, t = per[d]
+    print(f"malf commands:   {os.path.relpath(d, root):<{width}}  role={role:<10} {n} entries, {t} test/bench")
+PY
+}
+
 cmd_compile_commands() {
     [[ $# -eq 0 ]] || _malf_refuse_option commands "$1"
     # Generate the repo-level compile_commands.json that .clangd reads
@@ -2738,6 +2893,11 @@ cmd_compile_commands() {
     # clangd reads is the configuration `malf build` / `malf test` actually produce — this line
     # used to force Debug "so test targets match malf build / malf test", which was true only
     # because those verbs forced Debug too, and stopped being true the moment either moved.
+    #
+    # THE PASS IS IN THREE PARTS because of the role collision documented above this function:
+    # pass 1 configures each member as a target (and, on the way, DEMOTES any member that is a
+    # sibling's dependency), pass 2 re-asserts the target role on exactly those demoted members,
+    # and only then does the merge read the trees.
     local build_root; build_root="$(_malf_build_dir "$CWD")"
     mkdir -p "$build_root"
     # Rebuild the editor DB from scratch: clear the merged output so a single-package
@@ -2754,6 +2914,9 @@ cmd_compile_commands() {
     fi
 
     local db_dirs=("$build_root")
+    local configured=()            # members that reached a target-role configure, in visit order
+    local -A demoted_by_bootstrap=()   # every member dir a dependency bootstrap re-configured
+    local content_only=0
     local pkg_dir
     for pkg_dir in "${members[@]}"; do
         local subdir subdir_name subdir_build
@@ -2762,6 +2925,7 @@ cmd_compile_commands() {
         # Content-only packages (no CMakeLists.txt anywhere) have no TUs to index.
         if [[ ! -f "$subdir/CMakeLists.txt" && ! -f "$subdir/test_package/CMakeLists.txt" ]]; then
             echo "malf commands: $subdir_name is content-only — skipped"
+            content_only=$((content_only + 1))
             continue
         fi
         # Canonical build dir, mirroring `malf build` — package-anchored
@@ -2797,11 +2961,19 @@ cmd_compile_commands() {
         # already built just above, so their build dirs carry exactly those units — merge
         # them. rglob in the merge dedups by file, so overlapping deps across members are
         # harmless.
+        #
+        # THE SAME LOOP RECORDS THE DEMOTIONS. _malf_bootstrap_workspace_deps just
+        # re-configured every one of these dep dirs with tests and benches OFF; for a dep that
+        # is ALSO a member of this repo, that write landed in the very tree pass 1 configured
+        # as a target (one tree per (package, profile) — no role dimension), so pass 2 has to
+        # put it back. Guarded on MALF_AUTO_WORKSPACE_DEPS because with the bootstrap disabled
+        # nothing was demoted and a re-assert would be a configure paid for no reason.
         local _dep_ref _dep_dir _dep_build
         while IFS=$'\t' read -r _dep_ref _dep_dir; do
             [[ -n "$_dep_dir" ]] || continue
             _dep_build="$(_malf_editable_build_dir "$_dep_dir")"
             [[ -d "$_dep_build" ]] && db_dirs+=("$_dep_build")
+            [[ "$MALF_AUTO_WORKSPACE_DEPS" == "0" ]] || demoted_by_bootstrap["$_dep_dir"]=1
         done < <(_malf_workspace_dep_entries "$subdir")
 
         # test_package (if any) -> its own compile_commands.json.
@@ -2833,10 +3005,76 @@ cmd_compile_commands() {
                 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
                 "${cmake_feature_args[@]}" 2>&1 | tail -1 || \
                 echo "malf commands: warning: cmake configure failed for $subdir_name (continuing)"
+            configured+=("$subdir")
         fi
     done
 
+    # PASS 2 — RE-ASSERT THE TARGET ROLE on every member another member's dependency bootstrap
+    # demoted. This is the `N146` repair; the block above cmd_compile_commands carries the
+    # argument and the rejected alternatives. It is a CONFIGURE, not a build: nothing is
+    # recompiled, the objects the dependency build produced stay valid, and the only thing that
+    # changes is which targets the tree declares — which is the only thing the database records.
+    # Scoped to the intersection (member AND bootstrapped) rather than run over every member,
+    # because a member nothing demoted is already correct and a configure is not free.
+    local reasserted=0
+    for pkg_dir in "${configured[@]}"; do
+        [[ -n "${demoted_by_bootstrap[$pkg_dir]:-}" ]] || continue
+        local re_preset=""
+        re_preset="$(_malf_resolve_preset "$pkg_dir")"
+        [[ -n "$re_preset" ]] || continue
+        local re_args=()
+        mapfile -t re_args < <(_malf_cmake_feature_args "$pkg_dir" ON ON)
+        echo "malf commands: re-asserting target role for $(basename "$pkg_dir")" \
+             "(a sibling's dependency bootstrap configured it with tests and benches OFF)"
+        _malf_write_user_presets "$pkg_dir" "$(_malf_build_dir "$pkg_dir")"
+        cmake --preset "$re_preset" -S "$pkg_dir" \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            "${re_args[@]}" 2>&1 | tail -1 || \
+            echo "malf commands: warning: re-assert configure failed for $(basename "$pkg_dir") (continuing)"
+        reasserted=$((reasserted + 1))
+    done
+    (( reasserted == 0 )) || echo "malf commands: re-asserted the target role on $reasserted member(s)"
+
     _malf_merge_db_tree "$build_root" "${db_dirs[@]}"
+
+    # THE GATE. Every configured member's tree is interrogated for the role it is ACTUALLY in,
+    # read from its own CMakeCache — so a database that is short because a member is sitting in
+    # dependency role, or because it never configured at all, is a red rather than a number
+    # nobody can interpret. It should never fire now that pass 2 exists; that is the point. A
+    # detector that only ever fires when the repair is removed is what keeps the class from
+    # coming back silently, and this one costs one sed per member.
+    local rows=() demoted=() commands_rc=0 m
+    for m in "${configured[@]}"; do
+        _malf_commands_tree_role "$(_malf_build_dir "$m")"
+        rows+=("$_MALF_TREE_ROLE $m")
+        [[ "$_MALF_TREE_ROLE" == "target" ]] || \
+            demoted+=("$_MALF_TREE_ROLE|$m|$_MALF_TREE_ROLE_VARS")
+    done
+
+    _malf_commands_summary "$build_root/compile_commands.json" "$CWD" \
+        "${#members[@]}" "$content_only" "${rows[@]}" || commands_rc=1
+
+    if (( ${#demoted[@]} > 0 )); then
+        commands_rc=1
+        local row _role _pkg _vars
+        for row in "${demoted[@]}"; do
+            IFS='|' read -r _role _pkg _vars <<< "$row"
+            if [[ "$_role" == "no-cache" ]]; then
+                echo "malf commands: FATAL: $(basename "$_pkg") never configured — there is no" >&2
+                echo "malf commands: $(_malf_build_dir "$_pkg")/CMakeCache.txt, so NONE of its" >&2
+                echo "malf commands: translation units are in the database." >&2
+            else
+                echo "malf commands: FATAL: $(basename "$_pkg") is in the database as a DEPENDENCY, not as the" >&2
+                echo "malf commands: indexed target ($_vars = OFF in $(_malf_build_dir "$_pkg")/CMakeCache.txt)," >&2
+                echo "malf commands: so its test and benchmark translation units are ABSENT. A dependency" >&2
+                echo "malf commands: configure wrote that tree after its target configure." >&2
+            fi
+        done
+        echo "malf commands: the editor index is this file's only reader, and an editor reports a" >&2
+        echo "malf commands: missing TU as an unknown symbol rather than as a missing TU — so a" >&2
+        echo "malf commands: truncated database is silent. This refuses instead of handing one over." >&2
+    fi
+    exit "$commands_rc"
 }
 
 # Does this package DECLARE a benchmark target? Answered from SOURCE, before any build.
@@ -3401,6 +3639,13 @@ Commands:
                                extension can otherwise take the whole machine down. Prune extra
                                directories with MALF_FORMAT_EXCLUDE_EXTRA="dir1 dir2".
     commands | compile-commands
+                               rebuild the repo-level compile_commands.json the editor reads.
+                               Every run STATES ITS SCOPE — members selected/configured, the
+                               entry total split first-party vs external, and per member its
+                               entries and how many are test/bench TUs. A member left sitting in
+                               DEPENDENCY role (tests and benches OFF), or one that never
+                               configured, is FATAL: its TUs are absent from the database and
+                               an editor reports that as an unknown symbol, never as a hole.
     bench   [target] [--quick] [--filter REGEX] [--asan|--profile <name>] [--compare] [--threshold N] [--baseline path] [-- <benchmark args>]
     clean   <build|conan|editables|stale|all>
                                    NO DEFAULT and exactly one target: a bare `malf clean` REFUSES
