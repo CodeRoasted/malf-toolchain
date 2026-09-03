@@ -93,12 +93,33 @@ Index:
 
 ---
 
-# test_package is compiled during conan create, not in workspace build
-# It gets its dependencies from Conan's temporary build context
-# Suppress header-not-found errors since GTest paths vary by Conan cache layout
+# test_package TUs. The `Suppress: [clang-diagnostic-error]` that used to sit here was INERT,
+# and had always been. clangd matches a Suppress entry against the NORMALIZED clang diagnostic
+# name (`err_pp_file_not_found` -> `pp_file_not_found`) or a warning flag (`-Wunused-variable`
+# -> `unused-variable`); `clang-diagnostic-error` is a clang-tidy alias namespace, is neither,
+# and an unrecognised entry is dropped with NO diagnostic — so the line read as a mute and
+# muted nothing. That is the durable half; the incident half was its stated premise,
+# "test_package is compiled during conan create, not in workspace build", which stopped being
+# true when the build tool began configuring test_package in-tree.
+#
+# Measured 2026-09-03, clangd 21.1.8, `--check --check-locations=0
+# --experimental-modules-support`, over the 9 tracked test_package TUs in this workspace at 10
+# TU/database coordinates, each run twice (project config enabled, then --enable-config=0): the
+# diagnostic set is IDENTICAL in all 10 pairs. Pulling control on insight-metalog's TU against
+# its own package database, same session — baseline 2 diagnostics; `Suppress:
+# [pp_file_not_found]` -> 1; `Suppress: [clang-diagnostic-error]` -> 2; `Suppress:
+# [module_not_found, pp_file_not_found]` -> 0. Suppression works; that spelling was the wrong
+# key, not a working mute. So removing it surfaces nothing that was hidden.
+#
+# If a test_package diagnostic ever must be muted, name the diagnostic itself. A
+# `clang-diagnostic-*` alias cannot fail loudly here, so it buys a false sense of a mute.
+#
+# Do NOT re-derive "these TUs are indexed" from a database reading: coverage is per-package and
+# it MOVES. Measured the same day, 7 minutes apart, insight-eidos's package database went from
+# 391 entries / 4 test_package entries to 38 / 0 because a sibling lane reconfigured; a TU
+# absent from the database its own .clangd points at still opens, on clangd's heuristic flags,
+# and reports header-not-found noise that belongs to the database and not to the code.
 If:
   PathMatch: .*/test_package/.*
 Diagnostics:
-  Suppress:
-    - clang-diagnostic-error
   UnusedIncludes: Strict
