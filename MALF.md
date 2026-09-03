@@ -26,6 +26,7 @@ malf compile-commands
 malf bench   [target] [--quick] [--filter REGEX] [--compare] [--repetitions N] [--threshold F] [--asan|--profile <name>]
 malf clean   <build|conan|editables|stale|all>   # no default; `all` is the nuclear form
 malf run     <exe-name> [args...]
+malf slot    [status|acquire|release]
 ```
 
 ### Verbs — one compile surface
@@ -74,6 +75,7 @@ gone. The merged clangd DB lands at the repo root's default-leg tree
 | `commands` / `compile-commands` | configure every member package (+ its `test_package`) and merge all `compile_commands.json` into the repo root's default-leg DB |
 | `clean` | remove build trees (CWD + every member package), cached Conan packages, or the editable registry — **one explicit target, no default**. A bare `malf clean` refuses and removes nothing; `malf clean all` is the nuclear form (all three at once). It defaulted to `all` until 2026-09-02, so one missing word wiped the workspace |
 | `run` | execute a binary from any member package's build tree |
+| `slot` | the **workspace build slot** — the coarse claim that one *lane* builds at a time across every repo, distinct from the per-build-directory lock `build`/`test` take for themselves. Its stamp carries two independent proofs, because a holder poses two different questions: an **anchor** (the holder's session pid plus that pid's start time) answers *is the holder still alive?*, and a 32-hex **token** answers *am I the holder?*. The anchor is the lane's SESSION and never an individual run — a per-run pid is gone between runs by design, so its death proves nothing, which is exactly why the hand-rolled `holder`-file protocol it replaces could not tell a corpse from a lane that was thinking. `acquire` claims a free slot, refuses a live one by name, and reclaims a provably dead one automatically. `release` needs `--token`; `--force` covers only a slot with no readable stamp, and a **live** holder cannot be forced at all — kill its anchor pid and the slot frees itself. A directory carrying no stamp `malf` wrote is `UNKNOWN`: never reclaimed for you, always shown to you. `status` prints `FREE` / `HELD` / `STALE` / `UNKNOWN` and exits `0` / `1` / `2` / `3`. Path: `MALF_BUILD_SLOT_DIR` (default `/tmp/coderoast-build-slot`) |
 
 ### Cache discovery
 

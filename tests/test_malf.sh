@@ -1733,6 +1733,152 @@ check "clang-format that never RAN reds with 0 violations, and the run says that
 rm -rf "$fq_tmp"
 echo
 
+echo "[7r] the build slot carries an OWNERSHIP PROOF — a corpse and a holder between runs differ"
+
+# THE INCIDENT, 2026-09-03. The workspace rule is that one LANE builds at a time, because
+# concurrent malf runs share one editable conan tree. The protocol was hand-rolled and lived in no
+# file: `mkdir /tmp/coderoast-build-slot`, plus a `holder` file carrying the CURRENT RUN's pid,
+# re-stamped per run. A third party judged the slot stale and `rm -rf`'d it WHILE a `malf test`
+# was live; the holder's next re-stamp failed and two gcc runs ran unprotected. Green, and
+# consistent with their clang twins — a near miss, not a loss.
+#
+# THE ROOT CAUSE IS NOT THE DELETION. A bare mkdir carries no ownership proof, so a lane cannot
+# tell a corpse from a holder that is merely BETWEEN RUNS — and with a per-run pid, "that pid is
+# gone" is the NORMAL state, not evidence of anything. Every arm below is one of the judgements a
+# lane has to make, and each was previously a guess.
+#
+# WHAT NO TOOL CAN DO, said plainly so nobody reads more into these arms than they prove: a
+# literal `rm -rf` cannot be refused by anything. What is pinned is that every path malf offers
+# for taking the slot from somebody refuses while its holder is provably alive, and that the
+# directory itself survives each refusal — which is what removes the REASON to reach for `rm -rf`.
+
+sl_tmp="$(mktemp -d)"
+sl_dir="$sl_tmp/slot"
+# EVERY invocation is pinned to the scratch slot. A test that touched the default path would
+# reach into a live lane's slot on the developer's own box, which is the incident itself.
+sl() {   # <args...>
+    MALF_BUILD_SLOT_DIR="$sl_dir" bash "$MALF_BIN" slot "$@" 2>&1
+}
+sl_as() {   # <anchor pid> <args...>
+    MALF_BUILD_SLOT_DIR="$sl_dir" MALF_BUILD_SLOT_ANCHOR="$1" bash "$MALF_BIN" slot "${@:2}" 2>&1
+}
+sl_dir_exists() { [[ -d "$sl_dir" ]] && echo present || echo GONE; }
+
+sl_free_out="$(sl status)"; sl_free_rc=$?
+check "a slot nobody holds reads FREE and exits 0" \
+      "rc=0 FREE" \
+      "rc=$sl_free_rc $([[ "$sl_free_out" == *"FREE"* ]] && echo FREE || echo "GOT: $sl_free_out")"
+
+# The anchor is a process this suite owns and can kill, which is what makes ALIVE and GONE
+# reachable states here rather than things to wait for.
+sleep 300 & sl_anchor=$!
+sl_acq_out="$(sl_as "$sl_anchor" acquire --label suite-lane-A)"; sl_acq_rc=$?
+sl_token="$(grep -oE 'token [0-9a-f]{32}' <<< "$sl_acq_out" | head -1 | awk '{print $2}')"
+check "acquire claims a free slot, names the holder, and mints a 32-hex token" \
+      "rc=0 acquired 32" \
+      "rc=$sl_acq_rc $([[ "$sl_acq_out" == *"ACQUIRED by 'suite-lane-A'"* ]] && echo acquired || echo "GOT: $sl_acq_out") ${#sl_token}"
+
+sl_acq2_out="$(sl_as "$sl_anchor" acquire --label suite-lane-B)"; sl_acq2_rc=$?
+check "a SECOND lane is refused while the holder's anchor is alive, and is told whose it is" \
+      "rc=1 named present" \
+      "rc=$sl_acq2_rc $([[ "$sl_acq2_out" == *"HELD by 'suite-lane-A'"* && "$sl_acq2_out" == *"is ALIVE"* ]] \
+          && echo named || echo "GOT: $sl_acq2_out") $(sl_dir_exists)"
+
+# THE THREE WAYS A THIRD PARTY REACHES FOR SOMEBODY ELSE'S SLOT. All three refuse, and — the arm
+# that matters — the directory is still there afterwards.
+sl_rel_none="$(sl release)"; sl_rel_none_rc=$?
+check "release with NO token is refused while the holder is alive, and the slot survives" \
+      "rc=1 refused present" \
+      "rc=$sl_rel_none_rc $([[ "$sl_rel_none" == *"REFUSED"* ]] && echo refused || echo "GOT: $sl_rel_none") $(sl_dir_exists)"
+sl_rel_bad="$(sl release --token 00000000000000000000000000000000)"; sl_rel_bad_rc=$?
+check "release with the WRONG token is refused, says so, and the slot survives" \
+      "rc=1 named present" \
+      "rc=$sl_rel_bad_rc $([[ "$sl_rel_bad" == *"token given does not match"* ]] && echo named || echo "GOT: $sl_rel_bad") $(sl_dir_exists)"
+# There is deliberately no --force for a LIVE holder. The escape is to kill the anchor, which is
+# an act with a visible subject; a --force that worked here would be the incident with a flag on.
+sl_rel_force="$(sl release --force)"; sl_rel_force_rc=$?
+check "release --force is refused on a LIVE holder — the owner has to die first" \
+      "rc=1 named present" \
+      "rc=$sl_rel_force_rc $([[ "$sl_rel_force" == *"deliberately no --force for a LIVE holder"* ]] \
+          && echo named || echo "GOT: $sl_rel_force") $(sl_dir_exists)"
+
+sl_rel_ok="$(sl release --token "$sl_token")"; sl_rel_ok_rc=$?
+check "the holder releases with its own token" \
+      "rc=0 released GONE" \
+      "rc=$sl_rel_ok_rc $([[ "$sl_rel_ok" == *"RELEASED"* ]] && echo released || echo "GOT: $sl_rel_ok") $(sl_dir_exists)"
+
+# A GENUINELY STALE SLOT. The anchor dies; nothing else changes. This is the judgement the old
+# protocol could not make, and it is the whole reason the anchor is the lane's SESSION and not the
+# run: the pid in the stamp is expected to have no malf process behind it.
+sl_as "$sl_anchor" acquire --label suite-lane-A >/dev/null 2>&1
+kill "$sl_anchor" 2>/dev/null; wait "$sl_anchor" 2>/dev/null
+sl_stale_out="$(sl status)"; sl_stale_rc=$?
+check "once the anchor dies the slot reads STALE and exits 2 (a distinct state, not just 'held')" \
+      "rc=2 stale" \
+      "rc=$sl_stale_rc $([[ "$sl_stale_out" == *"STALE"* && "$sl_stale_out" == *"is GONE"* ]] \
+          && echo stale || echo "GOT: $sl_stale_out")"
+sleep 300 & sl_anchor2=$!
+sl_reclaim_out="$(sl_as "$sl_anchor2" acquire --label suite-lane-B)"; sl_reclaim_rc=$?
+check "acquire RECLAIMS a provably dead holder by itself, and names whose slot it took" \
+      "rc=0 reclaimed acquired" \
+      "rc=$sl_reclaim_rc $([[ "$sl_reclaim_out" == *"reclaiming"* && "$sl_reclaim_out" == *"suite-lane-A"* ]] \
+          && echo reclaimed || echo "GOT: $sl_reclaim_out") $([[ "$sl_reclaim_out" == *"ACQUIRED by 'suite-lane-B'"* ]] \
+          && echo acquired || echo NOT-ACQUIRED)"
+sl_tok2="$(grep -oE 'token [0-9a-f]{32}' <<< "$sl_reclaim_out" | head -1 | awk '{print $2}')"
+check "the reclaimed slot mints a NEW token — the dead holder's does not still open it" \
+      "different" \
+      "$([[ -n "$sl_tok2" && "$sl_tok2" != "$sl_token" ]] && echo different || echo "REUSED: $sl_tok2")"
+sl release --token "$sl_tok2" >/dev/null 2>&1
+kill "$sl_anchor2" 2>/dev/null; wait "$sl_anchor2" 2>/dev/null
+
+# THE LEGACY SLOT — the exact shape found on this box on 2026-09-03: a directory holding `holder`
+# (a pid, already gone) and `owner` (a lane name). It carries no proof of anything, so the answer
+# is UNKNOWN and the removal is a HUMAN's. Reporting it dead would be the incident automated;
+# reporting it held forever would make the tool unusable. It is the one state that asks.
+mkdir -p "$sl_dir"; echo 707217 > "$sl_dir/holder"; echo hephaistos-N147 > "$sl_dir/owner"
+sl_unk_out="$(sl status)"; sl_unk_rc=$?
+check "a hand-rolled slot reads UNKNOWN and exits 3 — never confirmed, never disproved" \
+      "rc=3 unknown" \
+      "rc=$sl_unk_rc $([[ "$sl_unk_out" == *"UNKNOWN"* ]] && echo unknown || echo "GOT: $sl_unk_out")"
+sl_unk_acq="$(sl_as 1 acquire --label suite-lane-C)"; sl_unk_acq_rc=$?
+check "acquire does NOT reclaim an unreadable stamp, and the directory survives" \
+      "rc=1 refused present" \
+      "rc=$sl_unk_acq_rc $([[ "$sl_unk_acq" == *"NOT reclaimed automatically"* ]] && echo refused || echo "GOT: $sl_unk_acq") $(sl_dir_exists)"
+sl_unk_rel="$(sl release)"; sl_unk_rel_rc=$?
+check "plain release refuses an unreadable stamp — there is no token to match and no anchor to test" \
+      "rc=1 refused present" \
+      "rc=$sl_unk_rel_rc $([[ "$sl_unk_rel" == *"no stamp this malf wrote"* ]] && echo refused || echo "GOT: $sl_unk_rel") $(sl_dir_exists)"
+sl_unk_force="$(sl release --force)"; sl_unk_force_rc=$?
+check "release --force removes it, and prints what it destroyed before doing so" \
+      "rc=0 recorded GONE" \
+      "rc=$sl_unk_force_rc $([[ "$sl_unk_force" == *"it contained"* && "$sl_unk_force" == *"holder"* ]] \
+          && echo recorded || echo "GOT: $sl_unk_force") $(sl_dir_exists)"
+
+# THE PATH ITSELF IS A GUARD, because an `rm -rf` runs against it. A mis-set variable must red
+# here rather than delete a level up.
+for sl_bad in / /tmp relative/path; do
+    sl_bad_out="$(MALF_BUILD_SLOT_DIR="$sl_bad" bash "$MALF_BIN" slot status 2>&1)"; sl_bad_rc=$?
+    check "MALF_BUILD_SLOT_DIR='$sl_bad' is refused before anything runs (an rm -rf targets it)" \
+          "rc=1 refused" \
+          "rc=$sl_bad_rc $([[ "$sl_bad_out" == *"must be an absolute path"* ]] && echo refused || echo "GOT: $sl_bad_out")"
+done
+
+# STRUCTURAL. The symptom (a slot deleted out from under its holder) is downstream of the
+# mechanism (an unconditional delete of that directory), and only the mechanism can be pinned
+# without a second lane. Every `rm -rf` of the slot must live inside cmd_slot, where the state
+# machine above decides whether it may run — a helper that grew its own would be invisible to
+# every arm here. Comments are stripped first so this file's own prose cannot satisfy it.
+sl_src="$(sed 's/#.*$//' "$MALF_BIN")"
+sl_body="$(awk '/^cmd_slot\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' <<< "$sl_src")"
+sl_total="$(grep -cF 'rm -rf "$MALF_BUILD_SLOT_DIR"' <<< "$sl_src" || true)"
+sl_inside="$(grep -cF 'rm -rf "$MALF_BUILD_SLOT_DIR"' <<< "$sl_body" || true)"
+check "the slot is deleted only from inside cmd_slot, and it is deleted somewhere (guards a zero)" \
+      "all inside, >0" \
+      "$([[ "$sl_total" == "$sl_inside" ]] && echo "all inside" || echo "$((sl_total - sl_inside)) OUTSIDE cmd_slot"), $( ((sl_total > 0)) && echo ">0" || echo "ZERO — the fixture no longer finds the deletes")"
+
+rm -rf "$sl_tmp"
+echo
+
 echo
 echo
 echo "malf selftest: $pass_count passed, $fail_count failed"

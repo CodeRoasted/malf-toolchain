@@ -14,6 +14,7 @@
 #   malf cut-verify [pkg] [--profile <name>] [--list]
 #   malf run     <exe-name>
 #   malf editables [list|sync]
+#   malf slot    [status|acquire|release]
 #
 # Verb semantics:
 #   `build` compiles EVERYTHING — package + tests + benches (one compile
@@ -98,6 +99,15 @@ MALF_SOURCE_MEM_LIMIT_KB="${MALF_SOURCE_MEM_LIMIT_KB:-4194304}"
 # workspace's 713 files, so the startup cost is noise. (`lint` fans out at
 # -n 1 already, so it needs no equivalent.)
 MALF_FORMAT_BATCH_SIZE="${MALF_FORMAT_BATCH_SIZE:-50}"
+
+# The WORKSPACE BUILD SLOT (see cmd_slot). Under ${TMPDIR:-/tmp} and not in the worktree: it
+# coordinates lanes across every repo at once, so it belongs to no repo, and a git-visible lock
+# would be staged by somebody eventually. The default path is the one the hand-rolled protocol
+# already used, so this replaces that practice rather than starting a second one beside it.
+MALF_BUILD_SLOT_DIR="${MALF_BUILD_SLOT_DIR:-${TMPDIR:-/tmp}/coderoast-build-slot}"
+# How long `malf slot` waits for the mutex around one read-decide-write. Not how long it waits
+# for the SLOT — the slot is never waited on, it is reported.
+MALF_BUILD_SLOT_WAIT_S="${MALF_BUILD_SLOT_WAIT_S:-10}"
 # Directory BASENAMES (glob-matched) pruned from BOTH walks — the single
 # hazard baseline, so the two commands cannot drift apart the way two
 # hand-maintained exclusion lists always do. Pruned, not filtered: a
@@ -3432,6 +3442,23 @@ Commands:
                                    Builds pass --lockfile automatically when the file exists;
                                    MALF_LOCKFILE_STRICT=1 drops --lockfile-partial so an
                                    unlocked dependency is a hard error (CI / release legs).
+    slot    [status|acquire|release]
+                                   the WORKSPACE build slot — one LANE builds at a time, across
+                                   every repo and across the gaps between its runs (this is not
+                                   the per-build-directory lock, which malf takes for itself).
+                                   The stamp carries an ANCHOR (the holder's session pid + that
+                                   pid's start time, so "is the holder alive?" has an answer even
+                                   when no malf process is running) and a TOKEN (32 hex, so
+                                   "am I the holder?" has one too).
+                                   acquire  claims it, or REFUSES and names the live holder;
+                                            a holder whose anchor is provably gone is reclaimed
+                                            automatically, and said so out loud
+                                   release  --token <token from acquire/status>; --force only for
+                                            a slot with no readable stamp. A LIVE holder cannot be
+                                            forced — kill its anchor pid, then the slot frees
+                                            itself. Never 'rm -rf' the directory.
+                                   status   FREE / HELD / STALE / UNKNOWN, and exits 0 / 1 / 2 / 3
+                                   Path: MALF_BUILD_SLOT_DIR (default /tmp/coderoast-build-slot).
     sbom    [--check]              regenerate each published CycloneDX SBOM from the RESOLVED
                                    conan graph (malf/sbom_gen.py). --check writes nothing and
                                    fails if a committed SBOM has drifted from the graph.
@@ -3788,6 +3815,367 @@ cmd_cut_verify() {
     echo "   forced from-source rebuild + test_package, dependency order, clean export ($MALF_PROFILE_NAME)."
 }
 
+# ─── The workspace build slot ────────────────────────────────────────────────
+#
+# WHAT IT IS, and how it differs from the build lock above. Concurrent malf runs share ONE
+# editable conan tree and one set of package-anchored build trees, so the workspace rule is that
+# at most one LANE builds at a time (CLAUDE.md § Build system). `_malf_with_build_lock` serializes
+# two runs that reach the same build DIRECTORY and is held for the length of one build. This is
+# the coarser, longer-lived thing: a workspace-wide claim a lane holds across many runs AND across
+# the gaps between them, so a second lane knows not to start one.
+#
+# WHY IT NEEDED A TOKEN — measured 2026-09-03. The protocol was hand-rolled and lived nowhere in
+# this file: `mkdir /tmp/coderoast-build-slot`, a `holder` file carrying the current run's pid,
+# re-stamped on every run. A third party judged the slot stale and `rm -rf`'d it WHILE a `malf
+# test` was live; the holder's next re-stamp failed and two gcc runs then ran unprotected. They
+# were green and consistent with their clang twins, so nothing was corrupted — a near miss, not a
+# loss. The root cause is not the deletion. It is that a bare mkdir carries NO OWNERSHIP PROOF, so
+# a lane cannot tell a corpse from a holder that is merely between runs, and a lane that guesses
+# wrong deletes a directory somebody else owns.
+#
+# TWO DIFFERENT QUESTIONS, TWO DIFFERENT ANSWERS. Conflating them is exactly what the one `holder`
+# file did, which is why it could answer neither:
+#   "Is the holder still alive?"  ->  the ANCHOR: a pid plus that pid's start time.
+#   "Am I the holder?"            ->  the TOKEN: 32 random hex, minted at acquisition.
+#
+# THE ANCHOR IS THE LANE'S SESSION, NEVER THE RUN, AND THAT IS THE WHOLE REPAIR. A per-run pid is
+# gone between runs BY DESIGN, so "that pid is dead" carries no information at all — which is not
+# a hypothetical: while this was being written /tmp/coderoast-build-slot held `holder` 707217
+# (gone) and `owner` hephaistos-N147, and whether that lane was finished or thinking was
+# unknowable from the directory. The anchor is instead the acquiring process's nearest ancestor
+# that is neither a shell nor malf: the session leader behind an interactive shell at a desk, the
+# agent process behind a lane, the job's worker under CI. It outlives every individual run and
+# dies with the thing that was actually holding the slot, which is the only death that means the
+# slot is free.
+#
+# WHY NOT A HEARTBEAT OR A LEASE. A lease reclaims on silence, and a lane that is legitimately
+# idle between runs — reading, writing docs, waiting on a review — is silent. Its length would be
+# a guess trading a false reclaim against a long stall, and it would have to be re-guessed every
+# time the work changed shape. The anchor answers the real question and has no number to tune.
+#
+# WHY NOT pgrep — measured 2026-09-03. `pgrep -f malf` matches the always-on GitHub Actions runner
+# service at /home/windows/actions-runner-malf/ on its DIRECTORY NAME: a permanent false positive
+# no pattern refinement reaches, present whether or not anyone is building. At the one moment a
+# real run existed the poll returned 7 hits, 1 real, and the real one belonged to a sibling
+# session. A process NAME identifies nothing here; a pid plus its start time does.
+#
+# WHY flock IS RIGHT HERE THOUGH IT WAS WRONG FOR THE LINT SCRATCH (see _malf_lint_open_scratch).
+# There the flock would have been held for the RUN's lifetime across a forked fan-out, and a lock
+# belongs to the open file description, which children inherit — so an orphaned clang-tidy kept it
+# and the probe read ALIVE. Here it is held for the milliseconds of one read-decide-write, no
+# child is forked inside it, and its only job is to stop two lanes reclaiming the same dead slot
+# at the same instant. Different question, different answer.
+#
+# AN UNPARSEABLE STAMP MEANS HELD — THE OPPOSITE OF _malf_lint_owner_alive, DELIBERATELY. There, a
+# stamp that cannot be read is reported DEAD, because refusing to answer would restore the
+# ambiguity that function exists to close and the cost of being wrong is a leaked temp directory.
+# Here the cost of being wrong is an unprotected build over a shared editable tree. So a stamp
+# this code did not write — a hand-rolled slot, a truncated file — is UNKNOWN, is never reclaimed
+# automatically, and needs a human to say `--force`.
+#
+# WHAT THIS DOES NOT DO, stated so nobody assumes otherwise: it does not stop `rm -rf`. Nothing
+# can. It removes the REASON to reach for one, by making "is the holder alive?" a question with an
+# answer, and it makes every removal path print who it is destroying before it does it.
+
+# The pid whose death means the slot is free. Walk up from this process, skipping shells and malf
+# itself; the answer is the first ancestor that is neither. If the walk reaches init without
+# finding one, the answer is the outermost ancestor below init — the session's own shell — which
+# is still strictly longer-lived than any run. Never pid 1: an anchor that cannot die is an anchor
+# that never frees the slot. Override with MALF_BUILD_SLOT_ANCHOR for anything this cannot see.
+_malf_slot_anchor_pid() {
+    if [[ -n "${MALF_BUILD_SLOT_ANCHOR:-}" ]]; then echo "$MALF_BUILD_SLOT_ANCHOR"; return 0; fi
+    local pid=$$ last=$$ hops=0 st rest ppid comm
+    while (( hops < 32 )); do
+        hops=$(( hops + 1 ))
+        st="$(cat "/proc/$pid/stat" 2>/dev/null)" || break
+        # `awk '{print $4}'` is WRONG on this file: field 2 is the comm in parentheses and a comm
+        # may contain spaces, which shifts every later field. Everything after the LAST ") " is
+        # the fixed part (state, ppid, pgrp, …), and no field there can contain that sequence.
+        rest="${st##*') '}"
+        ppid="$(awk '{print $2}' <<< "$rest")"
+        [[ -n "$ppid" && "$ppid" != 0 && "$ppid" != 1 ]] || break
+        comm="$(cat "/proc/$ppid/comm" 2>/dev/null)" || break
+        last="$ppid"
+        case "$comm" in
+            bash|sh|dash|zsh|ksh|fish|malf) pid="$ppid" ;;
+            *) echo "$ppid"; return 0 ;;
+        esac
+    done
+    echo "$last"
+}
+
+# A process's start time, read exactly as _malf_lint_owner_alive reads it: the mtime of its /proc
+# directory. ONE mechanism in this file rather than two that differ by a detail. Its residual is
+# stated at that function — one-second resolution, so a pid recycled inside the same second as the
+# dead anchor reads as alive. Here that residual fails SAFE: the slot then reads HELD when it is
+# free, which stalls a lane and asks a human, where the other direction would hand out a build
+# nobody is protecting.
+_malf_slot_proc_start() {   # <pid>
+    stat -c %Y "/proc/$1" 2>/dev/null
+}
+
+# Read the slot. Answers through globals rather than stdout because every caller needs several
+# fields at once and a command substitution per field would fork per field.
+#   free     the directory does not exist
+#   held     stamp parses, anchor alive        -> somebody is building; wait
+#   dead     stamp parses, anchor gone         -> reclaimable, and acquire reclaims it
+#   unknown  no stamp, or one this did not write -> a human decides; never reclaimed for them
+_malf_slot_read() {
+    _MALF_SLOT_STATE=free
+    _MALF_SLOT_TOKEN=""; _MALF_SLOT_ANCHOR=""; _MALF_SLOT_ANCHOR_START=""
+    _MALF_SLOT_LABEL=""; _MALF_SLOT_SINCE=""
+    [[ -d "$MALF_BUILD_SLOT_DIR" ]] || return 0
+    _MALF_SLOT_STATE=unknown
+    local stamp="$MALF_BUILD_SLOT_DIR/stamp"
+    [[ -r "$stamp" ]] || return 0
+    local magic k_tok token k_anc anchor k_start start
+    read -r magic k_tok token k_anc anchor k_start start _ < "$stamp" || return 0
+    [[ "$magic" == "malf-slot-1" && "$k_tok" == "token" && "$k_anc" == "anchor" \
+       && "$k_start" == "start" && -n "$token" && -n "$anchor" && -n "$start" ]] || return 0
+    _MALF_SLOT_TOKEN="$token"; _MALF_SLOT_ANCHOR="$anchor"; _MALF_SLOT_ANCHOR_START="$start"
+    _MALF_SLOT_LABEL="$(sed -n '2s/^label //p' "$stamp")"
+    _MALF_SLOT_SINCE="$(sed -n '3s/^since //p' "$stamp")"
+    local live=""
+    live="$(_malf_slot_proc_start "$anchor")" || true
+    if [[ -n "$live" && "$live" == "$start" ]]; then
+        _MALF_SLOT_STATE=held
+    else
+        _MALF_SLOT_STATE=dead
+    fi
+    return 0
+}
+
+# 16 bytes of /dev/urandom, not $RANDOM: bash seeds that from the pid and the clock, and two lanes
+# acquiring in the same second are exactly the case that must not collide. `od -N16` reads a fixed
+# count, so nothing closes a pipe early and no SIGPIPE reaches a producer under `pipefail`.
+_malf_slot_mint_token() {
+    od -An -tx1 -N16 /dev/urandom | tr -d ' \n'
+    echo
+}
+
+_malf_slot_write_stamp() {   # <token> <anchor pid> <anchor start> <label>
+    {
+        # Line 1 is the MACHINE line and its shape is a contract — _malf_slot_read parses it.
+        # Lines 2 and 3 are `label ` and `since ` for the same reason. Everything below is for a
+        # human who found this directory and has to decide what to do about it WITHOUT reading
+        # this file, which is the whole failure the incident turned on.
+        echo "malf-slot-1 token $1 anchor $2 start $3"
+        echo "label $4"
+        echo "since $(date -Is)"
+        echo "host $(uname -n)  cwd ${CWD:-$PWD}"
+        echo
+        echo "THIS DIRECTORY IS THE CODEROAST WORKSPACE BUILD SLOT. One lane builds at a time."
+        echo
+        echo "  IS THE HOLDER STILL ALIVE?   malf slot status"
+        echo "     It reads pid $2 and that pid's start time. A holder with no malf process running"
+        echo "     is NORMAL — the slot is held across the gaps between runs, on purpose."
+        echo
+        echo "  RELEASE IT (the holder):     malf slot release --token $1"
+        echo
+        echo "  DO NOT 'rm -rf' THIS DIRECTORY. Deleting it while its holder builds is how two"
+        echo "     unprotected gcc runs happened on 2026-09-03. If the holder is genuinely stuck,"
+        echo "     kill its anchor process $2; the next 'malf slot acquire' then reclaims the slot"
+        echo "     by itself, because it can prove the holder is gone."
+    } > "$MALF_BUILD_SLOT_DIR/stamp"
+}
+
+cmd_slot() {
+    local sub="${1:-status}"
+    shift || true
+    case "$sub" in
+        acquire|release|status) ;;
+        -*) _malf_refuse_option slot "$sub" ;;
+        *)  echo "malf slot: unknown subcommand '$sub'" >&2; _malf_usage_of slot >&2; exit 1 ;;
+    esac
+
+    local label="" token="" force=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --label) shift; label="${1:-}"
+                     [[ -n "$label" ]] || { echo "malf slot: --label needs a value" >&2; exit 1; } ;;
+            --token) shift; token="${1:-}"
+                     [[ -n "$token" ]] || { echo "malf slot: --token needs a value" >&2; exit 1; } ;;
+            --force) force=true ;;
+            *) _malf_refuse_option slot "$1" ;;
+        esac
+        shift
+    done
+
+    # An `rm -rf` runs against this path, so it is validated before anything else touches it: an
+    # absolute path, at least two components, no trailing slash. A mis-set MALF_BUILD_SLOT_DIR
+    # must fail loudly here rather than delete something a level up.
+    if [[ "$MALF_BUILD_SLOT_DIR" != /*/?* || "$MALF_BUILD_SLOT_DIR" == */ ]]; then
+        echo "malf slot: error: MALF_BUILD_SLOT_DIR must be an absolute path of at least two" >&2
+        echo "malf slot: components with no trailing slash — got '$MALF_BUILD_SLOT_DIR'." >&2
+        echo "malf slot: an 'rm -rf' runs against it, so this refuses rather than guess." >&2
+        exit 1
+    fi
+
+    # No graceful degradation, unlike _malf_with_build_lock. That lock's job is to make builds
+    # faster and safer and an unserialized build still builds; this one's only job IS the
+    # coordination, and an unserialized coordination primitive is not a weaker one, it is none.
+    if ! command -v flock >/dev/null 2>&1; then
+        echo "malf slot: error: flock not found (it ships in util-linux)." >&2
+        echo "malf slot: the slot is a coordination primitive — an unserialized one would hand two" >&2
+        echo "malf slot: lanes the same slot — so this refuses rather than degrade." >&2
+        exit 1
+    fi
+
+    # The mutex is a plain FILE beside the directory, never inside it: the critical section
+    # creates and destroys that directory, so a lock living in it would lose its inode mid-hold
+    # and stop excluding anything. Truncating rather than recreating keeps the inode stable across
+    # runs, which is what flock's identity is.
+    local guard="${MALF_BUILD_SLOT_DIR}.lock" slot_fd
+    if ! mkdir -p "$(dirname "$MALF_BUILD_SLOT_DIR")" 2>/dev/null || ! : > "$guard" 2>/dev/null; then
+        echo "malf slot: error: cannot create the mutex file $guard" >&2
+        exit 1
+    fi
+    exec {slot_fd}>"$guard"
+    if ! flock -w "$MALF_BUILD_SLOT_WAIT_S" "$slot_fd"; then
+        echo "malf slot: error: another 'malf slot' held the mutex for more than ${MALF_BUILD_SLOT_WAIT_S}s." >&2
+        echo "malf slot: that section is a few milliseconds long, so this means a stuck process:" >&2
+        echo "malf slot: 'fuser -v $guard' names it." >&2
+        exit 1
+    fi
+
+    local slot_rc=0
+    case "$sub" in
+    acquire)
+        _malf_slot_read
+        case "$_MALF_SLOT_STATE" in
+        held)
+            echo "malf slot: HELD by '${_MALF_SLOT_LABEL:-<unlabelled>}' since ${_MALF_SLOT_SINCE:-<unknown>} — anchor pid $_MALF_SLOT_ANCHOR is ALIVE." >&2
+            echo "malf slot: that lane still exists whether or not a malf process is running right now —" >&2
+            echo "malf slot: the anchor is its SESSION, and a holder between runs is the normal state." >&2
+            echo "malf slot: wait for it. If it is genuinely stuck, kill pid $_MALF_SLOT_ANCHOR and re-run this" >&2
+            echo "malf slot: command, which will then reclaim the slot itself. Do not rm -rf $MALF_BUILD_SLOT_DIR." >&2
+            slot_rc=1
+            ;;
+        unknown)
+            echo "malf slot: $MALF_BUILD_SLOT_DIR exists but carries no stamp this malf wrote — a" >&2
+            echo "malf slot: hand-rolled slot, or a truncated one. Its holder can be neither confirmed" >&2
+            echo "malf slot: nor disproved, so it is NOT reclaimed automatically. It contains:" >&2
+            ls -la "$MALF_BUILD_SLOT_DIR" >&2 || true
+            echo "malf slot: once you have established by other means that nobody holds it:" >&2
+            echo "malf slot:   malf slot release --force" >&2
+            slot_rc=1
+            ;;
+        *)
+            if [[ "$_MALF_SLOT_STATE" == dead ]]; then
+                echo "malf slot: reclaiming — the previous holder '${_MALF_SLOT_LABEL:-<unlabelled>}' (anchor pid $_MALF_SLOT_ANCHOR, held since ${_MALF_SLOT_SINCE:-<unknown>}) is GONE."
+                rm -rf "$MALF_BUILD_SLOT_DIR"
+            fi
+            [[ -n "$label" ]] || label="${MALF_BUILD_SLOT_LABEL:-$(id -un)@$(uname -n):$$}"
+            local anchor start tok
+            anchor="$(_malf_slot_anchor_pid)"
+            start="$(_malf_slot_proc_start "$anchor")" || start=""
+            if [[ -z "$start" ]]; then
+                echo "malf slot: error: cannot read the start time of anchor pid $anchor, so this slot" >&2
+                echo "malf slot: would carry no liveness proof at all. Name a live anchor explicitly:" >&2
+                echo "malf slot:   MALF_BUILD_SLOT_ANCHOR=<pid> malf slot acquire" >&2
+                slot_rc=1
+            else
+                tok="$(_malf_slot_mint_token)"
+                if ! mkdir "$MALF_BUILD_SLOT_DIR" 2>/dev/null; then
+                    echo "malf slot: error: could not create $MALF_BUILD_SLOT_DIR" >&2
+                    slot_rc=1
+                else
+                    _malf_slot_write_stamp "$tok" "$anchor" "$start" "$label"
+                    echo "malf slot: ACQUIRED by '$label' · anchor pid $anchor · token $tok"
+                    echo "malf slot: release with:  malf slot release --token $tok"
+                    echo "malf slot: acquire ONCE and release ONCE — releasing between runs is what lets a"
+                    echo "malf slot: second lane in halfway through your work."
+                fi
+            fi
+            ;;
+        esac
+        ;;
+
+    release)
+        _malf_slot_read
+        case "$_MALF_SLOT_STATE" in
+        free)
+            echo "malf slot: already FREE — $MALF_BUILD_SLOT_DIR does not exist, nothing to release."
+            ;;
+        unknown)
+            if $force; then
+                echo "malf slot: --force — removing $MALF_BUILD_SLOT_DIR, which carries no stamp this malf"
+                echo "malf slot: wrote. For the record, it contained:"
+                ls -la "$MALF_BUILD_SLOT_DIR" || true
+                rm -rf "$MALF_BUILD_SLOT_DIR"
+                echo "malf slot: removed."
+            else
+                echo "malf slot: refusing — $MALF_BUILD_SLOT_DIR carries no stamp this malf wrote, so there" >&2
+                echo "malf slot: is no token to match and no anchor to test. It contains:" >&2
+                ls -la "$MALF_BUILD_SLOT_DIR" >&2 || true
+                echo "malf slot: if you have established by other means that nobody holds it, say so:" >&2
+                echo "malf slot:   malf slot release --force" >&2
+                slot_rc=1
+            fi
+            ;;
+        *)
+            if [[ -n "$token" && "$token" == "$_MALF_SLOT_TOKEN" ]]; then
+                rm -rf "$MALF_BUILD_SLOT_DIR"
+                echo "malf slot: RELEASED — '${_MALF_SLOT_LABEL:-<unlabelled>}' (anchor pid $_MALF_SLOT_ANCHOR)."
+            elif [[ "$_MALF_SLOT_STATE" == dead ]] && $force; then
+                echo "malf slot: --force — the holder '${_MALF_SLOT_LABEL:-<unlabelled>}' (anchor pid $_MALF_SLOT_ANCHOR) is GONE; removing."
+                rm -rf "$MALF_BUILD_SLOT_DIR"
+                echo "malf slot: removed. ('malf slot acquire' would have reclaimed it on its own.)"
+            elif [[ "$_MALF_SLOT_STATE" == dead ]]; then
+                echo "malf slot: the holder '${_MALF_SLOT_LABEL:-<unlabelled>}' (anchor pid $_MALF_SLOT_ANCHOR) is GONE, but the" >&2
+                echo "malf slot: token given does not match the stamp. Either release it as its owner:" >&2
+                echo "malf slot:   malf slot release --token $_MALF_SLOT_TOKEN" >&2
+                echo "malf slot: or just take the slot — 'malf slot acquire' reclaims a dead holder itself." >&2
+                slot_rc=1
+            else
+                echo "malf slot: REFUSED — the slot is held by '${_MALF_SLOT_LABEL:-<unlabelled>}' since ${_MALF_SLOT_SINCE:-<unknown>}," >&2
+                echo "malf slot: and its anchor pid $_MALF_SLOT_ANCHOR is ALIVE. ${token:+The token given does not match. }" >&2
+                echo "malf slot: this is the release that must not happen by reflex: a holder with no malf" >&2
+                echo "malf slot: process running is between runs, not finished." >&2
+                echo "malf slot: if that lane is yours, its token is in $MALF_BUILD_SLOT_DIR/stamp and in 'malf slot status'." >&2
+                echo "malf slot: if it is stuck, kill pid $_MALF_SLOT_ANCHOR — the slot then frees itself. There is" >&2
+                echo "malf slot: deliberately no --force for a LIVE holder: the owner has to die first." >&2
+                slot_rc=1
+            fi
+            ;;
+        esac
+        ;;
+
+    status)
+        # Exit status is the state, so a script can branch on it without parsing prose:
+        # 0 free · 1 held (alive) · 2 stale (reclaimable) · 3 unknown (needs a human).
+        _malf_slot_read
+        echo "malf slot: dir $MALF_BUILD_SLOT_DIR"
+        case "$_MALF_SLOT_STATE" in
+        free)
+            echo "malf slot: FREE — the directory does not exist."
+            slot_rc=0 ;;
+        held)
+            echo "malf slot: HELD by '${_MALF_SLOT_LABEL:-<unlabelled>}' since ${_MALF_SLOT_SINCE:-<unknown>}"
+            echo "malf slot: anchor pid $_MALF_SLOT_ANCHOR is ALIVE (started $_MALF_SLOT_ANCHOR_START, same value as the stamp)"
+            echo "malf slot: token $_MALF_SLOT_TOKEN"
+            echo "malf slot: a holder with no malf process running is between runs — that is the normal state."
+            slot_rc=1 ;;
+        dead)
+            echo "malf slot: STALE — holder '${_MALF_SLOT_LABEL:-<unlabelled>}' since ${_MALF_SLOT_SINCE:-<unknown>}"
+            echo "malf slot: anchor pid $_MALF_SLOT_ANCHOR is GONE, so that lane is over."
+            echo "malf slot: 'malf slot acquire' reclaims it — no manual deletion needed."
+            slot_rc=2 ;;
+        *)
+            echo "malf slot: UNKNOWN — the directory exists but carries no stamp this malf wrote,"
+            echo "malf slot: so its holder can be neither confirmed nor disproved. It contains:"
+            ls -la "$MALF_BUILD_SLOT_DIR" || true
+            echo "malf slot: 'malf slot release --force' removes it once you have established by other"
+            echo "malf slot: means that nobody holds it."
+            slot_rc=3 ;;
+        esac
+        ;;
+    esac
+
+    exec {slot_fd}>&-
+    return "$slot_rc"
+}
+
 # ─── Dispatch ────────────────────────────────────────────────────────────────
 
 # Test seam. `source`-ing malf with MALF_SOURCE_ONLY=1 stops HERE, so the pure helpers
@@ -3829,6 +4217,7 @@ case "$COMMAND" in
     inventory)        cmd_inventory "$@" ;;
     cut-verify)       cmd_cut_verify "$@" ;;
     lock)             cmd_lock "$@" ;;
+    slot)             cmd_slot "$@" ;;
     sbom)             cmd_sbom "$@" ;;
     run)              cmd_run "$@" ;;
     bin-dir)          cmd_bin_dir "$@" ;;
