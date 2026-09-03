@@ -431,7 +431,6 @@ _malf_use_keyed_cache() {
     # and so is the save: the build type is the profile's, and re-applying the SAME profile
     # cannot move it.
     _malf_apply_profile "$MALF_PROFILE_NAME"
-    _malf_install_workspace_hooks
 }
 MALF_PROFILE="$(_malf_profile_path)"
 MALF_PROFILE_NAME="$(basename "$MALF_PROFILE")"
@@ -462,24 +461,16 @@ MALF_BUILD_PROFILE="${MALF_BUILD_PROFILE:-$MALF_PROFILE}"
 # libstdc++ + ASan/UBSan (libFuzzer via the harness target). Requires clang-21 installed.
 MALF_ASAN_PROFILE="${MALF_ASAN_PROFILE:-linux-clang21-asan}"
 
-# ─── Conan global.conf / hooks ───────────────────────────────────────────────
+# ─── Conan global.conf ───────────────────────────────────────────────────────
 # Sync the local cache's global.conf from the in-tree source of truth (overwrite-if-different).
 _malf_sync_conan_conf
 
-_malf_install_workspace_hooks() {
-    local hooks_dir="$CONAN_HOME/extensions/hooks"
-    mkdir -p "$hooks_dir"
-
-    local source_hook installed_hook
-    while IFS= read -r source_hook; do
-        installed_hook="$hooks_dir/$(basename "$source_hook")"
-        if [[ ! -f "$installed_hook" ]] || ! cmp -s "$source_hook" "$installed_hook"; then
-            cp "$source_hook" "$installed_hook"
-        fi
-    done < <(find "$MALF_WORKSPACE_ROOT" -path '*/scripts/conan_hooks/hook_*.py' | sort)
-}
-
-_malf_install_workspace_hooks
+# There is deliberately no repo-local conan HOOK installer here. malf carried one until
+# 2026-09-03; the only hook that ever used it was ripped from both repos that had it, and
+# the installer's unbounded workspace-wide `find` then cost 1.57 s on every invocation to
+# copy nothing. Conan creates `extensions/hooks` itself and tolerates its absence, so
+# nothing downstream needs the directory. If a third-party recipe ever needs patching
+# again, the eleven lines are one `git revert` away — do not re-derive them from scratch.
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 _malf_pkg_ref() {
@@ -3383,6 +3374,12 @@ cmd_bench() {
     local ts
     ts="$(date +%Y%m%dT%H%M%S)"
 
+    # The regression gate is variance-aware (bench_compare.py): comparing needs SAMPLES, so
+    # --compare defaults to 5 repetitions (median + cv aggregates). This is loop-INVARIANT — it
+    # reads only --repetitions and --compare — so it is derived once, here, rather than
+    # re-derived per executable. That is also what lets the baseline guard below read it.
+    local reps="${repetitions:-$($compare && echo 5 || echo 1)}"
+
     local last_json=""
     for exe in "${bench_exes[@]}"; do
         local name
@@ -3393,12 +3390,6 @@ cmd_bench() {
             "--benchmark_out_format=json"
         )
         $quick && bench_args+=("--benchmark_min_time=0.1")
-        # The regression gate is variance-aware (bench_compare.py): comparing needs
-        # SAMPLES, so --compare defaults to 5 repetitions (median + cv aggregates).
-        # A plain `malf bench` stays single-run unless --repetitions is given —
-        # but then the baseline it writes carries no cv, so the next compare falls
-        # back to the current run's cv alone for the widened threshold.
-        local reps="${repetitions:-$($compare && echo 5 || echo 1)}"
         if [[ "$reps" -gt 1 ]]; then
             bench_args+=("--benchmark_repetitions=${reps}"
                          "--benchmark_report_aggregates_only=true")
@@ -3411,10 +3402,55 @@ cmd_bench() {
         last_json="$out_file"
     done
 
-    # ── update baseline when not comparing ─────────────────────────────────────
-    if ! $compare && [[ -n "$last_json" && -f "$last_json" ]]; then
-        cp "$last_json" "$out_dir/baseline.json"
-        echo "Baseline updated: $out_dir/baseline.json"
+    # ── update the baseline only from a run that IS a baseline measurement ─────
+    # The baseline is what every later --compare is judged against, so a run that measured
+    # something other than the whole suite at full precision must never silently become one:
+    # the next comparison then reads noise as a regression or as a win, and nothing in its
+    # output says the BASELINE was the unusual half. Four refusals, each for its own reason,
+    # and each NAMED in the message — a silent refusal would only move the surprise.
+    #   --compare      this run is the challenger; overwriting the reference it was just
+    #                  judged against destroys the comparison and the next one too.
+    #   --quick        --benchmark_min_time=0.1 is a different measurement CONFIGURATION, not
+    #                  a faster one. Comparing a full run against it is a ratio across two
+    #                  configurations, which is the one thing a ratio may not be.
+    #   --filter       the JSON holds only the matched subset, so the next --compare takes
+    #                  bench_compare.py's missing-benchmark path and exits 1 on every bench
+    #                  the filter excluded. MEASURED TWICE, and both times the file had to be
+    #                  restored from a hand-made copy (DONE.md, the insight-metalog KeyAlloc
+    #                  runs: "a plain `malf bench` copies the filtered run's JSON over
+    #                  bench_results/baseline.json").
+    #   reps == 1      a single sample carries no cv, so bench_compare.py cannot widen the
+    #                  threshold from the baseline side at all and falls back to the
+    #                  challenger's own noise. All six published hub baselines are 100%
+    #                  aggregate (488 rows, 0 single-run — measured 2026-08-05), so a
+    #                  single-sample baseline is not what any real baseline here is.
+    # What this does NOT refuse, and the distinction is load-bearing: bench_compare.py's
+    # single-sample branch stays live and wanted, because it is for the CHALLENGER side — an
+    # ad-hoc `malf bench` judged against a good baseline. This guard is about the WRITER.
+    if [[ -n "$last_json" && -f "$last_json" ]]; then
+        local refusals=()
+        if $compare; then
+            refusals+=("--compare: this run is the challenger, not a new reference")
+        fi
+        if $quick; then
+            refusals+=("--quick: --benchmark_min_time=0.1 is a different measurement configuration")
+        fi
+        if [[ -n "$filter" ]]; then
+            refusals+=("--filter '$filter': the JSON holds only the matched subset")
+        fi
+        if [[ "$reps" -le 1 ]]; then
+            refusals+=("--repetitions $reps: a single sample carries no cv")
+        fi
+        if [[ ${#refusals[@]} -eq 0 ]]; then
+            cp "$last_json" "$out_dir/baseline.json"
+            echo "Baseline updated: $out_dir/baseline.json ($reps repetitions, unfiltered, full precision)"
+        else
+            echo "malf bench: baseline NOT updated — $out_dir/baseline.json is unchanged, because:"
+            printf 'malf bench:   · %s\n' "${refusals[@]}"
+            echo "malf bench: this run's results are in $last_json."
+            echo "malf bench: to make a baseline: malf bench $(basename "$target") --repetitions 5" \
+                 "(no --quick, no --filter, no --compare)"
+        fi
     fi
 
     # ── bench --compare ────────────────────────────────────────────────────────
@@ -3958,10 +3994,6 @@ Editables:
     conan editable add <path> --name=<name> --version=<version> -of <path>
     Clean all registrations with 'malf clean editables'.
 
-Workspace Conan hooks:
-    Any `scripts/conan_hooks/hook_*.py` files found under MALF_WORKSPACE_ROOT
-    are copied into CONAN_HOME/extensions/hooks and activated automatically.
-
 Profile:
     $CONAN_HOME/profiles/linux-clang21-libcxx-release  (dev default; or MALF_PROFILE_NAME)
   gcc-16 (ship + determinism reference leg): --profile linux-gcc16-release
@@ -4187,7 +4219,6 @@ cmd_cut_verify() {
     mkdir -p "$CONAN_HOME/profiles"
     _malf_sync_conan_conf
     _malf_apply_profile "$MALF_PROFILE_NAME"      # re-resolve the profile INTO this cache
-    _malf_install_workspace_hooks
     rm -f "$CONAN_HOME/editable_packages.json"    # CLEAN-EXPORT invariant: no editables
     # CLEAN-EXPORT invariant #2: recipes branch their cmake builddirs on MALF_EDITABLE_BUILD_DIR
     # (e.g. canon/eidos ship their OWN cmake config under lib/cmake/<pkg> with cmake_find_mode=none;
