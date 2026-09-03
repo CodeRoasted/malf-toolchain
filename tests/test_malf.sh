@@ -1799,7 +1799,7 @@ cat > "$cm_tmp/db.json" <<JSON
  {"file": "$cm_root/sub/benchmarks/bench_child.cpp"},
  {"file": "/usr/lib/llvm-21/share/libc++/v1/std.cppm"}]
 JSON
-cm_sum="$(_malf_commands_summary "$cm_tmp/db.json" "$cm_root" 2 0 3 2 1 "target $cm_root" "target $cm_root/sub" 2>&1)"
+cm_sum="$(_malf_commands_summary "$cm_tmp/db.json" "$cm_root" 2 0 0 3 2 1 "target $cm_root" "target $cm_root/sub" 2>&1)"
 cm_parent_line="$(grep -E '^malf commands:   \.[[:space:]]' <<< "$cm_sum" | tr -s ' ')"
 cm_child_line="$(grep -E '^malf commands:   sub[[:space:]]' <<< "$cm_sum" | tr -s ' ')"
 
@@ -1811,23 +1811,37 @@ check "the summary splits first-party from external — the half N146 moved whil
       "entries 5 = first-party 4 (under $cm_root) + external 1" \
       "$(grep -oE 'entries [0-9]+ = first-party [0-9]+ \(under [^)]*\) \+ external [0-9]+' <<< "$cm_sum")"
 
-check "the member line states the identity selected = configured + content-only" \
-      "members 2 selected = 2 configured + 0 content-only" \
-      "$(grep -oE 'members [0-9]+ selected = [0-9]+ configured \+ [0-9]+ content-only' <<< "$cm_sum")"
+# THREE terms, because a member can fail to be configured for two reasons that promise different
+# things: content-only has no CMakeLists.txt anywhere and contributes nothing, while a BUILDLESS
+# member produced no CMakePresets.json and still contributes its test_package's units. Folding the
+# second into the first would say "nothing to index" about a member whose only consumer-shaped
+# translation unit IS indexed; leaving it out of both — the state until 2026-09-03 — printed an
+# identity that did not sum: coderoast-server printed "7 selected = 5 configured + 1 content-only".
+cm_id_re='members [0-9]+ selected = [0-9]+ configured \+ [0-9]+ content-only \+ [0-9]+ buildless'
+check "the member line states the identity selected = configured + content-only + buildless" \
+      "members 2 selected = 2 configured + 0 content-only + 0 buildless" \
+      "$(grep -oE "$cm_id_re" <<< "$cm_sum")"
+
+# The buildless term has to be a term and not a constant: fed a non-zero one, the line must print
+# it, and the three parts must still sum to the selected count.
+cm_sum_buildless="$(_malf_commands_summary "$cm_tmp/db.json" "$cm_root" 3 0 1 1 1 0 "target $cm_root" "target $cm_root/sub" 2>&1)"
+check "a buildless member is counted on the member line, and the identity still sums" \
+      "members 3 selected = 2 configured + 0 content-only + 1 buildless" \
+      "$(grep -oE "$cm_id_re" <<< "$cm_sum_buildless")"
 
 # A test_package is configured OUTSIDE the member's preset — a synthetic conan consumer and a
 # direct `cmake -S` — so it leaves no CMakeCache and _malf_commands_tree_role is blind to it by
 # construction. This line is where a dropped one becomes visible, and its DENOMINATOR is the census
 # (every test_package/CMakeLists.txt under a selected member), never the number of configures
 # attempted: measured 2026-09-03, coderoast-server holds FOUR test_package directories and the run
-# attempts THREE, so a line counting attempts prints "3" and reads as complete. The arm feeds
+# attempted THREE, so a line counting attempts printed "3" and read as complete. The arm feeds
 # 3 present / 2 configured / 1 failed so that `unreached` is DERIVED rather than echoed — an
 # unreached count that were simply passed in could not go wrong and would measure nothing.
 check "the test_package line is a CENSUS, and unreached is derived from it" \
       "test_package 3 present = 2 configured + 1 failed + 0 unreached" \
       "$(grep -oE 'test_package [0-9]+ present = [0-9]+ configured \+ [0-9]+ failed \+ [0-9]+ unreached' <<< "$cm_sum")"
 
-cm_sum_unreached="$(_malf_commands_summary "$cm_tmp/db.json" "$cm_root" 2 0 4 3 0 "target $cm_root" "target $cm_root/sub" 2>&1)"
+cm_sum_unreached="$(_malf_commands_summary "$cm_tmp/db.json" "$cm_root" 2 0 0 4 3 0 "target $cm_root" "target $cm_root/sub" 2>&1)"
 check "a test_package the run never reached is counted apart from one that configured and refused" \
       "test_package 4 present = 3 configured + 0 failed + 1 unreached" \
       "$(grep -oE 'test_package [0-9]+ present = [0-9]+ configured \+ [0-9]+ failed \+ [0-9]+ unreached' <<< "$cm_sum_unreached")"
@@ -1835,7 +1849,7 @@ check "a test_package the run never reached is counted apart from one that confi
 # A database that was never written is not a zero-entry database, and the two must not print the
 # same sentence: the merge failing leaves the previous file OR no file, and both read as "clean"
 # from a count alone.
-cm_nodb_out="$(_malf_commands_summary "$cm_tmp/does-not-exist.json" "$cm_root" 1 0 1 1 0 "target $cm_root" 2>&1)"; cm_nodb_rc=$?
+cm_nodb_out="$(_malf_commands_summary "$cm_tmp/does-not-exist.json" "$cm_root" 1 0 0 1 1 0 "target $cm_root" 2>&1)"; cm_nodb_rc=$?
 check "a missing database reds and says so, rather than summarising a file that is not there" \
       "rc=1 named" \
       "rc=$cm_nodb_rc $([[ "$cm_nodb_out" == *"NO DATABASE WAS WRITTEN"* ]] && echo named || echo "GOT: $cm_nodb_out")"
@@ -1912,7 +1926,7 @@ check "a test_package that did not configure is FATAL, and the verdict reaches t
 # number of configures attempted and the line reads as complete on a repo that is missing one.
 # Line arithmetic against the preset gate, for the same reason the re-assertion is pinned that way:
 # the ordering IS the property.
-cm_census_ln="$(grep -n 'tp_present=$((tp_present + 1))' <<< "$cm_src" | head -1 | cut -d: -f1)"
+cm_census_ln="$(grep -n 'tp_present_dirs+=("$subdir")' <<< "$cm_src" | head -1 | cut -d: -f1)"
 cm_preset_gate_ln="$(grep -n 'CMakePresets.json" \]\]; then' <<< "$cm_src" | head -1 | cut -d: -f1)"
 check "the test_package census is taken BEFORE the gate that can drop the member" \
       "counted before" \
@@ -1922,6 +1936,84 @@ check "the test_package census is taken BEFORE the gate that can drop the member
 check "the role verdict and the scope summary are both CALLED by the command" \
       "verdict summary" \
       "$(grep -q '_malf_commands_tree_role "\$(_malf_build_dir "\$m")"' <<< "$cm_src" && echo verdict || echo "VERDICT-UNCALLED") $(grep -q '_malf_commands_summary "\$build_root/compile_commands.json"' <<< "$cm_src" && echo summary || echo "SUMMARY-UNCALLED")"
+
+# --- A PRESET-LESS MEMBER STILL REACHES ITS test_package --------------------------------------
+# MEASURED 2026-09-03 at profile clang21-libcxx-release: `malf commands` in coderoast-server
+# reported "test_package 4 present = 3 configured + 0 failed + 1 unreached" and 392 entries, of
+# which ZERO were coderoast-server/server-logging's. That member is a header-library recipe with
+# no CMakeLists.txt, so its conan install generates no CMakeToolchain and writes no
+# CMakePresets.json, and the member loop's preset gate `continue`d — past the dependency bootstrap
+# AND past the test_package configure, which needs no preset at all: it installs its own synthetic
+# conan consumer and runs `cmake -S <member>/test_package` against the toolchain that install
+# wrote. The one translation unit proving that header-only seat's contract had never been in any
+# editor database.
+#
+# THE PROPERTY IS AN ORDERING, so it is pinned as one: the preset gate comes first and records,
+# the test_package configure runs unconditionally after it, and only then does the guard that
+# skips the MEMBER's own preset-driven configure appear. Structural because reproducing the
+# symptom needs conan, a toolchain and a network, while the mechanism is three line numbers.
+cm_gate_ln="$(grep -n 'CMakePresets.json" \]\]; then' <<< "$cm_src" | sed -n '2p' | cut -d: -f1)"
+cm_tpcfg_ln="$(grep -n '_malf_configure_test_package "\$subdir"' <<< "$cm_src" | head -1 | cut -d: -f1)"
+cm_guard_ln="$(grep -n '\[\[ "\$member_has_preset" == true \]\] || continue' <<< "$cm_src" | head -1 | cut -d: -f1)"
+check "the preset gate, the test_package configure and the member-configure guard are in that order" \
+      "gate<tp<guard" \
+      "$([[ -n "$cm_gate_ln" && -n "$cm_tpcfg_ln" && -n "$cm_guard_ln" \
+            && "$cm_gate_ln" -lt "$cm_tpcfg_ln" && "$cm_tpcfg_ln" -lt "$cm_guard_ln" ]] \
+         && echo "gate<tp<guard" \
+         || echo "GOT(gate=${cm_gate_ln:-none} tp=${cm_tpcfg_ln:-none} guard=${cm_guard_ln:-none})")"
+
+# The gate itself must RECORD and fall through. A `continue` anywhere inside it is the exact
+# regression: it reads as a guard on the member and is in fact a guard on the whole iteration.
+cm_gate_end="$(awk -v s="$cm_gate_ln" 'NR>s && /^        fi$/{print NR; exit}' <<< "$cm_src")"
+cm_gate_block="$(sed -n "${cm_gate_ln},${cm_gate_end}p" <<< "$cm_src")"
+check "the preset gate records a buildless member and does NOT leave the iteration" \
+      "records falls-through" \
+      "$(grep -q 'buildless+=("$subdir")' <<< "$cm_gate_block" && echo records || echo "DOES-NOT-RECORD") $(grep -q '\bcontinue\b' <<< "$cm_gate_block" && echo "CONTINUES(the test_package is dropped again)" || echo falls-through)"
+
+# The member's own preset-driven configure must stay BEHIND the guard, _malf_write_user_presets
+# included: that function writes a CMakeUserPresets.json whose only content is an include of the
+# CMakePresets.json this member does not have, so running it for a buildless member would break
+# `cmake --preset` in that source dir for every other reader of it.
+cm_wup_ln="$(grep -n '_malf_write_user_presets "\$subdir" "\$subdir_build"' <<< "$cm_src" | head -1 | cut -d: -f1)"
+cm_preset_cfg_ln="$(grep -n 'cmake --preset "\$preset" -S "\$subdir"' <<< "$cm_src" | head -1 | cut -d: -f1)"
+check "the member's user-presets write and its own cmake --preset stay behind that guard" \
+      "both behind" \
+      "$([[ -n "$cm_wup_ln" && -n "$cm_guard_ln" && "$cm_wup_ln" -gt "$cm_guard_ln" ]] && echo both || echo "USER-PRESETS-AHEAD(wup=${cm_wup_ln:-none} guard=${cm_guard_ln:-none})") $([[ -n "$cm_preset_cfg_ln" && -n "$cm_guard_ln" && "$cm_preset_cfg_ln" -gt "$cm_guard_ln" ]] && echo behind || echo "CONFIGURE-AHEAD(cfg=${cm_preset_cfg_ln:-none} guard=${cm_guard_ln:-none})")"
+
+# --- BOTH RESIDUALS ARE SET DIFFERENCES, WITH EXACTLY ONE PRODUCER EACH ------------------------
+# `unreached` used to have TWO definitions that could disagree: the number PRINTED was derived
+# (present - configured - failed) while the list that produced the FATAL was appended to by hand
+# inside the loop. A skip path that forgot the append printed "1 unreached" and issued no refusal,
+# and the exit status stayed 0 for that reason. Deriving both from the census closes it, and the
+# pin is that there is exactly ONE producer of each residual — a second one is a second chance to
+# disagree, which is the defect itself.
+check "unreached and unaccounted are each produced in exactly ONE place, by set difference" \
+      "1 derived 1 derived" \
+      "$(grep -c 'tp_unreached+=' <<< "$cm_src") $(grep -q 'for m in "${tp_present_dirs\[@\]}"; do \[\[ -n "${tp_accounted\[\$m\]:-}" \]\] || tp_unreached+=' <<< "$cm_src" && echo derived || echo "NOT-DERIVED-FROM-CENSUS") $(grep -c 'unaccounted+=' <<< "$cm_src") $(grep -q 'for m in "${members\[@\]}"; do \[\[ -n "${member_accounted\[\$m\]:-}" \]\] || unaccounted+=' <<< "$cm_src" && echo derived || echo "NOT-DERIVED-FROM-MEMBERS")"
+
+# --- A BUILDLESS MEMBER IS A SHAPE OR A FAILURE, AND ONE OF THEM IS FATAL ----------------------
+# Having no CMakePresets.json is correct for a header-library recipe and catastrophic for a member
+# that declares a CMake project — same empty build dir, same absence from the per-member rows, and
+# in the second case every one of that member's translation units is gone. The CMakeLists.txt is
+# the discriminator, and it is read HERE rather than at the gate, so the gate keeps the artifact
+# predicate and this keeps the diagnosis.
+check "a buildless member that declares a CMake project is FATAL, discriminated, and reaches the exit status" \
+      "fatal discriminated rc" \
+      "$(awk '/for bl_pkg in "\$\{buildless\[@\]\}"/{f=1} f&&/^    done$/{exit}
+              f&&/declares a CMake project and produced no/{a=1}
+              f&&/\[\[ -f "\$bl_pkg\/CMakeLists.txt" \]\] \|\| continue/{b=1}
+              f&&/commands_rc=1/{c=1}
+              END{printf "%s %s %s", a?"fatal":"NO-FATAL-TEXT", b?"discriminated":"NO-CMAKELISTS-DISCRIMINATOR", c?"rc":"RC-NOT-SET"}' <<< "$cm_src")"
+
+# A member the loop accounts for under NONE of the three terms makes the member line's identity
+# false. No path written today reaches it; it is here because the identity is what a reader
+# checks, and a line that silently stops summing is the truncation-that-reads-as-complete failure
+# this whole command exists to refuse.
+check "a member accounted for by none of the three terms is FATAL, and reaches the exit status" \
+      "fatal rc" \
+      "$(awk '/for ua_pkg in "\$\{unaccounted\[@\]\}"/{f=1} f&&/^    done$/{exit}
+              f&&/reached none of/{a=1} f&&/commands_rc=1/{c=1}
+              END{printf "%s %s", a?"fatal":"NO-FATAL-TEXT", c?"rc":"RC-NOT-SET"}' <<< "$cm_src")"
 
 echo
 echo "[7r] the build slot carries an OWNERSHIP PROOF — a corpse and a holder between runs differ"

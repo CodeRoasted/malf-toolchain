@@ -2881,15 +2881,30 @@ _malf_commands_tree_role() {          # <build_dir> -> _MALF_TREE_ROLE, _MALF_TR
 # THE COUNTS ARE THE ONES THIS PATH HOLDS, and they are not lint's three:
 #   selected     every member `_malf_member_packages` produced
 #   configured   the members that reached a target-role `cmake --preset`
-#   content-only selected minus configured — a conanfile with no CMakeLists.txt has no TU to index,
-#                so `selected = configured + content-only` is an identity verifiable on the line
+#   content-only a member with no CMakeLists.txt ANYWHERE — neither its own nor its test_package's
+#                — so it contributes no TU at all. Narrower than malf_graph.py's identically-named
+#                term, which asks only about the member's own CMakeLists.txt; the difference is
+#                the bucket below.
+#   buildless    a member whose conan install produced no CMakePresets.json, so its own preset
+#                configures nothing. A header-library recipe generates no CMakeToolchain and lands
+#                here legitimately (coderoast-server/server-logging), and whatever it contributes
+#                to the database arrives through its test_package. It is a SEPARATE term from
+#                content-only because the two differ in what they promise: content-only says there
+#                is nothing to index, buildless says only the member's OWN units are unindexed.
+#                A buildless member that DOES carry a CMakeLists.txt is a failed install, and is
+#                fatal below — the preset it should have had is missing.
+#                So `selected = configured + content-only + buildless` is an identity verifiable
+#                on the line, and a member accounted for by none of the three is fatal.
 #   test_package a CENSUS — every test_package/CMakeLists.txt under a selected member — split into
-#                configured, failed (the configure ran and refused) and unreached (the member left
-#                the loop before the configure was attempted). The denominator is what EXISTS
-#                rather than what the run got to, because those two differ TODAY: measured
-#                2026-09-03, coderoast-server holds four test_package directories and the run
-#                attempts three. A line counting attempts would have printed "3" beside a repo
-#                holding 4 and read as complete.
+#                configured, failed (the configure ran and refused) and unreached (in the census
+#                and in neither outcome set). The denominator is what EXISTS rather than what the
+#                run got to, because those two differed until 2026-09-03: coderoast-server holds
+#                four test_package directories and the run attempted three, the fourth being
+#                server-logging's, dropped by the preset gate in the member loop. A line counting
+#                attempts would have printed "3" beside a repo holding 4 and read as complete.
+#                Both residuals — unaccounted members and unreached test_packages — are SET
+#                DIFFERENCES against a census taken before any gate, never a counter each branch
+#                remembers to bump: a branch that forgets a counter prints a line that still sums.
 #                It needs its own line because a test_package is configured OUTSIDE the member's
 #                preset (a synthetic conan consumer, then a direct cmake -S) and so contributes no
 #                CMakeCache for _malf_commands_tree_role to read — the per-member role verdict is
@@ -2899,25 +2914,30 @@ _malf_commands_tree_role() {          # <build_dir> -> _MALF_TREE_ROLE, _MALF_TR
 #                split is the load-bearing half: `N146` moved the first-party count while leaving
 #                the external one untouched, and a total alone cannot show that.
 #   per member   its entries and how many of those are test/bench TUs — where a demotion shows up.
+#                The rows cover the CONFIGURED members ONLY, because the role column is read from
+#                a CMakeCache and a buildless member has none to read. So the rows do not have to
+#                sum to first-party, and do not when a buildless member contributed: measured
+#                2026-09-03, coderoast-server's five rows total 128 entries against first-party
+#                129, the odd one being server-logging/test_package/test_package.cpp.
 #
 # Entries are attributed to the LONGEST matching member prefix, never the first match: members
 # NEST (insight-eidos is a package and also the parent of insight-eidos/sift), so a shortest-prefix
 # attribution bills every subpackage's TU to the parent and reports full coverage for a member that
 # contributed nothing.
-_malf_commands_summary() {            # <db> <root> <sel> <content_only> <tp_present> <tp_conf> <tp_failed> [<role> <dir>]...
-    local db="$1" root="$2" selected="$3" content_only="$4"
-    local tp_present="$5" tp_configured="$6" tp_failed="$7"
-    shift 7
+_malf_commands_summary() {            # <db> <root> <sel> <content_only> <buildless> <tp_present> <tp_conf> <tp_failed> [<role> <dir>]...
+    local db="$1" root="$2" selected="$3" content_only="$4" buildless="$5"
+    local tp_present="$6" tp_configured="$7" tp_failed="$8"
+    shift 8
     if [[ ! -f "$db" ]]; then
         echo "malf commands: SUMMARY · root=$root · db=$db · NO DATABASE WAS WRITTEN — nothing was indexed" >&2
         return 1
     fi
-    python3 - "$db" "$root" "$selected" "$content_only" \
+    python3 - "$db" "$root" "$selected" "$content_only" "$buildless" \
               "$tp_present" "$tp_configured" "$tp_failed" "$@" <<'PY'
 import json, os, sys
 
-db, root, selected, content_only, tp_present, tp_configured, tp_failed = sys.argv[1:8]
-rows = [a.split(" ", 1) for a in sys.argv[8:]]
+db, root, selected, content_only, buildless, tp_present, tp_configured, tp_failed = sys.argv[1:9]
+rows = [a.split(" ", 1) for a in sys.argv[9:]]
 
 files = [e.get("file", "") for e in json.loads(open(db).read())]
 prefix = root.rstrip("/") + "/"
@@ -2937,9 +2957,11 @@ for f in files:
 
 print(f"malf commands: SUMMARY · root={root} · db={db}")
 print(f"malf commands:   members {selected} selected = {len(rows)} configured + {content_only} content-only "
-      f"(a conanfile with no CMakeLists.txt has no TU to index)")
+      f"+ {buildless} buildless (content-only = no CMakeLists.txt anywhere, nothing to index; "
+      f"buildless = no CMakePresets.json, so only its test_package reaches the database)")
 print(f"malf commands:   test_package {tp_present} present = {tp_configured} configured + {tp_failed} failed + "
-      f"{int(tp_present) - int(tp_configured) - int(tp_failed)} unreached (the member never configured)")
+      f"{int(tp_present) - int(tp_configured) - int(tp_failed)} unreached (in the census, in neither "
+      f"outcome set)")
 print(f"malf commands:   entries {len(files)} = first-party {first} (under {root}) + external {len(files) - first}")
 width = max((len(os.path.relpath(d, root)) for _, d in rows), default=1)
 for role, d in rows:
@@ -2983,10 +3005,16 @@ cmd_compile_commands() {
     local db_dirs=("$build_root")
     local configured=()            # members that reached a target-role configure, in visit order
     local -A demoted_by_bootstrap=()   # every member dir a dependency bootstrap re-configured
-    local content_only=0
-    local tp_present=0 tp_configured=0
-    local tp_failed=()             # members whose test_package configure ran and refused
-    local tp_unreached=()          # members holding a test_package the loop never got to
+    # THE OUTCOME BUCKETS ARE SETS OF MEMBER DIRECTORIES, NOT COUNTERS, and that is what makes the
+    # two summary identities checkable: the residuals below are set DIFFERENCES against a census
+    # this loop takes before any gate, so a future path that leaves a member early is caught by
+    # arithmetic it cannot opt out of AND the offender is named. A counter each branch has to
+    # remember to bump fails the other way — the branch that forgets prints a line that still sums.
+    local content_only=()          # no CMakeLists.txt anywhere, its test_package's included
+    local buildless=()             # the conan install produced no CMakePresets.json
+    local tp_present_dirs=()       # holds a test_package/CMakeLists.txt — the census
+    local tp_configured_dirs=()    # ... and its test_package configure succeeded
+    local tp_failed=()             # ... and its test_package configure ran and refused
     local pkg_dir
     for pkg_dir in "${members[@]}"; do
         local subdir subdir_name subdir_build
@@ -2995,7 +3023,7 @@ cmd_compile_commands() {
         # Content-only packages (no CMakeLists.txt anywhere) have no TUs to index.
         if [[ ! -f "$subdir/CMakeLists.txt" && ! -f "$subdir/test_package/CMakeLists.txt" ]]; then
             echo "malf commands: $subdir_name is content-only — skipped"
-            content_only=$((content_only + 1))
+            content_only+=("$subdir")
             continue
         fi
         # The test_package CENSUS is taken HERE, before any of the gates below can drop this
@@ -3003,7 +3031,7 @@ cmd_compile_commands() {
         local has_test_package=false
         if [[ -f "$subdir/test_package/CMakeLists.txt" ]]; then
             has_test_package=true
-            tp_present=$((tp_present + 1))
+            tp_present_dirs+=("$subdir")
         fi
         # Canonical build dir, mirroring `malf build` — package-anchored
         # (<pkg>/build-<key>), the ONE tree per (package, profile).
@@ -3021,16 +3049,28 @@ cmd_compile_commands() {
                 $(_malf_conan_install_args) \
                 2>&1 | grep -vE "^$|^======|^Requirements|^Packages|^Build" || true
         fi
+        # A MISSING PRESET BLOCKS THE MEMBER'S OWN CONFIGURE AND NOTHING ELSE, so this records a
+        # fact and does not leave the iteration.
+        #
+        # The predicate is the ARTIFACT the install either wrote or did not, never the absence of
+        # a CMakeLists.txt. Those are different questions and answering the second would be wrong
+        # in both directions: a header-library legitimately has neither, while a member that DOES
+        # declare a CMake project and whose install failed has the file and no preset — and reading
+        # the file would let that one through as though nothing were wrong. The CMakeLists.txt is
+        # read below, once, to decide whether a buildless member is a shape or a failure.
+        #
+        # WHAT THE REST OF THE ITERATION IS: the dependency bootstrap and the test_package
+        # configure. The second needs no preset at all — it installs its own synthetic conan
+        # consumer and configures `cmake -S <member>/test_package` against the toolchain THAT
+        # install wrote — so a `continue` here dropped a translation unit for a reason that never
+        # applied to it. Measured 2026-09-03: coderoast-server/server-logging is a header-library
+        # recipe with no CMakeLists.txt, its install generates no CMakeToolchain, and it left
+        # exactly here — so its test_package translation unit, the ONLY arm proving that
+        # header-only seat's contract, had never been in any editor database.
+        local member_has_preset=true
         if [[ ! -f "$subdir_build/CMakePresets.json" ]]; then
-            # The member itself cannot be configured — a header-library recipe with no CMakeLists
-            # generates no preset. Its test_package needs none of that (it installs its own
-            # synthetic consumer and its own toolchain), but it is configured further down this
-            # same iteration, so leaving here drops it. Recorded rather than silently skipped:
-            # measured 2026-09-03, coderoast-server/server-logging leaves exactly here and its
-            # test_package translation unit — the ONLY arm proving that header-only seat's
-            # contract — has never been in the editor database.
-            if [[ "$has_test_package" == true ]]; then tp_unreached+=("$subdir"); fi
-            continue
+            member_has_preset=false
+            buildless+=("$subdir")
         fi
 
         # Register/build the editable workspace deps this package needs.
@@ -3063,14 +3103,22 @@ cmd_compile_commands() {
             [[ "$MALF_AUTO_WORKSPACE_DEPS" == "0" ]] || demoted_by_bootstrap["$_dep_dir"]=1
         done < <(_malf_workspace_dep_entries "$subdir")
 
-        # test_package (if any) -> its own compile_commands.json.
+        # test_package (if any) -> its own compile_commands.json. DELIBERATELY ABOVE the
+        # member_has_preset gate below: its inputs are the synthetic consumer's own toolchain and
+        # its own source dir, and the member's preset is not among them.
         if [[ "$has_test_package" == true ]]; then
             if _malf_configure_test_package "$subdir" "$subdir_build/test_package"; then
-                tp_configured=$((tp_configured + 1))
+                tp_configured_dirs+=("$subdir")
             else
                 tp_failed+=("$subdir")
             fi
         fi
+
+        # Everything below configures the MEMBER through its own preset, which a buildless member
+        # does not have. _malf_write_user_presets is included on purpose: it would write an
+        # include of a CMakePresets.json that does not exist, breaking `cmake --preset` in that
+        # source dir for every other reader of it.
+        [[ "$member_has_preset" == true ]] || continue
 
         # Point the source dir's CMakeUserPresets.json at the canonical build dir.
         # This MUST run AFTER the test_package install above. In a SINGLE-package repo
@@ -3128,13 +3176,25 @@ cmd_compile_commands() {
 
     _malf_merge_db_tree "$build_root" "${db_dirs[@]}"
 
+    # THE TWO RESIDUALS, DERIVED. `unaccounted` is the members the loop reached no outcome for and
+    # `tp_unreached` the test_packages in the census that reached neither outcome; both are set
+    # differences, so neither can be kept at zero by a branch forgetting to record itself.
+    local m
+    local -A member_accounted=() tp_accounted=()
+    for m in "${configured[@]}" "${content_only[@]}" "${buildless[@]}"; do member_accounted["$m"]=1; done
+    local unaccounted=()
+    for m in "${members[@]}"; do [[ -n "${member_accounted[$m]:-}" ]] || unaccounted+=("$m"); done
+    for m in "${tp_configured_dirs[@]}" "${tp_failed[@]}"; do tp_accounted["$m"]=1; done
+    local tp_unreached=()
+    for m in "${tp_present_dirs[@]}"; do [[ -n "${tp_accounted[$m]:-}" ]] || tp_unreached+=("$m"); done
+
     # THE GATE. Every configured member's tree is interrogated for the role it is ACTUALLY in,
     # read from its own CMakeCache — so a database that is short because a member is sitting in
     # dependency role, or because it never configured at all, is a red rather than a number
     # nobody can interpret. It should never fire now that pass 2 exists; that is the point. A
     # detector that only ever fires when the repair is removed is what keeps the class from
     # coming back silently, and this one costs one sed per member.
-    local rows=() demoted=() commands_rc=0 m
+    local rows=() demoted=() commands_rc=0
     for m in "${configured[@]}"; do
         _malf_commands_tree_role "$(_malf_build_dir "$m")"
         rows+=("$_MALF_TREE_ROLE $m")
@@ -3143,8 +3203,8 @@ cmd_compile_commands() {
     done
 
     _malf_commands_summary "$build_root/compile_commands.json" "$CWD" \
-        "${#members[@]}" "$content_only" \
-        "$tp_present" "$tp_configured" "${#tp_failed[@]}" "${rows[@]}" || commands_rc=1
+        "${#members[@]}" "${#content_only[@]}" "${#buildless[@]}" \
+        "${#tp_present_dirs[@]}" "${#tp_configured_dirs[@]}" "${#tp_failed[@]}" "${rows[@]}" || commands_rc=1
 
     # A test_package that did not configure is a truncation of the same database the role gate
     # guards, reached by the one path that gate cannot see: the directory is configured outside the
@@ -3162,10 +3222,40 @@ cmd_compile_commands() {
     for tp_pkg in "${tp_unreached[@]}"; do
         commands_rc=1
         echo "malf commands: FATAL: $(basename "$tp_pkg")/test_package was never configured, so its" >&2
-        echo "malf commands: translation units are absent from the database. The member itself has no" >&2
-        echo "malf commands: $(_malf_build_dir "$tp_pkg")/CMakePresets.json — a recipe with no" >&2
-        echo "malf commands: CMakeLists.txt generates none — and this loop leaves before reaching the" >&2
-        echo "malf commands: test_package configure, which would not have needed that preset." >&2
+        echo "malf commands: translation units are absent from the database. It is in the census the" >&2
+        echo "malf commands: member loop takes before its first gate and in neither outcome set, so the" >&2
+        echo "malf commands: loop left that member before the test_package configure. That is a defect" >&2
+        echo "malf commands: in the loop rather than in the package: read the member loop for the path" >&2
+        echo "malf commands: that skipped it." >&2
+    done
+
+    # A BUILDLESS MEMBER IS A SHAPE OR A FAILURE, AND THE CMakeLists.txt IS WHAT SEPARATES THEM.
+    # A header-library recipe generates no CMakeToolchain and so no preset, and that is correct —
+    # it has no units of its own to index. A member that DOES declare a CMake project and produced
+    # no preset lost its whole translation-unit set, and the two states are otherwise identical
+    # from the outside: same empty build dir, same absence from the per-member rows.
+    local bl_pkg
+    for bl_pkg in "${buildless[@]}"; do
+        [[ -f "$bl_pkg/CMakeLists.txt" ]] || continue
+        commands_rc=1
+        echo "malf commands: FATAL: $(basename "$bl_pkg") declares a CMake project and produced no" >&2
+        echo "malf commands: $(_malf_build_dir "$bl_pkg")/CMakePresets.json, so NONE of its own" >&2
+        echo "malf commands: translation units are in the database. That preset comes from the" >&2
+        echo "malf commands: recipe's CMakeToolchain generator, so an absent one means the conan" >&2
+        echo "malf commands: install this run made for that member failed — its output is above." >&2
+    done
+
+    # THE MEMBER LINE STATES AN IDENTITY, so a member accounted for by none of its three terms
+    # makes that line false. It cannot happen through any path written today; it is here because
+    # the identity is what a reader checks, and a line that silently stops summing is exactly the
+    # truncated-database-that-reads-as-complete failure this whole command exists to refuse.
+    local ua_pkg
+    for ua_pkg in "${unaccounted[@]}"; do
+        commands_rc=1
+        echo "malf commands: FATAL: $(basename "$ua_pkg") is a selected member that reached none of" >&2
+        echo "malf commands: the three outcomes the member line accounts for — configured," >&2
+        echo "malf commands: content-only, buildless — so that line's identity does not hold and the" >&2
+        echo "malf commands: status of its translation units is unknown. A defect in the member loop." >&2
     done
 
     if (( ${#demoted[@]} > 0 )); then
