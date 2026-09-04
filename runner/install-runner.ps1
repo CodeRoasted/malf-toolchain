@@ -559,6 +559,81 @@ if ($service.Status -ne 'Running') {
 }
 
 # ---------------------------------------------------------------------------
+# 10-bis) The service account can resolve the shells the workflows ask for
+#
+# WHY THIS EXISTS, measured 2026-09-04. Every `shell: pwsh` step in insight-eidos's
+# golden.yaml died with "pwsh: command not found" on THIS runner, four days after the same
+# runner had been green. Nothing was uninstalled: PowerShell 7.6.5 was present and working,
+# as a PER-USER Store (Appx) package whose only entry point is the execution alias in
+# %LOCALAPPDATA%\Microsoft\WindowsApps. That directory is on the interactive USER's PATH and
+# is NOT on the machine PATH -- and step 2 above puts this service on a MACHINE account by
+# design, whose environment is the machine PATH. So the install is fine, the account is fine,
+# and the pairing is not.
+#
+# THE FAILURE MODE IS WHAT MAKES A CHECK WORTH ITS LINES, not the defect. Without it the
+# install reports success, the service reports Running, and the break surfaces hours later
+# inside somebody's job, on a step that names a compiler -- so it reads as a code defect on
+# the branch under test. It cost exactly that: a probe branch's red was nearly filed as
+# "MSVC rejects this shape" when MSVC had never been reached.
+#
+# Resolved against the MACHINE path only, deliberately: this script runs as the interactive
+# user, and asking `Get-Command` here would answer for the WRONG account and pass. A hit
+# inside a per-user WindowsApps directory is refused for the same reason -- it is exactly the
+# shape that resolves for the installer and not for the service.
+# ---------------------------------------------------------------------------
+
+$machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+$machineDirs = $machinePath -split ';' | Where-Object { $_ }
+
+function Resolve-ForServiceAccount {
+    param([string]$Exe)
+    foreach ($dir in $machineDirs) {
+        $candidate = Join-Path $dir $Exe
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            if ($candidate -match '\\AppData\\Local\\Microsoft\\WindowsApps\\') { continue }
+            return $candidate
+        }
+    }
+    return $null
+}
+
+# `pwsh` only. Kept to what the workflows actually demand rather than a wishlist: a list that
+# outgrows its evidence is the hand-kept enumeration this repo kills everywhere else.
+$pwshPath = Resolve-ForServiceAccount 'pwsh.exe'
+
+if ($null -eq $pwshPath) {
+    $userVisible = $null
+    try { $userVisible = (Get-Command pwsh -ErrorAction SilentlyContinue).Source } catch { }
+    $diagnosis = if ($userVisible) {
+        "It IS installed and resolvable for YOU, at '$userVisible' -- so this is a per-user " +
+        "install (typically the Store/Appx package) that the '$WindowsLogonAccount' service " +
+        "account cannot see."
+    } else {
+        "It is not resolvable for this user either."
+    }
+    Fail @"
+The runner service account cannot resolve 'pwsh'.
+
+$diagnosis
+
+Every ``shell: pwsh`` step in a workflow that lands on this runner will fail with
+"pwsh: command not found" -- AFTER a green install, inside a job, on a step that looks
+like it is about something else.
+
+Fix: install PowerShell 7 MACHINE-WIDE so it lands under 'C:\Program Files\PowerShell\7'
+and on the machine PATH, then re-run this script:
+
+    winget install --scope machine --id Microsoft.PowerShell
+
+Do NOT instead change the workflows to ``shell: powershell``: Windows PowerShell 5.1
+ignores `$PSNativeCommandUseErrorActionPreference`, so native-command failures would stop
+failing the step -- a leg that cannot run becomes a leg that cannot fail.
+"@
+}
+
+Log "Service account can resolve pwsh: $pwshPath"
+
+# ---------------------------------------------------------------------------
 # 11) Final state
 # ---------------------------------------------------------------------------
 
