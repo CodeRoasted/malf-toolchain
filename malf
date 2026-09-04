@@ -4224,10 +4224,13 @@ cmd_bump() {
 # builds every inventory entry of the resolved repo to a LINKED artifact in ONE canonical cell.
 #
 # ⚠ THE BOUNDARY IS DECLARED, NOT DISCOVERED (ADR-3.D9): this proves the harnesses BUILD. The
-# 8-cell determinism matrices (canon scripts/det_public_proof.sh, metalog
+# determinism matrices (canon scripts/det_public_proof.sh, metalog
 # scripts/determinism_bitidentity.sh) prove they are DETERMINISTIC, at the tag. A digest drift
-# still first appears at the cut, BY DESIGN — do not widen this into an 8-cell run to make the
-# daily gate feel complete.
+# still first appears at the cut, BY DESIGN — do not widen this into a determinism sweep to make
+# the daily gate feel complete.
+# The cell COUNT is deliberately not restated here: it said "8-cell" until 2026-09-04, when both
+# sweeps retired an inert -ffp-contract axis and halved. A number in a second file is a number that
+# drifts, and this sentence needs the boundary, not the arithmetic.
 cmd_inventory() {
     local subdir=""
     # The SAME flag grammar as build/test — not a subset. A verb that silently ignored
