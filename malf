@@ -591,7 +591,23 @@ _malf_resolve_target_or_sweep() {
         i=$((i+1))
         label="${member#"$root"/}"; [[ "$member" == "$root" ]] && label="."
         echo "── malf $verb [$i/${#members[@]}] $label ──"
-        if ! MALF_SWEEP=1 "$MALF_DIR/malf" "$verb" "$member" "$@"; then
+        # MALF_ONLY=1 IS LOAD-BEARING AND ITS ABSENCE DOES NOT FAIL, IT RUNS AWAY. A member may BE
+        # the root — that is the whole shape this sweep exists for, a repo carrying a root recipe
+        # plus sub-recipes (`insight-eidos`, `coderoast-ipc`) — and without it the child re-enters
+        # this same resolver, re-derives this same member list, and sweeps again. Measured
+        # 2026-09-04: `malf build insight-eidos` reached 717 nested processes with ZERO compilers
+        # running. The root need not be FIRST in dependency order for this — only present:
+        # `insight-eidos` puts it at member 2 of 5 (behind `insight_llm`) and `coderoast-ipc` at
+        # member 1 of 4, so the second runs away before compiling anything at all. It presents as a
+        # SLOW BUILD, which is the worst possible face: nothing errors, nothing is logged, the
+        # machine looks busy, and the one visible symptom — no compiler in `ps` — is the symptom
+        # nobody checks while a build is "still going".
+        #
+        # MALF_SWEEP does NOT prevent this and must not be made to: it answers "am I a member?"
+        # for the inventory (run once per repo, never per member), which is a different question
+        # from "may I sweep?". Conflating them would hide the recursion guard inside a flag whose
+        # name is about something else.
+        if ! MALF_SWEEP=1 MALF_ONLY=1 "$MALF_DIR/malf" "$verb" "$member" "$@"; then
             echo "malf $verb: sweep FAILED at $label ($((i-1))/${#members[@]} completed)" >&2
             exit 1
         fi

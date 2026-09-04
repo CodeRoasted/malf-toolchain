@@ -2200,6 +2200,41 @@ for v in build test bench; do
           "0" "$(grep -E -- '--only\)' <<< "$vb" | grep -c 'fwd+=' || true)"
 done
 
+
+# ── THE SWEEP MUST TERMINATE, AND ONLY A RUN CAN SAY SO ──────────────────────────────────────
+#
+# EVERY ARM ABOVE IS A grep OVER THE RESOLVER'S SOURCE TEXT, and that is exactly why they were all
+# green while `malf build insight-eidos` ran away to 717 nested processes on 2026-09-04. A
+# structural arm can say the function is SHAPED a certain way; it cannot say the function
+# TERMINATES. The sweep re-invokes `malf <verb> <member>`, a member may BE the root, and the child
+# then re-derived the same member list and swept again — unbounded, with no error and no compiler
+# ever started, so it presented as a slow build.
+#
+# THE FIXTURE ABOVE ALREADY REPRODUCED IT AND WAS NEVER RUN AGAINST. `repo` carries a recipe AND
+# holds `leaf_a`/`leaf_b`, which is the precise shape (`insight-eidos`, `coderoast-ipc`). So the
+# arm costs one invocation, not a new fixture.
+#
+# WHAT IS ASSERTED IS THE ENUMERATION COUNT, not the build outcome. The header line is printed once
+# per sweep, so under the defect it appears unboundedly and under the fix exactly once. The build
+# itself is EXPECTED to fail (these recipes have no CMake project and their requirements resolve to
+# nothing), and that is deliberate: the recursion happens during RESOLUTION, strictly before any
+# build, so a fixture that cannot build still exercises the whole defect surface. `timeout` bounds
+# a red rather than letting the selftest itself run away, and `setsid` puts the run in its own
+# process group so the timeout reaps the descendants instead of orphaning them.
+ip_run_log="$ip_tmp/sweep.log"
+setsid timeout --kill-after=5 60 "$MALF_BIN" build "$ip_tmp/repo" > "$ip_run_log" 2>&1 || true
+ip_headers="$(grep -c 'packages under' "$ip_run_log" || true)"
+check "the sweep enumerates its members EXACTLY once — a member that is the root must not re-sweep" \
+      "1" "$ip_headers"
+# And the enumeration that happened must be the real one: an arm that passed because the sweep
+# never started would also report 1... or 0. Pin the count the fixture declares.
+check "the one enumeration covers all 3 fixture packages (guards a sweep that never ran)" \
+      "1" "$(grep -c '3 packages under' "$ip_run_log" || true)"
+# The runaway's own signature: the same member label announced more than once. Under the defect
+# `[1/3]` is printed at every level of the recursion.
+check "no member is announced twice (the runaway's signature)" \
+      "1" "$(grep -c 'malf build \[1/3\]' "$ip_run_log" || true)"
+
 rm -rf "$ip_tmp"
 echo
 
