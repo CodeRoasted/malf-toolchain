@@ -1231,12 +1231,18 @@ cmd_test() {
     local subdir="" fwd=()
     local gtest_filter=""
     local verbose=false
+    local corpus_only=false
     # No build-type seed and no --debug/--release — see cmd_build.
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --profile) fwd+=("$1" "$2"); shift; _malf_apply_profile "$1" ;;
             --asan)    _malf_apply_profile "$MALF_ASAN_PROFILE"; fwd+=("$1") ;;
             --verbose) verbose=true; fwd+=("$1") ;;
+            # Run ONLY the ctest `corpus` label — the heavy gates that need a private
+            # third-party corpus mounted. Forwarded, because a sweep member must make the
+            # same choice; a member that quietly ran the default set would report a green
+            # for a population the caller did not ask for.
+            --corpus)  corpus_only=true; fwd+=("$1") ;;
             --filter)
                 shift
                 [[ $# -gt 0 ]] || { echo "malf test: --filter requires a pattern" >&2; exit 1; }
@@ -1277,6 +1283,23 @@ cmd_test() {
     local ctest_args=(--test-dir "$(_malf_build_dir "$target")" --output-on-failure)
     $verbose && ctest_args+=(--verbose)
     [[ -n "$gtest_filter" ]] && ctest_args+=(-R "$gtest_filter")
+    # THE TWO POPULATIONS ARE NEVER RUN TOGETHER (Founder, 2026-09-04: "I also dont want to mix
+    # up big corpus tests/gates with regular self sustaining tests"). A test carrying the ctest
+    # label `corpus` needs a PRIVATE third-party corpus mounted through an environment variable;
+    # it can be neither built nor reasoned about from a checkout alone. Mixed into the default
+    # run they did the one thing a test must never do — report a PASS for a subject never
+    # reached — because a gtest skip exits 0 and ctest counts a skipping case as passed.
+    #
+    # So the default run EXCLUDES the label, and `--corpus` runs that label and nothing else.
+    # The two are complementary, not overlapping: every registered test belongs to exactly one
+    # of them, which is what makes "the suite is green" a statement with one meaning.
+    # Inside the corpus population a missing mount is a HARD FAILURE rather than a skip — you
+    # asked for it by name, so its absence is a broken invocation and not a quiet no-op.
+    if $corpus_only; then
+        ctest_args+=(-L corpus)
+    else
+        ctest_args+=(-LE corpus)
+    fi
     ctest "${ctest_args[@]}"
     _malf_run_inventory "$target"
 }
