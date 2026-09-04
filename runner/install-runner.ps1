@@ -635,6 +635,14 @@ leaving this exact failure in place while looking like it was fixed.
 Do NOT instead change the workflows to ``shell: powershell``: Windows PowerShell 5.1
 ignores `$PSNativeCommandUseErrorActionPreference`, so native-command failures would stop
 failing the step -- a leg that cannot run becomes a leg that cannot fail.
+
+AND INSTALLING IT IS NOT ENOUGH ON ITS OWN -- re-running this script is the half that
+finishes the job, which is why the line above says to. A Windows service captures its
+environment block when it STARTS, so a machine PATH written afterwards never reaches the
+running runner: pwsh then resolves perfectly for you at a prompt while every job still dies
+on "command not found", and the box looks fixed. Measured 2026-09-04, one dispatch spent on
+exactly that. Re-running this script recreates the service and the new environment comes
+with it; an elevated 'Restart-Service <this runner service>' does the same thing faster.
 "@
 }
 
