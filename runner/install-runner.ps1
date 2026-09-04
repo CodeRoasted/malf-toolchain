@@ -620,10 +620,17 @@ Every ``shell: pwsh`` step in a workflow that lands on this runner will fail wit
 "pwsh: command not found" -- AFTER a green install, inside a job, on a step that looks
 like it is about something else.
 
-Fix: install PowerShell 7 MACHINE-WIDE so it lands under 'C:\Program Files\PowerShell\7'
-and on the machine PATH, then re-run this script:
+Fix: install PowerShell 7 from the MSI, which is the only MACHINE-WIDE package -- it lands
+under 'C:\Program Files\PowerShell\7' and puts itself on the machine PATH. Then re-run this
+script:
 
-    winget install --scope machine --id Microsoft.PowerShell
+    msiexec.exe /i https://github.com/PowerShell/PowerShell/releases/download/v7.6.5/PowerShell-7.6.5-win-x64.msi /qb
+    (from an ELEVATED prompt; bump the version to the current release)
+
+DO NOT reach for 'winget install --scope machine --id Microsoft.PowerShell'. Measured
+2026-09-04: that id's manifest advertises an **msix** even under --scope machine, so winget
+sees the per-user Store package already present, reports success, and changes nothing --
+leaving this exact failure in place while looking like it was fixed.
 
 Do NOT instead change the workflows to ``shell: powershell``: Windows PowerShell 5.1
 ignores `$PSNativeCommandUseErrorActionPreference`, so native-command failures would stop
