@@ -114,6 +114,31 @@ function Invoke-Native {
         [string[]]$Arguments = @()
     )
 
+    # A .cmd is not an executable: PowerShell hands it to cmd.exe, which RE-PARSES the command
+    # line before the batch file ever sees it. An argument carrying `&` (or | < > ^ ( )) is
+    # therefore split at that character and its tail is run as a COMMAND. Measured 2026-09-04
+    # against a two-line echo harness: the value `abc&def` arrived as `abc`, and `def` was
+    # executed -- the runner install died on `& était inattendu` from cmd.exe, in a script whose
+    # own error text then blamed config.cmd. Passwords are where this bites, because they are the
+    # one argument here whose alphabet nobody chose.
+    #
+    # Double quotes fix it: cmd does not interpret a metacharacter inside them, and both the
+    # batch `%~n` expansion and Runner.Listener's argv parse strip them back off. Verified on
+    # all three of the quoted, caret-escaped and Legacy-passing forms; quoting is kept as the
+    # one that needs no per-character table.
+    if ($FilePath -match '\.(cmd|bat)$') {
+        $Arguments = $Arguments | ForEach-Object {
+            if ($_ -match '"') {
+                # Refused rather than mangled: escaping an embedded quote through PowerShell AND
+                # cmd AND the batch re-parse has no spelling that survives all three, so a value
+                # containing one would be silently corrupted into a wrong password and a failed
+                # logon nobody would trace back here. The value itself is never printed.
+                Fail "An argument passed to $FilePath contains a double quote, which cannot be passed through cmd.exe safely. Use a value without `" characters (a service account password is the usual source)."
+            }
+            if ($_ -match '[&|<>^()\s]') { '"' + $_ + '"' } else { $_ }
+        }
+    }
+
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
