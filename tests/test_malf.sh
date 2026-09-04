@@ -1530,11 +1530,18 @@ check "the profile roster is non-empty (a vacuous sweep would pass the arm above
 
 # `_malf_profile_build_type` reads the ACTIVE profile, so drive it through _malf_apply_profile —
 # the same seam every verb uses. Compared against the file read independently, two ways of asking.
+# CONAN_HOME is scoped here and at both sites below for TWO reasons, and the second is correctness,
+# not hygiene. (1) `_malf_apply_profile` COPIES the resolved profile into `$CONAN_HOME/profiles/`,
+# so an unscoped run writes into the developer's live cache — measured 2026-09-04: the junk probe
+# `probe-no-build-type` was sitting in the real base cache, and `conan profile list` reported it.
+# (2) Resolution reads `$CONAN_HOME/profiles/` FIRST, so against the live cache both sides of this
+# comparison could come from the same stale copy — the "two ways of asking" would be one. A fresh
+# empty home forces the registry file, which is the artifact the expectation is read from.
 bt_derived_mismatch=()
 for bt_name in "${bt_profiles[@]}"; do
     bt_expect="$(sed -nE 's/^[[:space:]]*build_type[[:space:]]*=[[:space:]]*([A-Za-z]+).*/\1/p' \
                  "$MALF_ROOT/profiles/$bt_name" | head -n1)"
-    bt_got="$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1
+    bt_got="$(CONAN_HOME="$bt_tmp/home" bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1
                        _malf_apply_profile "$2" >/dev/null 2>&1
                        echo "$MALF_CONFIG"' _ "$MALF_BIN" "$bt_name" 2>/dev/null)"
     [[ "$bt_got" == "$bt_expect" ]] || bt_derived_mismatch+=("$bt_name(got=$bt_got want=$bt_expect)")
@@ -1555,7 +1562,7 @@ check "the DEFAULT path (no --profile) carries the default profile's build type,
 mkdir -p "$bt_tmp/profiles"
 printf '[settings]\narch=x86_64\ncompiler=gcc\n' > "$bt_tmp/profiles/probe-no-build-type"
 bt_nb_rc=0
-bt_nb_out="$(MALF_DIR="$bt_tmp" bash -c '
+bt_nb_out="$(MALF_DIR="$bt_tmp" CONAN_HOME="$bt_tmp/home" bash -c '
     MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1
     MALF_DIR="$2"; _malf_apply_profile probe-no-build-type' _ "$MALF_BIN" "$bt_tmp" 2>&1)" || bt_nb_rc=$?
 check "a profile declaring no build_type is FATAL (exit 1), never a carried-over default" \
@@ -1570,7 +1577,7 @@ bt_gate() {   # $1 = cache body or the literal NONE; echoes "<rc> <output>"
     local dir="$bt_tmp/tree"; rm -rf "$dir"; mkdir -p "$dir"
     [[ "$1" == "NONE" ]] || printf '%s\n' "$1" > "$dir/CMakeCache.txt"
     local out rc=0
-    out="$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1
+    out="$(CONAN_HOME="$bt_tmp/home" bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1
                     _malf_apply_profile linux-gcc16-release >/dev/null 2>&1
                     _malf_assert_tree_matches_profile "$2"' _ "$MALF_BIN" "$dir" 2>&1)" || rc=$?
     printf '%s\n%s' "$rc" "$out"
