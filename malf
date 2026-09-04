@@ -533,21 +533,41 @@ _malf_resolve_target() {
 # each member a fresh process so no profile/cache/config state bleeds — and
 # exits with the sweep's status).
 #
-# The rule, invocation-point-based:
-#   * explicit arg naming a package dir (has conanfile.py)  -> that package only,
-#     even when sub-recipes exist below it (the precise escape hatch, e.g.
-#     `malf build .` at a root-package multi-package repo);
-#   * anything else (no arg, or an arg dir without a recipe) -> sweep every
-#     recipe under the dir, topo-ordered (a root-dir recipe is a member too);
-#     a single found recipe degenerates to the plain single-package build.
-# So a mono-package repo root, a leaf package subfolder, and `malf <verb> <pkg>`
-# all behave identically — a subfolder never knows (or cares) that it sits in a
-# multi-package repo, and no-arg at a multi-package root builds the whole repo.
+# THE RULE IS INVOCATION-POINT INDEPENDENCE: `malf <verb> <dir>` is exactly
+# `cd <dir> && malf <verb>`. The path spelling never changes the meaning.
+#   * any resolved dir -> sweep every recipe under it, topo-ordered (a root-dir
+#     recipe is a member too); a single found recipe degenerates to the plain
+#     single-package build, so a leaf subfolder behaves as it always did.
+#   * `--only` -> build exactly the recipe AT the resolved dir and nothing below.
+#
+# UNTIL 2026-09-04 AN EXPLICIT ARG NAMING A PACKAGE DIR MEANT "THAT PACKAGE ONLY",
+# and that is the bug this replaced. It made the two spellings of one intent
+# disagree wherever a repo has a root recipe AND sub-recipes — `insight-eidos`
+# (5 recipes) and `coderoast-ipc` (4). `malf build insight-eidos` built ONE
+# package; `cd insight-eidos && malf build` built five. The comment here used to
+# claim the two "behave identically", which was true for every OTHER repo and
+# false for exactly those two.
+#
+# It fails SILENTLY and that is what makes it worth a rule rather than a note:
+# the short build exits 0, so the operator reads a green over a surface that was
+# never compiled. Measured 2026-09-04 during the `N135` suite rename — the renamed
+# gtest suites were verified by `ctest -N`, which reported the OLD names as still
+# live because `malf build insight-eidos` had left `insight-eidos/sift` at the
+# previous day's binary. The rename looked incomplete; it was the build that was.
+#
+# Rebuilding one package of a multi-package repo is still a real need — eidos's
+# root recipe is a three-module compile target, not an umbrella — so the
+# capability survives as `--only`, where it is a stated intent instead of an
+# accident of how the path was typed.
 _malf_resolve_target_or_sweep() {
     local verb="$1" arg="$2"; shift 2
     local root
     root="$(_malf_resolve_dir "$arg")" || exit 1
-    if [[ -n "$arg" && -f "$root/conanfile.py" ]]; then
+    if [[ -n "${MALF_ONLY:-}" ]]; then
+        if [[ ! -f "$root/conanfile.py" ]]; then
+            echo "malf: error: --only needs a recipe AT $root; there is no conanfile.py there." >&2
+            exit 1
+        fi
         MALF_TARGET="$root"; return 0
     fi
     local members=() entry ref dir
@@ -1187,6 +1207,9 @@ cmd_build() {
             --profile) fwd+=("$1" "$2"); shift; _malf_apply_profile "$1" ;;
             # Sugar: ASan/UBSan(+libFuzzer-via-target) gate profile (canon→eidos parse path).
             --asan)    _malf_apply_profile "$MALF_ASAN_PROFILE"; fwd+=("$1") ;;
+            # Build exactly the recipe at the resolved dir, never the recipes below it.
+            # Not forwarded: a sweep cannot occur under it, so a member never sees it.
+            --only)    MALF_ONLY=1 ;;
             -*) _malf_refuse_option build "$1" ;;
             *) subdir="$1" ;;
         esac
@@ -1219,6 +1242,9 @@ cmd_test() {
                 [[ $# -gt 0 ]] || { echo "malf test: --filter requires a pattern" >&2; exit 1; }
                 gtest_filter="$1"; fwd+=(--filter "$1")
                 ;;
+            # Build exactly the recipe at the resolved dir, never the recipes below it.
+            # Not forwarded: a sweep cannot occur under it, so a member never sees it.
+            --only)    MALF_ONLY=1 ;;
             -*) _malf_refuse_option test "$1" ;;
             *) subdir="$1" ;;
         esac
@@ -3318,6 +3344,9 @@ cmd_bench() {
             --profile)   fwd+=("$1" "$2"); shift; _malf_apply_profile "$1" ;;
             --asan)      _malf_apply_profile "$MALF_ASAN_PROFILE"; fwd+=("$1") ;;
             --)          shift; extra+=("$@"); fwd+=(-- "$@"); break ;;
+            # Build exactly the recipe at the resolved dir, never the recipes below it.
+            # Not forwarded: a sweep cannot occur under it, so a member never sees it.
+            --only)    MALF_ONLY=1 ;;
             -*)          _malf_refuse_option bench "$1" ;;   # benchmark flags go after `--`
             *)           subdir="$1" ;;
         esac

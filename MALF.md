@@ -39,14 +39,31 @@ fail in the release pipeline (the 1.7.2 drift-at-tag class).
 
 ### Targets — packages under the invocation point
 
-* `[target]` omitted → **every package under the current dir, dependency-ordered**:
-  a multi-package repo root sweeps the whole repo, the workspace root sweeps the
-  whole workspace, a mono-package root degenerates to the single package. Each
-  member runs as its own `malf <verb> <pkg>` process — the exact `&&`-chain
-  semantics, first failure stops the sweep.
-* `[target]` = a package dir → exactly that package (also the escape hatch for a
-  repo whose *root* is itself a package with sibling sub-packages, e.g.
-  `malf build .` at `insight-eidos`).
+**The rule is invocation-point INDEPENDENCE: `malf <verb> <dir>` is exactly
+`cd <dir> && malf <verb>`.** How the path is spelled never changes what gets built.
+
+* Any resolved dir → **every package under it, dependency-ordered**: a
+  multi-package repo root sweeps the whole repo, the workspace root sweeps the
+  whole workspace, a mono-package root or a leaf subfolder degenerates to the
+  single package. Each member runs as its own `malf <verb> <pkg>` process — the
+  exact `&&`-chain semantics, first failure stops the sweep.
+* `--only` → exactly the recipe **at** the resolved dir and nothing below it.
+  It refuses (exit 1) when that dir carries no `conanfile.py`, rather than
+  quietly sweeping instead.
+
+> **Until 2026-09-04 an explicit arg naming a package dir meant "that package
+> only", and it was a defect.** It made the two spellings of one intent disagree
+> in exactly the two repos that have a root recipe *and* sub-recipes —
+> `insight-eidos` (5) and `coderoast-ipc` (4): `malf build insight-eidos` built
+> ONE package while `cd insight-eidos && malf build` built five. **It failed
+> silently** — the short build exits 0, so the operator reads a green over a
+> surface that was never compiled. Measured during the `N135` suite rename: a
+> `ctest -N` check reported the OLD suite names as still live, because
+> `malf build insight-eidos` had left `insight-eidos/sift` at the previous day's
+> binary. The rename looked incomplete; the build was. Rebuilding one package is
+> still a real need — eidos's root recipe is a three-module compile target, not an
+> umbrella — so it survives as `--only`, a stated intent rather than an accident
+> of typing.
 * Content-only packages (a `conanfile.py` but no `CMakeLists.txt` — umbrella
   metapackages, scenario corpora) are skipped with a note.
 

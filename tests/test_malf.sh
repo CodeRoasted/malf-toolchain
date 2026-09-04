@@ -2162,6 +2162,47 @@ check "the slot is deleted only from inside cmd_slot, and it is deleted somewher
 rm -rf "$sl_tmp"
 echo
 
+echo "[8] invocation-point independence — malf VERB DIR == cd DIR then malf VERB"
+
+# THE BUG THIS PINS, measured 2026-09-04: an explicit arg naming a package dir used to mean
+# "that package ONLY", so the two spellings of one intent disagreed wherever a repo has a root
+# recipe AND sub-recipes. It fails SILENTLY — the short build exits 0, so a green is read over a
+# surface that was never compiled. The fixture is built here rather than pointed at a real repo,
+# so the arms keep their teeth when the workspace's package layout changes.
+ip_tmp="$(mktemp -d)"
+mkdir -p "$ip_tmp/repo/leaf_a" "$ip_tmp/repo/leaf_b"
+for d in "$ip_tmp/repo" "$ip_tmp/repo/leaf_a" "$ip_tmp/repo/leaf_b"; do
+    name="$(basename "$d")"
+    printf 'from conan import ConanFile\nclass P(ConanFile):\n    name = "%s"\n    version = "1.0"\n' \
+           "${name//-/_}" > "$d/conanfile.py"
+done
+
+# `members` is what the sweep enumerates; both spellings must resolve the SAME root, so it is
+# enough to prove the resolver treats them alike. Three recipes under the root => 3 members.
+ip_members="$(python3 "$MALF_ROOT/malf_graph.py" members "$ip_tmp/repo" 2>/dev/null | grep -c . || true)"
+check "the fixture really is multi-package (guards a vacuous arm)" "3" "$ip_members"
+
+ip_body="$(sed -n '/^_malf_resolve_target_or_sweep() {/,/^}/p' "$MALF_BIN")"
+check "the resolver no longer branches on the ARG being a package dir (the retired hatch)" \
+      "0" "$(grep -cF 'if [[ -n "$arg" && -f "$root/conanfile.py" ]]' <<< "$ip_body" || true)"
+check "the single-package escape is gated on --only instead" \
+      "1" "$(grep -cF 'if [[ -n "${MALF_ONLY:-}" ]]' <<< "$ip_body" || true)"
+check "--only refuses a dir carrying no recipe, rather than silently sweeping it" \
+      "1" "$(grep -cF -- '--only needs a recipe AT' <<< "$ip_body" || true)"
+
+# All three sweeping verbs accept --only, and none of them FORWARDS it: a forwarded --only would
+# reach each sweep member, and a member is already a single package, so it would be noise that
+# could only ever mislead a reader of the member's command line.
+for v in build test bench; do
+    vb="$(sed -n "/^cmd_$v() {/,/^}/p" "$MALF_BIN")"
+    check "cmd_$v accepts --only" "1" "$(grep -cF -- '--only)' <<< "$vb" || true)"
+    check "cmd_$v does not forward --only to sweep members" \
+          "0" "$(grep -E -- '--only\)' <<< "$vb" | grep -c 'fwd+=' || true)"
+done
+
+rm -rf "$ip_tmp"
+echo
+
 echo
 echo
 echo "malf selftest: $pass_count passed, $fail_count failed"
