@@ -2,8 +2,12 @@
 """Code & Comment as Contract — the comment-grammar phase of `malf format` (DN-90.D5).
 
 Every `//` comment line in an ARMED repo must begin with exactly one of six tags
-(`pre:` `post:` `invariant:` `assert:` `note:` `refs:`), stand on its own line, and be one line;
-the only multi-line comment is the framed law block declaring a `D-LSRC-n`; a handful of TOOL
+(`pre:` `post:` `invariant:` `assert:` `note:` `refs:`) and stand on its own line. A CONTRACT
+form (the first four) may run to a second line carrying no tag — the Founder's budget ruling of
+2026-09-05, taken on the api unit, where one-line contracts were being split into two tagged
+lines that were one claim; `note:` and `refs:` stay strictly one line, the note being the form
+that must be starved. The only multi-line comment is the framed law block declaring a
+`D-LSRC-n`; a handful of TOOL
 forms are admitted because a machine reads them (clang-format's `} // namespace x`, clang-tidy's
 `/*name=*/` and own-line `NOLINT…`, `clang-format off/on`). Everything else is a violation, and
 the default disposition of a violating comment is deletion — never a new tag.
@@ -87,7 +91,8 @@ VIOLATION_CLASSES = (
     "suppression-without-why", "empty-claim", "refs-prose", "note-run", "block-prose",
     "law-malformed",
 )
-FORM_CLASSES = TAGS + ("law", "tool")
+CONTRACT_TAGS = ("pre", "post", "invariant", "assert")
+FORM_CLASSES = TAGS + ("continuation", "law", "tool")
 
 # ── the scanner ───────────────────────────────────────────────────────────────────────────────
 # A `//` inside a string literal is not a comment, and this corpus has them: measured on
@@ -279,7 +284,17 @@ def classify(comments: list[Comment]) -> list[Finding]:
             tag_at_line[comment.line] = tag
             add(comment, tag)
             continue
-        add(comment, "tag-mid-line" if TAG_MID.search(stripped) else "bare")
+        if TAG_MID.search(stripped):
+            add(comment, "tag-mid-line")
+            continue
+        # The one continuation a contract form may carry: the line directly above is a contract
+        # tag (never a note, a refs, or another continuation). The reflow-swallow shape stays
+        # caught because the mid-line tag check above runs first.
+        if tag_at_line.get(comment.line - 1) in CONTRACT_TAGS:
+            tag_at_line[comment.line] = "continuation"
+            add(comment, "continuation")
+            continue
+        add(comment, "bare")
     return findings
 
 
@@ -416,7 +431,8 @@ Body prose may be long, and the formatter may re-wrap it; the frame survives.
 namespace demo
 {
 // pre: `path` names an existing workspace.
-// post: on failure, externally observable state is unchanged.
+// post: on failure, externally observable state is unchanged, and the refusal names the
+// first invalid entry of the manifest.
 // invariant: state_.size() == index_.size()
 // refs: ADR-10.D3, LSRC-@N@, F-SRC-logcraft:core.api-value.cppm:to_string, SRC-SID-3
 int open(const std::string& path);
@@ -454,6 +470,10 @@ int open(int path);
 
 VIOLATION_FIXTURES: dict[str, str] = {
     "bare": "int x;\n// this is a comment\n",
+    "bare (third line of a contract — one continuation is the budget)":
+        "int x;\n// pre: one\n// two\n// three\n",
+    "bare (a note has no continuation)": "int x;\n// note: one line is the whole note\n// and this is bare\n",
+    "bare (a refs has no continuation)": "int x;\n// refs: ADR-10.D3\n// and this is bare\n",
     "tag-mid-line": "int x;\n// whose ratification is green. post: failure leaves state unchanged.\n",
     "slash3": "int x;\n/// a doxygen-looking line\n",
     "spacer": "int x;\n//\n",
@@ -496,20 +516,21 @@ def selftest(format_via: str | None) -> int:
         viol = [f for f in res.findings if f.is_violation]
         check("clean fixture: zero violations", [], [(f.klass, f.text) for f in viol])
         forms = collections.Counter(f.klass for f in res.findings if not f.is_violation)
-        check("clean fixture: every form counted once where expected",
-              {"pre": 1, "post": 1, "invariant": 1, "assert": 1, "note": 1, "refs": 2, "law": 1},
-              {k: forms[k] for k in TAGS + ("law",) if forms[k]})
+        check("clean fixture: every form counted once where expected (the post: carries its one continuation)",
+              {"pre": 1, "post": 1, "invariant": 1, "assert": 1, "note": 1, "refs": 2, "continuation": 1, "law": 1},
+              {k: forms[k] for k in TAGS + ("continuation", "law") if forms[k]})
         check("clean fixture: tool forms (namespace, arg comment, NOLINTNEXTLINE, BEGIN, END, off, on)",
               7, forms["tool"])
         check("scanner: `//` inside a literal, a raw string, a char literal and a digit separator are not comments",
               True, all("http" not in f.text and "yaml" not in f.text for f in res.findings))
 
-        for klass, source in VIOLATION_FIXTURES.items():
-            fixture = armed / "src" / f"{klass}.cpp"
+        for label, source in VIOLATION_FIXTURES.items():
+            klass = label.split(" ")[0]
+            fixture = armed / "src" / f"{len(label)}_{klass}.cpp"
             fixture.write_text(source)
             [res] = check_files([fixture], None, "", None)
             got = sorted({f.klass for f in res.findings if f.is_violation})
-            check(f"violation class fires: {klass}", [klass], got)
+            check(f"violation class fires: {label}", [klass], got)
 
         twin = plain / "src" / "bare.cpp"
         twin.write_text(VIOLATION_FIXTURES["bare"])
@@ -519,8 +540,10 @@ def selftest(format_via: str | None) -> int:
         check("unarmed repo: a violation is counted, never failed (rc 0)", 0, rc)
         check("unarmed repo: the summary names it report-only with its would-be count",
               True, "report-only 1" in buf.getvalue() and "would-be violations in report-only files 1" in buf.getvalue())
+        armed_bare = armed / "src" / "bare_armed.cpp"
+        armed_bare.write_text(VIOLATION_FIXTURES["bare"])
         buf = io.StringIO()
-        rc = summarize(check_files([armed / "src" / "bare.cpp"], None, "", None), "check-sweep", False, out=buf)
+        rc = summarize(check_files([armed_bare], None, "", None), "check-sweep", False, out=buf)
         check("armed repo: the same violation fails (rc 1)", 1, rc)
         buf = io.StringIO()
         rc = summarize([], "check-sweep", False, out=buf)
