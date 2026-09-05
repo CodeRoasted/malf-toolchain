@@ -264,6 +264,12 @@ def classify(comments: list[Comment]) -> list[Finding]:
         if stripped.startswith("wall-clock:"):
             add(comment, "tool")
             continue
+        # An SPDX licence identifier is read by licence scanners (REUSE, scancode), never by a
+        # person: a tool form, kept where the file already carries one. The grammar admits it and
+        # says nothing about whether the identifier is RIGHT — that is the licence audit's question.
+        if stripped.startswith("SPDX-License-Identifier:"):
+            add(comment, "tool")
+            continue
         if comment.trailing:
             if comment.code_before.rstrip().endswith("}") and re.match(r"namespace(\s|$)", stripped):
                 add(comment, "tool")
@@ -462,6 +468,7 @@ void process(int& state)
     call(/*deterministic=*/true, 1);
     // clang-format on
     const auto started = now(); // wall-clock: real-time-mode path (a lint waiver a machine reads)
+    // SPDX-License-Identifier: Apache-2.0
     (void)url; (void)raw; (void)quote; (void)big; (void)state; (void)started;
 }
 } // namespace demo
@@ -526,8 +533,8 @@ def selftest(format_via: str | None) -> int:
         check("clean fixture: every form counted once where expected (the post: carries its one continuation)",
               {"pre": 1, "post": 1, "invariant": 1, "assert": 1, "note": 1, "refs": 2, "continuation": 1, "law": 1},
               {k: forms[k] for k in TAGS + ("continuation", "law") if forms[k]})
-        check("clean fixture: tool forms (namespace, arg comment, NOLINTNEXTLINE, BEGIN, END, off, on, wall-clock waiver)",
-              8, forms["tool"])
+        check("clean fixture: tool forms (namespace, arg comment, NOLINTNEXTLINE, BEGIN, END, off, on, wall-clock waiver, SPDX)",
+              9, forms["tool"])
         check("scanner: `//` inside a literal, a raw string, a char literal and a digit separator are not comments",
               True, all("http" not in f.text and "yaml" not in f.text for f in res.findings))
 
