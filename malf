@@ -2970,11 +2970,25 @@ _malf_commands_tree_role() {          # <build_dir> -> _MALF_TREE_ROLE, _MALF_TR
 #                split is the load-bearing half: `N146` moved the first-party count while leaving
 #                the external one untouched, and a total alone cannot show that.
 #   per member   its entries and how many of those are test/bench TUs — where a demotion shows up.
-#                The rows cover the CONFIGURED members ONLY, because the role column is read from
-#                a CMakeCache and a buildless member has none to read. So the rows do not have to
-#                sum to first-party, and do not when a buildless member contributed: measured
-#                2026-09-03, coderoast-server's five rows total 128 entries against first-party
-#                129, the odd one being server-logging/test_package/test_package.cpp.
+#                Rows cover CONFIGURED members and BUILDLESS ones. The role column of a configured
+#                row is read from that member's CMakeCache; a buildless member has no cache to
+#                read, so its row prints the literal role `buildless` — which is the outcome
+#                itself, not a reading of one. It gets a row because it CONTRIBUTES: its
+#                test_package units reach the database even though its own do not, and a member
+#                with entries and no row is a database whose per-member breakdown silently does
+#                not account for it. Measured 2026-09-03 before this: coderoast-server's five rows
+#                totalled 128 against first-party 129, the odd one
+#                server-logging/test_package/test_package.cpp.
+#   unattributed the first-party entries under NO member prefix — the residual that makes the rows
+#                CHECKABLE on the line instead of assumed. It is a legitimate shape, not a fault,
+#                so it is a number and never a fatal: a first-party source directory that is not
+#                itself a conan member (shared test-support code compiled into a sibling member's
+#                test binary) lands here. Measured 2026-09-05 at profile clang21-libcxx-release,
+#                coderoast-server: first-party 170, configured rows 168, buildless row 1,
+#                unattributed 1 — infra/tests_support/local_container.cpp, compiled from
+#                infra/redis's build dir and under none of the seven members. So the gap the
+#                buildless row closes was ONE of TWO, and without this term the line would still
+#                not sum while reading as though it did.
 #
 # Entries are attributed to the LONGEST matching member prefix, never the first match: members
 # NEST (insight-eidos is a package and also the parent of insight-eidos/sift), so a shortest-prefix
@@ -2999,9 +3013,15 @@ files = [e.get("file", "") for e in json.loads(open(db).read())]
 prefix = root.rstrip("/") + "/"
 first = sum(1 for f in files if f.startswith(prefix))
 
+# `configured` is DERIVED from the rows rather than passed beside them. The rows are already the
+# caller's outcome sets; a second positional carrying the same fact would be a second producer of
+# it, and the two would eventually disagree on a line whose whole job is to state an identity.
+configured = sum(1 for role, _ in rows if role != "buildless")
+
 TEST_HEADS = {"tests", "test", "test_package", "benchmarks", "benchmark", "bench"}
 by_len = sorted((d for _, d in rows), key=len, reverse=True)
 per = {d: [0, 0] for _, d in rows}
+unattributed = []
 for f in files:
     for d in by_len:
         base = d.rstrip("/")
@@ -3010,15 +3030,25 @@ for f in files:
             if f[len(base) + 1:].split("/", 1)[0] in TEST_HEADS:
                 per[d][1] += 1
             break
+    else:
+        if f.startswith(prefix):
+            unattributed.append(f)
 
 print(f"malf commands: SUMMARY · root={root} · db={db}")
-print(f"malf commands:   members {selected} selected = {len(rows)} configured + {content_only} content-only "
+print(f"malf commands:   members {selected} selected = {configured} configured + {content_only} content-only "
       f"+ {buildless} buildless (content-only = no CMakeLists.txt anywhere, nothing to index; "
       f"buildless = no CMakePresets.json, so only its test_package reaches the database)")
 print(f"malf commands:   test_package {tp_present} present = {tp_configured} configured + {tp_failed} failed + "
       f"{int(tp_present) - int(tp_configured) - int(tp_failed)} unreached (in the census, in neither "
       f"outcome set)")
 print(f"malf commands:   entries {len(files)} = first-party {first} (under {root}) + external {len(files) - first}")
+rows_total = sum(n for n, _ in per.values())
+print(f"malf commands:   first-party {first} = {rows_total} in the member rows below + {len(unattributed)} "
+      f"unattributed (first-party, under no member — a legitimate shape, never a fault)")
+if unattributed:
+    where = sorted({os.path.dirname(os.path.relpath(f, root)) for f in unattributed})
+    shown = ", ".join(where[:5]) + (f", +{len(where) - 5} more" if len(where) > 5 else "")
+    print(f"malf commands:   unattributed live under: {shown}")
 width = max((len(os.path.relpath(d, root)) for _, d in rows), default=1)
 for role, d in rows:
     n, t = per[d]
@@ -3256,6 +3286,15 @@ cmd_compile_commands() {
         rows+=("$_MALF_TREE_ROLE $m")
         [[ "$_MALF_TREE_ROLE" == "target" ]] || \
             demoted+=("$_MALF_TREE_ROLE|$m|$_MALF_TREE_ROLE_VARS")
+    done
+    # A BUILDLESS MEMBER GETS A ROW TOO, and deliberately NOT through the role gate above: it has
+    # no CMakeCache, so _malf_commands_tree_role would answer `no-cache` and the loop would red on
+    # a member that is behaving exactly as its recipe says. Its role IS `buildless` — the outcome
+    # the member loop already recorded, not a reading of a tree. It earns a row because it
+    # CONTRIBUTES: its test_package units are in the database while its own are not, and until this
+    # they were in no row, so the per-member breakdown did not account for entries it can see.
+    for m in "${buildless[@]}"; do
+        rows+=("buildless $m")
     done
 
     _malf_commands_summary "$build_root/compile_commands.json" "$CWD" \

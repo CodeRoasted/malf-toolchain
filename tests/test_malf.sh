@@ -1836,6 +1836,76 @@ check "a buildless member is counted on the member line, and the identity still 
       "members 3 selected = 2 configured + 0 content-only + 1 buildless" \
       "$(grep -oE "$cm_id_re" <<< "$cm_sum_buildless")"
 
+# --- A BUILDLESS MEMBER GETS A ROW, and `configured` is DERIVED from the rows -------------------
+# Until 2026-09-05 the rows covered configured members only, so a buildless member's test_package
+# units were in the database and in no row: measured that day at profile clang21-libcxx-release,
+# coderoast-server printed five rows totalling 168 entries against first-party 170. The row is what
+# accounts for one of those two (server-logging/test_package/test_package.cpp); the residual arm
+# below is the other.
+#
+# `configured` on the member line is now COUNTED FROM THE ROWS (every row whose role is not
+# `buildless`) rather than taken as `len(rows)`, which would have double-counted the new row and
+# made the identity print 3 configured + 1 buildless for a 3-member repo. Fed one buildless row,
+# the line must still read 2 configured + 1 buildless.
+mkdir -p "$cm_root/hdrlib/test_package"
+cat > "$cm_tmp/db_bl.json" <<JSON
+[{"file": "$cm_root/api/parent.cppm"},
+ {"file": "$cm_root/sub/api/child.cppm"},
+ {"file": "$cm_root/hdrlib/test_package/test_package.cpp"},
+ {"file": "/usr/lib/llvm-21/share/libc++/v1/std.cppm"}]
+JSON
+cm_sum_blrow="$(_malf_commands_summary "$cm_tmp/db_bl.json" "$cm_root" 3 0 1 1 1 0 \
+                 "target $cm_root" "target $cm_root/sub" "buildless $cm_root/hdrlib" 2>&1)"
+# WEAKER THAN IT LOOKS, and labelled for what it is: the summary was ALREADY role-blind when it
+# attributed, so this arm is green against the unfixed malf too — verified 2026-09-05, it was the
+# one of six new arms that did not red. The defect was in the CALLER, which never handed the
+# summary a buildless row, and the arm that reds for it is the caller arm further down. What this
+# one still pins is real but narrow: attribution must not start filtering rows by role, which is
+# the obvious wrong way to keep the role column honest.
+check "the summary attributes a row's entries regardless of its role label (buildless included)" \
+      "malf commands: hdrlib role=buildless 1 entries, 1 test/bench" \
+      "$(grep -E '^malf commands:   hdrlib[[:space:]]' <<< "$cm_sum_blrow" | tr -s ' ')"
+
+check "the member line's configured term is derived from the rows, so a buildless row is not double-counted" \
+      "members 3 selected = 2 configured + 0 content-only + 1 buildless" \
+      "$(grep -oE "$cm_id_re" <<< "$cm_sum_blrow")"
+
+# --- THE RESIDUAL: first-party entries under NO member -----------------------------------------
+# The rows summing to first-party has to be CHECKABLE on the line, not assumed, and on 2026-09-05
+# it did not hold for a reason no row can fix: coderoast-server's
+# infra/tests_support/local_container.cpp is first-party, is compiled from infra/redis's build dir,
+# and sits under none of the seven members — there is no member to give a row to. That is a
+# legitimate shape (shared test-support source consumed by a sibling member's tests), so it is a
+# NUMBER and never a fatal. Without the term the entries line reads as complete while the rows are
+# short, which is the truncated-database-that-reads-as-complete failure this command exists to
+# refuse.
+# THE FIXTURE'S ROOT IS NOT A MEMBER, and that is the whole point: coderoast-server has no
+# conanfile.py at its root, so no row's prefix covers infra/tests_support/. A fixture whose root IS
+# a row (the one above) can never produce a residual — every first-party path is under it — so it
+# would green this arm while measuring nothing.
+cat > "$cm_tmp/db_ua.json" <<JSON
+[{"file": "$cm_root/pkg_a/api/a.cppm"},
+ {"file": "$cm_root/pkg_b/api/b.cppm"},
+ {"file": "$cm_root/shared_support/helper.cpp"},
+ {"file": "/usr/lib/llvm-21/share/libc++/v1/std.cppm"}]
+JSON
+cm_sum_ua="$(_malf_commands_summary "$cm_tmp/db_ua.json" "$cm_root" 2 0 0 1 1 0 \
+              "target $cm_root/pkg_a" "target $cm_root/pkg_b" 2>&1)"
+check "the first-party total is split into the member rows and the unattributed residual" \
+      "first-party 3 = 2 in the member rows below + 1 unattributed" \
+      "$(grep -oE 'first-party [0-9]+ = [0-9]+ in the member rows below \+ [0-9]+ unattributed' <<< "$cm_sum_ua")"
+
+check "a non-zero residual NAMES where it lives, so the number is a lead rather than a mystery" \
+      "malf commands: unattributed live under: shared_support" \
+      "$(grep -E '^malf commands:   unattributed live under:' <<< "$cm_sum_ua" | tr -s ' ')"
+
+# An EXTERNAL entry is not unattributed — it is already accounted for by the external term next
+# door, and counting it twice would make the residual fire on every run. The db here carries one
+# (libc++'s std.cppm) and every first-party path IS under a member, so the residual must read zero.
+check "an external entry stays external and never lands in the residual" \
+      "first-party 4 = 4 in the member rows below + 0 unattributed" \
+      "$(grep -oE 'first-party [0-9]+ = [0-9]+ in the member rows below \+ [0-9]+ unattributed' <<< "$cm_sum")"
+
 # A test_package is configured OUTSIDE the member's preset — a synthetic conan consumer and a
 # direct `cmake -S` — so it leaves no CMakeCache and _malf_commands_tree_role is blind to it by
 # construction. This line is where a dropped one becomes visible, and its DENOMINATOR is the census
@@ -1938,6 +2008,13 @@ cm_preset_gate_ln="$(grep -n 'CMakePresets.json" \]\]; then' <<< "$cm_src" | hea
 check "the test_package census is taken BEFORE the gate that can drop the member" \
       "counted before" \
       "$([[ -n "$cm_census_ln" ]] && echo counted || echo "NOT-COUNTED") $([[ -n "$cm_census_ln" && -n "$cm_preset_gate_ln" && "$cm_census_ln" -lt "$cm_preset_gate_ln" ]] && echo before || echo "AFTER(census=${cm_census_ln:-none} gate=${cm_preset_gate_ln:-none})")"
+
+# The buildless rows have to be APPENDED BY THE COMMAND, and outside the role-gate loop: fed to
+# _malf_commands_tree_role a buildless member answers `no-cache`, which is FATAL — so a row added
+# in the wrong loop would red on a member whose recipe is behaving exactly as written.
+check "the command appends a buildless row, and outside the role-gate loop" \
+      "appended outside" \
+      "$(grep -q 'rows+=("buildless \$m")' <<< "$cm_src" && echo appended || echo "NOT-APPENDED") $(awk '/for m in "\$\{configured\[@\]\}"; do/{f=1} f&&/rows\+=\("buildless/{print "INSIDE"; exit} f&&/^    done$/{f=0} /for m in "\$\{buildless\[@\]\}"; do/{g=1} g&&/rows\+=\("buildless/{print "outside"; exit}' <<< "$cm_src")"
 
 # An unused predicate tests nothing, and the fixture arms above would still be green.
 check "the role verdict and the scope summary are both CALLED by the command" \
