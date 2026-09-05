@@ -4018,13 +4018,14 @@ Commands:
                                needs ~500x a file's size in RAM, so one stray blob with a source
                                extension can otherwise take the whole machine down. Prune extra
                                directories with MALF_FORMAT_EXCLUDE_EXTRA="dir1 dir2".
-    contract-gen [DIR|FILE...] [--out PATH]
-                               the DERIVED contract surface (ADR-26.O3): per declaration its pre /
-                               post / invariant lines and refs:, every law block in full, the refs
-                               index and the TEST → refs table, rendered by the same parser
+    contract-gen [DIR|FILE...] [--out PATH] [--declarations-only]
+                               the DERIVED contract surface (ADR-26.O3): per declaration every
+                               tagged line it carries (pre / post / invariant / assert / note)
+                               and its refs:, a TEST under its name, every law block in full, the
+                               refs index and the TEST → refs table, rendered by the same parser
                                `format --check` counts with. Stdout by default; --out writes a
-                               scratch file. Never committed — regenerate it. --selftest proves
-                               the renderer on a fixture.
+                               scratch file. Never committed — regenerate it. --declarations-only
+                               is the narrower shape; --selftest proves the renderer on a fixture.
     commands | compile-commands
                                rebuild the repo-level compile_commands.json the editor reads.
                                Every run STATES ITS SCOPE — members selected/configured, the

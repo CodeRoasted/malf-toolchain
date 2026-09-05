@@ -2,9 +2,12 @@
 """malf contract-gen — the DERIVED contract surface of a Code & Comment as Contract repo (ADR-26.O3).
 
 Reads the tagged comment lines and the law blocks of a directory and renders `contract.md`: per file,
-per declaration, its `pre` / `post` / `invariant` lines with their `refs:`; every law block in full;
-a `refs` index (address → citing sites); and from the test tier, `TEST` name → `refs:`, so which
-contracts have a witness and which laws have none is one table.
+per declaration, every tagged line it carries (`pre` / `post` / `invariant` / `assert` / `note`) with
+its `refs:`, a `TEST` listed under its name; every law block in full; a `refs` index (address →
+citing sites); and from the test tier, `TEST` name → `refs:`, so which contracts have a witness and
+which laws have none is one table. The Founder ruled the all-forms surface the default on
+2026-09-05 after the measurement (14 of 33 questions from the declarations-only file, 33 of 33 from
+the all-forms one); `--declarations-only` renders the narrower shape.
 
 The output is DERIVED and never committed: a committed copy would be a mirror of the source with no
 enforced edge, the exact class the grammar removes. It prints to stdout, or to `--out PATH` when a
@@ -144,7 +147,8 @@ def collect(path: Path, rel: str) -> tuple[list[Site], list[Law]]:
     return sites, laws
 
 
-def render(root_label: str, sites: list[Site], laws: list[Law], all_forms: bool = False) -> str:
+def render(root_label: str, sites: list[Site], laws: list[Law], declarations_only: bool = False) -> str:
+    all_forms = not declarations_only
     shown = ("pre", "post", "invariant", "assert", "note") if all_forms else ("pre", "post", "invariant")
     out: list[str] = []
     today = _dt.date.today().isoformat()
@@ -228,7 +232,7 @@ def render(root_label: str, sites: list[Site], laws: list[Law], all_forms: bool 
     return "\n".join(out)
 
 
-def generate(targets: list[Path], root_label: str, all_forms: bool = False) -> tuple[str, int, int]:
+def generate(targets: list[Path], root_label: str, declarations_only: bool = False) -> tuple[str, int, int]:
     files = source_files(targets)
     sites: list[Site] = []
     laws: list[Law] = []
@@ -241,7 +245,7 @@ def generate(targets: list[Path], root_label: str, all_forms: bool = False) -> t
         file_sites, file_laws = collect(path, rel)
         sites.extend(file_sites)
         laws.extend(file_laws)
-    return render(root_label, sites, laws, all_forms), len(files), len(sites)
+    return render(root_label, sites, laws, declarations_only), len(files), len(sites)
 
 
 def selftest() -> int:
@@ -282,10 +286,10 @@ def selftest() -> int:
         check("a law with no LSRC citer is listed as having no witness, a cited one is not",
               "`D-LSRC-" + "7` — an orphan law" in text and "`D-LSRC-" + "5` —" not in text.split("## Laws with no witness")[1])
         check("the output declares itself derived and never committed", "never committed" in text)
-        full, _, _ = generate([root], "selftest", all_forms=True)
-        check("--all-forms renders assert: and note: lines and lists a TEST body under its name",
-              "**assert:**" in full and "**note:**" in full and "- `Subject.UnwitnessedProperty`" in full)
-        check("the default shape leaves assert: and note: out", "**assert:**" not in text and "**note:**" not in text)
+        narrow, _, _ = generate([root], "selftest", declarations_only=True)
+        check("the default renders assert: and note: lines and lists a TEST body under its name",
+              "**assert:**" in text and "**note:**" in text and "- `Subject.UnwitnessedProperty`" in text)
+        check("--declarations-only leaves assert: and note: out", "**assert:**" not in narrow and "**note:**" not in narrow)
         empty = root / "empty"
         empty.mkdir()
         text, files, sites = generate([empty], "empty")
@@ -298,8 +302,8 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="malf contract-gen", description=__doc__.split("\n\n")[0])
     parser.add_argument("targets", nargs="*", help="directories or files; a directory is walked for C++ sources")
     parser.add_argument("--out", metavar="PATH", help="write contract.md here instead of stdout (a scratch path, never a tracked one)")
-    parser.add_argument("--all-forms", action="store_true",
-                        help="also render assert: and note: lines, and every TEST body's claims (an experiment; the ruled shape is the default)")
+    parser.add_argument("--declarations-only", action="store_true",
+                        help="render only pre/post/invariant at declarations, no assert:/note: and no TEST bodies (the narrower shape; all forms is the ruled default)")
     parser.add_argument("--selftest", action="store_true")
     args = parser.parse_args(argv)
     if args.selftest:
@@ -311,7 +315,7 @@ def main(argv: list[str]) -> int:
     if missing:
         parser.error(f"no such path: {', '.join(missing)}")
     label = ", ".join(str(t) for t in targets)
-    text, files, sites = generate(targets, label, args.all_forms)
+    text, files, sites = generate(targets, label, args.declarations_only)
     if args.out:
         Path(args.out).write_text(text)
         print(f"contract-gen: {files} file(s), {sites} tagged site(s) → {args.out}", file=sys.stderr)
