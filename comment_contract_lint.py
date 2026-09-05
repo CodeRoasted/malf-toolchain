@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Code & Comment as Contract — the comment-grammar phase of `malf format` (DN-90.D5).
+"""Code & Comment as Contract — the comment-grammar phase of `malf format` (ADR-26.D7).
 
 Every `//` comment line in an ARMED repo must begin with exactly one of six tags
 (`pre:` `post:` `invariant:` `assert:` `note:` `refs:`) and stand on its own line. A CONTRACT
@@ -23,7 +23,7 @@ itself and judges that; in write mode the disk already holds the formatted bytes
 pins exactly that shape: the fixture is CLEAN before formatting and RED after.
 
 ARMING is the repo's own declaration: a top-level `comment_contract: true` in its `packages.yml`
-(the Founder, 2026-09-05, DN-90.O2 (d)). A file under an unarmed repo is COUNTED — every form,
+(the Founder, 2026-09-05, ADR-26.D7). A file under an unarmed repo is COUNTED — every form,
 every would-be violation — and never failed, so a repo's numbers exist before its migration is
 scheduled and the 90 % target has an instrument. Sites are printed for armed files, and for
 report-only files when the caller named the paths explicitly (a lane converting one unit wants
@@ -33,7 +33,7 @@ WHAT IT DELIBERATELY DOES NOT DO. It checks the FORM of a `refs:` address, never
 — that is `scripts/registry_grammar_lint.py`'s (G4, G5, G7, the LSRC arm), and one source per rule
 (ADR-6.D14). It does not check WHERE a tag sits (a `pre:` at a declaration versus in a body) —
 that is a read rule; parsing C++ for it would buy a second, weaker parser. It does not judge
-whether a `note:` deserves to exist — the cold-reader interrogation of DN-90.D6 does.
+whether a `note:` deserves to exist — the cold-reader interrogation of ADR-26.D8 does.
 
 Usage:
     comment_contract_lint.py [--mode M] [--format-via BIN --style STYLE [--mem-limit-kb N]]
@@ -462,7 +462,7 @@ void take(int /*unused*/);
 void process(int& state)
 {
     // assert: every entry in `state` has been normalized.
-    // refs: DN-90.D2
+    // refs: ADR-26.D5
     // NOLINTBEGIN(readability-magic-numbers)
     const char* url = "http://example.test//x";
     const char* raw = R"yaml(

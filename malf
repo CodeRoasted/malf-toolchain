@@ -2638,7 +2638,7 @@ cmd_format() {
     _malf_format_summary "$fmt_mode" "${roots[*]}" "$(( ${#targets[@]} + skipped ))" \
         "${#targets[@]}" "$misformatted" "$skipped" "$fmt_rc"
 
-    # ── Code & Comment as Contract (DN-90.D5): the grammar phase, over the SAME population ────
+    # ── Code & Comment as Contract (ADR-26.D7): the grammar phase, over the SAME population ────
     # Runs AFTER clang-format's verdict and reads the POST-FORMAT text. In check mode the file on
     # disk is untouched, so the checker formats each file to stdout itself; in write mode the disk
     # already holds the formatted bytes. Why post-format is not optional — measured 2026-09-05,
@@ -2659,6 +2659,14 @@ cmd_format() {
     | python3 "$MALF_DIR/comment_contract_lint.py" "${ccc_args[@]}" || ccc_rc=$?
     if (( fmt_rc != 0 )); then return "$fmt_rc"; fi
     return "$ccc_rc"
+}
+
+cmd_contract_gen() {
+    # ADR-26.O3: a DERIVED contract surface, rendered from the tagged lines and law blocks the
+    # format gate counts, and never committed — the generator is the only copy, so a stale
+    # contract.md cannot exist. Everything after the verb is the Python's: directories or files,
+    # `--out PATH`, `--selftest`.
+    python3 "$MALF_DIR/contract_gen.py" "$@"
 }
 
 _malf_resolve_preset() {
@@ -4001,7 +4009,7 @@ Commands:
                                capped at MALF_LINT_TU_TIMEOUT_S (600 s), because a crashed
                                clang-tidy hangs symbolizing rather than exiting.
     format  [--check]          clang-format, then the Code & Comment as Contract grammar over the
-                               SAME files, read post-format (DN-90.D5): armed by a top-level
+                               SAME files, read post-format (ADR-26.D7): armed by a top-level
                                `comment_contract: true` in the repo's packages.yml, counted and
                                never failed otherwise — the CCC SUMMARY line carries the counts.
                                guarded: files over MALF_SOURCE_MAX_FILE_KB (2048) are skipped and
@@ -4010,6 +4018,13 @@ Commands:
                                needs ~500x a file's size in RAM, so one stray blob with a source
                                extension can otherwise take the whole machine down. Prune extra
                                directories with MALF_FORMAT_EXCLUDE_EXTRA="dir1 dir2".
+    contract-gen [DIR|FILE...] [--out PATH]
+                               the DERIVED contract surface (ADR-26.O3): per declaration its pre /
+                               post / invariant lines and refs:, every law block in full, the refs
+                               index and the TEST → refs table, rendered by the same parser
+                               `format --check` counts with. Stdout by default; --out writes a
+                               scratch file. Never committed — regenerate it. --selftest proves
+                               the renderer on a fixture.
     commands | compile-commands
                                rebuild the repo-level compile_commands.json the editor reads.
                                Every run STATES ITS SCOPE — members selected/configured, the
@@ -4901,6 +4916,7 @@ case "$COMMAND" in
     test)             cmd_test "$@" ;;
     lint)             cmd_lint "$@" ;;
     format)           cmd_format "$@" ;;
+    contract-gen)     cmd_contract_gen "$@" ;;
     commands|compile-commands) cmd_compile_commands "$@" ;;
     bench)            cmd_bench "$@" ;;
     clean)            cmd_clean "$@" ;;

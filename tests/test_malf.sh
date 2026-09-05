@@ -317,7 +317,7 @@ echo
 
 echo "[7h] comment_contract_lint carries its own grammar proof (--selftest), post-format leg included"
 
-# The comment-grammar phase of `malf format` (DN-90.D5). Its selftest falsifies every violation
+# The comment-grammar phase of `malf format` (ADR-26.D7). Its selftest falsifies every violation
 # class on a fixture, proves the clean fixture green, and pins the one shape that justifies the
 # phase's placement: a `// pre:` over the column limit followed by a `// post:` is CLEAN before
 # clang-format and RED after it, because the reflow swallows the second tag mid-line. That leg
@@ -341,6 +341,18 @@ check "comment_contract_lint --selftest" \
       "ok" "$([[ $ccc_selftest_status -eq 0 ]] && echo ok || echo "failed: $(tail -5 <<< "$ccc_selftest_output")")"
 check "comment_contract_lint --selftest ran the post-format leg (or said it skipped it)" \
       "yes" "$(grep -qE 'RED after formatting|post-format leg' <<< "$ccc_selftest_output" && echo yes || echo no)"
+
+echo
+
+echo "[7i] contract_gen renders the derived contract surface from the gate's own parser (--selftest)"
+
+# ADR-26.O3: the surface is DERIVED and never committed, so the generator's own selftest is its only
+# proof — a fixture carrying a contract, a law, a witnessed and an unwitnessed TEST and an orphan
+# law, rendered and read back section by section; and an empty population must say so rather than
+# render a blank.
+cg_selftest_output="$(python3 "$MALF_ROOT/contract_gen.py" --selftest 2>&1)" && cg_selftest_status=0 || cg_selftest_status=$?
+check "contract_gen --selftest" \
+      "ok" "$([[ $cg_selftest_status -eq 0 ]] && echo ok || echo "failed: $(tail -5 <<< "$cg_selftest_output")")"
 
 echo
 
