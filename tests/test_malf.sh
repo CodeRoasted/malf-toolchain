@@ -315,6 +315,35 @@ check "sbom_gen --selftest" \
 
 echo
 
+echo "[7h] comment_contract_lint carries its own grammar proof (--selftest), post-format leg included"
+
+# The comment-grammar phase of `malf format` (DN-90.D5). Its selftest falsifies every violation
+# class on a fixture, proves the clean fixture green, and pins the one shape that justifies the
+# phase's placement: a `// pre:` over the column limit followed by a `// post:` is CLEAN before
+# clang-format and RED after it, because the reflow swallows the second tag mid-line. That leg
+# needs the version-matched clang-format; it is passed when found and the selftest SAYS so when
+# it is not, so a skipped leg reads as skipped and never as a pass.
+ccc_clang_format=""
+ccc_clang_bin="$(command -v clang-21 || command -v clang || true)"
+if [[ -n "$ccc_clang_bin" && -x "$(dirname "$(readlink -f "$ccc_clang_bin")")/clang-format" ]]; then
+    ccc_clang_format="$(dirname "$(readlink -f "$ccc_clang_bin")")/clang-format"
+elif command -v clang-format-21 >/dev/null 2>&1; then
+    ccc_clang_format="$(command -v clang-format-21)"
+fi
+if [[ -n "$ccc_clang_format" ]]; then
+    ccc_selftest_output="$(python3 "$MALF_ROOT/comment_contract_lint.py" --selftest --format-via "$ccc_clang_format" 2>&1)"
+else
+    ccc_selftest_output="$(python3 "$MALF_ROOT/comment_contract_lint.py" --selftest 2>&1)"
+    echo "  note: no clang-format-21 found — the post-format leg of the CCC selftest is SKIPPED here"
+fi
+ccc_selftest_status=$?
+check "comment_contract_lint --selftest" \
+      "ok" "$([[ $ccc_selftest_status -eq 0 ]] && echo ok || echo "failed: $(tail -5 <<< "$ccc_selftest_output")")"
+check "comment_contract_lint --selftest ran the post-format leg (or said it skipped it)" \
+      "yes" "$(grep -qE 'RED after formatting|post-format leg' <<< "$ccc_selftest_output" && echo yes || echo no)"
+
+echo
+
 echo "[7d] _malf_with_build_lock serializes concurrent runs on ONE build tree"
 
 # Two malf runs started from different repo roots resolve the same conan editables and so run

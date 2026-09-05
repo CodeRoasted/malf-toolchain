@@ -5,7 +5,7 @@
 #   malf build   [subdir] [--asan|--profile <name>]
 #   malf test    [subdir] [--asan|--profile <name>] [--filter PATTERN]
 #   malf lint    [--all-files] [-c|--console]
-#   malf format  [--check]
+#   malf format  [--check]   (clang-format, then the comment-contract grammar over the same files)
 #   malf commands|compile-commands
 #   malf bench   [subdir] [--quick] [--filter REGEX] [--compare] [--repetitions N]
 #   malf clean   <build|conan|editables|stale|all>   (NO default; `all` is the nuclear form)
@@ -2637,7 +2637,28 @@ cmd_format() {
 
     _malf_format_summary "$fmt_mode" "${roots[*]}" "$(( ${#targets[@]} + skipped ))" \
         "${#targets[@]}" "$misformatted" "$skipped" "$fmt_rc"
-    return "$fmt_rc"
+
+    # ── Code & Comment as Contract (DN-90.D5): the grammar phase, over the SAME population ────
+    # Runs AFTER clang-format's verdict and reads the POST-FORMAT text. In check mode the file on
+    # disk is untouched, so the checker formats each file to stdout itself; in write mode the disk
+    # already holds the formatted bytes. Why post-format is not optional — measured 2026-09-05,
+    # clang-format 21.1.8: the reflow merges an overlong `// pre:` with the `// post:` line below
+    # it and the second tag lands MID-LINE on an untagged continuation. A pre-format read passes
+    # the pre and never sees the post vanish. Arming is the repo's own `comment_contract: true` in
+    # its packages.yml; an unarmed repo is COUNTED and never failed, so its numbers exist before
+    # its migration does. The two verdicts stay separate on purpose: fmt_rc's "rc≠0 with zero
+    # violations" reading (clang-format failed for a non-format reason) would be wrong if the
+    # grammar's rc were folded into it, so the format summary prints first and a red from either
+    # phase reds the run.
+    local ccc_rc=0
+    local -a ccc_args=(--mode "$fmt_mode" --files0 -)
+    if $check; then
+        ccc_args+=(--format-via "$clang_format_bin" --style "$style" --mem-limit-kb "$MALF_SOURCE_MEM_LIMIT_KB")
+    fi
+    printf '%s\0' "${targets[@]}" \
+    | python3 "$MALF_DIR/comment_contract_lint.py" "${ccc_args[@]}" || ccc_rc=$?
+    if (( fmt_rc != 0 )); then return "$fmt_rc"; fi
+    return "$ccc_rc"
 }
 
 _malf_resolve_preset() {
@@ -3979,7 +4000,11 @@ Commands:
                                a crash dump is a coverage hole, never a finding. Each TU is
                                capped at MALF_LINT_TU_TIMEOUT_S (600 s), because a crashed
                                clang-tidy hangs symbolizing rather than exiting.
-    format  [--check]          guarded: files over MALF_SOURCE_MAX_FILE_KB (2048) are skipped and
+    format  [--check]          clang-format, then the Code & Comment as Contract grammar over the
+                               SAME files, read post-format (DN-90.D5): armed by a top-level
+                               `comment_contract: true` in the repo's packages.yml, counted and
+                               never failed otherwise — the CCC SUMMARY line carries the counts.
+                               guarded: files over MALF_SOURCE_MAX_FILE_KB (2048) are skipped and
                                reported, and each clang-format process is capped at
                                MALF_SOURCE_MEM_LIMIT_KB (4 GB) of address space — clang-format
                                needs ~500x a file's size in RAM, so one stray blob with a source
