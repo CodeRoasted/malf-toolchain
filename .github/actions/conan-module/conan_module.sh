@@ -212,7 +212,46 @@ if [ "$TEST" = "true" ]; then
     cmake --build "build/$MODULE"
     # Robust test detection: some modules emit Testing/ but not a top-level CTestTestfile.cmake.
     if [[ -d "build/$MODULE/Testing" || -f "build/$MODULE/CTestTestfile.cmake" ]]; then
-      ctest --test-dir "build/$MODULE" --output-on-failure
+      # `-LE corpus` — THE SAME EXCLUSION `malf test` APPLIES BY DEFAULT, and this is the caller
+      # that bypasses malf. The ctest label `corpus` marks gates needing a PRIVATE, machine-local,
+      # gitignored third-party bank mounted through an environment variable, and since
+      # insight-eidos 8c82df2 (2026-09-04) a missing mount is a HARD FAILURE rather than a gtest
+      # skip — deliberately, because a skip exits 0 and greened a gate that reached nothing. That
+      # commit taught malf to exclude the label and did not follow to the ctest callers that go
+      # around it. Measured 2026-09-05: insight-eidos drives `sift true true` through this script
+      # (its ci.yml modules list), sift carries 21 corpus-labelled tests, and release.yaml has
+      # `uses: ./.github/workflows/ci.yml` with golden/sbom/publish all `needs: ci` — so the next
+      # tag reds here and BLOCKS THE PUBLISH. Mounting the banks would be the wrong remedy: they
+      # are one developer's disk, and the corpus population has its own workflow and its own
+      # runner. Repos with no corpus label are unaffected — the flag removes an empty set.
+      #
+      # VACUITY GUARD, SCOPED TO THE VACUITY THIS FLAG CAN CREATE AND TO NOTHING ELSE. ctest exits
+      # 0 on "No tests were found!!!", and an exclusion is exactly what can empty a run that had
+      # content — so the flag owes a guard. But this script runs for EVERY module of EVERY repo,
+      # and a guard that simply demanded "at least one test" would also red every module that
+      # already ran zero, a population no one can enumerate without building all of them. That is
+      # a new red shipped into the release path on an unverified premise, which is the shape this
+      # whole change exists to remove.
+      #
+      # So the predicate is the DIFFERENCE, not the floor: fail only when the unfiltered suite has
+      # tests and the filtered one has none. A module that ran zero before behaves exactly as it
+      # did. The blast radius is therefore provably "modules where EVERY test is corpus-labelled",
+      # which is empty today — measured 2026-09-05, the label is set in one repo, in two lines of
+      # insight-eidos/sift/CMakeLists.txt, and that suite has 416 tests outside it.
+      ctest_all=$(ctest --test-dir "build/$MODULE" -N 2>/dev/null \
+                    | grep -cE '^[[:space:]]*Test[[:space:]]+#[0-9]+:' || true)
+      ctest_n=$(ctest --test-dir "build/$MODULE" -N -LE corpus 2>/dev/null \
+                  | grep -cE '^[[:space:]]*Test[[:space:]]+#[0-9]+:' || true)
+      if [ "${ctest_all:-0}" -gt 0 ] && [ "${ctest_n:-0}" -lt 1 ]; then
+        echo "conan_module: $MODULE discovers $ctest_all test(s) and ZERO of them survive -LE corpus." >&2
+        echo "conan_module: ctest exits 0 on an empty selection, so running it here would be a green" >&2
+        echo "conan_module: that measured nothing. Every test in this module is corpus-labelled, so it" >&2
+        echo "conan_module: belongs to the corpus job and its runner, not to this one — either move it" >&2
+        echo "conan_module: there or give this module a test that does not need a private bank." >&2
+        exit 1
+      fi
+      echo "conan_module: $MODULE — $ctest_n of $ctest_all test(s) run here (the rest are 'corpus'-labelled)"
+      ctest --test-dir "build/$MODULE" --output-on-failure -LE corpus
     fi
   ) 2>&1 | tee -a "$LOG"
   build_status=${PIPESTATUS[0]}
