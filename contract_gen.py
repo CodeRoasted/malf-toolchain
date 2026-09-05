@@ -144,7 +144,8 @@ def collect(path: Path, rel: str) -> tuple[list[Site], list[Law]]:
     return sites, laws
 
 
-def render(root_label: str, sites: list[Site], laws: list[Law]) -> str:
+def render(root_label: str, sites: list[Site], laws: list[Law], all_forms: bool = False) -> str:
+    shown = ("pre", "post", "invariant", "assert", "note") if all_forms else ("pre", "post", "invariant")
     out: list[str] = []
     today = _dt.date.today().isoformat()
     out.append(f"# contract.md — `{root_label}`")
@@ -152,10 +153,10 @@ def render(root_label: str, sites: list[Site], laws: list[Law]) -> str:
     out.append(f"DERIVED on {today} by `malf contract-gen` from the tagged comment lines and law blocks; "
                "never committed — regenerate it.")
     out.append("")
-    contract_sites = [site for site in sites if any(c.tag in ("pre", "post", "invariant") for c in site.claims) or site.refs]
+    contract_sites = [site for site in sites if any(c.tag in shown for c in site.claims) or site.refs]
     by_file: dict[str, list[Site]] = collections.defaultdict(list)
     for site in contract_sites:
-        if not site.test_name:
+        if all_forms or not site.test_name:
             by_file[site.file].append(site)
     out.append("## Contracts, per file and declaration")
     out.append("")
@@ -166,10 +167,10 @@ def render(root_label: str, sites: list[Site], laws: list[Law]) -> str:
         out.append(f"### `{file}`")
         out.append("")
         for site in by_file[file]:
-            head = site.decl if site.decl else "(end of file)"
+            head = site.test_name or site.decl or "(end of file)"
             out.append(f"- `{head}` (line {site.line})")
             for claim in site.claims:
-                if claim.tag in ("pre", "post", "invariant"):
+                if claim.tag in shown:
                     out.append(f"  - **{claim.tag}:** {claim.text}")
             if site.refs:
                 out.append(f"  - **refs:** {', '.join(site.refs)}")
@@ -227,7 +228,7 @@ def render(root_label: str, sites: list[Site], laws: list[Law]) -> str:
     return "\n".join(out)
 
 
-def generate(targets: list[Path], root_label: str) -> tuple[str, int, int]:
+def generate(targets: list[Path], root_label: str, all_forms: bool = False) -> tuple[str, int, int]:
     files = source_files(targets)
     sites: list[Site] = []
     laws: list[Law] = []
@@ -240,7 +241,7 @@ def generate(targets: list[Path], root_label: str) -> tuple[str, int, int]:
         file_sites, file_laws = collect(path, rel)
         sites.extend(file_sites)
         laws.extend(file_laws)
-    return render(root_label, sites, laws), len(files), len(sites)
+    return render(root_label, sites, laws, all_forms), len(files), len(sites)
 
 
 def selftest() -> int:
@@ -281,6 +282,10 @@ def selftest() -> int:
         check("a law with no LSRC citer is listed as having no witness, a cited one is not",
               "`D-LSRC-" + "7` — an orphan law" in text and "`D-LSRC-" + "5` —" not in text.split("## Laws with no witness")[1])
         check("the output declares itself derived and never committed", "never committed" in text)
+        full, _, _ = generate([root], "selftest", all_forms=True)
+        check("--all-forms renders assert: and note: lines and lists a TEST body under its name",
+              "**assert:**" in full and "**note:**" in full and "- `Subject.UnwitnessedProperty`" in full)
+        check("the default shape leaves assert: and note: out", "**assert:**" not in text and "**note:**" not in text)
         empty = root / "empty"
         empty.mkdir()
         text, files, sites = generate([empty], "empty")
@@ -293,6 +298,8 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="malf contract-gen", description=__doc__.split("\n\n")[0])
     parser.add_argument("targets", nargs="*", help="directories or files; a directory is walked for C++ sources")
     parser.add_argument("--out", metavar="PATH", help="write contract.md here instead of stdout (a scratch path, never a tracked one)")
+    parser.add_argument("--all-forms", action="store_true",
+                        help="also render assert: and note: lines, and every TEST body's claims (an experiment; the ruled shape is the default)")
     parser.add_argument("--selftest", action="store_true")
     args = parser.parse_args(argv)
     if args.selftest:
@@ -304,7 +311,7 @@ def main(argv: list[str]) -> int:
     if missing:
         parser.error(f"no such path: {', '.join(missing)}")
     label = ", ".join(str(t) for t in targets)
-    text, files, sites = generate(targets, label)
+    text, files, sites = generate(targets, label, args.all_forms)
     if args.out:
         Path(args.out).write_text(text)
         print(f"contract-gen: {files} file(s), {sites} tagged site(s) → {args.out}", file=sys.stderr)
