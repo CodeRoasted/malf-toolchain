@@ -4042,13 +4042,23 @@ Commands:
                                    pid's start time, so "is the holder alive?" has an answer even
                                    when no malf process is running) and a TOKEN (32 hex, so
                                    "am I the holder?" has one too).
+                                   THE ANCHOR'S RESOLUTION IS A SESSION, NOT A LANE: between two
+                                   lanes of ONE session it proves the session alive and nothing
+                                   about the holding lane, so a lane that died mid-run reads
+                                   HELD-and-alive. There is no per-lane pid to anchor on, so this
+                                   is DECLARED rather than fixed — every command detects the case
+                                   and says so, and withdraws the kill-the-anchor advice with it.
+                                   The token half is unaffected.
                                    acquire  claims it, or REFUSES and names the live holder;
                                             a holder whose anchor is provably gone is reclaimed
                                             automatically, and said so out loud
                                    release  --token <token from acquire/status>; --force only for
                                             a slot with no readable stamp. A LIVE holder cannot be
                                             forced — kill its anchor pid, then the slot frees
-                                            itself. Never 'rm -rf' the directory.
+                                            itself, EXCEPT when that anchor is your own session's
+                                            (see above), where killing it takes every sibling lane
+                                            and the token is the only escape.
+                                            Never 'rm -rf' the directory.
                                    status   FREE / HELD / STALE / UNKNOWN, and exits 0 / 1 / 2 / 3
                                    Path: MALF_BUILD_SLOT_DIR (default /tmp/coderoast-build-slot).
     sbom    [--check]              regenerate each published CycloneDX SBOM from the RESOLVED
@@ -4443,6 +4453,35 @@ cmd_cut_verify() {
 # a guess trading a false reclaim against a long stall, and it would have to be re-guessed every
 # time the work changed shape. The anchor answers the real question and has no number to tune.
 #
+# THE ANCHOR'S RESOLUTION IS A SESSION, NOT A LANE, AND BETWEEN TWO LANES OF ONE SESSION IT
+# ANSWERS NOTHING. Measured twice. 2026-09-03: a finishing lane and the slot's holder both derived
+# anchor pid 3053. 2026-09-05, re-derived deliberately from a THIRD, unrelated lane: it walked to
+# pid 3053 with start 1788357646, byte-identical to the stamp a different lane had written. The
+# cause is structural and not a bug in the walk — a delegated lane is not an OS process. Its
+# ancestry is `bash -> claude`, the bash is per-run and dies between runs (which is the defect the
+# anchor was introduced to fix), and the `claude` above it is the whole SESSION. There is no third
+# object, so THERE IS NO PER-LANE PID TO ANCHOR ON: this is not a matter of choosing a better
+# ancestor. The consequence: had the holding lane died mid-run, a sibling still alive would keep
+# the corpse reading HELD-and-alive for as long as the session lived. It also explains the five
+# dead lanes on 2026-09-03 whose slots looked held.
+#
+# THE TOKEN HALF IS UNAFFECTED — it still answers "am I the holder?" correctly, so no third party
+# can release by accident and nothing was ever at risk from this.
+#
+# SO THIS IS DECLARED, NOT FIXED, AND THE DECLARATION IS CONDITIONAL RATHER THAN A BLANKET
+# DISCLAIMER. `_malf_slot_anchor_is_shared` compares the READER's own derived anchor against the
+# stamped one; equal means the aliveness proof is void FOR THIS READER, and the message fires
+# exactly then. A reader in a different session gets a correct answer to the anchor's real
+# question ("is the holder's session alive?") and is told nothing extra. No new identifier is
+# needed for this — the comparison uses only what the file already computes.
+#
+# AND IT REMOVES A REMEDY THAT WAS ACTIVELY DANGEROUS UNDER THAT CONDITION. Three code paths told
+# a blocked reader to "kill pid <anchor>". When the anchor is shared, that pid is the reader's OWN
+# session: following the instruction literally kills the reader and every sibling lane with it.
+# Under a shared anchor the only non-catastrophic escape is the TOKEN, which `malf slot status`
+# already prints and the stamp already carries — and taking it is a deliberate human act, because
+# establishing that the holding lane is over is exactly what this code can no longer do.
+#
 # WHY NOT pgrep — measured 2026-09-03. `pgrep -f malf` matches the always-on GitHub Actions runner
 # service at /home/windows/actions-runner-malf/ on its DIRECTORY NAME: a permanent false positive
 # no pattern refinement reaches, present whether or not anyone is building. At the one moment a
@@ -4504,6 +4543,36 @@ _malf_slot_proc_start() {   # <pid>
     stat -c %Y "/proc/$1" 2>/dev/null
 }
 
+# Would THIS process anchor on the pid the stamp names? If so, the stamp's "anchor is ALIVE" is
+# true of a process this reader is itself running under, so it proves the SESSION is alive and
+# says nothing about the holding LANE. Callers use it to qualify a liveness claim and to withdraw
+# the "kill the anchor" remedy, never to change a state: the state is still `held`, correctly —
+# an unprovable death is not a death. Requires _malf_slot_read to have run.
+_malf_slot_anchor_is_shared() {
+    [[ -n "${_MALF_SLOT_ANCHOR:-}" ]] || return 1
+    [[ "$(_malf_slot_anchor_pid)" == "$_MALF_SLOT_ANCHOR" ]]
+}
+
+# The three call sites below print this identically, so it is written once. stderr or stdout is
+# the caller's choice, because `status` is a report and the other two are refusals.
+#
+# NO LINE HERE MAY BEGIN "malf slot: token " — that prefix is how `status` emits the MACHINE
+# field, and a second line carrying it makes `sed -n 's/^malf slot: token //p'` return two values.
+# Caught by writing exactly that extractor while testing this note, which then compared a
+# two-line token against the stamp and reported a mismatch on the correct token. The same applies
+# to "malf slot: dir " and to any other single-value line a caller might scrape.
+_malf_slot_shared_anchor_note() {
+    echo "malf slot: ⚠ THE ANCHOR IS SHARED WITH THIS PROCESS — pid $_MALF_SLOT_ANCHOR is what THIS"
+    echo "malf slot: command would anchor on too. The anchor's resolution is a SESSION, and a"
+    echo "malf slot: delegated lane is not an OS process, so between two lanes of one session"
+    echo "malf slot: 'the anchor is alive' proves the SESSION is alive and NOT that the holding"
+    echo "malf slot: lane is. A lane that died mid-run would read HELD-and-alive indefinitely."
+    echo "malf slot: DO NOT kill pid $_MALF_SLOT_ANCHOR — it is this session, and killing it takes"
+    echo "malf slot: every sibling lane with it. Under a shared anchor the only escape is the"
+    echo "malf slot: stamp's token, and taking it is a deliberate act: establishing that the"
+    echo "malf slot: holding lane is over is what this command can no longer do for you."
+}
+
 # Read the slot. Answers through globals rather than stdout because every caller needs several
 # fields at once and a command substitution per field would fork per field.
 #   free     the directory does not exist
@@ -4559,6 +4628,9 @@ _malf_slot_write_stamp() {   # <token> <anchor pid> <anchor start> <label>
         echo "  IS THE HOLDER STILL ALIVE?   malf slot status"
         echo "     It reads pid $2 and that pid's start time. A holder with no malf process running"
         echo "     is NORMAL — the slot is held across the gaps between runs, on purpose."
+        echo "     THE ANCHOR'S RESOLUTION IS A SESSION, NOT A LANE. If you are a lane of the same"
+        echo "     session as this holder, pid $2 is YOUR anchor too and its being alive tells you"
+        echo "     nothing about whether this holder is. 'malf slot status' detects that and says so."
         echo
         echo "  RELEASE IT (the holder):     malf slot release --token $1"
         echo
@@ -4639,6 +4711,10 @@ cmd_slot() {
             echo "malf slot: the anchor is its SESSION, and a holder between runs is the normal state." >&2
             echo "malf slot: wait for it. If it is genuinely stuck, kill pid $_MALF_SLOT_ANCHOR and re-run this" >&2
             echo "malf slot: command, which will then reclaim the slot itself. Do not rm -rf $MALF_BUILD_SLOT_DIR." >&2
+            if _malf_slot_anchor_is_shared; then
+                echo "malf slot: token $_MALF_SLOT_TOKEN" >&2
+                _malf_slot_shared_anchor_note >&2
+            fi
             slot_rc=1
             ;;
         unknown)
@@ -4725,6 +4801,7 @@ cmd_slot() {
                 echo "malf slot: if that lane is yours, its token is in $MALF_BUILD_SLOT_DIR/stamp and in 'malf slot status'." >&2
                 echo "malf slot: if it is stuck, kill pid $_MALF_SLOT_ANCHOR — the slot then frees itself. There is" >&2
                 echo "malf slot: deliberately no --force for a LIVE holder: the owner has to die first." >&2
+                _malf_slot_anchor_is_shared && _malf_slot_shared_anchor_note >&2
                 slot_rc=1
             fi
             ;;
@@ -4745,6 +4822,7 @@ cmd_slot() {
             echo "malf slot: anchor pid $_MALF_SLOT_ANCHOR is ALIVE (started $_MALF_SLOT_ANCHOR_START, same value as the stamp)"
             echo "malf slot: token $_MALF_SLOT_TOKEN"
             echo "malf slot: a holder with no malf process running is between runs — that is the normal state."
+            _malf_slot_anchor_is_shared && _malf_slot_shared_anchor_note
             slot_rc=1 ;;
         dead)
             echo "malf slot: STALE — holder '${_MALF_SLOT_LABEL:-<unlabelled>}' since ${_MALF_SLOT_SINCE:-<unknown>}"

@@ -2174,6 +2174,52 @@ check "the holder releases with its own token" \
       "rc=0 released GONE" \
       "rc=$sl_rel_ok_rc $([[ "$sl_rel_ok" == *"RELEASED"* ]] && echo released || echo "GOT: $sl_rel_ok") $(sl_dir_exists)"
 
+# THE ANCHOR'S RESOLUTION IS A SESSION, NOT A LANE — and the tool now says so when, and only
+# when, that costs the reader something. Measured twice on the real box (2026-09-03 and again
+# 2026-09-05 from a third, unrelated lane): two lanes of one session derive the SAME anchor pid
+# and the SAME start time, so "the anchor is ALIVE" proves the session is alive and nothing at
+# all about the holding lane. A delegated lane is not an OS process — its ancestry is
+# `bash -> claude`, the bash is per-run (the defect the anchor replaced) and the process above it
+# is the whole session — so there is no per-lane pid to anchor on and this cannot be fixed by
+# choosing a different ancestor. It is DECLARED instead, conditionally.
+#
+# BOTH DIRECTIONS ARE PINNED HERE, because a note that always fires is noise and a note that
+# never fires is absent. Determinism comes from the harness's own `sleep` anchor: acquiring
+# THROUGH it makes the holder's anchor foreign to the reader, and acquiring WITHOUT it makes the
+# holder's anchor identical to the reader's, since both invocations walk from the same parentage.
+sleep 300 & sl_anchor_far=$!
+sl_as "$sl_anchor_far" acquire --label suite-other-session >/dev/null 2>&1
+sl_far_out="$(sl status)"
+check "a holder in ANOTHER session does NOT trip the shared-anchor note (no false positive)" \
+      "silent" \
+      "$([[ "$sl_far_out" != *"ANCHOR IS SHARED"* ]] && echo silent || echo "GOT: $sl_far_out")"
+sl_far_tok="$(grep -oE 'token [0-9a-f]{32}' <<< "$sl_far_out" | head -1 | awk '{print $2}')"
+sl release --token "$sl_far_tok" >/dev/null 2>&1
+kill "$sl_anchor_far" 2>/dev/null; wait "$sl_anchor_far" 2>/dev/null
+
+sl_same_acq="$(sl acquire --label suite-same-session)"
+sl_same_out="$(sl status)"
+check "a holder in THIS session DOES trip it, and withdraws the kill-the-anchor remedy" \
+      "fires no-kill" \
+      "$([[ "$sl_same_out" == *"ANCHOR IS SHARED"* ]] && echo fires || echo "GOT: $sl_same_out") $([[ "$sl_same_out" == *"DO NOT kill pid"* ]] && echo no-kill || echo KILL-STILL-ADVISED)"
+# THE MACHINE FIELD MUST STAY SCRAPEABLE. `malf slot status` emits the token on a line beginning
+# "malf slot: token ", and a caller extracting it with `sed -n 's/^malf slot: token //p'` gets a
+# LIST, not a value, the moment any other line carries that prefix. Caught by writing exactly
+# that extractor while testing the note above: an early wording ended a sentence with "the token
+# above," on its own line, the extractor returned two lines, and the resulting comparison
+# reported a token mismatch on the correct token. Prose near a machine field is a contract.
+sl_tok_lines="$(grep -c '^malf slot: token ' <<< "$sl_same_out")"
+check "exactly ONE status line carries the machine token prefix, note or no note" \
+      "1" \
+      "$sl_tok_lines"
+sl_same_tok="$(grep -oE 'token [0-9a-f]{32}' <<< "$sl_same_acq" | head -1 | awk '{print $2}')"
+sl_same_scraped="$(sed -n 's/^malf slot: token //p' <<< "$sl_same_out")"
+check "the scraped token equals the minted one (a single clean value, not a list)" \
+      "equal" \
+      "$([[ -n "$sl_same_tok" && "$sl_same_scraped" == "$sl_same_tok" ]] && echo equal \
+          || echo "MINTED:$sl_same_tok SCRAPED:$sl_same_scraped")"
+sl release --token "$sl_same_tok" >/dev/null 2>&1
+
 # A GENUINELY STALE SLOT. The anchor dies; nothing else changes. This is the judgement the old
 # protocol could not make, and it is the whole reason the anchor is the lane's SESSION and not the
 # run: the pid in the stamp is expected to have no malf process behind it.
