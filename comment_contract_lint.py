@@ -9,7 +9,7 @@ lines that were one claim; `note:` and `refs:` stay strictly one line, the note 
 that must be starved. The only multi-line comment is the framed law block declaring a
 `D-LSRC-n`; a handful of TOOL
 forms are admitted because a machine reads them (clang-format's `} // namespace x`, clang-tidy's
-`/*name=*/` and own-line `NOLINT…`, `clang-format off/on`). Everything else is a violation, and
+`/*name=*/` and `/*name*/`, own-line `NOLINT…`, `clang-format off/on`). Everything else is a violation, and
 the default disposition of a violating comment is deletion — never a new tag.
 
 WHY THIS READS THE POST-FORMAT TEXT, and it is the reason the phase lives inside `malf format`
@@ -85,6 +85,12 @@ LAW_TITLE = re.compile(r"^D-LSRC-(\d+)\s*[—–:-]\s*\S")
 RULER = re.compile(r"^[-=─—_*#~.]{4,}")
 NOLINT = re.compile(r"^NOLINT(NEXTLINE|BEGIN|END)?\b")
 ARG_COMMENT = re.compile(r"^/\*\w+=\*/$")
+# `/*name*/` on an UNNAMED parameter is clang-tidy's other argument form: `readability-named-parameter`
+# accepts it as the name. Admitted 2026-09-05 after a census found the stripper had deleted eight of them
+# (1 in src, 7 in benchmarks) as block prose, leaving `push(LogRecord&&)` unnamed — a red that check
+# would raise, and no gate had run it. A one-line `/*word*/` is only ever this form or an argument
+# comment missing its `=`; both have a machine reader, so both are tool forms.
+NAMED_PARAM_COMMENT = re.compile(r"^/\*[A-Za-z_]\w*\*/$")
 
 VIOLATION_CLASSES = (
     "bare", "tag-mid-line", "slash3", "spacer", "ruler", "trailing", "trailing-nolint",
@@ -216,7 +222,7 @@ def classify(comments: list[Comment]) -> list[Finding]:
     for comment in comments:
         if comment.kind == "block":
             first, last = comment.lines[0].strip(), comment.lines[-1].strip()
-            if len(comment.lines) == 1 and ARG_COMMENT.match(first):
+            if len(comment.lines) == 1 and (ARG_COMMENT.match(first) or NAMED_PARAM_COMMENT.match(first)):
                 add(comment, "tool")
                 continue
             if LAW_OPEN.match(first) or first.startswith("/*" + "*" * 4):
@@ -449,6 +455,8 @@ namespace demo
 // refs: ADR-10.D3, LSRC-@N@, F-SRC-logcraft:core.api-value.cppm:to_string, SRC-SID-3
 int open(const std::string& path);
 
+void take(int /*unused*/);
+
 // note: clang-tidy cannot see the forward through the macro.
 // NOLINTNEXTLINE(cppcoreguidelines-missing-std-forward)
 void process(int& state)
@@ -533,8 +541,8 @@ def selftest(format_via: str | None) -> int:
         check("clean fixture: every form counted once where expected (the post: carries its one continuation)",
               {"pre": 1, "post": 1, "invariant": 1, "assert": 1, "note": 1, "refs": 2, "continuation": 1, "law": 1},
               {k: forms[k] for k in TAGS + ("continuation", "law") if forms[k]})
-        check("clean fixture: tool forms (namespace, arg comment, NOLINTNEXTLINE, BEGIN, END, off, on, wall-clock waiver, SPDX)",
-              9, forms["tool"])
+        check("clean fixture: tool forms (namespace, arg comment, named parameter, NOLINTNEXTLINE, BEGIN, END, off, on, wall-clock waiver, SPDX)",
+              10, forms["tool"])
         check("scanner: `//` inside a literal, a raw string, a char literal and a digit separator are not comments",
               True, all("http" not in f.text and "yaml" not in f.text for f in res.findings))
 
