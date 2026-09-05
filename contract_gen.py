@@ -28,14 +28,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import comment_contract_lint as ccl  # noqa: E402
 
-# BUILT, never a literal, for the reason `comment_contract_lint`'s own fixtures carry no law
-# number: `scripts/registry_grammar_lint.py` sweeps the source tree for `D-LSRC-<n>` declarations
-# AND — since 2026-09-05 — for `LSRC-<n>` citations. A literal `LSRC-5` here is a citation this  <!-- registry-lint: allow prose naming the token, not a site claiming it -->
-# workspace never made, of a law LogCraft has not minted; measured that day, this file was one of
-# the two specimen populations a naive sweep collected, and the only one outside the gate itself.
-# The declaration literals below were already built for the declaration half of the same sweep.
-_CITE = "LSRC" + "-"
-
 CPP_EXT = {".cpp", ".cppm", ".hpp", ".h", ".cc", ".hh", ".ixx"}
 SKIP_DIRS = {".git", ".conan2", ".cache", "node_modules"}
 TAG_LINE = re.compile(r"^(pre|post|invariant|assert|note|refs):\s*(.*)$")
@@ -274,7 +266,7 @@ def selftest() -> int:
         (root / "tests").mkdir()
         (root / "src" / "clean.cpp").write_text(ccl.CLEAN_FIXTURE.replace(ccl.LAW_NUMBER_TOKEN, "5"))
         (root / "tests" / "test_x.cpp").write_text(
-            "// refs: " + _CITE + "5, ADR-31.D9\n"
+            "// refs: LSRC-5, ADR-31.D9\n"
             "// invariant: the witness of the law above.\n"
             "TEST(Subject, PropertyHoldsUnderCondition)\n{\n}\n"
             "// note: a note with no refs.\n"
@@ -288,14 +280,11 @@ def selftest() -> int:
         check("walks every C++ file under the directory (3)", files == 3)
         check("a declaration carries its pre/post/invariant and refs", "**pre:**" in text and "**post:**" in text and "**invariant:**" in text)
         check("the law block is rendered in full under its number", "### D-LSRC-" + "5" + " —" in text)
-        check("the refs index maps an address to its citing sites",
-              "| `" + _CITE + "5` |" in text and "`Subject.PropertyHoldsUnderCondition`" in text)
+        check("the refs index maps an address to its citing sites", "| `LSRC-5` |" in text and "`Subject.PropertyHoldsUnderCondition`" in text)
         check("the test table lists a witnessed test with its refs and an unwitnessed one with a dash",
-              "| `Subject.PropertyHoldsUnderCondition` | `" + _CITE + "5`, `ADR-31.D9` |" in text
-              and "| `Subject.UnwitnessedProperty` | — |" in text)
+              "| `Subject.PropertyHoldsUnderCondition` | `LSRC-5`, `ADR-31.D9` |" in text and "| `Subject.UnwitnessedProperty` | — |" in text)
         check("a law with no LSRC citer is listed as having no witness, a cited one is not",
-              "`D-LSRC-" + "7` — an orphan law" in text
-              and "`D-LSRC-" + "5` —" not in text.split("## Laws with no witness")[1])
+              "`D-LSRC-" + "7` — an orphan law" in text and "`D-LSRC-" + "5` —" not in text.split("## Laws with no witness")[1])
         check("the output declares itself derived and never committed", "never committed" in text)
         narrow, _, _ = generate([root], "selftest", declarations_only=True)
         check("the default renders assert: and note: lines and lists a TEST body under its name",
