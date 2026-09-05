@@ -258,6 +258,12 @@ def classify(comments: list[Comment]) -> list[Finding]:
         if stripped in ("clang-format off", "clang-format on"):
             add(comment, "tool")
             continue
+        # logcraft's time-source lint (tests/determinism/test_time_source_lint.cpp) reads a
+        # `wall-clock:` marker on the STATEMENT of a wall-clock read as the reviewed waiver, and
+        # that marker is trailing by construction. A machine reads it, so it is a tool form.
+        if stripped.startswith("wall-clock:"):
+            add(comment, "tool")
+            continue
         if comment.trailing:
             if comment.code_before.rstrip().endswith("}") and re.match(r"namespace(\s|$)", stripped):
                 add(comment, "tool")
@@ -455,7 +461,8 @@ void process(int& state)
     // clang-format off
     call(/*deterministic=*/true, 1);
     // clang-format on
-    (void)url; (void)raw; (void)quote; (void)big; (void)state;
+    const auto started = now(); // wall-clock: real-time-mode path (a lint waiver a machine reads)
+    (void)url; (void)raw; (void)quote; (void)big; (void)state; (void)started;
 }
 } // namespace demo
 '''
@@ -519,8 +526,8 @@ def selftest(format_via: str | None) -> int:
         check("clean fixture: every form counted once where expected (the post: carries its one continuation)",
               {"pre": 1, "post": 1, "invariant": 1, "assert": 1, "note": 1, "refs": 2, "continuation": 1, "law": 1},
               {k: forms[k] for k in TAGS + ("continuation", "law") if forms[k]})
-        check("clean fixture: tool forms (namespace, arg comment, NOLINTNEXTLINE, BEGIN, END, off, on)",
-              7, forms["tool"])
+        check("clean fixture: tool forms (namespace, arg comment, NOLINTNEXTLINE, BEGIN, END, off, on, wall-clock waiver)",
+              8, forms["tool"])
         check("scanner: `//` inside a literal, a raw string, a char literal and a digit separator are not comments",
               True, all("http" not in f.text and "yaml" not in f.text for f in res.findings))
 
