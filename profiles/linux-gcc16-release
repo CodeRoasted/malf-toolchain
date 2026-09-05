@@ -8,8 +8,9 @@
 # HISTORY: 16.1.0 parked this profile 2026-06-06 — ICE (segfault in build_special_member_call)
 # on module-attached classes' member-init, filed as GCC PR 125768, CONFIRMED FIXED in 16.2.0 on
 # the June repros. The 16.2 residual defect (lazy-pendings BMI read on insight-e2e's two
-# contract-BMI-reading targets) is scoped where it lives: insight-e2e's CMake carries the
-# GNU-gated -fno-module-lazy with the upstream PR number and its removal trigger.
+# contract-BMI-reading targets) is scoped where it lives, under LSRC-3 — that law declares the
+# GNU-gated -fno-module-lazy, its measurement and its removal trigger, and nothing about it is
+# restated here.
 #
 # SOURCE: the sha256-pinned from-source build published by build-gcc-toolchain.yml (x64+arm64
 # native bootstraps, release tag gcc-16.2.0); setup-gcc extracts it to /opt/gcc-16.2 in CI and
@@ -53,20 +54,35 @@ tools.build:sharedlinkflags=["-Wl,-rpath,/opt/gcc-16.2/lib64"]
 # matching-profile build tree, closing the cross-stdlib editable .a contamination.
 # malf still sets MALF_EDITABLE_BUILD_DIR (takes precedence; covers sanitizer profiles).
 user.malf:editable_build_dir=build-gcc16-release
-# gcc-16's -Wmaybe-uninitialized false positive on constructor initializer lists (GCC PR 125203,
-# a [16 Regression]) fires inside redis-plus-plus 1.3.15's OWN -Werror build
-# (`F-SRC-redis-plus-plus:reply.h:ParseError` / `F-SRC-redis-plus-plus:sentinel.h:StopIterError`,
-# pinned 1.3.15 — the diagnostic cannot even name a variable).
-# Upstream confirmed + fixed on master (sewenew/redis-plus-plus#678, 2026-07-18: _err_info/_to_msg
-# made static), but NO release carries it and conancenter's head is 1.3.15. Desk-verified
-# 2026-08-16: without this line the package REDS on exactly those two sites; with it, the build is
-# green and all 5 diagnostics stay VISIBLE as warnings (-Wno-error=<name> is per-diagnostic and
-# position-independent under the library's blanket -Werror). Scope: this one package, this one
-# named diagnostic — any NEW warning class still reds (fail-closed). The per-package conf REPLACES
-# the global cxxflags, so the base flags are repeated verbatim. REMOVAL TRIGGER, first to land:
-# conan-center-index PR #30798 (our backport of the upstream fix; on merge the 1.3.15 recipe
-# revision carries the patch — take it at the next lock --update, delete this block), a
-# redis-plus-plus release > 1.3.15 on conancenter, or a ship gcc with the PR 125203 fix. A local
-# recipe fork or a source-mutating hook was rejected: the first grows the supply-chain surface
-# we'd own forever, the second makes the SBOM lie about the built bits.
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# D-LSRC-4 — the redis-plus-plus -Wmaybe-uninitialized waiver is per-package and per-diagnostic
+# THE LAW. Every gcc-16 profile waives this ONE diagnostic for redis-plus-plus and NOTHING wider:
+# `redis-plus-plus/*` scoped, `-Wno-error=maybe-uninitialized` named. A profile that needs the
+# waiver repeats the per-package line with its own base flags and cites this law by number; it
+# never widens the scope, never drops -Werror, and never carries a second copy of this argument.
+#
+# THE DEFECT. gcc-16's -Wmaybe-uninitialized false positive on constructor initializer lists (GCC
+# PR 125203, a [16 Regression]) fires inside redis-plus-plus 1.3.15's OWN -Werror build, at
+# `F-SRC-redis-plus-plus:reply.h:ParseError` and `F-SRC-redis-plus-plus:sentinel.h:StopIterError`
+# (pinned 1.3.15 — the diagnostic cannot even name a variable). Upstream confirmed and fixed on
+# master (sewenew/redis-plus-plus#678, 2026-07-18: _err_info/_to_msg made static), but NO release
+# carries it and conancenter's head is 1.3.15.
+#
+# MEASURED, desk, 2026-08-16: without the line the package REDS on exactly those two sites; with
+# it the build is green and all 5 diagnostics stay VISIBLE as warnings, because
+# `-Wno-error=<name>` is per-diagnostic and position-independent under the library's blanket
+# -Werror. Any NEW warning class still reds — the waiver is fail-closed by construction.
+#
+# WHY THE LINE LOOKS REDUNDANT: a per-package `[conf]` entry REPLACES the global cxxflags rather
+# than extending them, so the base flags are repeated verbatim in it.
+#
+# REJECTED: a local recipe fork (grows a supply-chain surface we would own forever) and a
+# source-mutating hook (makes the SBOM lie about the built bits).
+#
+# REMOVAL TRIGGER, first to land: conan-center-index PR #30798 (our backport of the upstream fix
+# — on merge the 1.3.15 recipe revision carries the patch, take it at the next `lock --update`
+# and delete this block), a redis-plus-plus release > 1.3.15 on conancenter, or a ship gcc
+# carrying the PR 125203 fix. Under ADR-3.D7 nothing is owed between those events: a compiler
+# defect is NOTED here and re-evaluated when the compiler moves or on demand, never enforced.
+# ─────────────────────────────────────────────────────────────────────────────────────────────
 redis-plus-plus/*:tools.build:cxxflags=["-O3", "-march=x86-64-v2", "-Wno-error=maybe-uninitialized"]

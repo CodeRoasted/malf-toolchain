@@ -42,7 +42,9 @@ tools.build:sharedlinkflags=["-Wl,-rpath,/opt/gcc-16.2/lib64", "-Wl,-rpath,/opt/
 # Editable build-dir keying: arm64-keyed so an arm64 leg never squats
 # on the x86 gcc16-release build tree (the two ISAs coexist in one workspace on a cross-build host).
 user.malf:editable_build_dir=build-gcc16-arm64-release
-# redis-plus-plus gcc-16 -Wmaybe-uninitialized waiver — the FULL argument, verification record and
-# removal trigger live in linux-gcc16-release (the x64 twin); this line mirrors it with the arm64
-# base flags (per-package conf REPLACES the global cxxflags, so they are repeated verbatim).
+# LSRC-4 — the redis-plus-plus gcc-16 -Wmaybe-uninitialized waiver. The rule, the measurement,
+# the rejected alternatives and the removal trigger are declared ONCE at that law's site and
+# are not repeated here; this line is the arm64 instance of it, per-package and per-diagnostic
+# as the law requires, with the arm64 base flags repeated because a per-package conf REPLACES
+# the global cxxflags rather than extending them.
 redis-plus-plus/*:tools.build:cxxflags=["-O3", "-march=armv8-a", "-Wno-error=maybe-uninitialized"]
