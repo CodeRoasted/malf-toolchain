@@ -66,13 +66,23 @@ TAG_HEAD = re.compile(r"(pre|post|invariant|assert|note|refs):(.*)$", re.S)
 TAG_MID = re.compile(r"(?<![\w`'\"/.:-])(pre|post|invariant|assert|note|refs):(\s|$)")
 
 # The registry forms a `refs:` may carry — LEXICON.md § Shortcut registry, minus the forms that are
-# not source-citable addresses: `MEMN-n` (banned from source, registry_grammar_lint G10), `Gn`
+# not source-citable addresses:
+#
+# THE `SRC-` BRANCH IS COPIED FROM `scripts/registry_grammar_lint.py`'s `SRC_CITE`, DELIBERATELY AND
+# CHARACTER FOR CHARACTER, because this gate checks FORM and that instrument owns RESOLUTION
+# (ADR-26.D5, ADR-6.D14). It used to carry a hand-written `SRC-[A-Z][A-Z0-9-]*[0-9]`, which requires
+# the token to END IN A DIGIT and so rejected every code with a lowercase CLAUSE suffix —
+# `SRC-D-OUT-4c` resolved in the registry lint while this gate called it "not an address". Measured
+# 2026-09-06 by the `insight-canon` CCC lane: 57 live-source occurrences over 8 codes and 15 files,
+# blocking five source directories and two test directories in one repo. Two copies of one grammar
+# is the defect; keep this branch in sync with that one, or delete it in favour of a call.
+# `MEMN-n` (banned from source, registry_grammar_lint G10), `Gn`
 # (a local ordinal, DN-70) and `<Name> · <Index>` (a register row, not an address).
 REF_FORM = re.compile(
     r"""^(?:
         ADR-\d+(?:\.[DO]\d+)? | DN-\d+(?:\.[DO]\d+)? | STU-\d+(?:\.[QAO]\d+)? |
         OPS-\d+(?:\.[SO]\d+)? | PRD-\d+(?:\.[PBO]\d+)? | LIM-\d+ | LSRC-\d+ |
-        SRC-[A-Z][A-Z0-9-]*[0-9] | F-SRC-[a-z0-9-]+:[^\s,:]+(?::[^\s,]+)? |
+        SRC-[A-Z][A-Za-z0-9]*(?:-[A-Z0-9]+)*-\d+[a-z]? | F-SRC-[a-z0-9-]+:[^\s,:]+(?::[^\s,]+)? |
         BUG-\d+ | FLAW-\d+ | OQ-\d+ | LEX:[A-Za-z][\w-]* | MEM:[a-z0-9-]+ | BIB:[a-z0-9_]+
     )$""",
     re.X,
@@ -452,7 +462,7 @@ namespace demo
 // post: on failure, externally observable state is unchanged, and the refusal names the
 // first invalid entry of the manifest.
 // invariant: state_.size() == index_.size()
-// refs: ADR-10.D3, LSRC-@N@, F-SRC-logcraft:core.api-value.cppm:to_string, SRC-SID-3
+// refs: ADR-10.D3, LSRC-@N@, F-SRC-logcraft:core.api-value.cppm:to_string, SRC-D-OUT-4c
 int open(const std::string& path);
 
 void take(int /*unused*/);
