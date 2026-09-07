@@ -86,9 +86,16 @@ CheckOptions:
   # WarningsAsErrors, so it never blocks a build. Handle a finding by TRIAGE, never by raising
   # this number to silence it: a genuinely sprawling function is refactored (single
   # responsibility); a legitimately-complex algorithmic / hot-path function whose split
-  # would fragment a coherent routine gets a SAME-LINE
-  # `// NOLINT(readability-function-cognitive-complexity): <reason>` — same-line, so the
-  # waiver cannot outlive the code it anchors to by drifting off it. The bar
+  # would fragment a coherent routine gets an OWN-LINE
+  # `// NOLINTNEXTLINE(readability-function-cognitive-complexity)` directly above the
+  # function, under a `// note:` carrying the reason — the one suppression form the Code &
+  # Comment as Contract grammar admits (ADR-26.D5; a same-line `// NOLINT(...)` is the
+  # `trailing-nolint` violation class and `malf format --check` reds it). The waiver still
+  # cannot drift off its anchor: clang-tidy itself binds NEXTLINE to the following line, and
+  # the gate reds a directive whose preceding line is not its `note:`/`refs:`. This text
+  # prescribed the same-line form until 2026-09-07 while the tree had already left it —
+  # measured that day: 20 cognitive-complexity waivers across the workspace, every one
+  # own-line NEXTLINE, zero same-line. The bar
   # stays open to revision, but only against DATA: if the finding distribution shows scores
   # inflated by idiomatic macros (LOG/assert one-liners) rather than real control flow, the
   # right lever is `IgnoreMacros: 'true'`, decided against the actual findings — not a raised
