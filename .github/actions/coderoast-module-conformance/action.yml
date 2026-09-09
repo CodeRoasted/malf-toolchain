@@ -1,6 +1,6 @@
 name: 'CodeRoast module conformance'
 description: |
-  C++23 module-unit conformance gate (the §11.9.x rule set: sealed <pkg>.detail, no internal-manifest
+  C++23 module-unit conformance gate (the ADR-3.D4 rule set: sealed <pkg>.detail, no internal-manifest
   re-export, no `export using` re-homing, no thread_local / C-library macro token in a module unit,
   detail units shipped under the PRIVATE install seal). All six rules are per-module-unit-local, so
   this runs per-repo (a package repo lints its OWN modules on every PR) or over a whole tree.
