@@ -50,6 +50,9 @@ class Site:
     decl: str
     claims: list[Claim] = field(default_factory=list)
     refs: list[str] = field(default_factory=list)
+    # A declaration rendered for its own text — a constexpr constant with its value, a concept with
+    # its requirements — because the value IS the contract and no tagged line restates it.
+    bare: bool = False
 
     @property
     def test_name(self) -> str:
@@ -84,13 +87,93 @@ def source_files(targets: list[Path]) -> list[Path]:
     return files
 
 
-def declaration_after(lines: list[str], last_comment_line: int) -> str:
+DECL_MAX_LINES = 8
+DECL_MAX_CHARS = 240
+CONCEPT_MAX_LINES = 14
+CONST_DECL = re.compile(r"^(?:export\s+)?(?:inline\s+|static\s+)*constexpr\b")
+CONCEPT_DECL = re.compile(r"^(?:export\s+)?concept\b")
+
+
+def join_declaration(lines: list[str], start: int) -> str:
+    """The declaration from its first code line to the line that ENDS it — a `;`, an opening `{`, or
+    the close of a parenthesised parameter list — joined onto one line and capped.
+
+    The first line alone is not a declaration: a `template <...>` header names nothing, and a
+    signature wrapped over three lines names its function on the first and its parameters on the
+    rest. Measured 2026-09-09 (DN-91.D3's shakedown on the two smallest packages): with the head
+    alone, a cold reader mapped 8 of 30 questions to their declaration by ADJACENCY, because every
+    class template rendered as a bare `template <...>` line and a source line number. A concept is
+    carried to its closing `};` because its requirements are the interface obligation itself."""
+    parts: list[str] = []
+    seen_paren = False
+    depth = 0
+    limit = min(len(lines), start + DECL_MAX_LINES)
+    for index in range(start, limit):
+        code = _code(lines[index]).strip()
+        if not code or code.startswith("//"):
+            continue
+        concept_mode = "concept" in " ".join(parts + [code]).split("=")[0]
+        if code.startswith("{") and parts and not concept_mode:
+            break
+        parts.append(code)
+        seen_paren = seen_paren or "(" in code
+        depth += code.count("(") - code.count(")")
+        joined = " ".join(parts)
+        if concept_mode:
+            limit = min(len(lines), start + CONCEPT_MAX_LINES)
+            if joined.endswith("};") or (joined.endswith(";") and "{" not in joined):
+                break
+            continue
+        if joined.endswith(";") or joined.endswith("{"):
+            break
+        if seen_paren and depth == 0 and not joined.endswith(","):
+            break
+        if not seen_paren and not joined.startswith("template") and not joined.endswith(","):
+            break
+    joined = " ".join(parts).rstrip("{").strip()
+    if len(joined) > DECL_MAX_CHARS:
+        joined = joined[: DECL_MAX_CHARS - 1] + "…"
+    return joined
+
+
+def declaration_after(lines: list[str], last_comment_line: int) -> tuple[str, int]:
     # The first line carrying code after the run; a run at end of file has no declaration.
     for index in range(last_comment_line, min(len(lines), last_comment_line + 40)):
         code = _code(lines[index]).strip()
         if code and not code.startswith("//"):
-            return code
-    return ""
+            return join_declaration(lines, index), index
+    return "", -1
+
+
+def bare_declarations(lines: list[str], rel: str, used: set[int]) -> list[Site]:
+    """Constants with a value and concepts, wherever they sit, when no tagged run already claims
+    the line. A `kIterations{600000}` or a `kMaxListedDivergences{8}` is a contract the code
+    states in its own text; measured 2026-09-09, three of the six NOT-STATED answers in the
+    shakedown were such values. A constexpr FUNCTION is not a constant and is left out: its
+    contract is its tagged lines."""
+    out: list[Site] = []
+    index = 0
+    while index < len(lines):
+        code = _code(lines[index]).strip()
+        if index in used or not code:
+            index += 1
+            continue
+        head = re.split(r"[{=]", code, maxsplit=1)[0]
+        is_const = CONST_DECL.match(code) and ("{" in code or "=" in code) and "(" not in head
+        is_concept = CONCEPT_DECL.match(code) is not None
+        skip_to = index + 1
+        if not is_concept and code.startswith("template"):
+            for probe in range(index + 1, min(len(lines), index + 3)):
+                nxt = _code(lines[probe]).strip()
+                if nxt:
+                    is_concept = CONCEPT_DECL.match(nxt) is not None
+                    if is_concept:
+                        skip_to = probe + 1   # the concept line itself is part of this site
+                    break
+        if is_const or is_concept:
+            out.append(Site(rel, index + 1, join_declaration(lines, index), bare=True))
+        index = skip_to
+    return out
 
 
 def collect(path: Path, rel: str) -> tuple[list[Site], list[Law]]:
@@ -118,10 +201,13 @@ def collect(path: Path, rel: str) -> tuple[list[Site], list[Law]]:
                 claims[-1].text = f"{claims[-1].text} {body}".strip()
         run.clear()
         if claims or refs:
-            decl = declaration_after(lines, run_last)
+            decl, decl_index = declaration_after(lines, run_last)
+            if decl_index >= 0:
+                used.add(decl_index)
             sites.append(Site(rel, run_first, decl, claims, refs))
 
     run_first = run_last = 0
+    used: set[int] = set()
     for comment in ccl.scan_comments(text):
         if comment.kind == "block":
             first = comment.lines[0].strip()
@@ -144,6 +230,7 @@ def collect(path: Path, rel: str) -> tuple[list[Site], list[Law]]:
             run.append(comment)
             run_first = run_last = comment.line
     flush()
+    sites.extend(bare_declarations(lines, rel, used))
     return sites, laws
 
 
@@ -157,11 +244,14 @@ def render(root_label: str, sites: list[Site], laws: list[Law], declarations_onl
     out.append(f"DERIVED on {today} by `malf contract-gen` from the tagged comment lines and law blocks; "
                "never committed — regenerate it.")
     out.append("")
-    contract_sites = [site for site in sites if any(c.tag in shown for c in site.claims) or site.refs]
+    contract_sites = [site for site in sites
+                      if any(c.tag in shown for c in site.claims) or site.refs or (site.bare and all_forms)]
     by_file: dict[str, list[Site]] = collections.defaultdict(list)
     for site in contract_sites:
         if all_forms or not site.test_name:
             by_file[site.file].append(site)
+    for file_sites in by_file.values():
+        file_sites.sort(key=lambda site: site.line)
     out.append("## Contracts, per file and declaration")
     out.append("")
     if not by_file:
@@ -172,7 +262,7 @@ def render(root_label: str, sites: list[Site], laws: list[Law], declarations_onl
         out.append("")
         for site in by_file[file]:
             head = site.test_name or site.decl or "(end of file)"
-            out.append(f"- `{head}` (line {site.line})")
+            out.append(f"- `{head}` (line {site.line}){' — declared value' if site.bare else ''}")
             for claim in site.claims:
                 if claim.tag in shown:
                     out.append(f"  - **{claim.tag}:** {claim.text}")
@@ -194,7 +284,7 @@ def render(root_label: str, sites: list[Site], laws: list[Law], declarations_onl
     index: dict[str, list[str]] = collections.defaultdict(list)
     for site in sites:
         for address in site.refs:
-            label = site.test_name or site.decl or "(end of file)"
+            label = site.test_name or site.decl.split("(")[0].strip() or "(end of file)"
             index[address].append(f"`{site.file}` — `{label}`")
     out.append("## refs index (address → citing sites)")
     out.append("")
@@ -276,8 +366,31 @@ def selftest() -> int:
             "D-LSRC-" + "7" + " — an orphan law\nNobody cites this one.\n"
             "****************************************************************************************************/\n"
             "int f();\n")
+        (root / "src" / "shapes.cppm").write_text(
+            "// invariant: the ring never blocks a pusher.\n"
+            "template <FrameLike Frame>\n"
+            "class SharedMemorySpscChannel\n{\n};\n"
+            "// post: one log's lines, segmented.\n"
+            "[[nodiscard]] std::vector<Quantum> segment_into_quanta(std::span<const std::string> lines,\n"
+            "                                                       std::string_view dialect,\n"
+            "                                                       std::string_view channel);\n"
+            "static constexpr std::uint32_t kIterations{600000};\n"
+            "constexpr int helper(int x) { return x; }\n"
+            "template <typename T>\n"
+            "concept FrameLike = requires(T t) {\n"
+            "    { t.header.sequence } -> std::convertible_to<std::uint64_t>;\n"
+            "};\n")
         text, files, sites = generate([root], "selftest")
-        check("walks every C++ file under the directory (3)", files == 3)
+        check("walks every C++ file under the directory (4)", files == 4)
+        check("a class template renders its NAME, not a bare `template <...>` head",
+              "- `template <FrameLike Frame> class SharedMemorySpscChannel` (line" in text)
+        check("a wrapped signature renders whole, parameters included",
+              "segment_into_quanta(std::span<const std::string> lines, std::string_view dialect, std::string_view channel);" in text)
+        check("a constexpr constant renders with its VALUE as a declared value",
+              "`static constexpr std::uint32_t kIterations{600000};` (line" in text and "— declared value" in text)
+        check("a constexpr FUNCTION is not a declared value", "helper(int x)" not in text)
+        check("a concept renders its requirements to the closing brace",
+              "concept FrameLike = requires(T t) { { t.header.sequence } -> std::convertible_to<std::uint64_t>; };" in text)
         check("a declaration carries its pre/post/invariant and refs", "**pre:**" in text and "**post:**" in text and "**invariant:**" in text)
         check("the law block is rendered in full under its number", "### D-LSRC-" + "5" + " —" in text)
         check("the refs index maps an address to its citing sites", "| `LSRC-5` |" in text and "`Subject.PropertyHoldsUnderCondition`" in text)
@@ -290,6 +403,7 @@ def selftest() -> int:
         check("the default renders assert: and note: lines and lists a TEST body under its name",
               "**assert:**" in text and "**note:**" in text and "- `Subject.UnwitnessedProperty`" in text)
         check("--declarations-only leaves assert: and note: out", "**assert:**" not in narrow and "**note:**" not in narrow)
+        check("--declarations-only leaves the declared values out too", "declared value" not in narrow)
         empty = root / "empty"
         empty.mkdir()
         text, files, sites = generate([empty], "empty")
