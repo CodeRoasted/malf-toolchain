@@ -2644,9 +2644,9 @@ cmd_format() {
     # already holds the formatted bytes. Why post-format is not optional — measured 2026-09-05,
     # clang-format 21.1.8: the reflow merges an overlong `// pre:` with the `// post:` line below
     # it and the second tag lands MID-LINE on an untagged continuation. A pre-format read passes
-    # the pre and never sees the post vanish. Arming is the repo's own `comment_contract: true` in
-    # its packages.yml; an unarmed repo is COUNTED and never failed, so its numbers exist before
-    # its migration does. The two verdicts stay separate on purpose: fmt_rc's "rc≠0 with zero
+    # the pre and never sees the post vanish. The phase reds in EVERY repo with no declaration
+    # (OPS-8.S13, 2026-09-09): the per-repo `comment_contract` key that once made an unmigrated
+    # repo report-only was ripped when the last migration closed. The two verdicts stay separate on purpose: fmt_rc's "rc≠0 with zero
     # violations" reading (clang-format failed for a non-format reason) would be wrong if the
     # grammar's rc were folded into it, so the format summary prints first and a red from either
     # phase reds the run.
@@ -4009,9 +4009,9 @@ Commands:
                                capped at MALF_LINT_TU_TIMEOUT_S (600 s), because a crashed
                                clang-tidy hangs symbolizing rather than exiting.
     format  [--check]          clang-format, then the Code & Comment as Contract grammar over the
-                               SAME files, read post-format (ADR-26.D7): armed by a top-level
-                               `comment_contract: true` in the repo's packages.yml, counted and
-                               never failed otherwise — the CCC SUMMARY line carries the counts.
+                               SAME files, read post-format (ADR-26.D7): reds on any violation
+                               in any repo, no declaration — the CCC SUMMARY line carries the
+                               population so a zero is distinguishable from nothing inspected.
                                guarded: files over MALF_SOURCE_MAX_FILE_KB (2048) are skipped and
                                reported, and each clang-format process is capped at
                                MALF_SOURCE_MEM_LIMIT_KB (4 GB) of address space — clang-format

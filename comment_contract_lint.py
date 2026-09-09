@@ -22,12 +22,14 @@ check mode — where clang-format rewrites nothing — this checker formats each
 itself and judges that; in write mode the disk already holds the formatted bytes. The selftest
 pins exactly that shape: the fixture is CLEAN before formatting and RED after.
 
-ARMING is the repo's own declaration: a top-level `comment_contract: true` in its `packages.yml`
-(the Founder, 2026-09-05, ADR-26.D7). A file under an unarmed repo is COUNTED — every form,
-every would-be violation — and never failed, so a repo's numbers exist before its migration is
-scheduled and the 90 % target has an instrument. Sites are printed for armed files, and for
-report-only files when the caller named the paths explicitly (a lane converting one unit wants
-its sites; a whole-repo sweep wants the count).
+THE GATE REDS EVERYWHERE, WITH NO DECLARATION (ADR-26.D7, OPS-8.S13, the Founder 2026-09-09).
+Until 2026-09-09 a repo armed itself with a top-level `comment_contract: true` in its
+`packages.yml` and an unarmed repo was COUNTED and never failed, so that a repo's numbers existed
+before its migration was scheduled. That instrument's value expired with the last migration —
+all eight C++ repos read zero (STU-18) — and an opt-out no repo uses is dormant plumbing, so the
+key was ripped rather than defaulted: any file this checker is handed is judged, every violation
+is printed with its site, and one violation anywhere reds the run. A repo that starts outside the
+grammar is migrated by OPS-8 before it lands; there is no report-only window to land it into.
 
 WHAT IT DELIBERATELY DOES NOT DO. It checks the FORM of a `refs:` address, never its RESOLUTION
 — that is `scripts/registry_grammar_lint.py`'s (G4, G5, G7, the LSRC arm), and one source per rule
@@ -37,7 +39,7 @@ whether a `note:` deserves to exist — the cold-reader interrogation of ADR-26.
 
 Usage:
     comment_contract_lint.py [--mode M] [--format-via BIN --style STYLE [--mem-limit-kb N]]
-                             [--sites] (--files0 - | FILE...)
+                             (--files0 - | FILE...)
     comment_contract_lint.py --selftest [--format-via BIN]
 """
 from __future__ import annotations
@@ -54,10 +56,6 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-try:
-    import yaml  # the same loader pin_coherence.py reads packages.yml with
-except ImportError:  # pragma: no cover — the workspace ships pyyaml; the fallback keeps the gate honest
-    yaml = None
 
 TAGS = ("pre", "post", "invariant", "assert", "note", "refs")
 TAG_HEAD = re.compile(r"(pre|post|invariant|assert|note|refs):(.*)$", re.S)
@@ -326,23 +324,6 @@ def classify(comments: list[Comment]) -> list[Finding]:
     return findings
 
 
-# ── arming ────────────────────────────────────────────────────────────────────────────────────
-@functools.lru_cache(maxsize=None)
-def repo_and_arming(directory: Path) -> tuple[Path | None, bool]:
-    for candidate in (directory, *directory.parents):
-        manifest = candidate / "packages.yml"
-        if manifest.is_file():
-            raw = manifest.read_text(encoding="utf-8", errors="replace")
-            if yaml is not None:
-                try:
-                    data = yaml.safe_load(raw) or {}
-                except yaml.YAMLError:
-                    return candidate, False
-                return candidate, isinstance(data, dict) and data.get("comment_contract") is True
-            return candidate, re.search(r"^comment_contract:\s*true\s*$", raw, re.M) is not None
-    return None, False
-
-
 # ── reading a file, pre- or post-format ───────────────────────────────────────────────────────
 def read_formatted(path: Path, clang_format: str, style: str, mem_limit_kb: int | None) -> tuple[str | None, str]:
     def limit() -> None:
@@ -362,8 +343,6 @@ def read_formatted(path: Path, clang_format: str, style: str, mem_limit_kb: int 
 @dataclass
 class FileResult:
     path: Path
-    repo: Path | None
-    armed: bool
     findings: list[Finding] = field(default_factory=list)
     not_checked: str = ""
     comment_lines: int = 0
@@ -372,8 +351,7 @@ class FileResult:
 def check_files(paths: list[Path], format_via: str | None, style: str, mem_limit_kb: int | None) -> list[FileResult]:
     results: list[FileResult] = []
     for path in paths:
-        repo, armed = repo_and_arming(path.resolve().parent)
-        result = FileResult(path, repo, armed)
+        result = FileResult(path)
         if format_via:
             text, why = read_formatted(path, format_via, style, mem_limit_kb)
             if text is None:
@@ -389,12 +367,10 @@ def check_files(paths: list[Path], format_via: str | None, style: str, mem_limit
     return results
 
 
-def summarize(results: list[FileResult], mode: str, show_sites: bool, out=sys.stdout) -> int:
+def summarize(results: list[FileResult], mode: str, out=sys.stdout) -> int:
     forms = collections.Counter()
-    armed_viol = collections.Counter()
-    plain_viol = collections.Counter()
-    armed_repos: set[str] = set()
-    n_armed = n_plain = n_not_checked = 0
+    viol = collections.Counter()
+    n_not_checked = 0
     total_comment_lines = 0
     for result in results:
         if result.not_checked:
@@ -402,42 +378,34 @@ def summarize(results: list[FileResult], mode: str, show_sites: bool, out=sys.st
             print(f"{result.path}: NOT CHECKED ({result.not_checked})", file=out)
             continue
         total_comment_lines += result.comment_lines
-        if result.armed:
-            n_armed += 1
-            armed_repos.add(result.repo.name if result.repo else "?")
-        else:
-            n_plain += 1
         for finding in result.findings:
             if not finding.is_violation:
                 forms[finding.klass] += 1
                 continue
-            (armed_viol if result.armed else plain_viol)[finding.klass] += 1
-            if result.armed or show_sites:
-                tag = "CCC" if result.armed else "CCC(report-only)"
-                print(f"{result.path}:{finding.line}:{finding.col}: {tag} {finding.klass}: {finding.text}", file=out)
+            viol[finding.klass] += 1
+            print(f"{result.path}:{finding.line}:{finding.col}: CCC {finding.klass}: {finding.text}", file=out)
 
     def counts(counter: collections.Counter, keys) -> str:
         return " ".join(f"{k}={counter[k]}" for k in keys if counter[k]) or "none"
 
-    armed_total = sum(armed_viol.values())
-    plain_total = sum(plain_viol.values())
-    armed_not_checked = sum(1 for r in results if r.not_checked and r.armed)
-    rc = 1 if (armed_total or armed_not_checked) else 0
+    total = sum(viol.values())
+    # A file that could not be read through clang-format is LOST COVERAGE, never a clean verdict:
+    # the reflow-swallow shape is invisible on the pre-format text, so an unchecked file reds.
+    rc = 1 if (total or n_not_checked) else 0
     n_files = len(results)
     if n_files == 0:
         print(f"malf format: CCC SUMMARY · mode={mode} · CHECKED 0 — NOTHING WAS INSPECTED · rc={rc}", file=out)
         return rc
     print(
-        f"malf format: CCC SUMMARY · mode={mode} · files {n_files} = armed {n_armed} + report-only {n_plain}"
-        f" + NOT CHECKED {n_not_checked} · armed repos: {', '.join(sorted(armed_repos)) or 'none'}"
+        f"malf format: CCC SUMMARY · mode={mode} · files {n_files} = checked {n_files - n_not_checked}"
+        f" + NOT CHECKED {n_not_checked}"
         f" · comment lines {total_comment_lines} · forms {counts(forms, FORM_CLASSES)}"
-        f" · violations in armed files {armed_total} ({counts(armed_viol, VIOLATION_CLASSES)})"
-        f" · would-be violations in report-only files {plain_total} ({counts(plain_viol, VIOLATION_CLASSES)})"
+        f" · violations {total} ({counts(viol, VIOLATION_CLASSES)})"
         f" · rc={rc}",
         file=out,
     )
-    if rc and armed_not_checked:
-        print(f"malf format: CCC · {armed_not_checked} armed file(s) were NOT CHECKED — that is lost coverage,"
+    if rc and n_not_checked:
+        print(f"malf format: CCC · {n_not_checked} file(s) were NOT CHECKED — that is lost coverage,"
               " not a clean verdict; read the NOT CHECKED lines above.", file=out)
     return rc
 
@@ -535,14 +503,13 @@ def selftest(format_via: str | None) -> int:
 
     with tempfile.TemporaryDirectory(prefix="malf_ccc_selftest.") as tmp:
         root = Path(tmp)
-        armed = root / "armed"
-        plain = root / "plain"
-        (armed / "src").mkdir(parents=True)
-        (plain / "src").mkdir(parents=True)
-        (armed / "packages.yml").write_text("comment_contract: true\npackages: {}\n")
-        (plain / "packages.yml").write_text("packages: {}\n")
+        repo = root / "repo"           # no packages.yml anywhere: the gate needs no declaration
+        keyed = root / "keyed"         # the RETIRED key, still spelled: it must change nothing
+        (repo / "src").mkdir(parents=True)
+        (keyed / "src").mkdir(parents=True)
+        (keyed / "packages.yml").write_text("comment_contract: true\npackages: {}\n")
 
-        clean = armed / "src" / "clean.cpp"
+        clean = repo / "src" / "clean.cpp"
         clean.write_text(CLEAN_FIXTURE.replace(LAW_NUMBER_TOKEN, "5"))
         [res] = check_files([clean], None, "", None)
         viol = [f for f in res.findings if f.is_violation]
@@ -558,31 +525,30 @@ def selftest(format_via: str | None) -> int:
 
         for label, source in VIOLATION_FIXTURES.items():
             klass = label.split(" ")[0]
-            fixture = armed / "src" / f"{len(label)}_{klass}.cpp"
+            fixture = repo / "src" / f"{len(label)}_{klass}.cpp"
             fixture.write_text(source)
             [res] = check_files([fixture], None, "", None)
             got = sorted({f.klass for f in res.findings if f.is_violation})
             check(f"violation class fires: {label}", [klass], got)
 
-        twin = plain / "src" / "bare.cpp"
-        twin.write_text(VIOLATION_FIXTURES["bare"])
         import io
+        bare = repo / "src" / "bare.cpp"
+        bare.write_text(VIOLATION_FIXTURES["bare"])
         buf = io.StringIO()
-        rc = summarize(check_files([twin], None, "", None), "check-sweep", False, out=buf)
-        check("unarmed repo: a violation is counted, never failed (rc 0)", 0, rc)
-        check("unarmed repo: the summary names it report-only with its would-be count",
-              True, "report-only 1" in buf.getvalue() and "would-be violations in report-only files 1" in buf.getvalue())
-        armed_bare = armed / "src" / "bare_armed.cpp"
-        armed_bare.write_text(VIOLATION_FIXTURES["bare"])
+        rc = summarize(check_files([bare], None, "", None), "check-sweep", out=buf)
+        check("no declaration anywhere: a violation FAILS (rc 1) and its site is printed",
+              (1, True), (rc, "CCC bare:" in buf.getvalue()))
+        keyed_bare = keyed / "src" / "bare.cpp"
+        keyed_bare.write_text(VIOLATION_FIXTURES["bare"])
         buf = io.StringIO()
-        rc = summarize(check_files([armed_bare], None, "", None), "check-sweep", False, out=buf)
-        check("armed repo: the same violation fails (rc 1)", 1, rc)
+        rc = summarize(check_files([keyed_bare], None, "", None), "check-sweep", out=buf)
+        check("the retired `comment_contract` key changes nothing: the same violation fails identically", 1, rc)
         buf = io.StringIO()
-        rc = summarize([], "check-sweep", False, out=buf)
+        rc = summarize([], "check-sweep", out=buf)
         check("zero files is announced as NOTHING WAS INSPECTED, never as a pass",
               True, "NOTHING WAS INSPECTED" in buf.getvalue())
 
-        swallow = armed / "src" / "swallow.cpp"
+        swallow = repo / "src" / "swallow.cpp"
         swallow.write_text(SWALLOW_FIXTURE)
         [res] = check_files([swallow], None, "", None)
         check("reflow-swallow fixture is CLEAN before formatting (the blindness a pre-format read has)",
@@ -610,7 +576,6 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--format-via", metavar="CLANG_FORMAT")
     parser.add_argument("--style", default="file")
     parser.add_argument("--mem-limit-kb", type=int)
-    parser.add_argument("--sites", action="store_true", help="print sites for report-only files too")
     parser.add_argument("--files0", metavar="-", help="read NUL-separated paths from stdin ('-')")
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument("files", nargs="*")
@@ -625,9 +590,8 @@ def main(argv: list[str]) -> int:
     if not paths:
         print("comment_contract_lint: no files given (use --files0 - or FILE...)", file=sys.stderr)
         return 2
-    show_sites = args.sites or args.mode.endswith("-paths")
     results = check_files(paths, args.format_via, args.style, args.mem_limit_kb)
-    return summarize(results, args.mode, show_sites)
+    return summarize(results, args.mode)
 
 
 if __name__ == "__main__":
