@@ -90,6 +90,7 @@ def source_files(targets: list[Path]) -> list[Path]:
 DECL_MAX_LINES = 8
 DECL_MAX_CHARS = 240
 CONCEPT_MAX_LINES = 14
+CONCEPT_MAX_CHARS = 1200
 CONST_DECL = re.compile(r"^(?:export\s+)?(?:inline\s+|static\s+)*constexpr\b")
 CONCEPT_DECL = re.compile(r"^(?:export\s+)?concept\b")
 
@@ -131,8 +132,11 @@ def join_declaration(lines: list[str], start: int) -> str:
         if not seen_paren and not joined.startswith("template") and not joined.endswith(","):
             break
     joined = " ".join(parts).rstrip("{").strip()
-    if len(joined) > DECL_MAX_CHARS:
-        joined = joined[: DECL_MAX_CHARS - 1] + "…"
+    # A concept's requirements ARE the obligation, so the cap that keeps a signature to one line
+    # would cut the contract itself — the shakedown's second round read a truncated FrameLike.
+    cap = CONCEPT_MAX_CHARS if "concept" in joined.split("=")[0] else DECL_MAX_CHARS
+    if len(joined) > cap:
+        joined = joined[: cap - 1] + "…"
     return joined
 
 
