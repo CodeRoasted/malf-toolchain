@@ -89,7 +89,7 @@ def source_files(targets: list[Path]) -> list[Path]:
 
 DECL_MAX_LINES = 8
 DECL_MAX_CHARS = 240
-CONCEPT_MAX_LINES = 14
+CONCEPT_MAX_LINES = 40
 CONCEPT_MAX_CHARS = 1200
 CONST_DECL = re.compile(r"^(?:export\s+)?(?:inline\s+|static\s+)*constexpr\b")
 CONCEPT_DECL = re.compile(r"^(?:export\s+)?concept\b")
