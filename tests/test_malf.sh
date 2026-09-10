@@ -1324,8 +1324,15 @@ $(grep -q 'semantic/test_frameworks/src/vocab.cpp' <<< "$(lx_walk)" && echo kept
 # The --header-filter is the third consumer of the same list. It must DERIVE, not hold a copy:
 # changing the variable must change the output, which a frozen string could not do.
 check "lint exclusion — the header filter derives from the variable, position-free, regex-escaped" \
-      '(?:.*/)?alpha/|(?:.*/)?be\.ta/' \
+      '(.*/)?alpha/|(.*/)?be\.ta/' \
       "$(MALF_LINT_EXCLUDE_EXTRA='alpha be.ta' _malf_lint_header_filter)"
+
+# llvm::Regex is POSIX ERE, and a pattern it cannot compile matches NOTHING, silently: that is how
+# every first-party header went unlinted until 2026-09-10. This pins the SHAPE — no `(?` group in
+# either filter flag — and the behaviour was measured on a fixture when the flags were split.
+check "lint filters — no (? group reaches --header-filter or --exclude-header-filter" \
+      "0" \
+      "$(grep -cE 'header-filter=.*\(\?' "$MALF_BIN")"
 
 rm -rf "$lx_tmp"
 

@@ -200,7 +200,7 @@ MALF_FORMAT_EXCLUDE_EXTRA="${MALF_FORMAT_EXCLUDE_EXTRA:-sift_assessment}"
 # derive from them and none restates them: `_malf_prune_args` builds the
 # --all-files walk's `find -prune` arguments, `_malf_lint_path_excluded` builds
 # the incremental leg's per-path test, and `_malf_lint_header_filter` builds
-# cmd_lint's --header-filter alternatives.
+# cmd_lint's --exclude-header-filter alternatives.
 #
 # The incremental leg used to hard-code the same four spellings as `*/NAME/*`
 # globs, and that copy had not merely been AT RISK of drifting — it HAD drifted.
@@ -1765,7 +1765,13 @@ PY
     # 64 library TUs lint clean (verified 2026-06-11); only the test/bench aggregator-imports
     # crash, and only in parallel. Excluded here so the gate covers 100% of SHIPPING source;
     # test/bench keep -Werror + sanitizers. Remove when clang's module ASTReader is fixed.
-    extra_args+=("--header-filter=^${CWD}/(?!\.conan2|build|$(_malf_lint_header_filter)).*")
+    # llvm::Regex, which compiles both flags, is POSIX ERE: it cannot compile ANY `(?…)` group, and
+    # a pattern it cannot compile matches NOTHING without a word. The single-flag lookahead form
+    # stood here until 2026-09-10 and reported zero diagnostics from every first-party header —
+    # byte-identical to a deliberately invalid `[`. So the exclusion is its own flag, and neither
+    # pattern may carry a `(?` group; tests/test_malf.sh pins that shape.
+    extra_args+=("--header-filter=^${CWD}/.*")
+    extra_args+=("--exclude-header-filter=^${CWD}/(\.conan2|build|$(_malf_lint_header_filter))")
 
     # THE VERDICT ACCUMULATOR, declared here rather than beside the xargs run below, because the
     # DB-completeness filter above it can already have failed the run. `local lint_status=0` sat
@@ -2239,8 +2245,8 @@ _malf_lint_path_excluded() {
     return 1
 }
 
-# LSRC-1's four names as --header-filter alternatives: glob-translated to regex and made
-# position-free. `(?:.*/)?tests/` excludes a tests/ at ANY depth INCLUDING the walk root, which
+# LSRC-1's four names as --exclude-header-filter alternatives: glob-translated to POSIX ERE and
+# made position-free. `(.*/)?tests/` excludes a tests/ at ANY depth INCLUDING the walk root, which
 # the hand-written `.*/tests/` did not — the same off-by-one the incremental leg carried, in the
 # other of the two copies this replaced. The widening's domain is EMPTY on this workspace and
 # that is a measurement, not an assumption (2026-08-31): no header file exists under a nested
@@ -2257,7 +2263,7 @@ _malf_lint_header_filter() {
         rx="${name//./\\.}"          # regex-escape, then translate the two glob metacharacters
         rx="${rx//\*/[^/]*}"          # component-scoped: neither may cross a path separator
         rx="${rx//\?/[^/]}"
-        out+="|(?:.*/)?${rx}/"
+        out+="|(.*/)?${rx}/"
     done
     printf '%s' "${out#|}"
 }
