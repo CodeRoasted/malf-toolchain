@@ -65,7 +65,7 @@ TAG_MID = re.compile(r"(?<![\w`'\"/.:-])(pre|post|invariant|assert|note|refs):(\
 
 # The registry forms a `refs:` may carry — LEXICON.md § Shortcut registry, minus the forms that are
 # not source-citable addresses: `MEMN-n` (banned from source, registry_grammar_lint G10), `Gn`
-# (a local ordinal, DN-70) and `<Name> · <Index>` (a register row, not an address).
+# (a local ordinal, ADR-6.D17) and `<Name> · <Index>` (a register row, not an address).
 #
 # THE `SRC-<code>` FORM IS NOT HERE, AND THAT IS THE RETIREMENT (ADR-6.D13, 2026-09-09): this gate
 # checks FORM and a retired form is not a form, so a `SRC-` token in a `refs:` reds as "not an
