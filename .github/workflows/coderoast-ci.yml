@@ -7,8 +7,10 @@ name: CodeRoast CI
 # data manifests. A caller becomes ~4 lines: permissions + `uses:` + `with: {vendor, modules}` +
 # `secrets: inherit`.
 #
-# Exception: `coderoast-server` needs `services:` (redis + postgres), which a `uses:` job cannot
-# declare, so it stays a bespoke composite-based job that calls the `coderoast-ci` composite directly.
+# Exceptions: `coderoast-server` (the SBOM freshness check, which must run inside the build job after
+# the conan graph is materialised) and `insight-eidos` (the hub export between the Sift chain and the
+# insight_e2e build) each need a step INSIDE the job, which this workflow has no slot for, so both stay
+# bespoke composite-based jobs that call the `coderoast-ci` composite directly.
 #
 # Sift dogfood is the standard `sift-action@v1` integration only — the internal courtesy `--explain`
 # endpoint is intentionally NOT wired here (retired from in-CI dogfood; the composite still supports it
