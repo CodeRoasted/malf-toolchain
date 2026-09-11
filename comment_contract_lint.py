@@ -9,7 +9,7 @@ lines that were one claim; `note:` and `refs:` stay strictly one line, the note 
 that must be starved. The only multi-line comment is the framed law block declaring a
 `D-LSRC-n`; a handful of TOOL
 forms are admitted because a machine reads them (clang-format's `} // namespace x`, clang-tidy's
-`/*name=*/` and `/*name*/`, own-line `NOLINT…`, `clang-format off/on`). Everything else is a violation, and
+`/*name=*/` and `/*name*/`, own-line `NOLINT…(<checks>)`, `clang-format off/on`). Everything else is a violation, and
 the default disposition of a violating comment is deletion — never a new tag.
 
 WHY THIS READS THE POST-FORMAT TEXT, and it is the reason the phase lives inside `malf format`
@@ -89,7 +89,14 @@ LAW_OPEN = re.compile(r"^/\*{%d,}$" % LAW_RULE_MIN)
 LAW_CLOSE = re.compile(r"^\*{%d,}/$" % LAW_RULE_MIN)
 LAW_TITLE = re.compile(r"^D-LSRC-(\d+)\s*[—–:-]\s*\S")
 RULER = re.compile(r"^[-=─—_*#~.]{4,}")
-NOLINT = re.compile(r"^NOLINT(NEXTLINE|BEGIN|END)?\b")
+# A directive is admitted only with its check list TIGHT against the token. clang-tidy reads
+# `NOLINTNEXTLINE (check)`, `NOLINTBEGIN Test` and a bare `NOLINTNEXTLINE` alike as a BARE
+# directive that suppresses every armed check on its target. Until 2026-09-11 this recogniser
+# ended in `\b`, which matches before a space, so all three spellings counted as a well-formed
+# tool form. Measured that day: 22 such lines in logcraft, insight-canon and coderoast-corpora —
+# 12 hid live diagnostics, 7 suppressed nothing, 1 was an orphan closer clang-tidy itself reports,
+# and 2 sit in format-excluded measurement code.
+NOLINT = re.compile(r"^NOLINT(NEXTLINE|BEGIN|END)?(?![A-Za-z0-9_])")
 ARG_COMMENT = re.compile(r"^/\*\w+=\*/$")
 # `/*name*/` on an UNNAMED parameter is clang-tidy's other argument form: `readability-named-parameter`
 # accepts it as the name. Admitted 2026-09-05 after a census found the stripper had deleted eight of them
@@ -100,7 +107,7 @@ NAMED_PARAM_COMMENT = re.compile(r"^/\*[A-Za-z_]\w*\*/$")
 
 VIOLATION_CLASSES = (
     "bare", "tag-mid-line", "slash3", "spacer", "ruler", "trailing", "trailing-nolint",
-    "suppression-without-why", "empty-claim", "refs-prose", "note-run", "block-prose",
+    "nolint-unscoped", "suppression-without-why", "empty-claim", "refs-prose", "note-run", "block-prose",
     "law-malformed",
 )
 CONTRACT_TAGS = ("pre", "post", "invariant", "assert")
@@ -257,15 +264,17 @@ def classify(comments: list[Comment]) -> list[Finding]:
         if nolint:
             if comment.trailing:
                 add(comment, "trailing-nolint")
+            elif nolint.group(1) is None:
+                add(comment, "bare")
+            elif not stripped[nolint.end():].startswith("("):
+                add(comment, "nolint-unscoped")
             elif nolint.group(1) in ("NEXTLINE", "BEGIN"):
                 if tag_at_line.get(comment.line - 1) in ("note", "refs"):
                     add(comment, "tool")
                 else:
                     add(comment, "suppression-without-why")
-            elif nolint.group(1) == "END":
-                add(comment, "tool")
             else:
-                add(comment, "bare")
+                add(comment, "tool")
             continue
         if stripped in ("clang-format off", "clang-format on"):
             add(comment, "tool")
@@ -479,6 +488,12 @@ VIOLATION_FIXTURES: dict[str, str] = {
     "trailing": "int x; // note: trailing forms are not forms\n",
     "trailing-nolint": "int x; // NOLINT(some-check)\n",
     "suppression-without-why": "int x;\n// NOLINTNEXTLINE(some-check)\nint y;\n",
+    "nolint-unscoped": "int x;\n// note: a why\n// NOLINTNEXTLINE\nint y;\n",
+    "nolint-unscoped (a space before the parenthesis is clang-tidy's bare form)":
+        "int x;\n// note: a why\n// NOLINTNEXTLINE (some-check)\nint y;\n",
+    "nolint-unscoped (a label is not a check list, on the opener and the closer)":
+        "int x;\n// note: a why\n// NOLINTBEGIN Test\nint y;\n// NOLINTEND Test\n",
+    "nolint-unscoped (a bare closer)": "int x;\n// NOLINTEND\n",
     "empty-claim": "int x;\n// pre:\n",
     "refs-prose": "int x;\n// refs: ADR-10.D3, because the loader said so\n",
     "refs-prose (the retired SRC-<code> form is not an address)": "int x;\n// refs: SRC-D-FOO-1\n",  # <!-- registry-lint: allow -->
