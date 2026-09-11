@@ -114,20 +114,35 @@ on:
           RELEASE TAG plus manual dispatch — which is where the gates are designed to run.
 
           Every release.yaml runs `ci: needs: lint`, so this build sits IN FRONT of the cut's own
-          build, serially. A repo whose first-party requires live in ANOTHER repo cannot run this
-          gate at all yet — the action's description owns that limit and names the shape that closes
-          it; such a repo sets `lint: false` here with the reason written at the site.
+          build, serially. A repo whose first-party requires live in ANOTHER repo declares those
+          repos in `lint-siblings`, and the build then covers its whole first-party closure from
+          source — the larger cost the Founder ruled worth paying on 2026-09-11 ("Turn it on").
 
-          Set false for a repo with no C++, or for that cross-repo case. Never set it false to
-          silence findings: a red here is the gate working.
+          Set false only for a repo with no C++. Never set it false to silence findings: a red here
+          is the gate working.
         type: boolean
         required: false
         default: true
+      lint-siblings:
+        description: |
+          The CodeRoasted repos this repo's first-party BUILD closure reaches (requires and
+          test_requires, from every node, minus its own packages), whitespace-separated. Empty keeps
+          the checkout as the whole workspace. Each is cloned from source beside the repo for the
+          clang-21 lint build — at the run's tag on a tag event, at `main` otherwise, or at the ref
+          an entry pins as `<repo>@<ref>` (a decoupled version line, ADR-1.D6). `pin_coherence.py`
+          INV-13 reds a set that does not cover the `packages.yml` closure.
+        type: string
+        required: false
+        default: ''
       runs-on:
         description: 'Runner label for the checks job. Defaults to hosted ubuntu-latest. PUBLIC callers MUST omit it — a self-hosted runner reachable from a public repo fork PR is an RCE. PRIVATE callers pass vars.CI_RUNS_ON (fallback ubuntu-latest) to route to the self-hosted fleet.'
         type: string
         required: false
         default: 'ubuntu-latest'
+    secrets:
+      lint-checkout-token:
+        description: 'Read-only Contents token for PRIVATE lint-siblings. Pass it by name, never `secrets: inherit`, and only from a PRIVATE caller whose siblings include a private repo.'
+        required: false
 
 permissions:
   contents: read
@@ -261,6 +276,9 @@ jobs:
       - name: C++ clang-tidy conformance
         if: ${{ !cancelled() && inputs.lint }}
         uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-lint-tidy@b964a026fff6d6f05ab16c37deabf9ca028fbddc
+        with:
+          siblings: ${{ inputs.lint-siblings }}
+          checkout-token: ${{ secrets.lint-checkout-token }}
 
       # A SKIPPED GATE MUST NOT LOOK LIKE A PASSED ONE. Every other toggle here defaults true, so
       # `false` is always a deliberate written line in the caller — but the RUN shows a skipped step
