@@ -18,7 +18,7 @@ Run `malf` from any directory that contains a `conanfile.py`, or from any parent
 
 ```
 malf build   [target] [--asan|--profile <name>]
-malf test    [target] [--asan|--profile <name>] [--verbose] [--filter PATTERN]
+malf test    [target] [--asan|--profile <name>] [--verbose] [--filter REGEX]
 malf lint    [--all-files] [-c|--console]
 malf format  [--check]
 malf commands

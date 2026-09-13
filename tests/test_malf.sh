@@ -2416,6 +2416,60 @@ check "no member is announced twice (the runaway's signature)" \
 rm -rf "$ip_tmp"
 echo
 
+echo "[9] a test run that selects NOTHING is a named failure, never a green"
+
+# ctest over a tree registering zero tests prints "No tests were found!!!" and exits 0, and
+# `malf test` passed that exit through — measured on insight-eidos's root tree after a dependency
+# configure left its tests unregistered. The guard reds an OWED run that selects nothing and names
+# the tree's configure role; `--corpus` alone and a --filter inside a sweep member owe nothing.
+tp_tmp="$(mktemp -d)"
+mkdir -p "$tp_tmp/empty" "$tp_tmp/one" "$tp_tmp/never" "$tp_tmp/demoted"
+: > "$tp_tmp/empty/CTestTestfile.cmake"
+printf 'add_test(TheOneCase.Passes true)\n' > "$tp_tmp/one/CTestTestfile.cmake"
+: > "$tp_tmp/demoted/CTestTestfile.cmake"
+printf 'PKG_BUILD_TESTS:BOOL=OFF\n' > "$tp_tmp/demoted/CMakeCache.txt"
+
+check "premise — ctest itself exits 0 over a tree that registers no test (the guard's reason)" \
+      "0" "$(ctest --test-dir "$tp_tmp/empty" -LE corpus >/dev/null 2>&1; echo $?)"
+
+# <sweep flag or ""> <build_dir> <corpus_only> <regex> -> the verdict's exit status
+tp_owed() {
+    bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e
+             [[ -n "$2" ]] && export MALF_SWEEP=1
+             _malf_test_population_is_owed "$3" "$4" "$5"; echo $?' _ "$MALF_BIN" "$@"
+}
+check "owed — the default population of a tree that has a CTestTestfile" \
+      "0" "$(tp_owed "" "$tp_tmp/empty" false "")"
+check "not owed — the default population of a tree that never enabled testing" \
+      "1" "$(tp_owed "" "$tp_tmp/never" false "")"
+check "not owed — --corpus alone, which most packages legitimately answer with nothing" \
+      "1" "$(tp_owed "" "$tp_tmp/empty" true "")"
+check "owed — a --filter outside a sweep, even with --corpus and no CTestTestfile" \
+      "0" "$(tp_owed "" "$tp_tmp/never" true 'Suite\..*')"
+check "not owed — a --filter inside a sweep member (the declared bound)" \
+      "1" "$(tp_owed sweep "$tp_tmp/never" false 'Suite\..*')"
+
+# <stderr file> <build_dir> <ctest selection args...> -> the guard's exit status
+tp_guard() {
+    bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e
+             err="$2"; shift 2
+             _malf_test_population_guard "$@" 2>"$err"; echo $?' _ "$MALF_BIN" "$@"
+}
+tp_err="$tp_tmp/guard.err"
+check "guard — a selection of zero tests reds" \
+      "1" "$(tp_guard "$tp_err" "$tp_tmp/empty" --test-dir "$tp_tmp/empty" -LE corpus)"
+check "guard — its red states the count and the selection" \
+      "1" "$(grep -c '0 test(s) selected in' "$tp_err")"
+check "guard — one registered test passes" \
+      "0" "$(tp_guard "$tp_err" "$tp_tmp/one" --test-dir "$tp_tmp/one" -LE corpus)"
+check "guard — a regex matching no registered name reds" \
+      "1" "$(tp_guard "$tp_err" "$tp_tmp/one" --test-dir "$tp_tmp/one" -R 'Nothing\.Here' -LE corpus)"
+check "guard — a demoted tree's red names the DEPENDENCY configure and its variable" \
+      "1" "$(tp_guard "$tp_err" "$tp_tmp/demoted" --test-dir "$tp_tmp/demoted" -LE corpus >/dev/null
+             grep -c 'DEPENDENCY (PKG_BUILD_TESTS OFF)' "$tp_err")"
+rm -rf "$tp_tmp"
+echo
+
 echo
 echo
 echo "malf selftest: $pass_count passed, $fail_count failed"

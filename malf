@@ -3,7 +3,7 @@
 #
 # Usage:
 #   malf build   [subdir] [--asan|--profile <name>]
-#   malf test    [subdir] [--asan|--profile <name>] [--filter PATTERN]
+#   malf test    [subdir] [--asan|--profile <name>] [--filter REGEX]
 #   malf lint    [--all-files] [-c|--console]
 #   malf format  [--check]   (clang-format, then the comment-contract grammar over the same files)
 #   malf commands|compile-commands
@@ -1243,9 +1243,51 @@ cmd_build() {
     _malf_run_inventory "$target"
 }
 
+# A TEST RUN THAT SELECTS NOTHING IS NOT A GREEN. ctest over a tree registering zero tests prints
+# "No tests were found!!!" and EXITS 0 — measured 2026-09-13 on insight-eidos/build-gcc16-release,
+# whose CMakeCache held INSIGHT_EIDOS_BUILD_TESTS=OFF from the last DEPENDENCY configure, so its
+# CTestTestfile descended into three layers and included no test. `malf test` passed that exit
+# through: a green over a population never reached, the class the corpus split below exists to
+# refuse. A --filter that matches no registered name exits the same way.
+#
+# OWED means the invocation promises at least one test: a --filter outside a sweep (the caller
+# named tests), or the default population of a tree that enabled testing (it has a
+# CTestTestfile.cmake). `--corpus` alone owes nothing, because most packages carry no corpus test
+# and a sweep over them must stay green; a tree with no CTestTestfile.cmake never enabled testing.
+# DECLARED BOUND: inside a sweep a --filter is judged by no member, since a name that lives in one
+# member is legitimately absent from the others, and the sweep does not sum the members' matches.
+_malf_test_population_is_owed() {    # <build_dir> <corpus_only> <regex> -> 0 when owed
+    local build_dir="$1" corpus_only="$2" regex="$3"
+    if [[ -n "$regex" ]]; then
+        [[ -z "${MALF_SWEEP:-}" ]]
+        return
+    fi
+    [[ "$corpus_only" != "true" && -f "$build_dir/CTestTestfile.cmake" ]]
+}
+
+# post: 0 when the selection registers at least one test; otherwise 1, with the selection and the
+# tree's configure role on stderr, so the red names its cause instead of repeating ctest's banner.
+_malf_test_population_guard() {      # <build_dir> <ctest selection args...>
+    local build_dir="$1"; shift
+    local listing total
+    listing="$(ctest "$@" -N 2>&1)" || true
+    total="$(printf '%s\n' "$listing" | sed -nE 's/^Total Tests: ([0-9]+)$/\1/p' | tail -1)"
+    [[ -n "$total" && "$total" -gt 0 ]] && return 0
+    _malf_commands_tree_role "$build_dir"
+    echo "malf test: ${total:-no} test(s) selected in $build_dir by: $*" >&2
+    if [[ "$_MALF_TREE_ROLE" == "dependency" ]]; then
+        echo "malf test: the tree was last configured as a DEPENDENCY ($_MALF_TREE_ROLE_VARS OFF)," \
+             "so it registers no test — another run reconfigured it after this one" >&2
+    else
+        echo "malf test: tree role '$_MALF_TREE_ROLE'; a --filter is a ctest -R regex over" \
+             "registered Suite.Case names" >&2
+    fi
+    return 1
+}
+
 cmd_test() {
     local subdir="" fwd=()
-    local gtest_filter=""
+    local test_regex=""
     local verbose=false
     local corpus_only=false
     # No build-type seed and no --debug/--release — see cmd_build.
@@ -1259,10 +1301,12 @@ cmd_test() {
             # same choice; a member that quietly ran the default set would report a green
             # for a population the caller did not ask for.
             --corpus)  corpus_only=true; fwd+=("$1") ;;
+            # A ctest -R REGEX over registered test names (gtest's `Suite.Case`), never a gtest
+            # filter: `Suite.*` works as both, `*Case*` is an invalid regex.
             --filter)
                 shift
-                [[ $# -gt 0 ]] || { echo "malf test: --filter requires a pattern" >&2; exit 1; }
-                gtest_filter="$1"; fwd+=(--filter "$1")
+                [[ $# -gt 0 ]] || { echo "malf test: --filter requires a regex" >&2; exit 1; }
+                test_regex="$1"; fwd+=(--filter "$1")
                 ;;
             # Build exactly the recipe at the resolved dir, never the recipes below it.
             # Not forwarded: a sweep cannot occur under it, so a member never sees it.
@@ -1296,9 +1340,10 @@ cmd_test() {
     if [[ ! -f "$target/CMakeLists.txt" ]]; then
         return 0   # content-only: nothing to run either
     fi
-    local ctest_args=(--test-dir "$(_malf_build_dir "$target")" --output-on-failure)
+    local build_dir; build_dir="$(_malf_build_dir "$target")"
+    local ctest_args=(--test-dir "$build_dir" --output-on-failure)
     $verbose && ctest_args+=(--verbose)
-    [[ -n "$gtest_filter" ]] && ctest_args+=(-R "$gtest_filter")
+    [[ -n "$test_regex" ]] && ctest_args+=(-R "$test_regex")
     # THE TWO POPULATIONS ARE NEVER RUN TOGETHER (Founder, 2026-09-04: "I also dont want to mix
     # up big corpus tests/gates with regular self sustaining tests"). A test carrying the ctest
     # label `corpus` needs a PRIVATE third-party corpus mounted through an environment variable;
@@ -1315,6 +1360,10 @@ cmd_test() {
         ctest_args+=(-L corpus)
     else
         ctest_args+=(-LE corpus)
+    fi
+    if _malf_test_population_is_owed "$build_dir" "$corpus_only" "$test_regex"; then
+        _malf_test_population_guard "$build_dir" "${ctest_args[@]}" || exit 1
+        ctest_args+=(--no-tests=error)
     fi
     ctest "${ctest_args[@]}"
     _malf_run_inventory "$target"
@@ -4007,7 +4056,7 @@ malf — coderoast build system
 
 Commands:
     build   [target] [--asan|--profile <name>]
-    test    [target] [--asan|--profile <name>] [--verbose] [--filter PATTERN]
+    test    [target] [--asan|--profile <name>] [--verbose] [--filter REGEX]
     lint    [--all-files] [-c|--console]
                                a translation unit clang-tidy DIES on is reported as NOT LINTED,
                                by name and separately from the findings, and fails the run —
