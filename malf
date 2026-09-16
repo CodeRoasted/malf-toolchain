@@ -3848,8 +3848,11 @@ PY
 # especially the stray ~/.conan2 which has no editables to shadow them. The surgical opposite
 # of `clean conan` (which nukes every package dir, third-party included, forcing a full
 # from-source rebuild — our own gcc toolchain has no ConanCenter binaries). SAFE by construction: removes ONLY
-# CodeRoast namespaces (pin_coherence.CODEROAST_PREFIXES — the single source of truth) at a
-# version != the uniform workspace baseline; NEVER third-party, NEVER the current version.
+# CodeRoast namespaces at a version != the uniform workspace baseline; NEVER third-party, NEVER
+# the current version. The namespaces are DERIVED from the workspace's own `packages.yml`
+# manifests via `scripts/workspace_layout.owned_package_prefixes()` — malf no longer imports
+# them from a superproject check script (DN-108.D1, crossing 2: the toolchain and the
+# orchestrator read the same declared FACT, neither importing the other's module).
 # Sweeps every cache `editables sync` touches (base + keyed subdirs) plus the stray default
 # home.
 _malf_clean_stale() {
@@ -3872,7 +3875,16 @@ import ast, json, os, pathlib, subprocess, sys
 ws = pathlib.Path(sys.argv[1]).resolve()
 homes = sys.argv[2:]
 sys.path.insert(0, str(ws / "scripts"))
-from pin_coherence import CODEROAST_PREFIXES   # single source of truth for owned namespaces
+# The owned conan namespaces, DERIVED from the workspace's `packages.yml` manifests rather than
+# imported from a check script (DN-108.D1). A workspace that declares no package REFUSES here
+# instead of returning an empty tuple: an empty prefix set makes every `startswith` below False,
+# so the sweep would find no stale package and print "already clean" over a cache it never judged.
+import workspace_layout
+try:
+    CODEROAST_PREFIXES = workspace_layout.owned_package_prefixes()
+except workspace_layout.UndeclaredWorkspace as why:
+    sys.stderr.write(f"malf clean stale: {why}\n")
+    sys.exit(2)
 
 # Uniform workspace baseline from the first-party recipes (refuse to guess if non-uniform).
 ignore = {".conan2", ".git", ".venv", "node_modules", "test_package"}
