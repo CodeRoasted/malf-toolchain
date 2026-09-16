@@ -105,9 +105,9 @@ Composite actions consumed cross-repo by `uses:` — true single source, no per-
 
 A consumer build job is then: `checkout` → `setup-gcc` → `setup-build-env` → `conan-module` (×N).
 
-## malf — the build orchestrator
+## malf — the build driver
 
-`malf` (+ `global.conf`, `bench_compare.py`) is CodeRoast's build orchestrator, a thin layer over
+`malf` (+ `global.conf`, `bench_compare.py`) is CodeRoast's build driver, a thin layer over
 Conan editable workspaces — `malf build` / `malf test` / `malf bench`. It lives here so the whole
 of *how we build* is one public, reproducible reference: same compilers, same profiles, same build
 tool, on our CI and on your fork. Usage: **[MALF.md](MALF.md)**.
