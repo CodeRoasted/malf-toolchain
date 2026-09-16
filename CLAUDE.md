@@ -1,6 +1,6 @@
 # malf — the public build-toolchain repo (malf-toolchain)
 
-The one public home of *how CodeRoast builds*: the `malf` orchestrator (Python
+The one public home of *how CodeRoast builds*: the `malf` build driver (Python
 over Conan editables), the canonical Conan profiles, the shared dev config, the
 cross-repo CI composite actions, and the pinned-compiler release workflows.
 Root CLAUDE.md owns malf *usage*; this file is for working ON the tooling.
