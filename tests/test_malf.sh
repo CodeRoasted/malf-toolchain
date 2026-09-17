@@ -1133,7 +1133,8 @@ echo "[7i] cmd_bump — the chain survives its own coherence check (the INV-14 s
 # one indicts the state, not the ordering.
 bump_tmp="$(mktemp -d)"
 mkdir -p "$bump_tmp/ws/scripts"
-: > "$bump_tmp/ws/scripts/pin_coherence.py"   # existence-checked by cmd_bump; python3 is stubbed
+: > "$bump_tmp/ws/scripts/version_line.py"   # existence-checked by cmd_bump; python3 is stubbed
+: > "$bump_tmp/ws/pharos"                    # the check's one spelling, existence-checked too
 # Extract the function under test from malf itself, so this tests the SHIPPED code, not a copy.
 bump_fn="$(sed -n '/^cmd_bump() {/,/^}/p' "$MALF_BIN")"
 cat > "$bump_tmp/probe.sh" <<PROBE

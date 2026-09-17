@@ -25,8 +25,8 @@ Root CLAUDE.md owns malf *usage*; this file is for working ON the tooling.
   SHA, never `@main`. So a change here does NOT reach a consumer by itself:
   landing one means re-pinning the self-references (one commit per nesting
   layer, after the change, never in the same commit) and then bumping the
-  consumers. The superproject's `scripts/pin_coherence.py` INV-17 owns the rule
-  and reds on a lapse. Treat every edit as a cross-repo change.
+  consumers. The superproject's `pin_coherence` check module (`./pharos check
+  --module pin_coherence`) INV-17 owns the rule and reds on a lapse. Treat every edit as a cross-repo change.
 - `profiles/` and `config/` are single-source by design — never fork a per-repo
   copy; repos symlink or fetch them.
 - The toolchain contracts (which compiler legs exist, why, their fix floors)
