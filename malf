@@ -3848,8 +3848,11 @@ PY
 # especially the stray ~/.conan2 which has no editables to shadow them. The surgical opposite
 # of `clean conan` (which nukes every package dir, third-party included, forcing a full
 # from-source rebuild — our own gcc toolchain has no ConanCenter binaries). SAFE by construction: removes ONLY
-# CodeRoast namespaces (pin_coherence.CODEROAST_PREFIXES — the single source of truth) at a
-# version != the uniform workspace baseline; NEVER third-party, NEVER the current version.
+# CodeRoast namespaces at a version != the uniform workspace baseline; NEVER third-party, NEVER
+# the current version. The namespaces are DERIVED from the workspace's own `packages.yml`
+# manifests via `scripts/workspace_layout.owned_package_prefixes()` — malf no longer imports
+# them from a superproject check script (DN-108.D1, crossing 2: the toolchain and the
+# orchestrator read the same declared FACT, neither importing the other's module).
 # Sweeps every cache `editables sync` touches (base + keyed subdirs) plus the stray default
 # home.
 _malf_clean_stale() {
@@ -3872,7 +3875,16 @@ import ast, json, os, pathlib, subprocess, sys
 ws = pathlib.Path(sys.argv[1]).resolve()
 homes = sys.argv[2:]
 sys.path.insert(0, str(ws / "scripts"))
-from pin_coherence import CODEROAST_PREFIXES   # single source of truth for owned namespaces
+# The owned conan namespaces, DERIVED from the workspace's `packages.yml` manifests rather than
+# imported from a check script (DN-108.D1). A workspace that declares no package REFUSES here
+# instead of returning an empty tuple: an empty prefix set makes every `startswith` below False,
+# so the sweep would find no stale package and print "already clean" over a cache it never judged.
+import workspace_layout
+try:
+    CODEROAST_PREFIXES = workspace_layout.owned_package_prefixes()
+except workspace_layout.UndeclaredWorkspace as why:
+    sys.stderr.write(f"malf clean stale: {why}\n")
+    sys.exit(2)
 
 # Uniform workspace baseline from the first-party recipes (refuse to guess if non-uniform).
 ignore = {".conan2", ".git", ".venv", "node_modules", "test_package"}
@@ -4256,7 +4268,8 @@ cmd_bin_dir() {
 }
 
 # Coordinated workspace version bump: rewrite every version axis to X.Y.Z via
-# pin_coherence's `bump` engine, then re-run the coherence check to prove it
+# the superproject's `scripts/version_line.py bump` engine (the producer half of the
+# pin-coherence gate), then run the `pin_coherence` check module to prove it
 # (bump rewrites exactly what the check validates → GREEN by construction). Then
 # bring the conan world along with the recipes — re-sync editables to the new
 # baseline across EVERY keyed cache, then surgically prune the now-stale (old-
@@ -4274,13 +4287,14 @@ cmd_bump() {
         echo "malf bump: usage: malf bump X.Y.Z   (coordinated workspace version bump)" >&2
         return 1
     fi
-    local pin="$MALF_WORKSPACE_ROOT/scripts/pin_coherence.py"
-    if [[ ! -f "$pin" ]]; then
-        echo "malf bump: $pin not found — run from a workspace checkout" >&2
+    local axes="$MALF_WORKSPACE_ROOT/scripts/version_line.py"
+    local pharos="$MALF_WORKSPACE_ROOT/pharos"
+    if [[ ! -f "$axes" || ! -f "$pharos" ]]; then
+        echo "malf bump: $axes or $pharos not found — run from a workspace checkout" >&2
         return 1
     fi
     echo "── malf bump $target — rewriting every workspace version axis ──"
-    python3 "$pin" bump "$target" "$MALF_WORKSPACE_ROOT" || return 1
+    python3 "$axes" bump "$target" "$MALF_WORKSPACE_ROOT" || return 1
 
     # ── Staleness hygiene, chained in so it is never left to memory. The bump above
     # rewrote every recipe to $target, but the conan world is still one version behind:
@@ -4321,8 +4335,11 @@ cmd_bump() {
     # leaving every cache one version behind (the next `malf lock --update` refused 19
     # roots). Sitting last, a green means the whole post-bump state is coherent, and a red
     # indicts the state rather than the chain's own ordering.
+    # The check is a `pharos check` MODULE (DN-108.D2) and `./pharos` is its one spelling;
+    # from here the absolute path is that spelling. DN-108.D1 (crossing 1) makes this call
+    # the orchestrator's at P2.3 (`pharos bump`); until then the driver still asks.
     echo "── verifying pin coherence at $target ──"
-    python3 "$pin" "$MALF_WORKSPACE_ROOT" || return 1
+    python3 "$pharos" check --module pin_coherence || return 1
 
     # ── sift-action is NOT part of a platform bump, by design ────────────────
     # This used to rewrite src/sift-version.ts to $target and re-bundle dist/index.js.
@@ -4346,7 +4363,7 @@ cmd_bump() {
 # Catches the conan-create-only drift class — a rotted test_package, or a sibling
 # package the editable `malf test <repo>` never compiles — BEFORE the tag, not AT
 # it (the v1.6.2 eidos break). The released set is the ONE canonical source
-# (scripts/pin_coherence.py released, from packages.yml), shared with the tag-time
+# (scripts/version_line.py released, from packages.yml), shared with the tag-time
 # Release Gate — no second hand-maintained list to drift out of step with it.
 #
 # Non-vacuity is the whole point of the gate:
@@ -4416,12 +4433,12 @@ cmd_cut_verify() {
         shift
     done
 
-    local pin="$MALF_WORKSPACE_ROOT/scripts/pin_coherence.py"
-    [[ -f "$pin" ]] || { echo "malf cut-verify: $pin not found — run from a workspace checkout" >&2; return 1; }
+    local axes="$MALF_WORKSPACE_ROOT/scripts/version_line.py"
+    [[ -f "$axes" ]] || { echo "malf cut-verify: $axes not found — run from a workspace checkout" >&2; return 1; }
 
     # The canonical released-package list, topo-ordered (deps before dependents).
     local released
-    released="$(python3 "$pin" released "$MALF_WORKSPACE_ROOT")" \
+    released="$(python3 "$axes" released "$MALF_WORKSPACE_ROOT")" \
         || { echo "malf cut-verify: failed to resolve the released-package list" >&2; return 1; }
 
     if $list_only; then

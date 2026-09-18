@@ -206,7 +206,7 @@ def selftest() -> int:
     """Prove the gate has teeth: every rule must fire on a synthetic violation,
     comment-only tokens must NOT fire, and the MODULES-ALLOW opt-out must be
     honored. Guards against the lint silently rotting into a pass-everything
-    no-op (the wallclock_lint --selftest pattern)."""
+    no-op (the `wallclock` check module's selftest pattern)."""
     import tempfile
 
     with tempfile.TemporaryDirectory(prefix="module_lint_selftest.") as tmp:
