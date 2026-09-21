@@ -613,10 +613,120 @@ _malf_resolve_target_or_sweep() {
         fi
     done
     echo "=== malf $verb: all ${#members[@]} packages done ==="
+    _malf_sweep_settle_db "$root" "${members[@]}" || exit 1
     if [[ "$verb" == "build" || "$verb" == "test" ]]; then
         _malf_run_inventory "$root" || exit 1
     fi
     exit 0
+}
+
+# note: a sweep member's dependency bootstrap re-configures an earlier member with tests OFF, and
+# for a root recipe that tree IS the repo database's address — so the last writer truncated it.
+# pre: every member of the sweep has run to completion under the active profile.
+# post: every configured member tree is in target role, read back from its own CMakeCache.
+# post: each touched repo's database is recomposed from its member trees, never accumulated.
+# refs: MEM:conan-malf-build-workflow
+_malf_sweep_settle_db() {            # <sweep_root> <member_dir>...
+    local sweep_root="$1"; shift
+    local member build_dir repo repo_build
+    local -a settled=()
+    local -A repo_of=()
+    for member in "$@"; do
+        [[ -f "$member/CMakeLists.txt" ]] || continue
+        build_dir="$(_malf_build_dir "$member")"
+        [[ -f "$build_dir/CMakeCache.txt" ]] || continue
+        repo="$(_malf_repo_root "$member")"
+        repo_build="$repo/build-$(_malf_build_key)"
+        _malf_commands_tree_role "$build_dir"
+        # note: the repo-root member is re-configured even in target role — its own configure is
+        # the only writer that restores a pristine copy of the file the merges accumulated into.
+        if [[ "$_MALF_TREE_ROLE" != "target" || "$(realpath -m "$build_dir")" == "$(realpath -m "$repo_build")" ]]; then
+            echo "malf: settling $(_malf_pkg_ref "$member/conanfile.py") in target role" \
+                 "(was: $_MALF_TREE_ROLE${_MALF_TREE_ROLE_VARS:+, $_MALF_TREE_ROLE_VARS OFF})"
+            _malf_with_build_lock "$build_dir" _malf_settle_target_role_locked "$member" "$build_dir" \
+                || return 1
+            _malf_commands_tree_role "$build_dir"
+            if [[ "$_MALF_TREE_ROLE" != "target" ]]; then
+                echo "malf: FATAL: $build_dir is still in $_MALF_TREE_ROLE role after a target configure" \
+                     "($_MALF_TREE_ROLE_VARS OFF in its CMakeCache.txt)." >&2
+                return 1
+            fi
+        fi
+        settled+=("$repo"$'\t'"$build_dir/compile_commands.json")
+        repo_of["$repo"]=1
+    done
+    for repo in "${!repo_of[@]}"; do
+        local -a dbs=()
+        local row
+        for row in "${settled[@]}"; do
+            [[ "${row%%$'\t'*}" == "$repo" ]] && dbs+=("${row#*$'\t'}")
+        done
+        _malf_compose_repo_db "$repo/build-$(_malf_build_key)/compile_commands.json" \
+            "$sweep_root" "$repo" "${dbs[@]}" || return 1
+    done
+}
+
+# pre: the caller holds the build lock on <build_dir>.
+_malf_settle_target_role_locked() {  # <pkg_dir> <build_dir>
+    local pkg_dir="$1" build_dir="$2"
+    local cmake_args=()
+    _malf_write_user_presets "$pkg_dir" "$build_dir"
+    mapfile -t cmake_args < <(_malf_cmake_feature_args "$pkg_dir" ON ON)
+    _malf_configure_and_build "$pkg_dir" "$build_dir" "${cmake_args[@]}"
+}
+
+# post: <repo_db> holds each member database's entries once, keyed by file, first member wins.
+# post: a sweep rooted below <repo> keeps the prior entries outside <sweep_root>; one at or above
+# the repo root keeps none, so an entry for a deleted or unbuilt TU cannot survive the sweep.
+_malf_compose_repo_db() {            # <repo_db> <sweep_root> <repo> <member_db>...
+    python3 - "$@" <<'PY'
+import json
+import os
+import sys
+
+repo_db, sweep_root, repo = (os.path.realpath(p) for p in sys.argv[1:4])
+member_dbs = [os.path.realpath(p) for p in sys.argv[4:]]
+
+
+def under(path, root):
+    return path == root or path.startswith(root + os.sep)
+
+
+def load(path):
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+covers_repo = under(repo, sweep_root)
+prior = []
+if not covers_repo and os.path.exists(repo_db):
+    prior = [e for e in load(repo_db)
+             if not under(os.path.realpath(os.path.join(e.get("directory", ""), e["file"])), sweep_root)]
+
+merged, seen, contributing = [], set(), 0
+for db in member_dbs:
+    if not os.path.exists(db):
+        continue
+    contributing += 1
+    for entry in load(db):
+        if entry["file"] not in seen:
+            seen.add(entry["file"])
+            merged.append(entry)
+kept = 0
+for entry in prior:
+    if entry["file"] not in seen:
+        seen.add(entry["file"])
+        merged.append(entry)
+        kept += 1
+
+os.makedirs(os.path.dirname(repo_db), exist_ok=True)
+tmp = repo_db + ".tmp"
+with open(tmp, "w", encoding="utf-8") as handle:
+    handle.write(json.dumps(merged, indent=2) + "\n")
+os.replace(tmp, repo_db)
+print(f"malf: composed {repo_db} — {len(merged)} entries from {contributing} member tree(s)"
+      + (f", {kept} kept from outside {sweep_root}" if not covers_repo else ", whole repo swept"))
+PY
 }
 
 # ── ADR-3.D9: the build system's INVENTORY ──────────────────────────────────────
@@ -1399,13 +1509,13 @@ _malf_tidy_crashed() {
 # invisible. The zero-file line is deliberately not phrased as a pass: it is the whole reason for
 # the rule (Founder, 2026-09-03).
 _malf_lint_summary() {
-    local mode="$1" dir="$2" selected="$3" checked="$4" findings="$5" not_linted="$6" rc="$7"
+    local mode="$1" dir="$2" selected="$3" checked="$4" findings="$5" not_linted="$6" rc="$7" refused="$8"
     if (( checked == 0 )); then
-        echo "malf lint: SUMMARY · mode=$mode · dir=$dir · selected $selected, CHECKED 0 — NOTHING WAS INSPECTED · rc=$rc"
+        echo "malf lint: SUMMARY · mode=$mode · dir=$dir · selected $selected, CHECKED 0 — NOTHING WAS INSPECTED, $refused platform-refused · rc=$rc"
         echo "malf lint: this run read no source, so it is NOT a clean verdict. 'malf lint --all-files' checks the tree."
         return 0
     fi
-    echo "malf lint: SUMMARY · mode=$mode · dir=$dir · selected $selected, checked $checked, $findings finding(s), $not_linted not linted · rc=$rc"
+    echo "malf lint: SUMMARY · mode=$mode · dir=$dir · selected $selected, checked $checked, $findings finding(s), $not_linted not linted, $refused platform-refused · rc=$rc"
 }
 
 cmd_lint() {
@@ -1828,6 +1938,7 @@ PY
     # zero on its way past — an arm that sets a flag a later declaration wipes is an arm that
     # never fires, and it would have looked exactly like the silence it was written to end.
     local lint_status=0
+    local lint_refused=0
 
     # Collect files: git-changed (default) or all
     local files=()
@@ -1963,6 +2074,17 @@ PY
                 esac
             done
             if [[ ${#_missing_tu[@]} -gt 0 ]]; then
+                _malf_lint_split_platform_refused "$comp_db/compile_commands.json" "${_missing_tu[@]}" \
+                    || { echo "malf lint: the platform-gate classifier failed (its error is above); every uncovered TU stays a coverage hole." >&2
+                         _MALF_LINT_STILL_MISSING=("${_missing_tu[@]}"); _MALF_LINT_REFUSED=(); }
+                _missing_tu=("${_MALF_LINT_STILL_MISSING[@]}")
+                lint_refused=${#_MALF_LINT_REFUSED[@]}
+                if (( lint_refused > 0 )); then
+                    echo "malf lint: $lint_refused translation unit(s) REFUSED — the build gates them off this platform, so no compile command can exist here:" >&2
+                    printf '  %s\n' "${_MALF_LINT_REFUSED[@]#"$CWD"/}" >&2
+                fi
+            fi
+            if [[ ${#_missing_tu[@]} -gt 0 ]]; then
                 echo "malf lint: ${#_missing_tu[@]} of $(( ${#_in_db[@]} + ${#_missing_tu[@]} )) translation unit(s) have no usable compile command (absent from the DB, or their build dir is missing):" >&2
                 printf '  %s\n' "${_missing_tu[@]#"$CWD"/}" >&2
                 # AND UNDER --all-files THAT IS FATAL, not a note. The two modes promise different
@@ -1974,8 +2096,8 @@ PY
                 #
                 # IT IS ALSO THE ONLY THING STANDING BETWEEN THIS GATE AND A BUILD-ORDER-DEPENDENT
                 # GREEN. The repo-root database is an ACCUMULATION: `malf build <pkg>` merges that
-                # package's entries into `<repo>/build-<key>/`, additively, while only
-                # `malf commands` clears and rebuilds it whole. So after a partial build the root DB
+                # package's entries into `<repo>/build-<key>/`, additively, while only a sweep
+                # (_malf_sweep_settle_db) or `malf commands` rebuilds it whole. So after a partial build the root DB
                 # describes whichever packages happened to be built last, and a tree walk against it
                 # lints that subset and exits 0. Measured on insight-eidos 2026-08-30 with NO source
                 # change: the root DB held 34 distinct files while the sub-package databases held 83,
@@ -2010,10 +2132,10 @@ PY
             echo "malf lint: refusing to report success — this mode walks the tree, so an empty set is a" >&2
             echo "malf lint: scoping failure (wrong directory, MALF_LINT_EXCLUDE_EXTRA too broad, or the" >&2
             echo "malf lint: package is not built so every TU was dropped as absent from the compile DB)." >&2
-            _malf_lint_summary "$lint_mode" "$CWD" "$lint_selected" 0 0 0 1
+            _malf_lint_summary "$lint_mode" "$CWD" "$lint_selected" 0 0 0 1 "$lint_refused"
             exit 1
         fi
-        _malf_lint_summary "$lint_mode" "$CWD" "$lint_selected" 0 0 0 0
+        _malf_lint_summary "$lint_mode" "$CWD" "$lint_selected" 0 0 0 0 "$lint_refused"
         return 0
     fi
 
@@ -2177,7 +2299,7 @@ PY
     # terminal keeps only "output written to ...", so the one line stating what this run covered
     # must be the one the reader already has in front of them.
     _malf_lint_summary "$lint_mode" "$CWD" "$lint_selected" "${#files[@]}" \
-        "$lint_findings" "${#crashed[@]}" "$lint_status"
+        "$lint_findings" "${#crashed[@]}" "$lint_status" "$lint_refused"
     return "$lint_status"
 }
 
@@ -2212,6 +2334,28 @@ _malf_lint_db_verdict() {
     else
         _MALF_LINT_VERDICT="missing"
     fi
+}
+
+# post: _MALF_LINT_REFUSED holds "<file> — <reason>" for each TU the build gates off this platform,
+# derived by platform_gate.py from the repo's CMake text; _MALF_LINT_STILL_MISSING holds the rest.
+# post: nonzero when the classifier itself failed, and the caller then keeps every TU missing.
+_malf_lint_split_platform_refused() {  # <compile_commands.json> <file>...
+    local db="$1"; shift
+    local verdict path reason report
+    _MALF_LINT_REFUSED=()
+    _MALF_LINT_STILL_MISSING=()
+    report="$(python3 "$MALF_DIR/platform_gate.py" "$(_malf_repo_root "$CWD")" "$db" "$@")" || return 1
+    while IFS=$'\t' read -r verdict path reason; do
+        case "$verdict" in
+            refused) _MALF_LINT_REFUSED+=("$path — $reason") ;;
+            missing) _MALF_LINT_STILL_MISSING+=("$path") ;;
+            *) echo "malf lint: platform_gate.py printed an unknown verdict '$verdict' for $path" >&2
+               return 1 ;;
+        esac
+    done <<< "$report"
+    (( ${#_MALF_LINT_REFUSED[@]} + ${#_MALF_LINT_STILL_MISSING[@]} == $# )) || {
+        echo "malf lint: platform_gate.py answered for $(( ${#_MALF_LINT_REFUSED[@]} + ${#_MALF_LINT_STILL_MISSING[@]} )) of $# file(s)" >&2
+        return 1; }
 }
 
 _malf_db_lintable_files() {

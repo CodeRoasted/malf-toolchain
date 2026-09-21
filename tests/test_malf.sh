@@ -2486,6 +2486,162 @@ check "guard — a demoted tree's red names the DEPENDENCY configure and its var
 rm -rf "$tp_tmp"
 echo
 
+echo "[7q3] a build SWEEP settles every member in target role and recomposes the repo database"
+
+# note: a member's dependency bootstrap re-configures an earlier member with tests OFF, and a root
+# recipe's tree IS the repo database — measured on insight-eidos 2026-09-21: 79 of 244 TUs covered.
+# note: driven end to end through the real sweep with conan and cmake stubbed; the stub cmake writes
+# a CMakeCache and a database whose tests/ entries exist only when a *_BUILD_TESTS define is ON.
+sw_tmp="$(realpath "$(mktemp -d)")"
+sw_bin="$sw_tmp/bin"; mkdir -p "$sw_bin" "$sw_tmp/ws"
+cat > "$sw_bin/conan" <<'STUB'
+#!/usr/bin/env bash
+out=""; prev=""
+for a in "$@"; do
+    [[ "$prev" == "-of" ]] && out="$a"
+    [[ "$a" == --output-folder=* ]] && out="${a#--output-folder=}"
+    prev="$a"
+done
+if [[ "$1" == install && -n "$out" ]]; then
+    mkdir -p "$out" && printf '{"version":4,"configurePresets":[{"name":"conan-release"}]}\n' > "$out/CMakePresets.json"
+fi
+exit 0
+STUB
+cat > "$sw_bin/cmake" <<'STUB'
+#!/usr/bin/env bash
+src=""; build=""; prev=""; tests=OFF; defs=()
+for a in "$@"; do
+    [[ "$a" == --build ]] && exit 0
+    case "$prev" in -S) src="$a" ;; -B) build="$a" ;; esac
+    case "$a" in
+        -D*BUILD_TESTS*=*) tests="${a##*=}"; defs+=("${a#-D}") ;;
+        -D*BUILD_BENCH*=*) defs+=("${a#-D}") ;;
+    esac
+    prev="$a"
+done
+[[ -n "$src" && -n "$build" ]] || exit 0
+mkdir -p "$build"
+{ echo "CMAKE_BUILD_TYPE:STRING=Release"; for d in "${defs[@]}"; do echo "${d%%=*}:BOOL=${d#*=}"; done; } > "$build/CMakeCache.txt"
+python3 - "$src" "$build" "$tests" <<'PY'
+import json, pathlib, sys
+src, build, tests = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3] == "ON"
+tus = sorted(src.glob("src/*.cpp")) + (sorted(src.glob("tests/*.cpp")) if tests else [])
+json.dump([{"directory": build, "command": f"clang++-21 -c {t}", "file": str(t)} for t in tus],
+          open(f"{build}/compile_commands.json", "w"))
+PY
+STUB
+chmod +x "$sw_bin/conan" "$sw_bin/cmake"
+sw_pkg() {   # <repo> <subdir> <name> [<requires>]
+    local d="$sw_tmp/ws/$1/$2"
+    mkdir -p "$d/src" "$d/tests"
+    printf 'from conan import ConanFile\nclass C(ConanFile):\n    name = "%s"\n    version = "1.0"\n' "$3" > "$d/conanfile.py"
+    [[ -n "${4:-}" ]] && printf '    requires = "%s"\n' "$4" >> "$d/conanfile.py"
+    printf 'option(%s_BUILD_TESTS "t" ON)\n' "${3^^}" > "$d/CMakeLists.txt"
+    printf 'int %s() { return 0; }\n' "$3" > "$d/src/$3.cpp"
+    printf 'int test_%s() { return 0; }\n' "$3" > "$d/tests/test_$3.cpp"
+}
+# repo `rooted`: a root recipe two sub-recipes require (the insight-eidos shape).
+sw_pkg rooted . sw_root; sw_pkg rooted sub sw_sub sw_root/1.0; sw_pkg rooted leaf sw_leaf sw_root/1.0
+# repo `flat`: no root recipe, so its database is only ever merged into (the accumulation shape).
+sw_pkg flat a sw_a; sw_pkg flat b sw_b sw_a/1.0
+git -C "$sw_tmp/ws/rooted" init -q; git -C "$sw_tmp/ws/flat" init -q
+sw_key="${MALF_DEFAULT_PROFILE#linux-}"
+mkdir -p "$sw_tmp/ws/flat/build-$sw_key"
+printf '[{"directory": "%s", "command": "clang++-21 -c gone.cpp", "file": "%s/gone/deleted.cpp"}]\n' \
+    "$sw_tmp/ws/flat/build-$sw_key" "$sw_tmp/ws/flat" > "$sw_tmp/ws/flat/build-$sw_key/compile_commands.json"
+sw_build() {   # <repo> -> the sweep's exit status, output in $sw_tmp/<repo>.log
+    (cd "$sw_tmp/ws/$1" && PATH="$sw_bin:$PATH" MALF_WORKSPACE_ROOT="$sw_tmp/ws" MALF_SKIP_INVENTORY=1 \
+        MALF_PROFILE_NAME="" bash "$MALF_BIN" build > "$sw_tmp/$1.log" 2>&1; echo $?)
+}
+sw_files() {   # <repo> — the repo database's files, repo-relative, sorted
+    python3 -c "import json,sys; print(' '.join(sorted(e['file'].split('/$1/',1)[1] for e in json.load(open(sys.argv[1])))))" \
+        "$sw_tmp/ws/$1/build-$sw_key/compile_commands.json" 2>&1
+}
+sw_role() { _malf_commands_tree_role "$1"; echo "$_MALF_TREE_ROLE"; }
+
+sw_rc="$(sw_build rooted)"
+check "a rooted sweep's database holds every member's TUs, tests included — the root's are the ones lost" \
+      "rc=0 leaf/src/sw_leaf.cpp leaf/tests/test_sw_leaf.cpp src/sw_root.cpp sub/src/sw_sub.cpp sub/tests/test_sw_sub.cpp tests/test_sw_root.cpp" \
+      "rc=$sw_rc $(sw_files rooted)"
+check "the root recipe's tree ends the sweep in TARGET role, read back from its own CMakeCache" \
+      "target" "$(sw_role "$sw_tmp/ws/rooted/build-$sw_key")"
+sw_rc="$(sw_build flat)"
+check "a flat sweep's database is recomposed, not accumulated — a stale entry for a deleted TU is gone" \
+      "rc=0 a/src/sw_a.cpp a/tests/test_sw_a.cpp b/src/sw_b.cpp b/tests/test_sw_b.cpp" \
+      "rc=$sw_rc $(sw_files flat)"
+check "a member another member's bootstrap demoted ends the sweep in TARGET role" \
+      "target" "$(sw_role "$sw_tmp/ws/flat/a/build-$sw_key")"
+rm -rf "$sw_tmp"
+echo
+
+echo "[7j6] lint --all-files NAMES a TU the build gates off this platform, and refuses nothing else"
+
+# note: two sift *_win32.cpp files are named only inside if(WIN32), so no Linux compile command can
+# exist; --all-files treated them as a fatal coverage hole and the eidos gate could never pass.
+# note: the verdict comes from the repo's CMake text evaluated by cmake -P, never a file name — so a
+# *_win32.cpp no CMake file names, one under a project option, and one under if(UNIX) all stay fatal.
+pg_tmp="$(realpath "$(mktemp -d)")"
+pg_bin="$pg_tmp/bin"; mkdir -p "$pg_bin"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$pg_bin/clang-21"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$pg_bin/clang-tidy"
+chmod +x "$pg_bin/clang-21" "$pg_bin/clang-tidy"
+pg_repo="$pg_tmp/repo"; mkdir -p "$pg_repo/src"
+cat > "$pg_repo/CMakeLists.txt" <<'CM'
+option(PG_EXTRA "extra" OFF)
+if(WIN32)
+    set(PG_PLATFORM_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/term_win32.cpp")
+else()
+    set(PG_PLATFORM_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/term_posix.cpp")
+endif()
+if(PG_EXTRA)
+    set(PG_EXTRA_SRC src/extra.cpp)
+endif()
+if(UNIX)
+    set(PG_UNIX_SRC src/unix_only.cpp)
+endif()
+add_library(pg src/core.cpp ${PG_PLATFORM_SRC})
+CM
+for pg_f in core term_posix term_win32; do printf 'int %s() { return 0; }\n' "$pg_f" > "$pg_repo/src/$pg_f.cpp"; done
+git -C "$pg_repo" init -q && git -C "$pg_repo" add -A
+pg_key="${MALF_DEFAULT_PROFILE#linux-}"; mkdir -p "$pg_repo/build-$pg_key"
+printf '[{"directory": "%s", "command": "clang++-21 -std=c++23 -c %s -o a.o", "file": "%s"},\n {"directory": "%s", "command": "clang++-21 -std=c++23 -c %s -o b.o", "file": "%s"}]\n' \
+    "$pg_repo/build-$pg_key" "$pg_repo/src/core.cpp" "$pg_repo/src/core.cpp" \
+    "$pg_repo/build-$pg_key" "$pg_repo/src/term_posix.cpp" "$pg_repo/src/term_posix.cpp" \
+    > "$pg_repo/build-$pg_key/compile_commands.json"
+pg_run() {
+    (cd "$pg_repo" && PATH="$pg_bin:$PATH" MALF_PROFILE_NAME="" bash "$MALF_BIN" lint --all-files --console 2>&1)
+}
+pg_counts() { grep -oE 'checked [0-9]+, [0-9]+ finding\(s\), [0-9]+ not linted, [0-9]+ platform-refused' <<< "$1" | head -1; }
+
+pg_out="$(pg_run)"; pg_rc=$?
+check "a TU named only inside if(WIN32) is REFUSED, not fatal — rc 0, the other two checked" \
+      "rc=0 checked 2, 0 finding(s), 0 not linted, 1 platform-refused" "rc=$pg_rc $(pg_counts "$pg_out")"
+check "the refusal NAMES the file and the CMake branch that gates it" \
+      "named" \
+      "$(grep -qE '^  src/term_win32\.cpp — CMakeLists\.txt:3 sits in if\(WIN32\)' <<< "$pg_out" && echo named || echo "GOT: $pg_out")"
+
+printf 'int orphan() { return 0; }\n' > "$pg_repo/src/orphan_win32.cpp"
+pg_out="$(pg_run)"; pg_rc=$?
+check "a *_win32.cpp NO CMake file names stays a fatal hole — the verdict never reads a file name" \
+      "rc=1 missing" \
+      "rc=$pg_rc $(grep -qE 'have no usable compile command' <<< "$pg_out" && grep -qE '^  src/orphan_win32\.cpp$' <<< "$pg_out" && echo missing || echo "GOT: $pg_out")"
+rm -f "$pg_repo/src/orphan_win32.cpp"
+
+printf 'int extra() { return 0; }\n' > "$pg_repo/src/extra.cpp"
+pg_out="$(pg_run)"; pg_rc=$?
+check "a TU gated by a PROJECT option is not a platform gate — fatal" \
+      "rc=1 missing" \
+      "rc=$pg_rc $(grep -qE '^  src/extra\.cpp$' <<< "$pg_out" && echo missing || echo "GOT: $pg_out")"
+rm -f "$pg_repo/src/extra.cpp"
+
+printf 'int unix_only() { return 0; }\n' > "$pg_repo/src/unix_only.cpp"
+pg_out="$(pg_run)"; pg_rc=$?
+check "a TU under if(UNIX) and absent from the database is fatal — the branch is evaluated, not assumed" \
+      "rc=1 missing" \
+      "rc=$pg_rc $(grep -qE '^  src/unix_only\.cpp$' <<< "$pg_out" && echo missing || echo "GOT: $pg_out")"
+rm -rf "$pg_tmp"
+echo
+
 echo
 echo
 echo "malf selftest: $pass_count passed, $fail_count failed"
