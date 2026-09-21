@@ -1382,6 +1382,21 @@ check "detector — without the benchmark pattern the bench TU is MISSED (proves
                   CWD="$2" _malf_lint_assert_no_test_tu "$2/perf/bench_hot.cpp" "$2/perf/unit.cpp" "$2/perf/agg.cppm" 2>&1 \
                     | grep -oE "[a-z_]+\.(cpp|cppm)" | tr "\n" " " | sed "s/ $//"' _ "$dt_mutant" "$dt_tmp")"
 
+# AN UNREADABLE TU IS A REFUSAL, NEVER "NO FRAMEWORK". grep exits 2 on it; the scan used to read
+# through a process substitution that dropped every status, so the guard passed it. chmod 000 does
+# not deny root, so the arm states that rather than passing vacuously.
+if [ "$(id -u)" -ne 0 ]; then
+    printf 'int g(){return 0;}\n' > "$dt_tmp/src/locked.cpp"; chmod 000 "$dt_tmp/src/locked.cpp"
+    dt_out="$(CWD="$dt_tmp" _malf_lint_assert_no_test_tu "$dt_tmp/src/engine.cpp" "$dt_tmp/src/locked.cpp" 2>&1)"
+    dt_rc=$?
+    chmod 644 "$dt_tmp/src/locked.cpp"
+    check "detector — an unreadable TU refuses the run (exit 1), never passes as framework-free" "1" "$dt_rc"
+    check "detector — the refusal says the scan could not read a TU" "1" \
+          "$(grep -c 'could not read every selected TU' <<< "$dt_out")"
+else
+    check "detector — the unreadable-TU arm needs a non-root user (chmod 000 does not deny root)" "non-root" "root"
+fi
+
 rm -rf "$dt_tmp"
 
 echo "[7n] lint scratch — a corpse and a stall no longer read alike"
