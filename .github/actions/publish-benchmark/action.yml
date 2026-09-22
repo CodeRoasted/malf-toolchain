@@ -36,7 +36,7 @@ runs:
   using: composite
   steps:
     - name: Measure + validate the benchmark JSON(s)
-      uses: CodeRoasted/malf-toolchain/.github/actions/measure-benchmark@fde46d6e8bf29fb81f0d6acac105b40dfc9f4ceb
+      uses: CodeRoasted/malf-toolchain/.github/actions/measure-benchmark@2a85892caae7a42b934fa06292c9f253d7e8ee54
       with:
         outputs: ${{ inputs.outputs }}
         subdir: ${{ inputs.subdir }}
