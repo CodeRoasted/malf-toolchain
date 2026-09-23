@@ -4044,7 +4044,13 @@ import workspace_layout
 try:
     CODEROAST_PREFIXES = workspace_layout.owned_package_prefixes()
 except workspace_layout.UndeclaredWorkspace as why:
+    # A roster manifest that cannot be read, absent included, refuses here too (DN-108.D19): its
+    # WHERE is the file, its DO the command that shows the file's state, never a clone.
     sys.stderr.write(f"malf clean stale: {why}\n")
+    if why.where:
+        sys.stderr.write(f"  WHERE  {why.where}\n")
+    for remedy in why.do:
+        sys.stderr.write(f"  DO     {remedy}\n")
     sys.exit(2)
 
 # Uniform workspace baseline from the first-party recipes (refuse to guess if non-uniform).
