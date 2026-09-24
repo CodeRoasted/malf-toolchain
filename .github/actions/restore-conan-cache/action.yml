@@ -129,7 +129,7 @@ runs:
         # From here a login exists — always logout before exiting so creds never persist on the
         # (self-hosted) runner. Linear flow, no early exit inside the pull/restore block.
         if oras pull "$CACHE_REF" --output "$work"; then
-          tarball="$(find "$work" -name '*.tgz' -type f | head -n1)"
+          tarball="$(find "$work" -name '*.tgz' -type f | sed -n 1p)"
           if [ -n "$tarball" ]; then
             # Make the existing cache writable before extracting over it. `conan cache restore` is a
             # plain `tarfile.extractall` into $CONAN_HOME, and conan marks cached SOURCE folders

@@ -44,8 +44,12 @@ fi
 
 PKG_REF="${PKG_NAME}/${PKG_VERSION}"
 
-# Fast path: already vendored.
-if conan list "$PKG_REF" --format=compact 2>/dev/null | grep -q "$PKG_REF"; then
+# Fast path: already vendored. The listing is CAPTURED and matched from a here-string, never
+# `conan list | grep -q`: under pipefail grep exits at its first match while conan may still be
+# writing, conan dies on the closed pipe, and a cached package reads as absent. A failed listing
+# still reads as absent, as before.
+listed="$(conan list "$PKG_REF" --format=compact 2>/dev/null)" || listed=""
+if grep -q -- "$PKG_REF" <<<"$listed"; then
     echo "ci_fetch_conan_package: $PKG_REF already in local cache, skipping download."
     exit 0
 fi

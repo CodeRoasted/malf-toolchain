@@ -56,7 +56,7 @@ jobs:
         run: |
           set -euo pipefail
           V='${{ inputs.gcc_version }}'
-          if ! printf '%s\n' "$V" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+          if ! grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' <<<"$V"; then
             echo "::error::gcc_version must be MAJOR.MINOR.PATCH (got '$V')"; exit 1; fi
           maj=${V%%.*}; rest=${V#*.}; min=${rest%%.*}
           if [ "$maj" -lt 15 ] || { [ "$maj" -eq 15 ] && [ "$min" -lt 3 ]; }; then
@@ -140,7 +140,7 @@ jobs:
         if: steps.precheck.outputs.skip != 'true'
         run: |
           set -euo pipefail
-          "$PREFIX/bin/g++" --version | head -1
+          "$PREFIX/bin/g++" --version | sed -n 1p
           test "$("$PREFIX/bin/g++" -dumpversion)" = "$GCC_VERSION" \
             || { echo "::error::built g++ is not $GCC_VERSION"; exit 1; }
           # Minimal PR124309 repro: a partition that imports a "cross-package" module,

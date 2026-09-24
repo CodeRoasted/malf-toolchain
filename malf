@@ -286,7 +286,7 @@ _malf_profile_path() {
 # does not name, and a fallback here is the same defect wearing a default.
 _malf_profile_build_type() {
     local bt
-    bt="$(sed -nE 's/^[[:space:]]*build_type[[:space:]]*=[[:space:]]*([A-Za-z]+).*/\1/p' "$MALF_PROFILE" | head -n1)"
+    bt="$(sed -nE 's/^[[:space:]]*build_type[[:space:]]*=[[:space:]]*([A-Za-z]+).*/\1/p' "$MALF_PROFILE" | sed -n 1p)"
     if [[ -z "$bt" ]]; then
         echo "malf: error: profile '$MALF_PROFILE_NAME' ($MALF_PROFILE) declares no [settings] build_type." >&2
         echo "       Every malf profile must declare one — the build tree is named for the profile," >&2
@@ -1148,7 +1148,7 @@ _malf_assert_tree_matches_profile() {
     fi
     local declared cached
     declared="$(_malf_profile_build_type)"
-    cached="$(sed -nE 's/^CMAKE_BUILD_TYPE:[A-Za-z]+=(.*)$/\1/p' "$cache" | head -n1)"
+    cached="$(sed -nE 's/^CMAKE_BUILD_TYPE:[A-Za-z]+=(.*)$/\1/p' "$cache" | sed -n 1p)"
     [[ "$cached" == "$declared" ]] && return 0
     echo "malf: FATAL: build-type drift — $build_dir is configured" >&2
     echo "       CMAKE_BUILD_TYPE=${cached:-<empty>}, but the profile it is NAMED for" >&2
@@ -4180,10 +4180,21 @@ cmd_run() {
     local exe_name="${1:-}"
     case "$exe_name" in -*) _malf_refuse_option run "$exe_name" ;; esac
     [[ -n "$exe_name" ]] || { echo "malf run: specify an executable name" >&2; exit 1; }
-    local found="" dir
+    local found="" dir tree listed
+    local -a trees
     while IFS= read -r dir; do
-        found="$(find "$dir"/build "$dir"/build-* -type f -executable -name "$exe_name" \
-            -not -name "*.sh" 2>/dev/null | head -1)"
+        # Only the trees that EXIST are handed to find. `find <dir>/build <dir>/build-*` exits 1
+        # on whichever of the two is absent — in the usual layout one of them is — so under
+        # `set -e` + pipefail the assignment killed `malf run` with no message, found or not.
+        # Captured, then its first line read from a here-string: `| head -1` could also SIGPIPE
+        # find on a long listing.
+        trees=()
+        for tree in "$dir"/build "$dir"/build-*; do
+            if [[ -d "$tree" ]]; then trees+=("$tree"); fi
+        done
+        (( ${#trees[@]} )) || continue
+        listed="$(find "${trees[@]}" -type f -executable -name "$exe_name" -not -name "*.sh")"
+        found="$(sed -n 1p <<<"$listed")"
         [[ -n "$found" ]] && break
     done < <(_malf_build_tree_roots)
     if [[ -z "$found" ]]; then

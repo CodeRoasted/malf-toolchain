@@ -20,8 +20,12 @@ runs:
         # bridge symlink, and the update-alternatives all survive between jobs. Re-running needs sudo
         # (apt + alternatives) → a password prompt on a self-hosted box. Skip when every end-state
         # invariant the action guarantees is already in place; the first provision still installs.
+        # Every version probe below is CAPTURED and matched from a here-string, never
+        # `--version | grep -q`: under pipefail grep exits at its first match, the writer can take
+        # SIGPIPE, and a present clang-21 reads as absent. A failed probe still reads as absent.
+        bare_version="$(clang++ --version 2>/dev/null || true)"
         if command -v clang++-21 >/dev/null 2>&1 \
-           && clang++ --version 2>/dev/null | grep -qE 'version 21\.' \
+           && grep -qE 'version 21\.' <<<"$bare_version" \
            && dpkg -s libc++-21-dev libc++abi-21-dev >/dev/null 2>&1 \
            && [ -e /usr/lib/share/libc++ ]; then
           echo "clang-21 + libc++-21 + bridge + alternatives already provisioned — skipping (idempotent skip)"
@@ -45,5 +49,6 @@ runs:
         sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-21 1000
         sudo update-alternatives --set clang   /usr/bin/clang-21
         sudo update-alternatives --set clang++ /usr/bin/clang++-21
-        clang++ --version | head -1
-        clang++ --version | grep -qE 'version 21\.' || { echo "::error::bare clang++ is not clang-21 (std::expected would fail)"; exit 1; }
+        bare_version="$(clang++ --version)"
+        sed -n 1p <<<"$bare_version"
+        grep -qE 'version 21\.' <<<"$bare_version" || { echo "::error::bare clang++ is not clang-21 (std::expected would fail)"; exit 1; }

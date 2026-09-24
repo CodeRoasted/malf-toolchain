@@ -57,7 +57,10 @@ runs:
         # already satisfy the old invariants — provisioned on hosted, silently absent on
         # self-hosted. An action provisioning the one tool it asserts on has no such gap.
         want_dir="$(dirname "$(readlink -f "$(command -v clang-21 || command -v clang)")")"
-        if ! "$want_dir/clang-format" --version 2>/dev/null | grep -qE "version ${WANT_MAJOR}\."; then
+        # Captured, then matched from a here-string: `--version | grep -q` under pipefail can read a
+        # present clang-format as absent when grep's early exit sends the writer SIGPIPE.
+        have_version="$("$want_dir/clang-format" --version 2>/dev/null || true)"
+        if ! grep -qE "version ${WANT_MAJOR}\." <<<"$have_version"; then
           sudo apt-get update
           sudo apt-get install -y "clang-format-${WANT_MAJOR}"
         fi

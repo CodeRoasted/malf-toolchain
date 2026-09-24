@@ -109,7 +109,10 @@ runs:
         # BMI is pinned to the exact clang build that produced it. A note on stderr with exit 0 is
         # the shape a green run hides; assert the end state instead.
         want_dir="$(dirname "$(readlink -f "$(command -v clang-21 || command -v clang)")")"
-        if ! "$want_dir/clang-tidy" --version 2>/dev/null | grep -qE "version ${WANT_MAJOR}\."; then
+        # Captured, then matched from a here-string: `--version | grep -q` under pipefail can read a
+        # present clang-tidy as absent when grep's early exit sends the writer SIGPIPE.
+        have_version="$("$want_dir/clang-tidy" --version 2>/dev/null || true)"
+        if ! grep -qE "version ${WANT_MAJOR}\." <<<"$have_version"; then
           sudo apt-get update
           sudo apt-get install -y "clang-tidy-${WANT_MAJOR}"
         fi

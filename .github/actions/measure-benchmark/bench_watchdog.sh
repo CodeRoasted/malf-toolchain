@@ -63,7 +63,10 @@ dump_thread_backtraces() {
         -ex 'set pagination off' \
         -ex 'thread apply all bt full' \
         -ex 'info registers' 2>&1 || true)"
-    if printf '%s\n' "$gdb_out" | grep -q 'Could not attach'; then
+    # Every match below reads the CAPTURED dump from a here-string, never `printf | grep -q`: under
+    # pipefail grep exits at its first match while printf is still writing a multi-megabyte dump,
+    # printf takes SIGPIPE, and the pipeline reads the hit as a miss.
+    if grep -q 'Could not attach' <<<"$gdb_out"; then
       gdb_out="$(sudo -n gdb --batch -p "$root" \
           -ex 'set pagination off' \
           -ex 'thread apply all bt full' \
@@ -74,7 +77,7 @@ dump_thread_backtraces() {
     echo "gdb unavailable — cannot backtrace pid $root"
   fi
   # No usable backtrace from gdb (absent, or every attach denied) → degraded /proc view.
-  if ! printf '%s\n' "$gdb_out" | grep -Eq '^(Thread|#0)'; then
+  if ! grep -Eq '^(Thread|#0)' <<<"$gdb_out"; then
     dump_proc_state "$root"
   fi
   echo "::endgroup::"

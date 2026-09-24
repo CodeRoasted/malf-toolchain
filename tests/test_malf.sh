@@ -574,7 +574,7 @@ check "db verdict: in-DB TU / uncovered HEADER / uncovered TU are three distinct
 # in the three lines above it.
 refuse_line="$(grep -n 'refusing to report success — --all-files walks the TREE' "$MALF_BIN" | cut -d: -f1)"
 allfiles_fatal="$([[ -n "$refuse_line" ]] \
-  && sed -n "$((refuse_line - 3)),${refuse_line}p" "$MALF_BIN" | grep -q 'lint_status=1' \
+  && grep -q 'lint_status=1' <<<"$(sed -n "$((refuse_line - 3)),${refuse_line}p" "$MALF_BIN")" \
   && echo wired || echo "NOT WIRED (refusal at line ${refuse_line:-none})")"
 check "an uncovered TU fails --all-files (the mode promises the tree, so a partial subject is a hole)" \
       "wired" \
@@ -1120,17 +1120,19 @@ check "D: single-repo shape + sibling STAGED -> the cell builds, no skip (the D6
 
 rm -rf "$inv_tmp"
 
-echo "[7i] cmd_bump — the chain survives its own coherence check (the INV-14 self-defeat)"
+echo "[7i] cmd_bump — every hygiene step runs, and the toolchain never calls the orchestrator"
 
 # Post-bump, the FULL pin-coherence verification is structurally RED until the lockfile is
 # re-derived: INV-14 compares conan.lock's first-party pins against the recipes the bump just
 # moved. Measured 2026-08-15 (the 1.9.4 bump): with the verification mid-chain, cmd_bump exited
 # at that check and STRANDED the editable re-sync, the stale prune and the SBOM — the caches
-# stayed one version behind and the next `malf lock --update` refused 19 roots. The contract
-# this section pins: every hygiene step the ceremony owns runs BEFORE the check that judges the
-# result, with the plain (behaviour-neutral, first-party-only) lock chained where the lock doc
-# already prescribed it, so a green bump means the whole post-bump state is coherent — and a red
-# one indicts the state, not the ordering.
+# stayed one version behind and the next `malf lock --update` refused 19 roots. That check is no
+# longer malf's: DN-108.D1, crossing 1 — `malf bump` rewrites the axes it owns and STOPS, and
+# `./pharos bump X.Y.Z` runs the verification last. The contract this section pins: every hygiene
+# step runs, in order, with the plain (behaviour-neutral, first-party-only) lock chained where the
+# lock doc prescribes it — and NO call reaches the orchestrator. The python3 stub still carries
+# INV-14's semantics, so a verification call put back mid-chain shows as `verify-RED` and one put
+# back last shows as `verify`: either reds this check.
 bump_tmp="$(mktemp -d)"
 mkdir -p "$bump_tmp/ws/scripts"
 : > "$bump_tmp/ws/scripts/version_line.py"   # existence-checked by cmd_bump; python3 is stubbed
@@ -1161,8 +1163,8 @@ cmd_bump 1.2.3
 command echo "rc=\$? order=\$(cat "\$T/order" 2>/dev/null)"
 PROBE
 chmod +x "$bump_tmp/probe.sh"
-check "bump chain — rc=0 and every hygiene step precedes the verification" \
-      "rc=0 order=rewrite sync lock clean verify " \
+check "bump chain — rc=0, every hygiene step in order, and no call to the orchestrator" \
+      "rc=0 order=rewrite sync lock clean " \
       "$("$bump_tmp/probe.sh" "$bump_tmp")"
 rm -rf "$bump_tmp"
 
@@ -2046,7 +2048,7 @@ check "a directly-configured test_package is handed the version of the package u
 # and the disagreement would be a version assertion passing against the wrong oracle.
 check "the version and the --requires come from the SAME reference reading" \
       "one reading" \
-      "$(grep -c 'main_ref="$(_malf_pkg_ref' <<< "$cm_tp_src" | grep -q '^1$' && echo "one reading" || echo "GOT $(grep -c 'main_ref="$(_malf_pkg_ref' <<< "$cm_tp_src") readings")"
+      "$([[ "$(grep -c 'main_ref="$(_malf_pkg_ref' <<< "$cm_tp_src")" == 1 ]] && echo "one reading" || echo "GOT $(grep -c 'main_ref="$(_malf_pkg_ref' <<< "$cm_tp_src") readings")"
 
 # The function has to REPORT the failure, not just print it: before this it returned 0 on a failed
 # configure and the caller had nothing to test.
@@ -2640,6 +2642,36 @@ check "a TU under if(UNIX) and absent from the database is fatal — the branch 
       "rc=1 missing" \
       "rc=$pg_rc $(grep -qE '^  src/unix_only\.cpp$' <<< "$pg_out" && echo missing || echo "GOT: $pg_out")"
 rm -rf "$pg_tmp"
+echo
+
+# --- malf run: it finds the executable, and a miss is a NAMED miss --------------------------------
+# `cmd_run` used to hand find BOTH `<pkg>/build` and `<pkg>/build-*`. In the usual layout one of
+# the two is absent, find exits 1 on it, and under malf's `set -e` + pipefail the assignment killed
+# `malf run` at exit 1 with no message — for an executable that was there, and for one that was
+# not. Measured 2026-09-24: every `malf run` in coderoast-ipc exited 1 silently. A fixture package
+# with ONLY a `build-*` tree is the shape that reproduces it; the third arm adds a plain `build/`
+# so both trees exist.
+echo "--- malf run"
+rn_tmp="$(mktemp -d)"
+mkdir -p "$rn_tmp/pkg/build-fx"
+printf 'from conan import ConanFile\nclass P(ConanFile):\n    name = "fxpkg"\n    version = "0.0.1"\n' \
+    > "$rn_tmp/pkg/conanfile.py"
+printf '#!/bin/sh\necho "RAN-FIXTURE $*"\n' > "$rn_tmp/pkg/build-fx/fixture_exe"
+chmod +x "$rn_tmp/pkg/build-fx/fixture_exe"
+rn_out="$(cd "$rn_tmp/pkg" && "$MALF_BIN" run fixture_exe a1 2>&1)"; rn_rc=$?
+check "malf run finds an executable in the only build tree there is, and runs it with its arguments" \
+      "rc=0 ran" \
+      "rc=$rn_rc $(grep -qx 'RAN-FIXTURE a1' <<< "$rn_out" && echo ran || echo "GOT: $rn_out")"
+rn_out="$(cd "$rn_tmp/pkg" && "$MALF_BIN" run absent_exe 2>&1)"; rn_rc=$?
+check "malf run on an absent executable exits 1 and SAYS so — never a silent exit" \
+      "rc=1 named" \
+      "rc=$rn_rc $(grep -q "malf run: 'absent_exe' not found in any package build tree" <<< "$rn_out" && echo named || echo "GOT: $rn_out")"
+mkdir -p "$rn_tmp/pkg/build"
+rn_out="$(cd "$rn_tmp/pkg" && "$MALF_BIN" run fixture_exe a2 2>&1)"; rn_rc=$?
+check "malf run still finds it when a plain build/ tree exists beside the build-* one" \
+      "rc=0 ran" \
+      "rc=$rn_rc $(grep -qx 'RAN-FIXTURE a2' <<< "$rn_out" && echo ran || echo "GOT: $rn_out")"
+rm -rf "$rn_tmp"
 echo
 
 echo

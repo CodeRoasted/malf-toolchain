@@ -167,7 +167,10 @@ diagnose_crash() {
           echo "--- attempt $attempt ---"
           out="$(run_under_gdb "$bin" "--gtest_filter=$name")"
           echo "$out"
-          if echo "$out" | grep -qE 'received signal|SIGSEGV|SIGABRT|SIGBUS|SIGILL'; then
+          # A here-string, never `echo | grep -q`: under pipefail grep exits at its first match while
+          # echo is still writing a 200-line `bt full`, echo takes SIGPIPE, and a captured crash
+          # reads as a miss — the loop then re-runs a test it has already caught.
+          if grep -qE 'received signal|SIGSEGV|SIGABRT|SIGBUS|SIGILL' <<<"$out"; then
             echo "captured a crashing backtrace on attempt $attempt"; break
           fi
         done

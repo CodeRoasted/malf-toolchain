@@ -136,7 +136,7 @@ jobs:
               echo "::error::bad package row '$row' — want '<conan-pkg>:<recipe-dir>'"; exit 1
             fi
             # Refuse to publish a vX.Y.Z release from a recipe that still says version="A.B.C".
-            ver="$(sed -nE "s/^[[:space:]]*version[[:space:]]*=[[:space:]]*['\"]([^'\"]+)['\"].*/\1/p" "$dir/conanfile.py" | head -n1 || true)"
+            ver="$(sed -nE "s/^[[:space:]]*version[[:space:]]*=[[:space:]]*['\"]([^'\"]+)['\"].*/\1/p" "$dir/conanfile.py" | sed -n 1p || true)"
             if [ "$ver" != "$VERSION" ]; then
               echo "::error::$dir/conanfile.py version='$ver' != tag '$TAG' (version $VERSION)"; exit 1
             fi

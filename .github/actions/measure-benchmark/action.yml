@@ -107,7 +107,7 @@ runs:
           if [ -z "$exe" ] || [ -z "$label" ]; then continue; fi
           # Newest JSON this run wrote for this exe (<target>/bench_results/ varies with subdir).
           json="$(find "$GITHUB_WORKSPACE" -path "*/bench_results/${exe}_*.json" -printf '%T@ %p\n' 2>/dev/null \
-                    | sort -rn | head -1 | cut -d' ' -f2-)"
+                    | sort -rn | sed -n 1p | cut -d' ' -f2-)"
           if [ -z "$json" ] || [ ! -f "$json" ]; then echo "::error::no benchmark JSON for exe '$exe' under any bench_results/ — did the build produce it?"; exit 1; fi
 
           # Reject a throttled capture — a scaling-enabled run must never become published evidence.

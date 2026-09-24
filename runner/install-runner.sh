@@ -106,7 +106,7 @@ if [[ ! -x ./config.sh ]]; then
   # legitimate install.
   NOTES_SHA="$(printf '%s' "$RELEASE_JSON" \
                | jq -r --arg n "$TARBALL" '.body // "" | split("\n")[] | select(startswith("- " + $n + " "))' \
-               | grep -oiE '\b[0-9a-f]{64}\b' | head -1 || true)"
+               | grep -oiE '\b[0-9a-f]{64}\b' | sed -n 1p || true)"
   if [[ -z "$NOTES_SHA" ]]; then
     log "NOTE: release notes carry no SHA-256 line for $TARBALL — corroboration UNCHECKED, continuing on the published asset digest alone."
   elif [[ "${NOTES_SHA,,}" != "$WANT" ]]; then
