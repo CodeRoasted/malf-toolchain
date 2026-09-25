@@ -202,7 +202,26 @@ jobs:
               echo "::error::$ASSET already published on '$TAG' — a published compiler is immutable. Bump the version."; exit 1
             fi
           else
-            gh release create "$TAG" --title "gcc ${GCC_VERSION}" --notes-file RELEASE_NOTES.md --latest=false
+            # The toolchain-drop tag is created ANNOTATED first, at the recipe commit this run
+            # built, and the Release only ATTACHES to it (`--verify-tag`): without that flag
+            # `gh release create` mints a missing tag itself, LIGHTWEIGHT, which ADR-2.D1 forbids.
+            # The read-back asks the object type, because creating a ref and creating an ANNOTATED
+            # ref are different acts; a `gh api` 404 exits non-zero, so the exit code is asked,
+            # never the body.
+            if ! gh api "repos/$GH_REPO/git/ref/tags/$TAG" >/dev/null 2>&1; then
+              obj="$(gh api "repos/$GH_REPO/git/tags" -f tag="$TAG" -f type=commit \
+                       -f object="$GITHUB_SHA" \
+                       -f message="gcc ${GCC_VERSION} — CodeRoast build toolchain, built from $GITHUB_SHA" \
+                       --jq .sha)"
+              gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$obj" >/dev/null \
+                || echo "::warning::creating refs/tags/$TAG failed (a concurrent run may hold it) — the read-back below decides"
+            fi
+            if ! kind="$(gh api "repos/$GH_REPO/git/ref/tags/$TAG" --jq .object.type 2>/dev/null)"; then
+              kind=MISSING
+            fi
+            [ "$kind" = "tag" ] || {
+              echo "::error::refs/tags/$TAG is '$kind', not the annotated-tag object 'tag' — refusing to publish a Release onto it (ADR-2.D1)"; exit 1; }
+            gh release create "$TAG" --verify-tag --title "gcc ${GCC_VERSION}" --notes-file RELEASE_NOTES.md --latest=false
             rel=""
           fi
           # Binary asset (this arch) — immutability checked above.

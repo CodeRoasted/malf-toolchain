@@ -154,8 +154,12 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
+          # `--verify-tag`: the tag is the cut's annotated tag, pushed before this job runs (a tag
+          # push, or a dispatch whose tag the caller's `attest` job has already resolved). Without
+          # the flag, a MISSING tag is minted right here, LIGHTWEIGHT, at the default branch head,
+          # which ADR-2.D1 forbids for a release; with it, this command can only ATTACH.
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --title "$TAG" --notes "Automated Conan-package release for $TAG.
+            gh release create "$TAG" --verify-tag --title "$TAG" --notes "Automated Conan-package release for $TAG.
 
           Attached \`*.tgz\` are produced by \`conan cache save\` and consumed downstream by
           \`conan cache restore\`. Any \`*-benchmark.json\` is the fresh benchmark measured at this tag."
