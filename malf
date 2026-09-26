@@ -100,10 +100,26 @@ MALF_SOURCE_MEM_LIMIT_KB="${MALF_SOURCE_MEM_LIMIT_KB:-4194304}"
 # -n 1 already, so it needs no equivalent.)
 MALF_FORMAT_BATCH_SIZE="${MALF_FORMAT_BATCH_SIZE:-50}"
 
-# The WORKSPACE BUILD SLOT (see cmd_slot). Under ${TMPDIR:-/tmp} and not in the worktree: it
-# coordinates lanes across every repo at once, so it belongs to no repo, and a git-visible lock
-# would be staged by somebody eventually. The default path is the one the hand-rolled protocol
-# already used, so this replaces that practice rather than starting a second one beside it.
+# The WORKSPACE BUILD SLOT (see cmd_slot). Not in the worktree: it coordinates lanes across every
+# repo at once, so it belongs to no repo, and a git-visible lock would be staged by somebody
+# eventually.
+#
+# WHERE IT LIVES IS A PROPERTY OF THE MACHINE, and there are two kinds of machine. On a box where
+# the desk and the self-hosted runner are TWO accounts, the slot must be one directory both can
+# create, stamp and reclaim — which /tmp cannot be: it is sticky, so neither account can remove a
+# slot the other created, and fs.protected_regular=2 refuses opening the other account's mutex
+# file with O_CREAT even when its mode would allow it. That box carries the shared root below,
+# created by malf/runner/isolate-runner-wsl.sh with a default ACL granting both accounts rw on
+# everything created inside it, whatever either one's umask. Its EXISTENCE is the switch, and
+# existence is a machine fact, never a per-user one: every account on the box resolves the same
+# path, and an account the ACL does not name fails loudly at the mutex rather than silently
+# using a private slot. Every other box keeps ${TMPDIR:-/tmp}, the path the hand-rolled protocol
+# used before this verb existed. MALF_BUILD_SLOT_DIR still overrides both (the selftests pin a
+# scratch slot through it).
+MALF_BUILD_SLOT_SHARED_ROOT="${MALF_BUILD_SLOT_SHARED_ROOT:-/var/lib/coderoast-build}"
+if [[ -z "${MALF_BUILD_SLOT_DIR:-}" && -d "$MALF_BUILD_SLOT_SHARED_ROOT" ]]; then
+    MALF_BUILD_SLOT_DIR="$MALF_BUILD_SLOT_SHARED_ROOT/slot"
+fi
 MALF_BUILD_SLOT_DIR="${MALF_BUILD_SLOT_DIR:-${TMPDIR:-/tmp}/coderoast-build-slot}"
 # How long `malf slot` waits for the mutex around one read-decide-write. Not how long it waits
 # for the SLOT — the slot is never waited on, it is reported.
@@ -4348,7 +4364,9 @@ Commands:
                                             and the token is the only escape.
                                             Never 'rm -rf' the directory.
                                    status   FREE / HELD / STALE / UNKNOWN, and exits 0 / 1 / 2 / 3
-                                   Path: MALF_BUILD_SLOT_DIR (default /tmp/coderoast-build-slot).
+                                   Path: MALF_BUILD_SLOT_DIR (default /var/lib/coderoast-build/slot
+                                   when /var/lib/coderoast-build exists — the box whose desk and
+                                   runner are two accounts — else /tmp/coderoast-build-slot).
     sbom    [--check]              regenerate each published CycloneDX SBOM from the RESOLVED
                                    conan graph (malf/sbom_gen.py). --check writes nothing and
                                    fails if a committed SBOM has drifted from the graph.

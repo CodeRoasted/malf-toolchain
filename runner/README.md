@@ -18,6 +18,30 @@ org runner is visible to *all* repos, so this is enforced at the **workflow laye
 - **Public** repos stay hard-pinned to `ubuntu-latest`. Never add the `malf-local`
   label to a public repo's workflow.
 
+## Isolation: no job reads a desk credential (ROADMAP N214)
+
+The safety rule above keeps foreign code off the box; this keeps OUR jobs — and every third-party
+conan recipe, action and image they pull — away from the Founder's credentials. The installers
+below register a runner under whichever account runs them, which on this box is the desk account;
+the isolation scripts then move each runner onto an account of its own. **Run them after every
+(re)install**: an installer run undoes them.
+
+| Runner | Isolate (prints a plan; acts only with the flag) | Undo |
+|---|---|---|
+| WSL `malf-runner` | `sudo bash malf/runner/isolate-runner-wsl.sh --apply` | `isolate-runner-wsl-rollback.sh --apply` |
+| Windows `malf-runner-win` | elevated `pwsh -File malf\runner\isolate-runner-windows.ps1 -Apply` | `isolate-runner-windows-rollback.ps1 -Apply` |
+
+Each script's header names every door it closes and what stays open. In short: the WSL runner runs
+as the system account `ghrunner` inside a systemd sandbox that hides the Windows drives and WSL
+interop, with a rootless Docker of its own (never the `docker` group); the Windows runner logs on
+as its service's virtual account `NT SERVICE\<service>`, not the Founder. The proof is the
+superproject's `runner-isolation-probe.yml`, one `workflow_dispatch` run after both scripts: it
+tries every door from inside a job and passes only if each is refused and every control works.
+
+The build slot is shared with the desk through `/var/lib/coderoast-build` (the WSL script creates
+it; `malf` resolves its slot there whenever it exists), because `/tmp` cannot hold a slot two
+accounts can both reclaim.
+
 ## Setup (on the warehouse box)
 
 ```bash

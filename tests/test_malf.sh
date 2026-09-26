@@ -2358,6 +2358,32 @@ check "the slot is deleted only from inside cmd_slot, and it is deleted somewher
 rm -rf "$sl_tmp"
 echo
 
+echo "[7r2] the slot's DEFAULT path is a machine fact: the shared root when it exists, else TMPDIR"
+
+# On the box where the desk and the self-hosted runner are two accounts, /tmp cannot hold a slot
+# both can reclaim (sticky bit, fs.protected_regular=2), so malf switches to a shared root whose
+# EXISTENCE is the switch. The arms pin the three resolutions; the default path is the one almost
+# every invocation takes and the one nobody passes a flag to, so it is pinned rather than trusted.
+# Every arm steers BOTH candidates into scratch — the shared root through
+# MALF_BUILD_SLOT_SHARED_ROOT, the fallback through TMPDIR — so no arm reads or truncates a live
+# lane's slot or mutex on the developer's own box. What cannot run here is the cross-account half
+# (two uids and a default ACL need root); malf/runner/isolate-runner-wsl.sh proves that on the box.
+sd_tmp="$(mktemp -d)"
+mkdir "$sd_tmp/shared" "$sd_tmp/tmp"
+sd_dir() {   # <shared root> [MALF_BUILD_SLOT_DIR] -> the dir `status` reports
+    env -u MALF_BUILD_SLOT_DIR TMPDIR="$sd_tmp/tmp" MALF_BUILD_SLOT_SHARED_ROOT="$1" \
+        ${2:+MALF_BUILD_SLOT_DIR="$2"} bash "$MALF_BIN" slot status 2>&1 \
+        | sed -n 's/^malf slot: dir //p'
+}
+check "shared root present, nothing set -> the slot lives under the shared root" \
+      "$sd_tmp/shared/slot" "$(sd_dir "$sd_tmp/shared")"
+check "shared root absent -> the slot falls back to \${TMPDIR}/coderoast-build-slot" \
+      "$sd_tmp/tmp/coderoast-build-slot" "$(sd_dir "$sd_tmp/absent")"
+check "MALF_BUILD_SLOT_DIR set -> it wins over a present shared root" \
+      "$sd_tmp/explicit" "$(sd_dir "$sd_tmp/shared" "$sd_tmp/explicit")"
+rm -rf "$sd_tmp"
+echo
+
 echo "[8] invocation-point independence — malf VERB DIR == cd DIR then malf VERB"
 
 # THE BUG THIS PINS, measured 2026-09-04: an explicit arg naming a package dir used to mean
