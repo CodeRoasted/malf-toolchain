@@ -2602,6 +2602,89 @@ check "a member another member's bootstrap demoted ends the sweep in TARGET role
 rm -rf "$sw_tmp"
 echo
 
+echo "[7q4] a WORKSPACE-ROOT sweep builds every member repository's inventory cells, and terminates"
+
+# note: the inventory ran once per sweep, for the repository the sweep ROOT sits in — at the
+# workspace root that is the superproject, which declares no inventory, so step 0's B3 compiled
+# neither `canon_det_proof` nor `metalog_det_harness` and exited 0 (W211, 2026-09-26).
+# note: conan and cmake are stubbed, the inventory tool is the real one: the stub `cmake --build`
+# links an executable named after its `--target`, which is the artifact the tool requires.
+iv_tmp="$(realpath "$(mktemp -d)")"
+iv_bin="$iv_tmp/bin"; iv_ws="$iv_tmp/ws"; mkdir -p "$iv_bin" "$iv_ws"
+cat > "$iv_bin/conan" <<'STUB'
+#!/usr/bin/env bash
+out=""; prev=""
+for a in "$@"; do
+    [[ "$prev" == "-of" ]] && out="$a"
+    [[ "$a" == --output-folder=* ]] && out="${a#--output-folder=}"
+    prev="$a"
+done
+if [[ "$1" == install && -n "$out" ]]; then
+    mkdir -p "$out" && : > "$out/conan_toolchain.cmake"
+    printf '{"version":4,"configurePresets":[{"name":"conan-release"}]}\n' > "$out/CMakePresets.json"
+fi
+exit 0
+STUB
+cat > "$iv_bin/cmake" <<'STUB'
+#!/usr/bin/env bash
+build=""; target=""; prev=""; linking=false
+for a in "$@"; do
+    [[ "$a" == --build ]] && linking=true
+    case "$prev" in --build) build="$a" ;; --target) target="$a" ;; -B) build="$a" ;; esac
+    prev="$a"
+done
+mkdir -p "$build"
+if $linking; then
+    [[ -n "$target" ]] && { printf '#!/bin/sh\n' > "$build/$target"; chmod +x "$build/$target"; }
+    exit 0
+fi
+echo "CMAKE_BUILD_TYPE:STRING=Release" > "$build/CMakeCache.txt"
+echo "[]" > "$build/compile_commands.json"
+STUB
+chmod +x "$iv_bin/conan" "$iv_bin/cmake"
+iv_repo() {   # <repo> <package> <cell target> [<define line>]
+    local r="$iv_ws/$1"
+    mkdir -p "$r/pkg" "$r/cell"
+    printf 'from conan import ConanFile\nclass C(ConanFile):\n    name = "%s"\n    version = "1.0"\n' "$2" > "$r/pkg/conanfile.py"
+    printf 'option(X "x" ON)\n' > "$r/pkg/CMakeLists.txt"
+    printf 'project(%s)\n' "$3" > "$r/cell/CMakeLists.txt"
+    printf 'inventory:\n  %s_cell:\n    path: cell\n    toolchain_from: pkg\n    target: %s\n' "$1" "$3" > "$r/packages.yml"
+    [[ -n "${4:-}" ]] && printf '    defines:\n      %s\n' "$4" >> "$r/packages.yml"
+    # COMMITTED, because the inventory lint reads the TRACKED CMakeLists.txt of each repository.
+    git -C "$r" init -q && git -C "$r" add -A && \
+        git -C "$r" -c user.name=fixture -c user.email=fixture@example.invalid commit -qm fixture
+}
+# The superproject shape: a workspace root that is itself a repository and declares no inventory,
+# holding two sibling repositories, the second one's cell WORKSPACE-GRAIN (the metalog shape).
+git -C "$iv_ws" init -q
+iv_repo alpha iv_alpha alpha_tool
+# A second package in `alpha`, so "once per repository" is measured against more than one member.
+mkdir -p "$iv_ws/alpha/pkg2"
+printf 'from conan import ConanFile\nclass C(ConanFile):\n    name = "iv_alpha2"\n    version = "1.0"\n' > "$iv_ws/alpha/pkg2/conanfile.py"
+printf 'option(Y "y" ON)\n' > "$iv_ws/alpha/pkg2/CMakeLists.txt"
+git -C "$iv_ws/alpha" add -A && \
+    git -C "$iv_ws/alpha" -c user.name=fixture -c user.email=fixture@example.invalid commit -qm pkg2
+iv_repo beta iv_beta beta_tool 'ALPHA_ROOT: ${workspace}/alpha'
+iv_key="${MALF_DEFAULT_PROFILE#linux-}"
+iv_log="$iv_tmp/sweep.log"
+# `setsid timeout` bounds a runaway and reaps its descendants rather than orphaning them: the
+# inventory is not a sweep, and TERMINATION is proven by running it, never by reading it.
+(cd "$iv_ws" && PATH="$iv_bin:$PATH" MALF_WORKSPACE_ROOT="$iv_ws" MALF_PROFILE_NAME="" \
+    setsid timeout --kill-after=5 120 bash "$MALF_BIN" build > "$iv_log" 2>&1; echo "rc=$?" >> "$iv_log")
+check "the workspace-root sweep exits 0" "rc=0" "$(tail -1 "$iv_log")"
+check "the sweep enumerates its members EXACTLY once over the workspace (it terminates)" \
+      "1" "$(grep -c '3 packages under' "$iv_log" || true)"
+check "the first repository's inventory cell is built and LINKED by the workspace-root sweep" \
+      "yes" "$([[ -x "$iv_ws/alpha/cell/build-inventory-$iv_key/alpha_tool" ]] && echo yes || echo no)"
+check "the second, workspace-grain cell is built and LINKED too" \
+      "yes" "$([[ -x "$iv_ws/beta/cell/build-inventory-$iv_key/beta_tool" ]] && echo yes || echo no)"
+check "each repository's inventory runs ONCE, however many of its packages the sweep held" \
+      "1 1" "$(grep -c 'malf inventory: alpha/cell' "$iv_log") $(grep -c 'malf inventory: beta/cell' "$iv_log")"
+check "the workspace lint runs once per sweep, not once per repository" \
+      "1" "$(grep -c 'build inventory lint (ADR-3.D9)' "$iv_log")"
+rm -rf "$iv_tmp"
+echo
+
 echo "[7j6] lint --all-files NAMES a TU the build gates off this platform, and refuses nothing else"
 
 # note: two sift *_win32.cpp files are named only inside if(WIN32), so no Linux compile command can

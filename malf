@@ -631,7 +631,7 @@ _malf_resolve_target_or_sweep() {
     echo "=== malf $verb: all ${#members[@]} packages done ==="
     _malf_sweep_settle_db "$root" "${members[@]}" || exit 1
     if [[ "$verb" == "build" || "$verb" == "test" ]]; then
-        _malf_run_inventory "$root" || exit 1
+        _malf_run_inventory "$root" "${members[@]}" || exit 1
     fi
     exit 0
 }
@@ -768,12 +768,36 @@ _malf_repo_root_of() {
     return 1
 }
 
-_malf_run_inventory() {
-    local root="$1"
+# note: the inventory ran for the ONE repository the sweep root sits in, so a sweep from the
+# workspace root built the superproject's (it declares none) and no sibling's: step 0's B3 compiled
+# neither canon_det_proof nor metalog_det_harness and exited 0 (W211, 2026-09-26).
+# pre: every dir given is the sweep root or one of its members, all already built.
+# post: each distinct repository those dirs sit in has built its inventory cells ONCE, in the order
+# the dirs name them, after ONE workspace lint; a dir inside no repository contributes none.
+# refs: ADR-3.D9, ADR-3.D10
+_malf_run_inventory() {            # <dir>...
     [[ -n "${MALF_SWEEP:-}" ]] && return 0            # a sweep member — the root runs it once
     [[ -n "${MALF_SKIP_INVENTORY:-}" ]] && return 0   # the mutation arms drive the tool directly
-    local repo; repo="$(_malf_repo_root_of "$root")" || return 0
+    local dir repo
+    local -a repos=()
+    local -A seen=()
+    for dir in "$@"; do
+        repo="$(_malf_repo_root_of "$dir")" || continue
+        [[ -n "${seen[$repo]:-}" ]] && continue
+        seen[$repo]=1
+        repos+=("$repo")
+    done
+    [[ ${#repos[@]} -gt 0 ]] || return 0
     python3 "$MALF_DIR/build_inventory.py" lint --workspace "$MALF_WORKSPACE_ROOT" || return 1
+    for repo in "${repos[@]}"; do
+        _malf_run_repo_inventory "$repo" || return 1
+    done
+}
+
+# pre: the workspace inventory lint has passed.
+# post: the repository's cells are built and linked, and their databases folded into its root one.
+_malf_run_repo_inventory() {       # <repo>
+    local repo="$1"
     python3 "$MALF_DIR/build_inventory.py" build \
         --workspace "$MALF_WORKSPACE_ROOT" --repo "$repo" \
         --build-key "$(_malf_build_key)" --profile "$MALF_PROFILE_NAME" \
