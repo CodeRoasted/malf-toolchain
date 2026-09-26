@@ -180,6 +180,11 @@ done
 for bin in dockerd containerd runc iptables python3; do
     command -v "$bin" >/dev/null || die "$bin is not installed"
 done
+# Step 4 builds the venv's C extensions with the system compiler; one that cannot find its own headers
+# refuses here rather than after three applied steps (measured 2026-09-26: gcc-13's
+# /usr/lib/gcc/x86_64-linux-gnu/13 gone, `dpkg -V libgcc-13-dev` 174 files missing).
+printf '#include <stddef.h>\n' | cc -E -x c - >/dev/null 2>&1 \
+    || die "the system C compiler (cc) cannot preprocess <stddef.h>: its package is broken (dpkg -V on the gcc behind cc names the missing files; apt-get install --reinstall repairs it)"
 missing=()
 for pkg in "${PACKAGES[@]}"; do dpkg -s "$pkg" >/dev/null 2>&1 || missing+=("$pkg"); done
 for pkg in "${missing[@]}"; do
@@ -294,7 +299,11 @@ cat > "$CHILD" <<'EOF'
 # parent's /run entries the daemon must own in its own namespace, then become dockerd.
 set -e
 rm -f /run/docker /run/containerd /run/xtables.lock
-exec dockerd --host="unix://$XDG_RUNTIME_DIR/docker.sock" "$@"
+# cgroupfs, not the systemd driver dockerd picks on a systemd host: the systemd driver places a
+# container under the user's slice, which a system unit with no login session never has (measured
+# 2026-09-26: "user-995.slice/cgroup.controllers: no such file"); rootless dockerd then runs with no
+# cgroup driver, so container resource limits are not enforced — the fixtures set none.
+exec dockerd --host="unix://$XDG_RUNTIME_DIR/docker.sock" --exec-opt native.cgroupdriver=cgroupfs "$@"
 EOF
 chmod 0755 "$CHILD"
 cat > "/etc/systemd/system/$DOCKER_UNIT" <<EOF
