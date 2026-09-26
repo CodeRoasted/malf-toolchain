@@ -1,7 +1,8 @@
 # linux-gcc16-release — the gcc-16.2 ship/CI toolchain (replaces gcc-15.3; Founder green light
 # 2026-08-16 on the eval: 27/27 packages, 2822/2822 tests, determinism digest byte-identical to
-# 15.3, +34% ship-leg compile cost accepted). Flags MIRROR linux-clang21-release EXACTLY so the
-# determinism gate proves gcc-16.2 ≡ clang-21 bit-identity (det_math is integer / no-libm /
+# 15.3, +34% ship-leg compile cost accepted). Its determinism-relevant flags (-O3 -march=x86-64-v2,
+# gnu23) MIRROR linux-clang21-libcxx-release, the determinism gate's clang leg, so that gate proves
+# gcc-16.2/libstdc++ ≡ clang-21/libc++ bit-identity (det_math is integer / no-libm /
 # -ffp-contract-invariant by design, so the serialized document MUST match across both).
 # Auto-keys to the 'gcc16-release' conan cache + build-gcc16-release/ tree via _malf_profile_key.
 #

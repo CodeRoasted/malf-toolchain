@@ -4402,7 +4402,6 @@ Editables:
 Profile:
     $CONAN_HOME/profiles/linux-clang21-libcxx-release  (dev default; or MALF_PROFILE_NAME)
   gcc-16 (ship + determinism reference leg): --profile linux-gcc16-release
-  clang-21 + libstdc++ (keyed):              --profile linux-clang21-release
 EOF
 }
 
