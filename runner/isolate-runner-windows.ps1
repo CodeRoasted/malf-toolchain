@@ -94,6 +94,12 @@ if ($svc.StartName -ieq $Virtual) {
     if (-not (Test-Path -LiteralPath $manifestPath)) { Refuse "the service already logs on as $Virtual but $manifestPath is absent - not this script's work" }
     $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
     $DeskAccount = $manifest.DeskAccount
+} elseif (Test-Path -LiteralPath $manifestPath) {
+    # A run that stopped after step 1: the manifest holds the pre-isolation state and is never re-recorded.
+    $State = 'partial'
+    $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+    if ($manifest.DeskAccount -ine $svc.StartName) { Refuse "the service logs on as $($svc.StartName) but $manifestPath records $($manifest.DeskAccount) - not this script's work" }
+    $DeskAccount = $manifest.DeskAccount
 } else {
     $State = 'fresh'
     $DeskAccount = $svc.StartName
@@ -225,10 +231,10 @@ Set-Content -LiteralPath (Join-Path $RunnerDir '.env') -Value ($lines -join "`r`
 
 Step "6/6 log the service on as $Virtual and start it"
 Native 'sc.exe' @('sidtype', $ServiceName, 'unrestricted')
-# Change() through CIM: the password travels in a method parameter, never on a command line.
-$r = Invoke-CimMethod -InputObject (Get-CimInstance Win32_Service -Filter "Name='$ServiceName'") -MethodName Change `
-        -Arguments @{ StartName = $Virtual; StartPassword = '' }
-if ($r.ReturnValue -ne 0) { Refuse "Win32_Service.Change returned $($r.ReturnValue)" }
+# note: sc.exe, never Win32_Service.Change: Change refuses a virtual account with 22 (measured 2026-09-26), and a virtual account has no password to keep off a command line.
+Native 'sc.exe' @('config', $ServiceName, 'obj=', $Virtual)
+$now = (Get-CimInstance Win32_Service -Filter "Name='$ServiceName'").StartName
+if ($now -ine $Virtual) { Refuse "the service logs on as $now after sc.exe config, not $Virtual" }
 $started = Get-Date
 Start-Service -Name $ServiceName
 (Get-Service -Name $ServiceName).WaitForStatus('Running', [TimeSpan]::FromSeconds(60))
