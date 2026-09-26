@@ -201,6 +201,15 @@ if ($have -ne $PyVersion) {
     Move-Item -LiteralPath (Join-Path $unpack 'tools') -Destination $PythonDir
     Remove-Item -LiteralPath $unpack, $nupkg -Recurse -Force
 }
+# note: a same-volume Move-Item keeps the ACL the tree had under the elevated user's %TEMP% (SYSTEM,
+# Administrators, that user), so the virtual account could not read python312 and no job resolved
+# `python` - measured by the probe, run 36257355640. Re-inherit from the data root on every run.
+Native 'icacls.exe' @($PythonDir, '/setowner', "*$SidAdmins", '/T', '/C', '/Q')
+Native 'icacls.exe' @($PythonDir, '/reset', '/T', '/C', '/Q')
+$pyGrant = @((Get-Acl -LiteralPath $py).Access | Where-Object {
+    $_.AccessControlType -eq 'Allow' -and
+    $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq $VirtualSid })
+if ($pyGrant.Count -eq 0) { Refuse "$py grants $Virtual nothing after the reset - the runner could not run its own Python" }
 $pipVersion = (& $py -m pip --version) 2>&1
 if ($LASTEXITCODE -ne 0) { Refuse "the runner's Python has no working pip: $pipVersion" }
 Say "$((& $py --version) 2>&1) at $PythonDir; $pipVersion"
