@@ -1384,7 +1384,7 @@ def selftest() -> int:
               "the tool version belongs in the header and never in hashed content — a "
               "tool upgrade must not mass-revoke what the declarations claim"))
 
-    # ── the module-suffix fence (DN-17.D21) ──────────────────────────────────
+    # ── the module-suffix fence (ADR-17.D10) ──────────────────────────────────
     # The suffix may reach the module name and the namespace and NOTHING else. This is the
     # one place that is cheap to prove, and it is what makes "the bytes proven equivalent
     # are the bytes that ship" true: the declaration never varies between the two.
