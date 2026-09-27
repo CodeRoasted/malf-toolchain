@@ -40,7 +40,6 @@ Checks:
   - -hicpp-avoid-c-arrays
   - -cppcoreguidelines-avoid-c-arrays
   - -cppcoreguidelines-pro-bounds-array-to-pointer-decay
-  - -cppcoreguidelines-pro-type-member-init
   - -modernize-use-trailing-return-type
   - -readability-isolate-declaration
   - -readability-braces-around-statements
