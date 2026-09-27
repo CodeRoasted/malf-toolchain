@@ -22,7 +22,7 @@ THE FOUR TEETH this tool carries (the soundness fence, §4):
   4. The showcase surface is fail-closed — the generated ratified indices contain
      ONLY hash-matched entries; Authored entries are not in them, by construction.
 
-THE LINK FENCE (DN-62.D9), which is NOT one of the teeth and is deliberately a different
+THE LINK FENCE (ADR-17.D11), which is NOT one of the teeth and is deliberately a different
 kind of rule. The four teeth are properties of a declaration; this one relates a
 declaration to the BUILD that compiles it. A `dialect:` names a canon semantic package
 the consuming target must LINK, and the build is the only thing that knows which ones it
@@ -405,7 +405,7 @@ def resolve_ratification(entries: dict[str, dict], records: list[dict],
     return resolution
 
 
-# ── the link fence (DN-62.D9) ────────────────────────────────────────────────
+# ── the link fence (ADR-17.D11) ──────────────────────────────────────────────
 #
 # A declaration naming `dialect: X` compiles into `insight::semantic::X::Dialect`. If the
 # consuming target links no `insight_semantic_X` package, today's failure is a C++ error at a
@@ -955,7 +955,7 @@ def _pin_arms(pinned: dict, base_structure_hash: str, base_body_hash: str,
         "fixture failure: it is the key ratification.manifest.yaml resolves on, and the register "
         "is FAIL-CLOSED, so shipping this moves github.step out of kStructureRatifiedEntries and "
         "empties the twin's ratified claim surface with nothing red. Revert the front-end change; "
-        "a hash may only move when a DECLARATION is edited (DN-62.D8 G1)"))
+        "a hash may only move when a DECLARATION is edited (ADR-17.D11, its Boundary)"))
     _selftest_case("pin: the body grain's hash has not moved", failures, lambda: _assert(
         grain_hash(pinned, "body") == _PINNED_BODY_HASH,
         "the front end moved the BODY grain hash — the template, the flow-sequence domain, the "
@@ -1049,7 +1049,7 @@ def selftest() -> int:
                       lambda: _parse_entry(_SYNTHETIC_ENTRY.replace(
                           "payload: Declared", "payload: yarn_install")))
 
-    # ── the LINK fence (DN-62.D9): declared ⊆ linked, and the operand is not optional ──
+    # ── the LINK fence (ADR-17.D11): declared ⊆ linked, and the operand is not optional ──
     #
     # Five arms, and each covers a way the fence dies rather than a way it fires. The
     # OPERAND arms exist because a fence whose input can go missing is a fence that
@@ -1344,7 +1344,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--linked-dialects", default=None,
                         help="comma-separated canon semantic packages the consuming target "
                              "LINKS; a declaration naming any other dialect is refused "
-                             "(DN-62.D9). Build-derived; never defaulted")
+                             "(ADR-17.D11). Build-derived; never defaulted")
     parser.add_argument("--selftest", action="store_true",
                         help="run the synthetic-fixture selftest and exit")
     args = parser.parse_args(argv)
