@@ -59,6 +59,23 @@ Checks:
   # is enforced, CLAUDE.md). Re-evaluate if a fixed clang-tidy lands AND we adopt owner<>.
   - -cppcoreguidelines-owning-memory
 
+  # A SECOND CRASH CLASS, ORDER-DEPENDENT RATHER THAN CHECK-DEPENDENT (measured 2026-09-27,
+  # clang-tidy 21.1.8). A TU whose imports reach BOTH a module that #includes libc++ textually in
+  # its global module fragment (logcraft.core.detail.logging: <spdlog/logger.h>) AND a module that
+  # instantiates libc++ templates under `import std` (logcraft.core.detail.foundation:pipeline)
+  # SIGSEGVs in RecursiveASTVisitor::TraverseTemplateInstantiations — inside ParentMapContext, or
+  # inside a check's own whole-TU visitor — while the compiler accepts the same TU. Which check walks
+  # the whole TU first decides it (inferred; the order-dependence below is measured), so a check SET
+  # is what is safe or not, never a check:
+  #   * this whole set passes logcraft/core/src/engine/runtime_monitor.cpp; the same set minus
+  #     modernize-deprecated-headers alone crashes it in 2 s, so that check is LOAD-BEARING here —
+  #     never disable it without a full `malf lint --all-files` over every C++ repository;
+  #   * a check family run ALONE crashes where this set does not: bugprone-*, readability-* and
+  #     readability-identifier-naming each crash runtime_monitor.cpp, and
+  #     cppcoreguidelines-pro-type-member-init alone crashes 9 of 9 logcraft/core engine/output TUs
+  #     that pass inside this set — a single-check measurement says nothing about this gate.
+  # A crash is never silent: `malf lint` names the TU NOT LINTED and fails the run.
+
   # NOTE (modules) — misc-* is NOT enabled here, so this does not run today. If you ever
   # allowlist misc-*, disable misc-use-internal-linkage: on named-module code it wrongly
   # pushes a non-exported NAMED-namespace helper (which already has internal MODULE linkage,
