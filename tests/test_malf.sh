@@ -555,7 +555,7 @@ echo "[7g2] lint's SUBJECT cannot be decided by build order or by a stray file"
 # Driven through the extracted predicate rather than a full run, so it is pure. The header case is
 # asserted in the same breath, because collapsing it into "missing" would red every run on every
 # header and is the obvious wrong fix.
-verdict_fn="$(sed -n '/^_malf_lint_db_verdict() {/,/^}/p' "$MALF_BIN")"
+verdict_fn="$(sed -n '/^_malf_lint_db_verdict() {/,/^}/p; /^_malf_lint_is_header() {/,/^}/p' "$MALF_BIN")"
 # It publishes through a global (no fork per walked file), so each probe echoes the global back.
 v_in="$(bash -c "$verdict_fn; _malf_lint_db_verdict /w/a.cpp a.cpp 1; echo \"\$_MALF_LINT_VERDICT\"")"
 v_hdr="$(bash -c "$verdict_fn; _malf_lint_db_verdict /w/a.hpp a.hpp ''; echo \"\$_MALF_LINT_VERDICT\"")"
@@ -906,7 +906,7 @@ echo "[7j5] every lint run STATES ITS OWN SCOPE — mode, population, checked, f
 # The arms below are the three states a run can be in, plus the two facts that must never merge.
 
 lk_sum() { grep -oE 'malf lint: SUMMARY .*' <<< "$1" | head -1; }
-lk_counts() { grep -oE 'selected [0-9]+, checked [0-9]+, [0-9]+ finding\(s\), [0-9]+ not linted' <<< "$1" | head -1; }
+lk_counts() { grep -oE 'selected [0-9]+ = [0-9]+ translation unit\(s\) \+ [0-9]+ header\(s\), checked [0-9]+, [0-9]+ finding\(s\), [0-9]+ not linted' <<< "$1" | head -1; }
 lk_af_run() {   # <log> [env...] — malf lint --all-files from core/ with the fake toolchain
     (cd "$lk_repo/core" && PATH="$lk_bin:$PATH" LK_TIDY_LOG="$1" MALF_PROFILE_NAME="" \
         env "${@:2}" bash "$MALF_BIN" lint --all-files --console 2>&1)
@@ -917,7 +917,7 @@ git -C "$lk_repo" -c user.email=t@t -c user.name=t commit -aq -m clean
 lk_clean_out="$(lk_run "$lk_repo/core" "$lk_tmp/tidy.clean.log")"; lk_clean_rc=$?
 check "STATE 1/3 — a CLEAN tree checks nothing, and the summary says so instead of reading as a pass" \
       "rc=0 declared" \
-      "rc=$lk_clean_rc $([[ "$lk_clean_out" == *"selected 0, CHECKED 0 — NOTHING WAS INSPECTED"* \
+      "rc=$lk_clean_rc $([[ "$lk_clean_out" == *"selected 0 = 0 translation unit(s) + 0 header(s), CHECKED 0 — NOTHING WAS INSPECTED"* \
           && "$lk_clean_out" == *"NOT a clean verdict"* ]] && echo declared || echo "GOT: $lk_clean_out")"
 check "the zero-file summary NAMES the selection mode that produced the empty set" \
       "named" \
@@ -929,7 +929,7 @@ check "the zero-file run never says 'no files to check' — the phrase that read
 
 lk_af_out="$(lk_af_run "$lk_tmp/tidy.af.log")"; lk_af_rc=$?
 check "STATE 2/3 — --all-files on that SAME clean tree checks the TU and finds nothing, rc 0" \
-      "rc=0 selected 1, checked 1, 0 finding(s), 0 not linted" \
+      "rc=0 selected 1 = 1 translation unit(s) + 0 header(s), checked 1, 0 finding(s), 0 not linted" \
       "rc=$lk_af_rc $(lk_counts "$lk_af_out")"
 check "the two states are DISTINGUISHABLE — the clean-run summary and the zero-run summary differ" \
       "distinct" \
@@ -942,7 +942,7 @@ check "--all-files names ITS mode, so the fact that was invisible is on both pat
 
 lk_warn_out="$(lk_af_run "$lk_tmp/tidy.warn.log" LK_TIDY_WARN_ON=engine.cpp)"; lk_warn_rc=$?
 check "STATE 3/3 — a run WITH findings counts them, and a diagnostic's note lines are not findings" \
-      "rc=0 selected 1, checked 1, 1 finding(s), 0 not linted" \
+      "rc=0 selected 1 = 1 translation unit(s) + 0 header(s), checked 1, 1 finding(s), 0 not linted" \
       "rc=$lk_warn_rc $(lk_counts "$lk_warn_out")"
 
 # A TU THE CHECKER NEVER READ IS ITS OWN COLUMN. Clean, dirty and UNREAD are three states and the
@@ -951,8 +951,25 @@ check "STATE 3/3 — a run WITH findings counts them, and a diagnostic's note li
 # one-line summary carries the same count, since that line is what a reader stops at.
 lk_nl_out="$(lk_af_run "$lk_tmp/tidy.nl.log" LK_TIDY_DIE_ON=engine.cpp)"; lk_nl_rc=$?
 check "a TU clang-tidy never read is counted NOT LINTED in the summary, not as 0 findings, rc 1" \
-      "rc=1 selected 1, checked 1, 0 finding(s), 1 not linted" \
+      "rc=1 selected 1 = 1 translation unit(s) + 0 header(s), checked 1, 0 finding(s), 1 not linted" \
       "rc=$lk_nl_rc $(lk_counts "$lk_nl_out")"
+
+# A HEADER IS NEVER A TRANSLATION UNIT, AND THE SUMMARY USED TO COUNT IT AS ONE THE RUN SKIPPED.
+# The walk matches `.h`/`.hpp`, the compile-DB filter drops them by design (a header has no compile
+# command; it is reached through --header-filter from a TU that includes it), and `selected` still
+# carried them — so `selected > checked` read as a coverage gap that was only headers. Measured on
+# insight-eidos's v1.10.4 release lint (job 106726130358, 2026-09-22): "selected 107, checked 85,
+# 2 platform-refused", of which 20 were headers and no TU was unchecked. The split puts the header
+# count on the line, so the TU count is the one a reader compares with `checked`.
+printf 'int engine();\n' > "$lk_repo/core/src/engine.hpp"
+git -C "$lk_repo" add core/src/engine.hpp
+git -C "$lk_repo" -c user.email=t@t -c user.name=t commit -q -m header
+lk_hdr_out="$(lk_af_run "$lk_tmp/tidy.hdr.log")"; lk_hdr_rc=$?
+check "a walked HEADER is counted apart from the translation units, never among the unchecked" \
+      "rc=0 selected 2 = 1 translation unit(s) + 1 header(s), checked 1, 0 finding(s), 0 not linted" \
+      "rc=$lk_hdr_rc $(lk_counts "$lk_hdr_out")"
+check "and the header itself never reaches clang-tidy — it is linted only through the TU including it" \
+      "0" "$(grep -c 'engine\.hpp$' "$lk_tmp/tidy.hdr.log" || true)"
 
 rm -rf "$lk_tmp"
 echo
