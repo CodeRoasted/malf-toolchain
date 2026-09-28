@@ -2702,6 +2702,109 @@ check "the workspace lint runs once per sweep, not once per repository" \
 rm -rf "$iv_tmp"
 echo
 
+echo "[7q5] an inventory cell resolves its workspace dependencies in the leg's KEYED cache, whatever ran before"
+
+# note: step 0 run 36405124004 (2026-09-28) linked canon's cell and died at `metalog_det_harness`:
+# "insight_canon/1.10.5 not resolved". Its toolchain recipe requires a workspace package, and the
+# cell's `conan install` saw a registry nothing had written — the sweep root never keyed its cache
+# and the inventory never registered the cell's dependencies. The desk's persistent registry hid it.
+# note: this conan stub keeps a real per-CONAN_HOME registry and fails an install whose recipe
+# requires an unregistered ref, the one property the [7q4] stub (which resolves everything) lacks.
+rg_tmp="$(realpath "$(mktemp -d)")"
+rg_bin="$rg_tmp/bin"; rg_ws="$rg_tmp/ws"; rg_home="$rg_tmp/conan_home"; rg_trace="$rg_tmp/installs"
+mkdir -p "$rg_bin" "$rg_ws" "$rg_home"
+cat > "$rg_bin/conan" <<'STUB'
+#!/usr/bin/env bash
+reg="$CONAN_HOME/editable_packages.json"
+case "$1 $2" in
+    "editable add")
+        name=""; version=""
+        for a in "$@"; do
+            case "$a" in --name=*) name="${a#--name=}" ;; --version=*) version="${a#--version=}" ;; esac
+        done
+        mkdir -p "$CONAN_HOME"; echo "$name/$version" >> "$reg"
+        echo "Reference '$name/$version' in editable mode"; exit 0 ;;
+    "editable list") [[ -f "$reg" ]] && cat "$reg"; exit 0 ;;
+    "editable remove") exit 0 ;;
+esac
+[[ "$1" == install ]] || exit 0
+out=""; prev=""
+for a in "$@"; do
+    [[ "$prev" == "-of" ]] && out="$a"
+    [[ "$a" == --output-folder=* ]] && out="${a#--output-folder=}"
+    prev="$a"
+done
+echo "$2 $CONAN_HOME" >> "$RG_TRACE"
+for ref in $(grep -oE '"[a-z_]+/[0-9.]+"' "$2/conanfile.py" | tr -d '"'); do
+    if ! grep -qx "$ref" "$reg" 2>/dev/null; then
+        echo "ERROR: Package '$ref' not resolved" >&2; exit 1
+    fi
+done
+mkdir -p "$out" && : > "$out/conan_toolchain.cmake"
+printf '{"version":4,"configurePresets":[{"name":"conan-release"}]}\n' > "$out/CMakePresets.json"
+exit 0
+STUB
+cat > "$rg_bin/cmake" <<'STUB'
+#!/usr/bin/env bash
+build=""; target=""; prev=""; linking=false
+for a in "$@"; do
+    [[ "$a" == --build ]] && linking=true
+    case "$prev" in --build) build="$a" ;; --target) target="$a" ;; -B) build="$a" ;; esac
+    prev="$a"
+done
+mkdir -p "$build"
+if $linking; then
+    [[ -n "$target" ]] && { printf '#!/bin/sh\n' > "$build/$target"; chmod +x "$build/$target"; }
+    exit 0
+fi
+echo "CMAKE_BUILD_TYPE:STRING=Release" > "$build/CMakeCache.txt"
+echo "[]" > "$build/compile_commands.json"
+STUB
+chmod +x "$rg_bin/conan" "$rg_bin/cmake"
+rg_repo() {   # <repo> <package> <requires ref or ""> <cell target>
+    local r="$rg_ws/$1"
+    mkdir -p "$r/pkg" "$r/cell"
+    printf 'from conan import ConanFile\nclass C(ConanFile):\n    name = "%s"\n    version = "1.0"\n' "$2" > "$r/pkg/conanfile.py"
+    [[ -n "$3" ]] && printf '    def requirements(self):\n        self.requires("%s")\n' "$3" >> "$r/pkg/conanfile.py"
+    printf 'option(X "x" ON)\n' > "$r/pkg/CMakeLists.txt"
+    printf 'project(%s)\n' "$4" > "$r/cell/CMakeLists.txt"
+    printf 'inventory:\n  %s_cell:\n    path: cell\n    toolchain_from: pkg\n    target: %s\n' "$1" "$4" > "$r/packages.yml"
+    git -C "$r" init -q && git -C "$r" add -A && \
+        git -C "$r" -c user.name=fixture -c user.email=fixture@example.invalid commit -qm fixture
+}
+# The CI shape in miniature: `lib` is canon (a cell needing no workspace package), `app` is metalog
+# (a cell whose toolchain recipe requires `lib`), under a superproject declaring no inventory.
+git -C "$rg_ws" init -q
+rg_repo lib rg_lib "" lib_tool
+rg_repo app rg_app "rg_lib/1.0" app_tool
+rg_profile="linux-gcc16-release"
+rg_key="$(MALF_PROFILE_NAME="$rg_profile" _malf_profile_key)"
+rg_run() {   # <log> <malf args>... — a fresh conan home, every registry in it empty
+    local log="$1"; shift
+    rm -rf "$rg_home" "$rg_trace" "$rg_ws"/*/cell/build-inventory-*; mkdir -p "$rg_home"
+    (cd "$rg_ws" && PATH="$rg_bin:$PATH" RG_TRACE="$rg_trace" CONAN_HOME="$rg_home" \
+        MALF_WORKSPACE_ROOT="$rg_ws" setsid timeout --kill-after=5 120 bash "$MALF_BIN" "$@" \
+        > "$log" 2>&1; echo "rc=$?" >> "$log")
+}
+rg_linked() { [[ -x "$rg_ws/$1/cell/build-inventory-$rg_key/$2" ]] && echo linked || echo absent; }
+
+rg_log="$rg_tmp/inventory.log"
+rg_run "$rg_log" inventory app --profile "$rg_profile"
+check "malf inventory over a cell needing a workspace package, on a conan home nothing built into" \
+      "rc=0 linked" "$(tail -1 "$rg_log") $(rg_linked app app_tool)"
+check "the cell's dependency is registered in the KEYED cache, the one its install resolved in" \
+      "rg_lib/1.0 $rg_home/$rg_key" \
+      "$(cat "$rg_home/$rg_key/editable_packages.json" 2>&1 | sort -u | tr '\n' ' ')$(grep "^$rg_ws/app/pkg " "$rg_trace" | cut -d' ' -f2 | sort -u)"
+
+rg_log="$rg_tmp/sweep.log"
+rg_run "$rg_log" build --profile "$rg_profile"
+check "a workspace-root sweep links BOTH cells — the one needing a workspace package included" \
+      "rc=0 linked linked" "$(tail -1 "$rg_log") $(rg_linked lib lib_tool) $(rg_linked app app_tool)"
+check "every install of the sweep — members' and cells' alike — ran in the leg's keyed cache" \
+      "$rg_home/$rg_key" "$(cut -d' ' -f2 "$rg_trace" | sort -u | tr '\n' ' ' | sed 's/ $//')"
+rm -rf "$rg_tmp"
+echo
+
 echo "[7j6] lint --all-files NAMES a TU the build gates off this platform, and refuses nothing else"
 
 # note: two sift *_win32.cpp files are named only inside if(WIN32), so no Linux compile command can

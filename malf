@@ -774,10 +774,16 @@ _malf_repo_root_of() {
 # pre: every dir given is the sweep root or one of its members, all already built.
 # post: each distinct repository those dirs sit in has built its inventory cells ONCE, in the order
 # the dirs name them, after ONE workspace lint; a dir inside no repository contributes none.
+# post: every cell resolved in the active profile's keyed cache, whatever cache the caller held.
 # refs: ADR-3.D9, ADR-3.D10
 _malf_run_inventory() {            # <dir>...
     [[ -n "${MALF_SWEEP:-}" ]] && return 0            # a sweep member — the root runs it once
     [[ -n "${MALF_SKIP_INVENTORY:-}" ]] && return 0   # the mutation arms drive the tool directly
+    # note: a sweep reaches this line without having keyed its cache — every member keys its own,
+    # in its own process, and the sweep root never did — so the cells' `conan install` resolved in
+    # the BASE cache under the members' profile: a registry no member wrote, and a cache the keying
+    # exists to keep that profile's binaries out of. Keyed here, the cache is the gate's own fact.
+    _malf_use_keyed_cache
     local dir repo
     local -a repos=()
     local -A seen=()
@@ -795,9 +801,27 @@ _malf_run_inventory() {            # <dir>...
 }
 
 # pre: the workspace inventory lint has passed.
+# post: each cell's toolchain package has its workspace dependencies registered in the active cache.
 # post: the repository's cells are built and linked, and their databases folded into its root one.
+# note: a cell's `conan install` resolves its toolchain recipe's first-party requires through the
+# editable registry, and nothing else guarantees that registry holds them: the package builds that
+# ran before wrote THEIR closures, into THEIR cache. Measured 2026-09-28, step 0 run 36405124004:
+# B3's sweep registered insight_canon in every member's keyed cache and `metalog_det_harness` still
+# died "insight_canon/1.10.5 not resolved"; the desk never reddens because its registry persists.
+# note: registration only, never the dependency BUILD `_malf_bootstrap_workspace_deps` runs — the
+# cells compile their towers from source, and a dependency-role build here would demote the trees
+# `_malf_sweep_settle_db` has just settled in target role.
 _malf_run_repo_inventory() {       # <repo>
     local repo="$1"
+    local toolchains toolchain_dir
+    local -a entries=()
+    toolchains="$(python3 "$MALF_DIR/build_inventory.py" toolchains \
+                      --workspace "$MALF_WORKSPACE_ROOT" --repo "$repo")" || return 1
+    while IFS= read -r toolchain_dir; do
+        [[ -n "$toolchain_dir" && "$MALF_AUTO_WORKSPACE_DEPS" != "0" ]] || continue
+        mapfile -t entries < <(_malf_workspace_dep_entries "$toolchain_dir")
+        _malf_register_dep_entries "${entries[@]}"
+    done <<< "$toolchains"
     python3 "$MALF_DIR/build_inventory.py" build \
         --workspace "$MALF_WORKSPACE_ROOT" --repo "$repo" \
         --build-key "$(_malf_build_key)" --profile "$MALF_PROFILE_NAME" \
@@ -1091,17 +1115,25 @@ _malf_bootstrap_workspace_deps() {
 
     local entry ref dep_dir
 
-    echo "malf: registering local workspace dependencies as editables from $MALF_WORKSPACE_ROOT"
-    for entry in "${entries[@]}"; do
-        IFS=$'\t' read -r ref dep_dir <<< "$entry"
-        [[ -n "$ref" && -n "$dep_dir" ]] || continue
-        _malf_editable_add "$dep_dir"
-    done
+    _malf_register_dep_entries "${entries[@]}"
 
     for entry in "${entries[@]}"; do
         IFS=$'\t' read -r ref dep_dir <<< "$entry"
         [[ -n "$ref" && -n "$dep_dir" ]] || continue
         _malf_build_editable_package "$dep_dir"
+    done
+}
+
+# pre: each argument is a `<ref>\t<dir>` row as `_malf_workspace_dep_entries` prints it.
+# post: every row's package is registered editable, at its recipe's version, in the ACTIVE cache.
+_malf_register_dep_entries() {      # <entry>...
+    [[ $# -gt 0 ]] || return 0
+    local entry ref dep_dir
+    echo "malf: registering local workspace dependencies as editables from $MALF_WORKSPACE_ROOT"
+    for entry in "$@"; do
+        IFS=$'\t' read -r ref dep_dir <<< "$entry"
+        [[ -n "$ref" && -n "$dep_dir" ]] || continue
+        _malf_editable_add "$dep_dir"
     done
 }
 

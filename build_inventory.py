@@ -424,11 +424,26 @@ def run_build(workspace: Path, repo_root: Path, build_key: str, profile: str,
     return 0
 
 
+def run_toolchains(repo_root: Path) -> int:
+    """Print, one per line in cell-name order, the directory of every cell's `toolchain_from`
+    package — the recipes `run_build` hands to `conan install`.
+
+    malf reads this to register each such package's workspace dependencies as editables in the
+    active cache BEFORE the build. The install resolves the recipe's first-party requires, and the
+    registry it resolves them through is whatever the cache holds at that moment: on 2026-09-28
+    step 0's B3 died at `metalog_det_harness` with `insight_canon/1.10.5` "not resolved", because
+    the cell's own `conan install` was the first thing to need that ref in a cache whose registry
+    nothing had written (run 36405124004)."""
+    for _name, entry in sorted(load_inventory(repo_root).items()):
+        print(repo_root / entry["toolchain_from"])
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="build inventory (ADR-3.D9): lint + one-cell build")
-    parser.add_argument("mode", choices=["lint", "build"])
+    parser.add_argument("mode", choices=["lint", "build", "toolchains"])
     parser.add_argument("--workspace", required=True)
-    parser.add_argument("--repo", help="repo root (build mode)")
+    parser.add_argument("--repo", help="repo root (build and toolchains modes)")
     parser.add_argument("--build-key", default="default")
     parser.add_argument("--profile", default="")
     # NO DEFAULT, and required in `build` mode only (checked below, beside --repo — `lint` mode
@@ -449,7 +464,9 @@ def main() -> int:
     if args.mode == "lint":
         return run_lint(workspace, None)
     if not args.repo:
-        parser.error("build mode needs --repo")
+        parser.error(f"{args.mode} mode needs --repo")
+    if args.mode == "toolchains":
+        return run_toolchains(Path(args.repo).resolve())
     if not args.build_type:
         parser.error("build mode needs --build-type (the active profile's declared build_type)")
     return run_build(workspace, Path(args.repo).resolve(), args.build_key, args.profile,
