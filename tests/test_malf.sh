@@ -2903,6 +2903,36 @@ check "malf run still finds it when a plain build/ tree exists beside the build-
 rm -rf "$rn_tmp"
 echo
 
+echo "[7q6] a job starts with NO editable registry in ANY conan home it restored — the base and every keyed one"
+
+# note: setup-build-env restores $CONAN_HOME WHOLE, and malf keys a profile's home under it
+# (<home>/gcc16-release, <home>/cut-verify). A registry saved in a keyed home re-registers its
+# editables in every later job that restores the entry; the step cleared only the base's.
+de_script="$MALF_ROOT/.github/actions/setup-build-env/drop-editable-registries.sh"
+de_tmp="$(mktemp -d)"
+de_home="$de_tmp/.conan2"
+mkdir -p "$de_home/gcc16-release" "$de_home/cut-verify" "$de_home/p/pkgfolder"
+for reg in "$de_home" "$de_home/gcc16-release" "$de_home/cut-verify"; do
+    echo '{"insight_canon/1.10.5": {"path": "/stale/checkout/conanfile.py"}}' > "$reg/editable_packages.json"
+done
+touch "$de_home/gcc16-release/settings.yml" "$de_home/p/pkgfolder/conaninfo.txt"
+de_out="$(CONAN_HOME="$de_home" bash "$de_script" 2>&1)"; de_rc=$?
+check "every conan home's editable registry is gone after the step, the base's and each keyed one's" \
+      "rc=0 left:" \
+      "rc=$de_rc left:$(cd "$de_home" && find . -name editable_packages.json | sort | tr '\n' ' ')"
+check "the step removes registries only: the keyed home's settings and a cached package stay" \
+      "gcc16-release/settings.yml p/pkgfolder/conaninfo.txt" \
+      "$(cd "$de_home" && find . -type f ! -name editable_packages.json | sed 's#^\./##' | sort | tr '\n' ' ' | sed 's/ $//')"
+check "the step NAMES each registry it removed, so a job log says what the restore carried" \
+      "3" "$(grep -c '^removing .*/editable_packages.json' <<< "$de_out")"
+de_out="$(CONAN_HOME="$de_tmp/absent" bash "$de_script" 2>&1)"; de_rc=$?
+check "a cache miss (no conan home yet) is exit 0, saying there was nothing to drop" \
+      "rc=0 said" "rc=$de_rc $(grep -q 'no conan home at' <<< "$de_out" && echo said || echo "GOT: $de_out")"
+check "setup-build-env's cleanup step RUNS this script — a tested script no step invokes is no gate" \
+      "1" "$(grep -c 'bash "$ACTION_PATH/drop-editable-registries.sh"' "$MALF_ROOT/.github/actions/setup-build-env/action.yml")"
+rm -rf "$de_tmp"
+echo
+
 echo
 echo
 echo "malf selftest: $pass_count passed, $fail_count failed"
