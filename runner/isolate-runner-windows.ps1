@@ -25,9 +25,15 @@
 #     SeChangeNotifyPrivilege).
 #   * pwsh 7 and git: already machine-wide on this host (checked below; the installer's own step
 #     10-bis explains why a per-user pwsh fails a service account).
+#   * The job workspace (.runner's workFolder, _work): folders jobs made BEFORE the isolation keep
+#     the ACLs their account gave them, and the virtual account could not delete them - measured on
+#     the 1.10.5 cut (2026-09-28); the Founder re-owned and reset the tree by hand that night. Step
+#     5 does it: owner Administrators, then every entry reset to inherit the runner directory's ACL.
 #
 # IDEMPOTENT; REFUSES, changing nothing, on anything it did not expect: a job running, a service in
-# neither the before nor the after shape, a missing MSVC install, a pin that does not verify.
+# neither the before nor the after shape, a missing MSVC install, a pin that does not verify, a
+# reparse point under the job workspace (a workspace folder it cannot list is re-owned, alone, and
+# walked before any /T runs).
 # Uses SIDs, never group NAMES: this host's Windows is localized (Administrateurs, Utilisateurs).
 
 param([switch]$Apply)
@@ -67,6 +73,35 @@ function Native([string]$exe, [string[]]$argv) {
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try { & $exe @argv } finally { $ErrorActionPreference = $prev }
     if ($LASTEXITCODE -ne 0) { Refuse "$exe $($argv -join ' ') exited $LASTEXITCODE" }
+}
+
+# Every reparse point under $root, found WITHOUT descending into one, and every folder that could
+# not be listed. note: icacls /T reaches THROUGH a junction and rewrites its target - measured
+# 2026-09-29 on this host, /reset /T with and without /L reset a folder outside the tree reached by
+# a junction inside it - so step 5's /T runs only over a tree this walk found none in. A folder
+# this account cannot list is handed to $repair (never a reparse point: the walk enqueues none),
+# then listed once more; without $repair, or still unlisted, it is reported.
+function Find-ReparsePoint([string]$root, [scriptblock]$repair = $null) {
+    $reparse = New-Object 'Collections.Generic.List[string]'
+    $unlisted = New-Object 'Collections.Generic.List[string]'
+    $walked = 0
+    $queue = New-Object 'Collections.Generic.Queue[IO.DirectoryInfo]'
+    $queue.Enqueue((New-Object IO.DirectoryInfo($root)))
+    while ($queue.Count -gt 0) {
+        $dir = $queue.Dequeue()
+        $entries = $null
+        foreach ($attempt in 1, 2) {
+            try { $entries = $dir.GetFileSystemInfos(); break } catch { $denied = $_.Exception.Message }
+            if ($attempt -eq 1 -and $repair) { & $repair $dir.FullName } else { break }
+        }
+        if ($null -eq $entries) { $unlisted.Add("$($dir.FullName): $denied"); continue }
+        foreach ($entry in $entries) {
+            $walked++
+            if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { $reparse.Add($entry.FullName) }
+            elseif ($entry -is [IO.DirectoryInfo]) { $queue.Enqueue($entry) }
+        }
+    }
+    [pscustomobject]@{ Walked = $walked; Reparse = @($reparse); Unlisted = @($unlisted) }
 }
 
 # --- Preflight - reads only ---------------------------------------------------------------------
@@ -133,6 +168,20 @@ foreach ($exe in 'pwsh.exe', 'git.exe') {
 }
 if ($machinePath -match '\\Users\\') { Refuse "the machine PATH names a directory under a user profile - the runner's PATH is built from it: $machinePath" }
 
+# The job workspace, where .runner says it is (relative to the runner directory unless rooted).
+$workFolder = (Get-Content -Raw -LiteralPath (Join-Path $RunnerDir '.runner') | ConvertFrom-Json).workFolder
+if (-not $workFolder) { Refuse "$RunnerDir\.runner names no workFolder" }
+$WorkDir = if ([IO.Path]::IsPathRooted($workFolder)) { $workFolder } else { Join-Path $RunnerDir $workFolder }
+if (Test-Path -LiteralPath $WorkDir) {
+    if ((Get-Item -LiteralPath $WorkDir -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { Refuse "$WorkDir is itself a reparse point - step 5's /T would rewrite its target" }
+    $scan = Find-ReparsePoint $WorkDir
+    if ($scan.Reparse.Count -gt 0) { Refuse "$($scan.Reparse.Count) reparse point(s) under $WorkDir - step 5's icacls /T would rewrite what each points at (the first: $($scan.Reparse[0])). Remove them (a junction: [IO.Directory]::Delete), then re-run" }
+    $unlistedNote = if ($scan.Unlisted.Count -gt 0) { "; $($scan.Unlisted.Count) folder(s) this account cannot list - step 5 re-owns each before walking into it, and refuses on a reparse point found there" } else { '' }
+    $workPlan = "$WorkDir - owner Administrators, every entry reset to inherit (/T over $($scan.Walked) listed entries, no reparse point$unlistedNote)"
+} else {
+    $workPlan = "$WorkDir - absent (no job has run here): nothing to reset"
+}
+
 @"
 
 [isolate] state: $State
@@ -144,6 +193,8 @@ if ($machinePath -match '\\Users\\') { Refuse "the machine PATH names a director
   LOCALAPPDATA      $LocalAppData, holding a junction $MsvcName -> $MsvcSource
                     ($Virtual granted read+execute on that directory only)
   runner .env       LOCALAPPDATA and PATH ($PythonDir, its Scripts, then the machine PATH)
+  job workspace     $workPlan
+                    (a pre-isolation folder keeps its creator's ACL; the virtual account could not delete one)
   kept              the runner registration (no re-register: its RSA key is DPAPI LocalMachine-scoped)
 "@ | Write-Host
 
@@ -225,10 +276,30 @@ if (Test-Path -LiteralPath $junction) {
 }
 Say "junction $junction -> $MsvcSource"
 
-Step "5/6 runner directory $RunnerDir - cut inheritance from C:\, grant $Virtual modify"
+Step "5/6 runner directory $RunnerDir - cut inheritance from C:\, grant $Virtual modify; its job workspace reset to inherit"
 Native 'icacls.exe' @($RunnerDir, '/setowner', "*$SidAdmins", '/Q')
 Native 'icacls.exe' @($RunnerDir, '/inheritance:r', '/grant:r',
     "*${SidSystem}:(OI)(CI)F", "*${SidAdmins}:(OI)(CI)F", "*${VirtualSid}:(OI)(CI)M", '/Q')
+# note: AFTER the grant above, so the reset inherits it. Owner first: an owner may always rewrite a DACL, whatever it denies.
+if (Test-Path -LiteralPath $WorkDir) {
+    # The walk again, now re-owning a folder it cannot list (that folder alone, no /T) before
+    # walking into it: a reparse point inside one is found before any /T runs.
+    $scan = Find-ReparsePoint $WorkDir { param($dir)
+        Native 'icacls.exe' @($dir, '/setowner', "*$SidAdmins", '/Q')
+        Native 'icacls.exe' @($dir, '/reset', '/Q') }
+    if ($scan.Reparse.Count -gt 0) { Refuse "$($scan.Reparse.Count) reparse point(s) under $WorkDir, found once its unlisted folders were re-owned (the first: $($scan.Reparse[0])) - no /T ran. Remove them, then re-run" }
+    if ($scan.Unlisted.Count -gt 0) { Refuse "$($scan.Unlisted.Count) folder(s) under $WorkDir still cannot be listed after re-owning them (the first: $($scan.Unlisted[0])) - no /T ran" }
+    Native 'icacls.exe' @($WorkDir, '/setowner', "*$SidAdmins", '/T', '/C', '/Q')
+    Native 'icacls.exe' @($WorkDir, '/reset', '/T', '/C', '/Q')
+    $explicit = @(@(Get-Item -LiteralPath $WorkDir -Force) + @(Get-ChildItem -LiteralPath $WorkDir -Force) | Where-Object {
+        @((Get-Acl -LiteralPath $_.FullName).Access | Where-Object { -not $_.IsInherited }).Count -gt 0 })
+    if ($explicit.Count -gt 0) { Refuse "$($explicit.Count) item(s) of $WorkDir still carry an explicit ACE after the reset, the first $($explicit[0].FullName)" }
+    $workGrant = @((Get-Acl -LiteralPath $WorkDir).Access | Where-Object {
+        $_.AccessControlType -eq 'Allow' -and
+        $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq $VirtualSid })
+    if ($workGrant.Count -eq 0) { Refuse "$WorkDir grants $Virtual nothing after the reset - a job could not clean its own workspace" }
+    Say "$WorkDir owned by Administrators, every entry inheriting $RunnerDir's ACL"
+}
 # .env reaches every job through Runner.Listener (LoadAndSetEnv). PATH is written WHOLE because a
 # .env value is not expanded: the runner's Python first, then the machine PATH as of this run -
 # a later machine-PATH change reaches the runner by re-running this script, as it would only reach

@@ -52,7 +52,10 @@ if (-not (Test-Path -LiteralPath $aclSave)) { Refuse "the saved runner ACLs ($ac
 [rollback] plan
   service           $ServiceName  (logon now: $($svc.StartName)) -> $($manifest.DeskAccount) (asks its password)
   service SID type  -> $($manifest.SidType)
-  runner directory  ACLs restored from $aclSave; .env restored
+  runner directory  ACLs restored from $aclSave (saved /T before the isolation, so the job workspace's
+                    are among them, undoing step 5's reset); .env restored
+  owners            NOT restored - icacls /save records DACLs only: Administrators stays owner of
+                    $RunnerDir and of its job workspace, and access follows the restored DACLs
   MSVC              grant for $Virtual removed from $($manifest.MsvcSource); junction $LocalAppData\$MsvcName removed
   kept on purpose   $DataRoot (the runner Python and this record)
 "@ | Write-Host

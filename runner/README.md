@@ -37,6 +37,9 @@ interop, with a rootless Docker of its own (never the `docker` group); the Windo
 as its service's virtual account `NT SERVICE\<service>`, not the Founder. The proof is the
 superproject's `runner-isolation-probe.yml`, one `workflow_dispatch` run after both scripts: it
 tries every door from inside a job and passes only if each is refused and every control works.
+The probe runs in a FRESH workspace, so it cannot see what earlier jobs left: the Windows script
+also re-owns and resets the runner's job workspace (`_work`), and the parts of it that need no
+elevation are proven on the Windows host by `pwsh -File malf\runner\isolate-runner-windows.selftest.ps1`.
 
 The build slot is shared with the desk through `/var/lib/coderoast-build` (the WSL script creates
 it; `malf` resolves its slot there whenever it exists), because `/tmp` cannot hold a slot two
