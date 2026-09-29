@@ -1,7 +1,7 @@
 name: 'Setup CodeRoast build env'
 description: |
   The shared C++ build environment every CodeRoast repo's CI uses, as ONE step: apt base +
-  the pinned CMake 4.3.x + Conan (no profile autodetect) + the conan dep-binary cache + the
+  the pinned CMake 4.3.x + Conan from a hash lock (no profile autodetect) + the conan dep-binary cache + the
   canonical conan profile fetched from THIS toolchain repo (single source — no per-repo
   vendored `linux-gcc16-release` copy).
 
@@ -90,13 +90,38 @@ runs:
           *) echo "::error::expected CMake 4.3.x (got: $(cmake --version | head -1))"; exit 1 ;;
         esac
 
-    - name: Setup Conan ${{ inputs.conan-version }}
-      uses: conan-io/setup-conan@ed3942a6883243f4af84e13e49c972f9440fa1c2 # v1.4.0
-      with:
-        version: ${{ inputs.conan-version }}
-        home: ${{ env.CONAN_HOME }}
-        cache_packages: false
-        profile_detect: false
+    - name: Install Conan ${{ inputs.conan-version }} from its hash lock, into a job-scoped venv
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        CONAN_VERSION: ${{ inputs.conan-version }}
+      # EVERY FILE PIP INSTALLS IS ONE OF THE DIGESTS `conan-<version>.txt` PINS (`--require-hashes`),
+      # AND NOTHING IS BUILT FROM SOURCE (`--only-binary=:all:`), so no unhashed build dependency is
+      # fetched either (W295, ROADMAP N281). This replaced conan-io/setup-conan, whose
+      # `pip install --upgrade pip` and `pip install conan==<v>` took whatever PyPI served, into
+      # whatever `python` came first on PATH — on a self-hosted runner that is the runner account's
+      # PERSISTENT venv, which every later job of every repository then executed, and which carried
+      # urllib3 2.6.3 (two HIGH advisories) and idna 3.11 because an installed conan never pulls its
+      # dependencies forward. The venv lives in RUNNER_TEMP and dies with the job; only `conan` is put
+      # on PATH, through a directory of its own, so the job's `python3` is still the runner's.
+      # A version with no lock refuses — there is no unhashed fallback.
+      run: |
+        set -euo pipefail
+        lock="$ACTION_PATH/conan-$CONAN_VERSION.txt"
+        if [ ! -f "$lock" ]; then
+          echo "::error::no hash lock for conan $CONAN_VERSION at $lock: write conan-$CONAN_VERSION.txt as conan-2.28.1.txt's header says, never install it unhashed"
+          exit 1
+        fi
+        venv="$RUNNER_TEMP/conan-venv"
+        bin="$RUNNER_TEMP/conan-bin"
+        rm -rf "$venv" "$bin"
+        python3 -m venv "$venv"
+        "$venv/bin/python" -m pip install --disable-pip-version-check --no-input \
+          --require-hashes --only-binary=:all: -r "$lock"
+        mkdir -p "$bin"
+        ln -s "$venv/bin/conan" "$bin/conan"
+        echo "$bin" >> "$GITHUB_PATH"
+        "$bin/conan" --version
 
     - name: Declare MALF_TOOLCHAIN_DIR (build-time codegen reachability, job-wide)
       shell: bash
@@ -159,7 +184,7 @@ runs:
       # A persistent home is its own cache: restoring over it would re-download what it holds, and
       # saving it would upload it again (DN-119.D2 measured both at about 510 s a run).
       if: ${{ inputs.persistent-conan-home != 'true' }}
-      uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ env.CONAN_HOME }}
         key: conan-gcc162-${{ runner.os }}-${{ hashFiles('**/conanfile.py', '.malf-toolchain/*') }}

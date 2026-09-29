@@ -3153,6 +3153,28 @@ check "setup-build-env hands the job's token to conan-home.sh alone, and unsets 
 rm -rf "$cg_tmp"
 echo
 
+echo "[7q11] conan is installed from a hash lock, into a job-scoped venv, never from whatever PyPI serves (N281)"
+# The property is the INSTALL LINE and the LOCK together: `--require-hashes` refuses a file whose
+# digest the lock does not list, and `--only-binary=:all:` keeps pip from fetching an unhashed build
+# dependency. Read from the action and the lock as committed; the network install is proven by every
+# job that runs setup-build-env, step 0's build and lint jobs first.
+cl_action="$MALF_ROOT/.github/actions/setup-build-env/action.yml"
+cl_default="$(awk '/^  conan-version:/{f=1} f && /default:/{gsub(/[^0-9.]/, "", $2); print $2; exit}' "$cl_action")"
+cl_lock="$MALF_ROOT/.github/actions/setup-build-env/conan-$cl_default.txt"
+check "setup-build-env runs no third-party conan installer" \
+      "0" "$(grep -c 'uses: conan-io/setup-conan' "$cl_action")"
+check "the install is --require-hashes --only-binary=:all: from the lock the version names" \
+      "1 1" "$(grep -c -- '--require-hashes --only-binary=:all: -r "$lock"' "$cl_action") $(grep -c 'lock="$ACTION_PATH/conan-$CONAN_VERSION.txt"' "$cl_action")"
+check "the default version ($cl_default) has its lock on disk" "yes" "$([[ -f "$cl_lock" ]] && echo yes || echo "no $cl_lock")"
+cl_bad="$(grep -vE '^\s*(#|$)' "$cl_lock" | grep -vE '^\s+--hash=sha256:[0-9a-f]{64}( \\)?$' \
+          | grep -vE '^[a-z0-9._-]+==[0-9A-Za-z.+!-]+( ; [^\\]+)? \\$' || true)"
+check "every lock line is a \`name==version\` pin or a sha256 digest, nothing else" "" "$cl_bad"
+cl_pins="$(grep -cE '^[a-z0-9._-]+==' "$cl_lock")"
+cl_hashed="$(awk '/^[a-z0-9._-]+==/{name=$1; getline; if ($0 ~ /--hash=sha256:/) n++} END{print n+0}' "$cl_lock")"
+check "every pin in the lock carries at least one digest ($cl_pins pins)" "$cl_pins" "$cl_hashed"
+check "conan itself is pinned at the default version" "1" "$(grep -c "^conan==$cl_default " "$cl_lock")"
+echo
+
 echo
 echo
 echo "malf selftest: $pass_count passed, $fail_count failed"
