@@ -91,7 +91,7 @@ runs:
         esac
 
     - name: Setup Conan ${{ inputs.conan-version }}
-      uses: conan-io/setup-conan@v1
+      uses: conan-io/setup-conan@ed3942a6883243f4af84e13e49c972f9440fa1c2 # v1.4.0
       with:
         version: ${{ inputs.conan-version }}
         home: ${{ env.CONAN_HOME }}
@@ -159,7 +159,7 @@ runs:
       # A persistent home is its own cache: restoring over it would re-download what it holds, and
       # saving it would upload it again (DN-119.D2 measured both at about 510 s a run).
       if: ${{ inputs.persistent-conan-home != 'true' }}
-      uses: actions/cache@v5
+      uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: ${{ env.CONAN_HOME }}
         key: conan-gcc162-${{ runner.os }}-${{ hashFiles('**/conanfile.py', '.malf-toolchain/*') }}
