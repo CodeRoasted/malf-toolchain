@@ -212,9 +212,10 @@ group_members="$(getent group "$DESK_GROUP" | cut -d: -f4)"
 # `ls` marks an ACL with a trailing '+', and needs no package the box may not have yet.
 [[ "$(ls -ld "$DESK_HOME" | cut -c11)" != "+" ]] || die "$DESK_HOME carries an ACL — a grant its mode bits do not show; read it with getfacl before running this"
 
-# No job may be running on THIS instance: the apply restarts it, and a job killed mid-step is a red
-# with no cause. Another instance's job is none of this run's business.
-if systemctl is-active --quiet "$UNIT"; then
+# No job may be running on THIS instance when it is applied: the apply restarts it, and a job killed
+# mid-step is a red with no cause. The plan only reads, so it runs beside a job (the ci runner carries
+# the corpus collector for hours). Another instance's job is none of this run's business.
+if $APPLY && systemctl is-active --quiet "$UNIT"; then
     cg="$(systemctl show -p ControlGroup --value "$UNIT")"
     if [[ -n "$cg" && -r "/sys/fs/cgroup$cg/cgroup.procs" ]]; then
         while read -r pid; do

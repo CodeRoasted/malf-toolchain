@@ -125,6 +125,24 @@ has not pushed yet, and the restriction applies to the whole group, so turning i
 tag release out. It stays off; the routing lives in the committed workflows, where only the declared
 release jobs name `coderoast-release`.
 
+**Applied 2026-09-29 by the Founder** (`--instance release --apply`, malf-toolchain `9e68ff9` + `868c538`),
+and each undone by `isolate-runner-wsl-rollback.sh --instance release --apply` unless marked kept:
+
+| Host change | As measured | Undo |
+|---|---|---|
+| account `ghrelease` | uid 994, group `ghrelease` only, nologin, locked, subuid/subgid 231072:65536 | kept (inert); the rollback prints the `userdel -r` line |
+| `/home/ghrelease` | mode 700, no ACL; venv of 61 packages pinned from `/home/windows/venvs/common` (cmake 4.3.1); persistent conan home dir `.cache/coderoast-build/conan/malf-release` mode 700 | kept with the account |
+| runner | actions/runner 2.337.0, SHA-256 `70920811…6613` verified; registered `malf-release`, group `coderoast-release` (id 3), label `coderoast-release` only | deregistered (removal token, stdin) |
+| units | `actions.runner.CodeRoasted.malf-release.service`, `coderoast-release-docker.service` (enabled) | stopped, disabled, deleted |
+| rootless Docker | a container published on 127.0.0.1 answered PONG; `-v` of `/home/windows`, `/mnt/c`, `/` and `/home/ghrunner` each refused | with its unit |
+| build slot root | `u:windows:rwX,u:ghrelease:rwX`, no entry for `ghrunner` (was `ghrunner:rwx`) | recomputed: `ghrunner` rw again |
+| home-mirror ACLs | `u:ghrelease:rX` on the three `corpora-*-backup` directories | removed |
+
+**The boundary proof, as run** (`--prove`). Before the release runner existed, on `malf-runner`:
+`ghrunner` wrote all 7 targets of the runner that then built every release (`Runner.Worker` busy but
+permitted). After: as `ghrunner`, all 7 targets of `malf-release` refused `EACCES`, the owner's 7
+control writes succeeded; and as `ghrelease`, all 7 targets of `malf-runner` refused `EACCES`.
+
 **What the job-side refusal cannot see** (`setup-build-env`'s `conan-home.sh`): who the group admits.
 Read it back from the desk with the three commands above after any change to the group.
 

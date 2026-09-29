@@ -169,6 +169,12 @@ if [[ "${AS_SERVICE:-false}" == "true" ]]; then
   log "Service installed. Stop/remove: sudo ./svc.sh stop && sudo ./svc.sh uninstall && ./config.sh remove --token <removal-token>"
 fi
 
+if [[ -n "$RUNNER_GROUP" ]]; then
+  # A runner in a group of its own is routed by naming its label in the workflows it serves, never by
+  # CI_RUNS_ON (malf/runner/README.md § The release runner).
+  log "Registered '$RUNNER_NAME' (labels:$only $LABELS) in group $RUNNER_GROUP, in $RUNNER_DIR."
+  exit 0
+fi
 cat <<EOF
 
 [runner] Registered '$RUNNER_NAME' (labels: $LABELS) in $RUNNER_DIR. Next:
