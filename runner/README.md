@@ -45,6 +45,51 @@ The build slot is shared with the desk through `/var/lib/coderoast-build` (the W
 it; `malf` resolves its slot there whenever it exists), because `/tmp` cannot hold a slot two
 accounts can both reclaim.
 
+## Runner groups: what one job leaves for the next
+
+Isolation keeps a job away from the DESK; it does not keep one job away from the NEXT. A runner runs
+every job as its one account, and that account owns what the next job executes: `malf-runner`'s
+`ghrunner` owns the runner's own binaries (`~/actions-runner-malf/bin/`), the venv its `.path` puts
+first on every job's PATH (`conan`, `cmake`, `ninja`, `pip`), and everything under its HOME. The
+runner group decides whose jobs those are. Both runners sit in `Default`, which admits every private
+repository of the organisation (read it back below), so a dependency any of them runs in CI can
+leave behind what a later job builds a release with.
+
+The one thing the build tooling hands out on that basis is the conan home that outlives the job
+(`setup-build-env`'s `persistent-conan-home`, `DN-119.D2`), and `conan-home.sh` refuses it unless the
+job's runner is a RELEASE runner, three facts it checks at every job start:
+
+1. GitHub's record of the job (the jobs API, the job's token with `actions: read`) puts it in the
+   runner group **`coderoast-release`**;
+2. among the runner units in `/etc/systemd/system`, the ones run by the job's account are exactly
+   its own runner's;
+3. every directory from that account's HOME down to the home is the account's and writable by no
+   other, and every entry in the home is the account's.
+
+What no job can read is who the group admits, so it is set by an organisation owner and read back
+from the desk. **The setting** (Settings → Actions → Runner groups → New runner group):
+
+| Field | Value |
+|---|---|
+| Name | `coderoast-release` |
+| Repository access | **Selected repositories**: `coderoast` — and each repository whose release job is routed to it, no other |
+| Allow public repositories | off |
+| Workflow access | **Selected workflows**, where the plan offers it: `CodeRoasted/coderoast/.github/workflows/pharos-build.yml@refs/heads/main`, plus each routed release workflow at its tag ref |
+
+and the runner registered into it (`config.sh --runnergroup coderoast-release`, or moved in the
+runners page) under an account that runs no other runner. **The read-back**, as the desk:
+
+```bash
+gh api orgs/CodeRoasted/actions/runner-groups \
+  --jq '.runner_groups[] | {id, name, visibility, allows_public_repositories, restricted_to_workflows, selected_workflows}'
+gh api orgs/CodeRoasted/actions/runner-groups/<id>/repositories --jq '.repositories[].full_name'
+gh api orgs/CodeRoasted/actions/runners --jq '.runners[] | {name, labels: [.labels[].name]}'
+```
+
+`Default` reads `"visibility": "all"` today (2026-09-29), with `malf-runner` and `malf-runner-win`
+in it. `isolate-runner-wsl.sh` provisions one runner account, `ghrunner`; its rootless-Docker child
+script, the build slot's ACLs and its rollback state are each written for that one account.
+
 ## Setup (on the warehouse box)
 
 ```bash

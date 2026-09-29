@@ -35,8 +35,10 @@ inputs:
   persistent-conan-home:
     description: >-
       'true': CONAN_HOME is this self-hosted runner's own home under the runner user's HOME,
-      outside the checkout, and it outlives the job, so the actions/cache step does not run (a
-      hosted runner refuses). The caller runs clean-conan-homes.sh at job end. 'false': the
+      outside the checkout, and it outlives the job, so the actions/cache step does not run. It is
+      handed out only on a runner in the `coderoast-release` group whose user runs no other runner
+      and owns every entry of the home; anything else refuses (conan-home.sh says why), so the
+      caller grants `actions: read` and runs clean-conan-homes.sh at job end. 'false': the
       checkout's .conan2, restored and saved by actions/cache.
     required: false
     default: 'false'
@@ -50,11 +52,15 @@ runs:
         EXTRA_APT: ${{ inputs.extra-apt }}
         PERSISTENT: ${{ inputs.persistent-conan-home }}
         ACTION_PATH: ${{ github.action_path }}
+        JOB_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
         # CONAN_HOME owned here (single definition) — visible to every later step as $CONAN_HOME.
-        # WHERE it is, and why a persistent one lives where it does, is conan-home.sh's header.
-        conan_home="$(bash "$ACTION_PATH/conan-home.sh" "$PERSISTENT")"
+        # WHERE it is, and why a persistent one lives where it does, is conan-home.sh's header. The
+        # job's token reaches conan-home.sh alone (it reads this job's runner group), and is unset
+        # before the apt and pip installs below run anything.
+        conan_home="$(GH_TOKEN="$JOB_TOKEN" bash "$ACTION_PATH/conan-home.sh" "$PERSISTENT")"
+        unset JOB_TOKEN
         echo "CONAN_HOME=$conan_home" >> "$GITHUB_ENV"
         echo "CONAN_HOME=$conan_home (persistent: $PERSISTENT)"
         # Idempotent on a persistent (self-hosted) runner: apt state survives between jobs, so the

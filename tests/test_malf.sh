@@ -2939,9 +2939,31 @@ echo "[7q7] the persistent conan home: per runner, outside the checkout, self-ho
 # entry, and about 1 800 s of every cold one rebuilding the third-party closure, because the conan
 # home lived in the checkout that `actions/checkout` cleans. `conan-home.sh` is where the home is.
 ch_script="$MALF_ROOT/.github/actions/setup-build-env/conan-home.sh"
+# The release runner `true` is handed out on ([7q10] refuses every other shape): a `gh` that answers
+# the jobs API from $CH_JOBS through the script's own jq filter, and the runner's systemd unit.
+ch_fixture() {   # <dir>: <dir>/bin/gh and an empty <dir>/units
+    mkdir -p "$1/bin" "$1/units"
+    cat > "$1/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+[[ -z "${CH_GH_FAIL:-}" ]] || { echo "HTTP 403: Resource not accessible by integration" >&2; exit 1; }
+want="repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs"
+[[ "$1" == api && "$2" == "$want" ]] || { echo "gh stub: unexpected call: $*" >&2; exit 2; }
+filter=""
+while (($#)); do [[ "$1" == --jq ]] && { filter="$2"; break; }; shift; done
+jq -r "$filter" <<< "$CH_JOBS"
+STUB
+    chmod +x "$1/bin/gh"
+}
+ch_jobs() {   # <runner name> <runner group of its in-progress job>: the run's jobs, as the API lists them
+    printf '{"jobs":[{"status":"completed","runner_name":"%s","runner_group_name":"default"},{"status":"in_progress","runner_name":"elsewhere","runner_group_name":"default"},{"status":"in_progress","runner_name":"%s","runner_group_name":"%s"}]}' "$1" "$1" "$2"
+}
 ch_tmp="$(realpath "$(mktemp -d)")"
-ch_ws="$ch_tmp/work/coderoast/coderoast"; ch_user="$ch_tmp/home"; mkdir -p "$ch_ws" "$ch_user"
+ch_ws="$ch_tmp/work/coderoast/coderoast"; ch_user="$ch_tmp/home"; mkdir -p "$ch_ws"; mkdir -m 700 "$ch_user"
+ch_fixture "$ch_tmp"
+printf '[Service]\nUser=%s\n' "$(id -un)" > "$ch_tmp/units/actions.runner.CodeRoasted.malf-runner.service"
 ch_run() {   # <persistent> <runner environment> <runner name>
+    PATH="$ch_tmp/bin:$PATH" CONAN_HOME_RUNNER_UNITS="$ch_tmp/units" CH_JOBS="$(ch_jobs "$3" coderoast-release)" \
+    GITHUB_REPOSITORY=CodeRoasted/coderoast GITHUB_RUN_ID=4242 GITHUB_RUN_ATTEMPT=1 \
     GITHUB_WORKSPACE="$ch_ws" HOME="$ch_user" RUNNER_ENVIRONMENT="$2" RUNNER_NAME="$3" \
         bash "$ch_script" "$1" 2>&1
 }
@@ -3032,6 +3054,103 @@ check "a third-party package is never removed: the purge is the first-party set,
 check "cut-verify says what it purged, naming the home" \
       "said" "$(grep -q 'purged 2 first-party package(s) from' <<< "$cv_out" && echo said || echo "GOT: $(grep -i purge <<< "$cv_out")")"
 rm -rf "$cv_tmp"
+echo
+
+echo "[7q10] the persistent home is handed out only where every job its user runs is the release's"
+
+# note: a runner runs every job as its one user, and its runner group sends it jobs from every
+# repository the group admits; a package any of them writes into the home is what the next release
+# build links. A planted binary with its manifest line rewritten passes `conan cache check-integrity`
+# and keeps its package revision in `conan list` (measured 2026-09-29), so nothing inside the home
+# tells the two apart: what refuses is the SHAPE of the runner — its group as GitHub records it, one
+# runner per user — and an entry of the home another account owns.
+cg_tmp="$(realpath "$(mktemp -d)")"
+cg_ws="$cg_tmp/ws"; cg_user="$cg_tmp/home"; mkdir -p "$cg_ws"; mkdir -m 700 "$cg_user"
+cg_name=malf-release
+cg_home="$cg_user/.cache/coderoast-build/conan/$cg_name"
+cg_pkg="$cg_home/p/zlibd1f4a2c3/p/lib/libz.a"
+ch_fixture "$cg_tmp"
+# ONE guarded call. The units are written by whoever runs it — inside a user namespace that is root —
+# because the script compares a unit's `User=` with `id -un`; another user's runner unit is always
+# there and must never refuse. CG_PLANT is bind-mounted over by a root-owned binary, which only a
+# process inside `unshare --user --mount` can do (the plant arm's unprivileged route).
+cat > "$cg_tmp/run.sh" <<'RUN'
+#!/usr/bin/env bash
+rm -f "$CONAN_HOME_RUNNER_UNITS"/*.service
+printf '[Service]\nUser=someone-else\n' > "$CONAN_HOME_RUNNER_UNITS/actions.runner.CodeRoasted.malf-runner.service"
+[[ -n "${CG_NO_OWN_UNIT:-}" ]] \
+    || printf '[Service]\nUser=%s\n' "$(id -un)" > "$CONAN_HOME_RUNNER_UNITS/actions.runner.CodeRoasted.$RUNNER_NAME.service"
+[[ -z "${CG_EXTRA_UNIT:-}" ]] \
+    || printf '[Service]\nUser=%s\n' "$(id -un)" > "$CONAN_HOME_RUNNER_UNITS/actions.runner.CodeRoasted.$CG_EXTRA_UNIT.service"
+if [[ -n "${CG_PLANT:-}" ]]; then mount --bind /usr/bin/true "$CG_PLANT" || exit 97; fi
+exec bash "$CG_SCRIPT" true
+RUN
+cg_run() {   # [NAME=value ...]: one guarded call; cg_out is its stdout, cg_err its stderr, cg_rc its exit
+    cg_out="$(env PATH="$cg_tmp/bin:$PATH" CONAN_HOME_RUNNER_UNITS="$cg_tmp/units" CG_SCRIPT="$ch_script" \
+        CH_JOBS="$(ch_jobs "$cg_name" coderoast-release)" GITHUB_REPOSITORY=CodeRoasted/coderoast \
+        GITHUB_RUN_ID=4242 GITHUB_RUN_ATTEMPT=1 GITHUB_WORKSPACE="$cg_ws" HOME="$cg_user" \
+        RUNNER_ENVIRONMENT=self-hosted RUNNER_NAME="$cg_name" "$@" \
+        ${CG_WRAP:-} bash "$cg_tmp/run.sh" 2>"$cg_tmp/err")"; cg_rc=$?
+    cg_err="$(cat "$cg_tmp/err")"
+}
+cg_said() {   # <fixed string>: "said" when the refusal names it, else what it said instead
+    grep -qF -- "$1" <<< "$cg_err" && echo said || echo "GOT: $cg_err"
+}
+
+cg_run
+mkdir -p "$(dirname "$cg_pkg")" && printf 'GENUINE\n' > "$cg_pkg"
+cg_run
+check "the release runner's shape — its group, one runner for its user, a home it owns — is handed the home" \
+      "rc=0 $cg_home" "rc=$cg_rc $cg_out"
+cg_run CH_JOBS="$(ch_jobs "$cg_name" default)"
+check "a runner in the group every repository reaches (the shared runner's shape) refuses, printing no home" \
+      "rc=1 out= said" "rc=$cg_rc out=$cg_out $(cg_said "runs in runner group 'default', not 'coderoast-release'")"
+cg_run CH_GH_FAIL=1
+check "GitHub's record of the job unreadable refuses, naming the permission the job needs" \
+      "rc=1 said" "rc=$cg_rc $(cg_said 'actions: read')"
+cg_run CH_JOBS='{"jobs":[{"status":"completed","runner_name":"malf-release","runner_group_name":"coderoast-release"}]}'
+check "no in-progress job of this run on this runner refuses: the group read would be some other job's" \
+      "rc=1 said" "rc=$cg_rc $(cg_said "lists 0 in-progress job(s) of run 4242 on runner 'malf-release'")"
+cg_run CG_EXTRA_UNIT=malf-runner-2
+check "a second runner run by the same user refuses, naming it: its jobs write the same home" \
+      "rc=1 said" "rc=$cg_rc $(cg_said "also runs actions.runner.CodeRoasted.malf-runner-2.service")"
+cg_run CG_NO_OWN_UNIT=1
+check "no unit of this runner refuses: which runners share the user is then unproven" \
+      "rc=1 said" "rc=$cg_rc $(cg_said "no runner unit in $cg_tmp/units runs 'malf-release'")"
+chmod 775 "$cg_user/.cache"
+cg_run
+check "a directory on the way to the home another account can write into refuses, naming it" \
+      "rc=1 said" "rc=$cg_rc $(cg_said "$cg_user/.cache is mode 775")"
+chmod 755 "$cg_user/.cache"
+
+# THE PLANTED BINARY: the package file at the SAME path, different bytes, written by ANOTHER account.
+# Unprivileged where the kernel lets a user namespace mount (the desk); by `sudo -n` where it does not
+# and sudo needs no password (a hosted runner). A box with neither REDS here — never a skip.
+cg_route=none
+cg_probe="$cg_tmp/probe"; : > "$cg_probe"
+if unshare --user --map-root-user --mount bash -c 'mount --bind /usr/bin/true "$1"' _ "$cg_probe" 2>/dev/null; then
+    cg_route=userns
+elif sudo -n chown 0:0 "$cg_probe" 2>/dev/null; then
+    cg_route=sudo
+fi
+rm -f "$cg_probe"
+check "this box can make a file of another account, so the plant arm below judges something" \
+      "yes" "$([[ "$cg_route" != none ]] && echo yes || echo "no: neither an unprivileged user namespace with a mount nor a password-less sudo")"
+if [[ "$cg_route" == userns ]]; then
+    CG_WRAP="unshare --user --map-root-user --mount" cg_run
+    check "the control, inside the same user namespace and with no plant, is handed the home" \
+          "rc=0 $cg_home" "rc=$cg_rc $cg_out"
+    CG_WRAP="unshare --user --map-root-user --mount" cg_run CG_PLANT="$cg_pkg"
+else
+    printf 'PLANTED\n' > "$cg_pkg"
+    sudo -n chown 0:0 "$cg_pkg" 2>/dev/null
+    cg_run
+fi
+check "a package file another account wrote into the home refuses, naming the file, and prints no home" \
+      "rc=1 out= said" "rc=$cg_rc out=$cg_out $(cg_said "zlibd1f4a2c3/p/lib/libz.a")"
+check "setup-build-env hands the job's token to conan-home.sh alone, and unsets it before any install" \
+      "1 1" "$(grep -c 'GH_TOKEN="$JOB_TOKEN" bash "$ACTION_PATH/conan-home.sh"' "$MALF_ROOT/.github/actions/setup-build-env/action.yml") $(grep -c '^        unset JOB_TOKEN$' "$MALF_ROOT/.github/actions/setup-build-env/action.yml")"
+rm -rf "$cg_tmp"
 echo
 
 echo
