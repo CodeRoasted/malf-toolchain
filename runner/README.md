@@ -28,8 +28,15 @@ the isolation scripts then move each runner onto an account of its own. **Run th
 
 | Runner | Isolate (prints a plan; acts only with the flag) | Undo |
 |---|---|---|
-| WSL `malf-runner` | `sudo bash malf/runner/isolate-runner-wsl.sh --apply` | `isolate-runner-wsl-rollback.sh --apply` |
+| WSL `malf-runner` (`ghrunner`) | `sudo bash malf/runner/isolate-runner-wsl.sh --instance ci --apply` | `isolate-runner-wsl-rollback.sh --instance ci --apply` |
+| WSL `malf-release` (`ghrelease`) | `sudo bash malf/runner/isolate-runner-wsl.sh --instance release --apply` | `isolate-runner-wsl-rollback.sh --instance release --apply` |
 | Windows `malf-runner-win` | elevated `pwsh -File malf\runner\isolate-runner-windows.ps1 -Apply` | `isolate-runner-windows-rollback.ps1 -Apply` |
+
+The WSL instances are one table, `runner-instances.sh`: account, directory, Docker unit, the bank
+roots each writes, whether the desk reads its home, and who holds the build slot. The plan (no flag)
+renders every unit and script the apply would write and diffs each against what is installed, so
+it checks the script against a runner that cannot be restarted; `--prove` runs the boundary proof
+alone (below).
 
 Each script's header names every door it closes and what stays open. In short: the WSL runner runs
 as the system account `ghrunner` inside a systemd sandbox that hides the Windows drives and WSL
@@ -74,7 +81,7 @@ from the desk. **The setting** (Settings → Actions → Runner groups → New r
 | Name | `coderoast-release` |
 | Repository access | **Selected repositories**: `coderoast` — and each repository whose release job is routed to it, no other |
 | Allow public repositories | off |
-| Workflow access | **Selected workflows**, where the plan offers it: `CodeRoasted/coderoast/.github/workflows/pharos-build.yml@refs/heads/main`, plus each routed release workflow at its tag ref |
+| Workflow access | **All workflows** — the plan offers the restriction, but only over refs that already exist, so it cannot admit a tag release before its tag is pushed (measured below) |
 
 and the runner registered into it (`config.sh --runnergroup coderoast-release`, or moved in the
 runners page) under an account that runs no other runner. **The read-back**, as the desk:
@@ -86,9 +93,45 @@ gh api orgs/CodeRoasted/actions/runner-groups/<id>/repositories --jq '.repositor
 gh api orgs/CodeRoasted/actions/runners --jq '.runners[] | {name, labels: [.labels[].name]}'
 ```
 
-`Default` reads `"visibility": "all"` today (2026-09-29), with `malf-runner` and `malf-runner-win`
-in it. `isolate-runner-wsl.sh` provisions one runner account, `ghrunner`; its rootless-Docker child
-script, the build slot's ACLs and its rollback state are each written for that one account.
+`Default` reads `"visibility": "all"` (2026-09-29), with `malf-runner` and `malf-runner-win` in it.
+
+### The release runner (`DN-119.D8`, option A)
+
+`malf-release` runs as `ghrelease`, a second OS account on this box, and sits in `coderoast-release`
+(id 3). It carries **one label, `coderoast-release`, and none of the defaults** (`self-hosted`,
+`Linux`, `X64`): a job reaches it only by naming that label, and only from a repository the group
+admits. What it adds over the ci instance, and why:
+
+| Control | Why |
+|---|---|
+| home mode 700, no ACL, every file `ghrelease`'s | the account is the boundary: no ci job writes what a release executes, links or takes a verdict from |
+| `ProtectHome=tmpfs` + its own home bound back | no other home is visible from a release job, so nothing planted there is reachable even by a PATH mistake |
+| `ProtectSystem=full`, `PrivateIPC=yes`, a private `/dev/shm` | step 0 runs the shared-memory transport's tests; a segment another account created under the same name would feed them |
+| its own venv, pinned from the desk's venv (never `ghrunner`'s) | a ci job can write `ghrunner`'s venv, so its package list is not a trusted source |
+| the registration token through stdin into `config.sh`'s environment | `/proc/<pid>/cmdline` is world-readable here; a token read from an argv enrols any runner into any group for an hour |
+| the build slot: `ghrelease` rw, `ghrunner` **no entry** | step 0 takes the slot; `malf slot` flocks `slot.lock` and flock works on a read-only descriptor, so read alone would let a ci job stall step 0 |
+
+**The group's scope (Argos, 2026-09-29).** It admits `coderoast`, `coderoast-security`,
+`coderoast-server`, `insight-eidos` and `logcraft`, and no other: `insight-canon`,
+`insight-metalog` and `coderoast-ipc` are PUBLIC repositories, which the group refuses
+(`allows_public_repositories: false`) and the safety rule above forbids, and every one of their
+release jobs runs on GitHub-hosted `ubuntu-latest` — a fresh machine per job, never this box.
+
+**Workflow restriction: available, and not usable here (measured 2026-09-29).** The organisation's
+plan accepts `restricted_to_workflows` (`workflow_restrictions_read_only: false`), but every entry must
+name a ref that EXISTS: `release.yaml@refs/tags/v*` and `release.yaml@*` answer HTTP 400 ("was not
+found"), and an entry with no ref answers 400 ("must be pinned"). A tag release runs at a tag the cut
+has not pushed yet, and the restriction applies to the whole group, so turning it on would lock every
+tag release out. It stays off; the routing lives in the committed workflows, where only the declared
+release jobs name `coderoast-release`.
+
+**What the job-side refusal cannot see** (`setup-build-env`'s `conan-home.sh`): who the group admits.
+Read it back from the desk with the three commands above after any change to the group.
+
+The ci instance's live unit carries `JoinsNamespaceOf=` under `[Service]`, where systemd ignores it
+(`systemd-analyze verify`: "Unknown key name"); the runner and its dockerd have never shared a
+namespace. The script no longer writes the line, so the ci plan shows exactly that one line as drift
+until the ci instance is next applied — which changes no behaviour.
 
 ## Setup (on the warehouse box)
 

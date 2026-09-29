@@ -15,6 +15,16 @@
 #     ./install-runner.sh                 # mints an org registration token via gh
 #   or, with a token you minted yourself:
 #     RUNNER_TOKEN=XXXX ./install-runner.sh
+#   or, run as ANOTHER account that holds no gh login (isolate-runner-wsl.sh --instance release does
+#   this), with the token on stdin so it never appears in any process's argv:
+#     RUNNER_TOKEN_STDIN=true ./install-runner.sh <<< "$token"
+#
+# THE TOKEN NEVER REACHES AN ARGV. /proc/<pid>/cmdline is readable by every account on this box (no
+# hidepid), and a registration token enrols a runner into ANY group of the organisation for an hour,
+# so a job of another runner reading it during a registration could enrol a runner of its own into
+# the release group. config.sh reads it from ACTIONS_RUNNER_INPUT_TOKEN instead (the runner's
+# ACTIONS_RUNNER_INPUT_<ARG> convention, verified in Runner.Listener.dll 2.337.0), and a process's
+# environment is readable by its own account and root alone.
 #
 # Toggle (after the runner is up): set the org variable CI_RUNS_ON=malf-local to route
 # every private repo's CI + release to this box; unset it to fall back to GitHub-hosted.
@@ -35,6 +45,11 @@ LABELS="${LABELS:-malf-local,corpora-runner}"
 RUNNER_NAME="${RUNNER_NAME:-malf-runner}"
 RUNNER_DIR="${RUNNER_DIR:-$HOME/actions-runner-malf}"
 RUNNER_ARCH="${RUNNER_ARCH:-x64}"   # x64 | arm64
+# The runner group to register into; empty is the organisation's default group.
+RUNNER_GROUP="${RUNNER_GROUP:-}"
+# true: the runner carries ONLY $LABELS, not `self-hosted`/`Linux`/`X64`, so a job reaches it only by
+# naming one of its own labels (the release runner, whose group admits the release alone).
+NO_DEFAULT_LABELS="${NO_DEFAULT_LABELS:-false}"
 
 log() { printf '\033[1;34m[runner]\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31m[runner] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -44,8 +59,11 @@ command -v tar       >/dev/null || die "tar is required"
 command -v jq        >/dev/null || die "jq is required — the release JSON is parsed for the download's SHA-256 (apt install jq)"
 command -v sha256sum >/dev/null || die "sha256sum is required (coreutils) — the runner tarball is never unpacked unverified"
 
-# 1) Registration token — minted via gh unless RUNNER_TOKEN is provided.
-if [[ -z "${RUNNER_TOKEN:-}" ]]; then
+# 1) Registration token — from stdin, from RUNNER_TOKEN, or minted via gh.
+if [[ "${RUNNER_TOKEN_STDIN:-false}" == "true" ]]; then
+  IFS= read -r RUNNER_TOKEN || true
+  [[ -n "$RUNNER_TOKEN" ]] || die "RUNNER_TOKEN_STDIN=true, and stdin carried no token"
+elif [[ -z "${RUNNER_TOKEN:-}" ]]; then
   command -v gh >/dev/null || die "gh not found and RUNNER_TOKEN unset — install gh or pass RUNNER_TOKEN"
   log "Minting an org registration token via gh (org: $ORG)…"
   RUNNER_TOKEN="$(gh api -X POST "/orgs/$ORG/actions/runners/registration-token" -q .token)" \
@@ -131,15 +149,14 @@ else
   log "Runner already extracted in $RUNNER_DIR — reconfiguring."
 fi
 
-# 3) Configure against the ORG (idempotent via --replace), with the malf-local label.
-log "Configuring org runner '$RUNNER_NAME' (labels: $LABELS)…"
-./config.sh \
-  --url "https://github.com/$ORG" \
-  --token "$RUNNER_TOKEN" \
-  --name "$RUNNER_NAME" \
-  --labels "$LABELS" \
-  --unattended \
-  --replace
+# 3) Configure against the ORG (idempotent via --replace), with its labels, in its group.
+cfg=(--url "https://github.com/$ORG" --name "$RUNNER_NAME" --labels "$LABELS" --unattended --replace)
+[[ -n "$RUNNER_GROUP" ]] && cfg+=(--runnergroup "$RUNNER_GROUP")
+[[ "$NO_DEFAULT_LABELS" == "true" ]] && cfg+=(--no-default-labels)
+only=""; [[ "$NO_DEFAULT_LABELS" == "true" ]] && only=" only"
+log "Configuring org runner '$RUNNER_NAME' (labels:$only $LABELS; group: ${RUNNER_GROUP:-the default})…"
+ACTIONS_RUNNER_INPUT_TOKEN="$RUNNER_TOKEN" ./config.sh "${cfg[@]}"
+unset RUNNER_TOKEN
 
 # 4) Optionally install as a background service (opt-in). Default is FOREGROUND so you
 #    run it from a terminal with start-runner.sh and Ctrl+C to stop — clearer on WSL2,
