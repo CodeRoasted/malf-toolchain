@@ -277,6 +277,41 @@ gh variable set WIN_RUNS_ON --org CodeRoasted --body malf-windows --visibility p
 gh variable delete WIN_RUNS_ON --org CodeRoasted                                          # → windows-2025
 ```
 
+### The Windows release runner — the plan for its own session (`DN-119.D8`, not yet built)
+
+**Today (read 2026-09-29):** `malf-runner-win` runs as the service's virtual account
+`NT SERVICE\actions.runner.CodeRoasted.malf-runner-win`, from `C:\actions-runner-malf-win`, in the
+group `Default`. The directory's ACL: SYSTEM, Administrators, the runner-made local group
+`GITHUB_ActionsRunner_Gb37c3` (FullControl) and the virtual account (Modify). MSVC 14.52 is reached
+through a junction to the Founder's `%LOCALAPPDATA%\malf-msvc1452`, read+execute only. So every
+private repository's Windows CI and the public `sift-windows-x64.exe` (insight-eidos
+`sift-windows.yml` `build`, `vars.WIN_RUNS_ON`) and the golden proof's MSVC leg run as ONE account —
+the Windows half of what the release runner closed on Linux.
+
+**Why a session of its own:** it needs an elevated PowerShell on the host, a second service, a
+registration, and a per-instance `isolate-runner-windows.ps1` whose selftest runs on Windows; none of
+it can be driven from WSL, and the WSL instance was the prerequisite.
+
+**The steps, in order, each red first where it is a claim:**
+1. `isolate-runner-windows.ps1 -Instance ci|release`, the same table as `runner-instances.sh`:
+   `release` = `malf-release-win`, directory `C:\actions-runner-release-win`, label
+   `coderoast-release-windows` ONLY (`--no-default-labels`), group `coderoast-release`, token through
+   the environment (`ACTIONS_RUNNER_INPUT_TOKEN`), never an argv. A second SERVICE is a second virtual
+   account (`NT SERVICE\actions.runner.CodeRoasted.malf-release-win`) by construction.
+2. Read, before trusting that: whether `config.cmd` adds the new service to the SAME
+   `GITHUB_ActionsRunner_*` group, which holds FullControl on the ci runner's directory. If it does,
+   each runner's directory ACL drops that group and names its own virtual account alone.
+3. Python: the release instance unpacks its own NuGet `python` 3.12.10 (the same two-producer pin),
+   never the ci runner's copy. MSVC: the same read-only junction to the Founder's install — a
+   directory neither virtual account can write.
+4. Prove it, red first, from inside a job: the superproject's `runner-isolation-probe.yml` `windows`
+   job runs as the ci virtual account, so it gains the Linux legs' "other runner" section — open for
+   writing the release runner's `bin\Runner.Worker.exe`, its Python and its `_work`, every one
+   refused — and a `windows-release` leg doing the same the other way, with the owner's controls
+   writable. Red first: the same writes aimed at today's release builder, the ci runner itself.
+5. Route: `sift-windows.yml` (`subjects` and `build`) and `golden.yaml` `proof-msvc` take a `runs-on`
+   input that `release.yaml` sets to `coderoast-release-windows`; the actionlint config gains that
+   label.
 **Only the PRIVATE `insight-eidos` probe reads `WIN_RUNS_ON`.** canon + metalog Windows
 probes stay hard-pinned to `windows-2025` (public = free + fork-safe). First run installs
 MSVC 14.52 (Insiders Preview, ~GBs) on the host via `setup-msvc1452`; needs git + python +
