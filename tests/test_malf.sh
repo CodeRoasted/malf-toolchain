@@ -2933,6 +2933,107 @@ check "setup-build-env's cleanup step RUNS this script — a tested script no st
 rm -rf "$de_tmp"
 echo
 
+echo "[7q7] the persistent conan home: per runner, outside the checkout, self-hosted only (DN-119.D2)"
+
+# note: step 0 spent about 510 s of every warm run restoring and re-saving one 3.2 GB actions/cache
+# entry, and about 1 800 s of every cold one rebuilding the third-party closure, because the conan
+# home lived in the checkout that `actions/checkout` cleans. `conan-home.sh` is where the home is.
+ch_script="$MALF_ROOT/.github/actions/setup-build-env/conan-home.sh"
+ch_tmp="$(realpath "$(mktemp -d)")"
+ch_ws="$ch_tmp/work/coderoast/coderoast"; ch_user="$ch_tmp/home"; mkdir -p "$ch_ws" "$ch_user"
+ch_run() {   # <persistent> <runner environment> <runner name>
+    GITHUB_WORKSPACE="$ch_ws" HOME="$ch_user" RUNNER_ENVIRONMENT="$2" RUNNER_NAME="$3" \
+        bash "$ch_script" "$1" 2>&1
+}
+ch_out="$(ch_run false github-hosted runner-1)"; ch_rc=$?
+check "persistent=false keeps the home in the checkout, where actions/cache restores it" \
+      "$ch_ws/.conan2 rc=0" "$ch_out rc=$ch_rc"
+ch_out="$(ch_run true self-hosted malf-runner)"; ch_rc=$?
+check "persistent=true on a self-hosted runner: one home per runner NAME, under the runner user's HOME" \
+      "$ch_user/.cache/coderoast-build/conan/malf-runner rc=0" "$ch_out rc=$ch_rc"
+check "the persistent home exists, outside the checkout, readable by its owner alone" \
+      "700 outside" \
+      "$(stat -c %a "$ch_user/.cache/coderoast-build/conan/malf-runner" 2>&1) $(case "$ch_out" in "$ch_ws"/*) echo inside ;; *) echo outside ;; esac)"
+ch_out="$(ch_run true github-hosted runner-1)"; ch_rc=$?
+check "persistent=true on a HOSTED runner refuses: nothing there outlives the job" \
+      "rc=1 said" "rc=$ch_rc $(grep -q 'self-hosted' <<< "$ch_out" && echo said || echo "GOT: $ch_out")"
+ch_out="$(ch_run true self-hosted '../escape')"; ch_rc=$?
+check "a runner name that is not one path segment refuses rather than escaping the home's base" \
+      "rc=1" "rc=$ch_rc"
+check "setup-build-env derives CONAN_HOME through this script, and skips actions/cache for a persistent home" \
+      "1 1" "$(grep -c 'bash "$ACTION_PATH/conan-home.sh"' "$MALF_ROOT/.github/actions/setup-build-env/action.yml") $(grep -c "if: \${{ inputs.persistent-conan-home != 'true' }}" "$MALF_ROOT/.github/actions/setup-build-env/action.yml")"
+rm -rf "$ch_tmp"
+echo
+
+echo "[7q8] at job end every conan home drops its build and temp folders, and reports its size (DN-119.D2)"
+
+cc_script="$MALF_ROOT/.github/actions/setup-build-env/clean-conan-homes.sh"
+cc_tmp="$(realpath "$(mktemp -d)")"
+cc_bin="$cc_tmp/bin"; cc_home="$cc_tmp/conan"; mkdir -p "$cc_bin" "$cc_home"
+cat > "$cc_bin/conan" <<'STUB'
+#!/usr/bin/env bash
+echo "$CONAN_HOME :: $*" >> "$CC_LOG"
+STUB
+chmod +x "$cc_bin/conan"
+for h in "$cc_home" "$cc_home/gcc16-release" "$cc_home/cut-verify"; do
+    mkdir -p "$h/p/b/build1" && touch "$h/settings.yml"
+done
+# conan's own structural children carry a settings.yml when a stray run seeded them (malf's
+# `_malf_conan_homes` guard); they are not homes, and a clean pointed at one would seed it more.
+mkdir -p "$cc_home/profiles" "$cc_home/p/pkg1" && touch "$cc_home/profiles/settings.yml"
+cc_out="$(PATH="$cc_bin:$PATH" CC_LOG="$cc_tmp/log" CONAN_HOME="$cc_home" bash "$cc_script" 2>&1)"; cc_rc=$?
+check "the base home and each keyed home run \`conan cache clean '*' --build --temp\`, no structural child" \
+      "rc=0 $cc_home :: cache clean * --build --temp|$cc_home/cut-verify :: cache clean * --build --temp|$cc_home/gcc16-release :: cache clean * --build --temp" \
+      "rc=$cc_rc $(sort "$cc_tmp/log" 2>/dev/null | tr '\n' '|' | sed 's/|$//')"
+check "each home's size is printed, its build folders apart, so the log carries gate G2's number" \
+      "3" "$(grep -c '^conan home .* MB, of which p/b ' <<< "$cc_out")"
+cc_out="$(PATH="$cc_bin:$PATH" CC_LOG="$cc_tmp/log" CONAN_HOME="$cc_tmp/absent" bash "$cc_script" 2>&1)"; cc_rc=$?
+check "no conan home at all is exit 0, saying so" \
+      "rc=0 said" "rc=$cc_rc $(grep -q 'no conan home at' <<< "$cc_out" && echo said || echo "GOT: $cc_out")"
+rm -rf "$cc_tmp"
+echo
+
+echo "[7q9] cut-verify purges every first-party package from its home BEFORE its first create (DN-119.D2)"
+
+# note: with a conan home that outlives the job, B2's "clean export" must hold by the cache's state,
+# not by each recipe's revision mode: a first-party package a previous run created stays in the
+# cut-verify home. `--build=<name>/*` forces the package being created, never one it only requires.
+cv_tmp="$(realpath "$(mktemp -d)")"
+cv_bin="$cv_tmp/bin"; cv_ws="$cv_tmp/ws"; cv_home="$cv_tmp/conan"; cv_log="$cv_tmp/conan.log"
+mkdir -p "$cv_bin" "$cv_ws/scripts" "$cv_ws/alpha" "$cv_ws/beta" "$cv_home/cut-verify/refs"
+cat > "$cv_ws/scripts/version_line.py" <<PY
+import sys
+print("cv_alpha\t$cv_ws/alpha\t")
+print("cv_beta\t$cv_ws/beta\tcv_alpha")
+PY
+# A conan whose cache is one file per recipe name under <home>/refs, logging every call in order.
+cat > "$cv_bin/conan" <<'STUB'
+#!/usr/bin/env bash
+refs="$CONAN_HOME/refs"; mkdir -p "$refs"
+echo "$*" >> "$CV_LOG"
+case "$1" in
+    list)   python3 -c 'import json, os, sys; print(json.dumps({"Local Cache": {f"{n}/1.0": {} for n in sorted(os.listdir(sys.argv[1]))}}))' "$refs" ;;
+    remove) rm -f "$refs/${2%%/*}" ;;
+    create) touch "$refs/$(basename "$2" | sed 's/^/cv_/')" ;;
+esac
+exit 0
+STUB
+chmod +x "$cv_bin/conan"
+touch "$cv_home/cut-verify/refs/cv_alpha" "$cv_home/cut-verify/refs/cv_beta" "$cv_home/cut-verify/refs/zlib"
+cv_out="$(cd "$cv_ws" && PATH="$cv_bin:$PATH" CV_LOG="$cv_log" CONAN_HOME="$cv_home" \
+          MALF_WORKSPACE_ROOT="$cv_ws" bash "$MALF_BIN" cut-verify 2>&1)"; cv_rc=$?
+cv_first_create="$(grep -n '^create ' "$cv_log" | head -1 | cut -d: -f1)"
+check "cut-verify exits 0 over the stub" "rc=0" "rc=$cv_rc"
+check "both first-party packages are removed from the cut-verify home, before the first create" \
+      "yes yes" \
+      "$(awk -v f="${cv_first_create:-0}" 'NR<f && /^remove cv_alpha\/\*/ {a=1} NR<f && /^remove cv_beta\/\*/ {b=1} END {print (a?"yes":"no"), (b?"yes":"no")}' "$cv_log")"
+check "a third-party package is never removed: the purge is the first-party set, nothing wider" \
+      "0" "$(grep -c '^remove zlib' "$cv_log" || true)"
+check "cut-verify says what it purged, naming the home" \
+      "said" "$(grep -q 'purged 2 first-party package(s) from' <<< "$cv_out" && echo said || echo "GOT: $(grep -i purge <<< "$cv_out")")"
+rm -rf "$cv_tmp"
+echo
+
 echo
 echo
 echo "malf selftest: $pass_count passed, $fail_count failed"

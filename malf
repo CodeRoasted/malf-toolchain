@@ -4688,6 +4688,28 @@ cmd_inventory() {
     MALF_SWEEP="" MALF_SKIP_INVENTORY="" _malf_run_inventory "$root"
 }
 
+# The first-party packages (one name a line) in the current CONAN_HOME, removed; says which. A
+# conan that cannot list or remove is a failure: an unproven purge would read as a clean export.
+_malf_cut_verify_purge() {
+    local names="$1" listed present name removed=()
+    listed="$(conan list '*' --format=json)" \
+        || { echo "malf cut-verify: 'conan list' failed in $CONAN_HOME — the purge cannot be proven" >&2; return 1; }
+    present="$(python3 -c 'import json, sys; print("\n".join(sorted({ref.split("/")[0] for ref in json.loads(sys.argv[1]).get("Local Cache", {})})))' "$listed")" \
+        || { echo "malf cut-verify: 'conan list' in $CONAN_HOME printed no readable JSON" >&2; return 1; }
+    while IFS= read -r name; do
+        [[ -n "$name" ]] || continue
+        grep -qxF -- "$name" <<< "$present" || continue
+        conan remove "$name/*" -c >/dev/null \
+            || { echo "malf cut-verify: could not remove $name from $CONAN_HOME" >&2; return 1; }
+        removed+=("$name")
+    done <<< "$names"
+    if [[ ${#removed[@]} -gt 0 ]]; then
+        echo "    purged ${#removed[@]} first-party package(s) from $CONAN_HOME: ${removed[*]}"
+    else
+        echo "    $CONAN_HOME held no first-party package"
+    fi
+}
+
 cmd_cut_verify() {
     local only="" list_only=false
     # A RELEASE gate builds the way the cut SHIPS: gcc-16 / libstdc++ — the canonical
@@ -4735,6 +4757,12 @@ cmd_cut_verify() {
 
     echo "=== malf cut-verify: forced conan create over the released set ($MALF_PROFILE_NAME) ==="
     echo "    cache: $CONAN_HOME"
+    # CLEAN-EXPORT invariant #3 (DN-119.D2 invariant 2): this home holds no first-party package
+    # before the first create. `--build="$name/*"` forces the package being created, never one it
+    # only REQUIRES, so a first-party package an earlier run left here — a conan home that outlives
+    # the job keeps every package — would be consumed instead of the clean export. Purged by the
+    # cache's STATE, whatever each recipe's revision mode, and the purge says what it removed.
+    _malf_cut_verify_purge "$(printf '%s\n' "$released" | awk -F'\t' 'NF>=2 {print $1}')" || return 1
 
     local profile_args=(
         --profile:host="$MALF_PROFILE"

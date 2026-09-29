@@ -9,8 +9,11 @@ description: |
   inlined 5-step block (Setup environment → Setup Conan → Cache → Setup Conan profile) that
   was copy-pasted across every consumer CI. Consumers add repo-specific apt via `extra-apt`.
 
-  Owns `CONAN_HOME` (exported to `$GITHUB_ENV` as <workspace>/.conan2) so consumers no longer
-  declare it at job level; later steps (conan-module, etc.) read it as `$CONAN_HOME`.
+  Owns `CONAN_HOME` (exported to `$GITHUB_ENV`) so consumers no longer declare it at job level;
+  later steps (conan-module, etc.) read it as `$CONAN_HOME`. It is <workspace>/.conan2, which
+  `actions/cache` restores and saves, unless the caller asks for `persistent-conan-home`: one home
+  per self-hosted runner, outside the checkout, that outlives the job (`conan-home.sh` says why and
+  where). A caller that asks for it also runs `clean-conan-homes.sh` at its job's end.
 
   Also owns `MALF_TOOLCHAIN_DIR` for the COMPOSITE path (see the step below). Do NOT re-declare
   either variable in a caller — a per-caller copy of a toolchain-layout fact is two places
@@ -29,6 +32,14 @@ inputs:
     description: 'Conan profile (in this repo''s profiles/) to install into $CONAN_HOME/profiles.'
     required: false
     default: 'linux-gcc16-release'
+  persistent-conan-home:
+    description: >-
+      'true': CONAN_HOME is this self-hosted runner's own home under the runner user's HOME,
+      outside the checkout, and it outlives the job, so the actions/cache step does not run (a
+      hosted runner refuses). The caller runs clean-conan-homes.sh at job end. 'false': the
+      checkout's .conan2, restored and saved by actions/cache.
+    required: false
+    default: 'false'
 
 runs:
   using: composite
@@ -37,10 +48,15 @@ runs:
       shell: bash
       env:
         EXTRA_APT: ${{ inputs.extra-apt }}
+        PERSISTENT: ${{ inputs.persistent-conan-home }}
+        ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
         # CONAN_HOME owned here (single definition) — visible to every later step as $CONAN_HOME.
-        echo "CONAN_HOME=$GITHUB_WORKSPACE/.conan2" >> "$GITHUB_ENV"
+        # WHERE it is, and why a persistent one lives where it does, is conan-home.sh's header.
+        conan_home="$(bash "$ACTION_PATH/conan-home.sh" "$PERSISTENT")"
+        echo "CONAN_HOME=$conan_home" >> "$GITHUB_ENV"
+        echo "CONAN_HOME=$conan_home (persistent: $PERSISTENT)"
         # Idempotent on a persistent (self-hosted) runner: apt state survives between jobs, so the
         # apt/pip provision is pure waste AND needs sudo → a password prompt on a self-hosted box.
         # Install only what's actually missing; on a hosted (ephemeral) runner everything is missing
@@ -134,6 +150,9 @@ runs:
         cp "$ACTION_PATH/../../../settings_user.yml" "$GITHUB_WORKSPACE/.malf-toolchain/settings_user.yml"
 
     - name: Cache conan dep binaries (keyed on the dep set + the gcc-16.2 profile)
+      # A persistent home is its own cache: restoring over it would re-download what it holds, and
+      # saving it would upload it again (DN-119.D2 measured both at about 510 s a run).
+      if: ${{ inputs.persistent-conan-home != 'true' }}
       uses: actions/cache@v5
       with:
         path: ${{ env.CONAN_HOME }}

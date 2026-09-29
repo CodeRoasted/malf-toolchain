@@ -110,13 +110,15 @@ on:
 
           TRIGGER CADENCE IS THE OTHER HALF OF THE COST, and it is small: measured across all eight
           C++ repos, ONE pull request since 2026-07-01. On a main-only trunk `pull_request` is
-          effectively dead and no repo carries a push trigger, so this runs once per repo per
-          RELEASE TAG plus manual dispatch — which is where the gates are designed to run.
+          effectively dead, no repo carries a push trigger, and no release tag runs this workflow
+          since the Founder's 2026-09-28 ruling (ADR-2.D3): the cut's step 0, `pharos build`'s B4
+          stage, runs every leg a caller arms at the SHA the tag must carry, and the attestation
+          makes that verdict the tag's. What still calls this workflow is a caller's dispatch or
+          pull request.
 
-          Every release.yaml runs `ci: needs: lint`, so this build sits IN FRONT of the cut's own
-          build, serially. A repo whose first-party requires live in ANOTHER repo declares those
-          repos in `lint-siblings`, and the build then covers its whole first-party closure from
-          source — the larger cost the Founder ruled worth paying on 2026-09-11 ("Turn it on").
+          A repo whose first-party requires live in ANOTHER repo declares those repos in
+          `lint-siblings`, and the build then covers its whole first-party closure from source —
+          the larger cost the Founder ruled worth paying on 2026-09-11 ("Turn it on").
 
           Set false only for a repo with no C++. Never set it false to silence findings: a red here
           is the gate working.
