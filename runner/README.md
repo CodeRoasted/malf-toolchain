@@ -123,7 +123,10 @@ name a ref that EXISTS: `release.yaml@refs/tags/v*` and `release.yaml@*` answer 
 found"), and an entry with no ref answers 400 ("must be pinned"). A tag release runs at a tag the cut
 has not pushed yet, and the restriction applies to the whole group, so turning it on would lock every
 tag release out. It stays off; the routing lives in the committed workflows, where only the declared
-release jobs name `coderoast-release`.
+release jobs and the two jobs holding the production SSH key name `coderoast-release`: coderoast-server's
+deploy and the weekly `Security` workflow's production reads, both held to that one label by the
+superproject's `action_pins` check (G8), which refuses any runner for a job naming `SSH_PRIVATE_KEY`
+or `CODEROAST_SERVER_ENV` but this one.
 
 **Applied 2026-09-29 by the Founder** (`--instance release --apply`, malf-toolchain `9e68ff9` + `868c538`),
 and each undone by `isolate-runner-wsl-rollback.sh --instance release --apply` unless marked kept:
