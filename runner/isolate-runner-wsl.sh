@@ -646,6 +646,12 @@ case "$INSTANCE:$STATE" in
         ;;
 esac
 
+# The service entry point. `svc.sh install` copies bin/runsvc.sh to the runner's root and the unit runs
+# that copy; this script writes its own unit instead of running svc.sh, so it makes the copy itself.
+# A registration alone leaves no runsvc.sh (measured 2026-09-29: the first release apply's unit exited
+# 203/EXEC in 24 ms), and on the ci runner the copy svc.sh made is byte-identical to bin/runsvc.sh.
+install -m 0755 -o "$RUNNER_USER" -g "$RUNNER_USER" "$NEW_DIR/bin/runsvc.sh" "$NEW_DIR/runsvc.sh"
+
 # PATH: nothing from the desk, nothing from another runner. The runner's own venv first
 # (conan-io/setup-conan runs `python -m pip`, so `python` must be a venv the runner owns), then the system.
 printf '%s\n' "$RUNNER_HOME/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" > "$NEW_DIR/.path"
