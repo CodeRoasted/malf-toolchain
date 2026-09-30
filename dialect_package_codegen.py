@@ -37,6 +37,14 @@ exactly one emit row, in declared order, with `emit = dual(extract)` — and the
 emits the CALL to core's `dual()`, never a `PayloadEmit` enumerator, so a fifth extractor
 added to core cannot be silently mis-derived by a stale table in this file.
 
+A MARKER ROW MAY DECLARE ITS PAYLOAD'S VERSION COORDINATE. The optional mapping
+`version_coordinate: {introducer, shape}` on a marker row states where that unit's name
+holds its version: the introducer byte sequence, and the payload shape it applies to, a
+member of a closed core enum. It is data the core applies; no version syntax is parsed
+here. A row that declares none omits the key, keeps its content hash and emits the bytes
+it emitted before. The coordinate is a reader-side derivation, so it appears on the
+recognition row alone and the derived emit row carries no copy of it.
+
 DETERMINISM (DN-17.D19). Strict YAML subset -> canonical content hash -> byte-stable
 emission, strings end-to-end with no typed conversion, LF-only output, write-if-changed.
 The emitted text is Python output and cannot vary with the C++ compiler; the axes that
@@ -78,7 +86,7 @@ from codegen_common import (
     required_scalar,
 )
 
-TOOL_VERSION = "2"  # 2: the author-voice marker (`// > `), DN-17.D35
+TOOL_VERSION = "3"  # 3: a marker row may declare its payload's version coordinate
 SCHEMA_VERSION = "1"
 
 DIALECT_FILE_SUFFIX = ".dialect.yaml"
@@ -97,6 +105,10 @@ _MARKER_KINDS = ("None", "Job", "Step")
 _CHILD_ORDERS = ("Ordered", "Unordered")
 _PAYLOAD_EXTRACTS = ("None", "RemainderAfterPrefix", "RemainderToClosingParen",
                      "NumericFieldThenRemainder")
+# The payload shapes a marker row's version coordinate may name. A row that declares no
+# coordinate omits the key: the core's `None` shape is an ABSENCE here, never an authorable
+# value, so "declared none" has exactly one spelling.
+_VERSION_PAYLOAD_SHAPES = ("OneToken",)
 _LOG_LEVELS = ("Trace", "Debug", "Info", "Warn", "Error", "Fatal")
 _RUN_OUTCOMES = ("Unknown", "Success", "Failure", "Unstable", "Aborted")
 
@@ -344,10 +356,31 @@ def _validate_role_row(row: dict, context: str, source: str) -> dict:
     }
 
 
+def _validate_version_coordinate(node, context: str, source: str) -> dict:
+    """Where the row's payload holds its unit's VERSION: an introducer and a payload shape.
+
+    The dialect states its own version syntax as data; the core applies it and knows no
+    platform's reference grammar. Both members are required: a coordinate is declared whole
+    or not at all, which is the rule composition enforces on a hand-written package.
+    """
+    if not isinstance(node, dict):
+        fail(source, None,
+             f"{context}: `version_coordinate:` must be a mapping of `introducer:` and "
+             "`shape:` — a row that declares no version coordinate omits the key")
+    expect_keys(node, ("introducer", "shape", "why"), context, source, _DIALECT_REJECTIONS)
+    return {
+        "introducer": _prefix(node, "introducer", f"{context} version_coordinate", source),
+        "shape": _enum_value(node, "shape", _VERSION_PAYLOAD_SHAPES,
+                             f"{context} version_coordinate", source),
+        "why": _validate_why(node, f"{context} version_coordinate", source),
+    }
+
+
 def _validate_marker_row(row: dict, channels: list[str], context: str, source: str) -> dict:
     expect_keys(row, ("prefix", "kind", "child_order", "dialect_gate", "extract",
-                      "channel_gate", "why"), context, source, _DIALECT_REJECTIONS)
-    return {
+                      "channel_gate", "version_coordinate", "why"), context, source,
+                _DIALECT_REJECTIONS)
+    validated = {
         "prefix": _prefix(row, "prefix", context, source),
         "kind": _enum_value(row, "kind", _MARKER_KINDS, context, source),
         "child_order": _enum_value(row, "child_order", _CHILD_ORDERS, context, source),
@@ -356,6 +389,12 @@ def _validate_marker_row(row: dict, channels: list[str], context: str, source: s
         "channel_gate": _channel_gate(row, channels, context, source),
         "why": _validate_why(row, context, source),
     }
+    # The key enters the validated row ONLY when declared, so a declaration that names no
+    # version coordinate keeps its content hash and its emitted bytes.
+    if "version_coordinate" in row:
+        validated["version_coordinate"] = _validate_version_coordinate(
+            row["version_coordinate"], context, source)
+    return validated
 
 
 def _validate_level_lift_row(row: dict, context: str, source: str) -> dict:
@@ -893,14 +932,24 @@ def _emit_marker_rows(out: list[str], declaration: dict) -> None:
     _emit_why(out, section["why"])
     _emit_array(out, "IntentMarkerRow", "kMarkers", len(rows))
     for row in rows:
-        _emit_row(out, [
+        fields = [
             ("prefix", _quoted(row["prefix"])),
             ("kind", f"insight::tokenization::IntentMarkerKind::{row['kind']}"),
             ("child_order", f"insight::tokenization::ChildOrder::{row['child_order']}"),
             ("dialect_gate", _gate_expression(row["dialect_gate"])),
             ("extract", f"PayloadExtract::{row['extract']}"),
             ("channel_gate", _channel_expression(row["channel_gate"])),
-        ], row["why"])
+        ]
+        why = list(row["why"])
+        # A reader-side derivation with no writer dual: the emit rows below carry the payload
+        # verbatim, so the coordinate appears on the recognition row alone.
+        coordinate = row.get("version_coordinate")
+        if coordinate is not None:
+            fields.append(("version",
+                           f"{{.introducer = {_quoted(coordinate['introducer'])}, "
+                           f".shape = VersionPayloadShape::{coordinate['shape']}}}"))
+            why += coordinate["why"]
+        _emit_row(out, fields, why)
     out.append("}};")
     out.append("")
 
@@ -1464,6 +1513,42 @@ def selftest() -> int:
                       lambda: _parse_fixture(_SYNTHETIC.replace(
                           "        channel_gate: any\n",
                           "        channel_gate: any\n        payload_excludes: [x]\n", 1)))
+    # ── the marker row's version coordinate ─────────────────────────────────────────────
+    _with_coordinate = _SYNTHETIC.replace(
+        "        channel_gate: plain\n",
+        "        channel_gate: plain\n        version_coordinate:\n"
+        "          introducer: \"@\"\n          shape: OneToken\n"
+        "          why: [\"The bytes after the last introducer are the unit's version.\"]\n", 1)
+    _case("version coordinate: a declared one reaches its recognition row and no other row",
+          failures, lambda: _assert(
+              render_fixture(text=_with_coordinate).count(
+                  '.version = {.introducer = "@", .shape = VersionPayloadShape::OneToken}') == 1
+              and "// > The bytes after the last introducer are the unit's version."
+              in render_fixture(text=_with_coordinate),
+              "the declared coordinate is not on exactly one emitted row with its argument"))
+    _case("version coordinate: declaring none emits none and leaves the content hash alone",
+          failures, lambda: _assert(
+              ".introducer = " not in rendered
+              and declaration_hash(_parse_fixture(_SYNTHETIC)) == base_hash
+              and declaration_hash(_parse_fixture(_with_coordinate)) != base_hash,
+              "an undeclared coordinate was emitted, or a declared one did not move the hash"))
+    _expect_rejection("refuse: a version coordinate with a shape outside the closed set",
+                      failures, "outside the closed core vocabulary",
+                      lambda: _parse_fixture(_with_coordinate.replace(
+                          "shape: OneToken", "shape: AnyShape")))
+    _expect_rejection("refuse: a version coordinate with an empty introducer", failures,
+                      "must be non-empty",
+                      lambda: _parse_fixture(_with_coordinate.replace(
+                          'introducer: "@"', 'introducer: ""')))
+    _expect_rejection("refuse: a version coordinate with no shape", failures, "shape",
+                      lambda: _parse_fixture(_with_coordinate.replace(
+                          "          shape: OneToken\n", "")))
+    _expect_rejection("refuse: a version coordinate that is not a mapping", failures,
+                      "must be a mapping",
+                      lambda: _parse_fixture(_SYNTHETIC.replace(
+                          "        channel_gate: plain\n",
+                          "        channel_gate: plain\n        version_coordinate: \"@\"\n",
+                          1)))
     _expect_rejection("refuse: an EMPTY-only section declared non-empty", failures,
                       "may be declared EMPTY with an argument",
                       lambda: _parse_fixture(_SYNTHETIC.replace(
