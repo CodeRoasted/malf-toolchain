@@ -94,6 +94,24 @@ MALF_AUTO_WORKSPACE_DEPS="${MALF_AUTO_WORKSPACE_DEPS:-1}"
 # legitimate and well below the RAM whose exhaustion kills the box.
 MALF_SOURCE_MAX_FILE_KB="${MALF_SOURCE_MAX_FILE_KB:-2048}"
 MALF_SOURCE_MEM_LIMIT_KB="${MALF_SOURCE_MEM_LIMIT_KB:-4194304}"
+
+# ─── Fan-out widths: the memory operands ─────────────────────────────────────
+# Every fan-out this file performs derives its width from BOTH operands, the cores and the memory
+# (`_malf_width`): width = max(1, min(cores, floor((MemAvailable − reserve) / cap))). The three
+# figures below are KiB, each a MEASUREMENT AT A COORDINATE, and each ages as translation units
+# grow — which is why a build says so when its largest process exceeds its cap (`_malf_cap_note`).
+#   cap, a build job — 1.1 GiB. Measured over the heaviest first-party closure on the shipping
+#     compiler at -j16: the heaviest translation unit peaked at 1 086 MiB (the median 301 MiB), and
+#     the whole build at 7.78 GiB.
+#   cap, a sanitizer build job — 3 GiB. Under instrumentation the clang frontend's module
+#     instantiation costs about 3 GB a translation unit (see `_malf_build_width`).
+#   reserve — 2 GiB. MemAvailable already excludes what is resident, so this is only the headroom
+#     for what OTHER processes grow by while the fan-out runs. It is also the largest round figure
+#     that leaves an idle 16-core, 23.5 GiB machine its 16 jobs: with about 20 GiB available, 16
+#     jobs of 1.1 GiB fit under any reserve up to about 2.4 GiB.
+MALF_BUILD_JOB_MEM_KB="${MALF_BUILD_JOB_MEM_KB:-1153434}"
+MALF_SANITIZER_JOB_MEM_KB="${MALF_SANITIZER_JOB_MEM_KB:-3145728}"
+MALF_FANOUT_RESERVE_KB="${MALF_FANOUT_RESERVE_KB:-2097152}"
 # Files per clang-format process. Bounds the blast radius of a pathological
 # file to its own batch instead of the whole run; ~15 processes for this
 # workspace's 713 files, so the startup cost is noise. (`lint` fans out at
@@ -1180,19 +1198,100 @@ _malf_restore_user_presets() {
     fi
 }
 
-# Build parallelism. Sanitizer builds (ASan/UBSan/MSan) are FAR heavier in the clang frontend:
-# import-std module instantiation under instrumentation drives deep frontend recursion AND ~3 GB/TU.
-# Under full -j$(nproc) on a memory-tight box this OOM-thrashes AND starves the frontend's stack →
-# the intermittent "stack exhaustion" frontend ICE on the heaviest module TU (insight-eidos's
-# metalog_pyramid.cpp, which imports the big metalog compose/diff module forest). So for a sanitizer
-# build ONLY, cap parallelism by available memory (the determinism-gate precedent, ~3 GB/job).
-# Non-sanitizer builds keep full -j (byte-identical behaviour to before).
-_malf_build_jobs() {
-    local ncpu; ncpu="$(nproc 2>/dev/null || echo 2)"
-    [[ "${MALF_IS_SANITIZER:-0}" == "1" ]] || { echo "$ncpu"; return; }
-    local mem_gb; mem_gb="$(awk '/MemAvailable/{print int($2/1024/1024)}' /proc/meminfo 2>/dev/null || echo 4)"
-    local jobs=$(( mem_gb / 3 )); (( jobs < 1 )) && jobs=1; (( jobs > ncpu )) && jobs=$ncpu
+# ─── A FAN-OUT'S WIDTH IS DERIVED FROM BOTH OPERANDS, THE CORES AND THE MEMORY ───────────────────
+#
+#   width = max(1, min(cores, floor((MemAvailable − reserve) / cap)))
+#
+# THE MEMORY OPERAND IS MemAvailable, READ WHEN THE FAN-OUT STARTS — never MemTotal. One machine
+# can host two builds at once that know nothing of each other (a desk and a CI runner sharing a
+# VM). Off MemTotal each takes its full width; the sum fits once and not twice, and the failure is
+# swap thrash, which reads as a slow build and never as a red. Off MemAvailable the build that
+# starts second sees what the first already holds: beside a -j16 build at its 7.8 GiB peak, 12.2
+# GiB are available and the second build gets 9 jobs.
+#
+# WHAT IT DOES NOT PROTECT, stated: two fan-outs that start within the same few seconds both read
+# the idle figure, and one sampled before the other reaches its peak sees memory the other will
+# take. The width is read once — ninja fixes -j at start. Closing either gap needs admission
+# across processes, which no single process that spawns the children can do.
+#
+# A WIDTH CHANGES SCHEDULING, NEVER A VERDICT: no result reads it, so a width that depends on the
+# machine's load touches no determinism property.
+#
+# WHERE MemAvailable IS NOT REPORTED (a /proc/meminfo without the line, or none at all), the width
+# is the cores alone and the printed derivation says the memory operand was not applied.
+
+# MemAvailable in KiB from a meminfo file (default /proc/meminfo); non-zero and silent when the
+# file does not carry the line.
+_malf_mem_available_kib() {   # [meminfo file]
+    awk '/^MemAvailable:/ {print $2; found = 1} END {exit !found}' "${1:-/proc/meminfo}" 2>/dev/null
+}
+
+# The width, PURE: its four operands in, the job count out. An empty memory operand means the
+# machine does not report it.
+_malf_width() {   # <cores> <MemAvailable KiB, or empty> <reserve KiB> <cap KiB a job>
+    local cores="$1" avail="$2" reserve="$3" cap="$4" jobs
+    [[ -n "$avail" ]] || { echo "$cores"; return 0; }
+    jobs=$(( avail > reserve ? (avail - reserve) / cap : 0 ))
+    (( jobs >= 1 )) || jobs=1
+    (( jobs <= cores )) || jobs="$cores"
     echo "$jobs"
+}
+
+# The derivation as one line: the four operands and the width they gave.
+_malf_width_line() {   # <what> <jobs> <cores> <MemAvailable KiB, or empty> <reserve KiB> <cap KiB>
+    if [[ -z "$4" ]]; then
+        echo "$1: -j$2 = $3 cores; MemAvailable is not reported here, so memory does not bound the width"
+        return 0
+    fi
+    echo "$1: -j$2 = max(1, min($3 cores, floor((MemAvailable $(( $4 / 1024 )) MiB - reserve $(( $5 / 1024 )) MiB) / $(( $6 / 1024 )) MiB a job)))"
+}
+
+# The build's width. Sets _MALF_BUILD_JOBS, _MALF_BUILD_CAP_KB and _MALF_BUILD_WIDTH_LINE in one
+# reading of the machine, so what is printed is what was used.
+#
+# A SANITIZER BUILD HAS ITS OWN CAP, because it is far heavier in the clang frontend: import-std
+# module instantiation under instrumentation drives deep frontend recursion AND about 3 GB a
+# translation unit. At full width on a memory-tight machine that thrashes AND starves the
+# frontend's stack — the intermittent "stack exhaustion" frontend ICE on the heaviest module
+# translation unit (`_malf_configure_and_build` raises the compiler's stack for the same reason).
+_malf_build_width() {
+    local cores avail=""
+    cores="$(nproc 2>/dev/null || echo 2)"
+    avail="$(_malf_mem_available_kib)" || avail=""
+    _MALF_BUILD_CAP_KB="$MALF_BUILD_JOB_MEM_KB"
+    [[ "${MALF_IS_SANITIZER:-0}" == "1" ]] && _MALF_BUILD_CAP_KB="$MALF_SANITIZER_JOB_MEM_KB"
+    _MALF_BUILD_JOBS="$(_malf_width "$cores" "$avail" "$MALF_FANOUT_RESERVE_KB" "$_MALF_BUILD_CAP_KB")"
+    _MALF_BUILD_WIDTH_LINE="$(_malf_width_line "malf build" "$_MALF_BUILD_JOBS" "$cores" "$avail" \
+        "$MALF_FANOUT_RESERVE_KB" "$_MALF_BUILD_CAP_KB")"
+}
+
+# Run a command and record, in <peak file>, the largest max RSS (KiB) any process of its tree
+# reached — the figure a cap is checked against. Returns the command's exit code. Where the
+# interpreter has no `resource` module (Windows), the command runs unmeasured and the file stays
+# empty.
+_malf_run_measured() {   # <peak file> <command...>
+    python3 -c 'import subprocess, sys
+try:
+    import resource
+except ImportError:
+    resource = None
+try:
+    code = subprocess.call(sys.argv[2:])
+except KeyboardInterrupt:
+    sys.exit(130)
+if resource is not None:
+    with open(sys.argv[1], "w", encoding="utf-8") as peak:
+        peak.write(str(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss))
+sys.exit(code if code >= 0 else 128 - code)' "$@"
+}
+
+# THE CAP IS A MEASUREMENT, AND IT AGES. A fan-out whose largest process peaked above the cap its
+# width was derived from says so: a note, never a failure.
+_malf_cap_note() {   # <what> <largest process KiB, or empty> <cap KiB> <the variable that sets the cap>
+    [[ "$2" =~ ^[0-9]+$ ]] || return 0
+    (( $2 > $3 )) || return 0
+    echo "$1: note — its largest process peaked at $(( $2 / 1024 )) MiB, above the $(( $3 / 1024 )) MiB a job the width was derived from." >&2
+    echo "$1: the cap is a measurement and it has aged: re-measure it and move $4." >&2
 }
 
 # THE TREE'S CONFIGURATION IS CHECKED AGAINST THE PROFILE IT IS NAMED FOR (`N120`).
@@ -1241,16 +1340,23 @@ _malf_configure_and_build() {
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         "$@"
     _malf_assert_tree_matches_profile "$build_dir"
-    local jobs; jobs="$(_malf_build_jobs)"
+    _malf_build_width
+    echo "$_MALF_BUILD_WIDTH_LINE" >&2
     if [[ "${MALF_IS_SANITIZER:-0}" == "1" ]]; then
-        # The companion to the -j cap: give the clang frontend stack headroom for the deep
+        # The companion to the sanitizer's cap: give the clang frontend stack headroom for the deep
         # import-std module instantiation under instrumentation (the named "stack exhaustion"
         # mechanism). The soft rlimit is inherited by ninja's child compiler processes; raising
-        # it is best-effort (a lower hard cap is fine — the -j cap still relieves the pressure).
+        # it is best-effort (a lower hard cap is fine — the width still relieves the pressure).
         ulimit -s 131072 2>/dev/null || true   # 128 MB frontend stack (default ~8 MB)
-        echo "malf: sanitizer build — -j$jobs (mem-aware) + 128MB compiler stack (frontend-ICE guard)" >&2
+        echo "malf: sanitizer build — 128MB compiler stack (frontend-ICE guard)" >&2
     fi
-    cmake --build "$build_dir" -j"$jobs"
+    local peak_file build_rc=0 cap_variable=MALF_BUILD_JOB_MEM_KB
+    [[ "${MALF_IS_SANITIZER:-0}" == "1" ]] && cap_variable=MALF_SANITIZER_JOB_MEM_KB
+    peak_file="$(mktemp)"
+    _malf_run_measured "$peak_file" cmake --build "$build_dir" -j"$_MALF_BUILD_JOBS" || build_rc=$?
+    _malf_cap_note "malf build" "$(cat "$peak_file" 2>/dev/null)" "$_MALF_BUILD_CAP_KB" "$cap_variable"
+    rm -f "$peak_file"
+    return "$build_rc"
 }
 
 _malf_repo_root() {
@@ -1593,6 +1699,27 @@ _malf_lint_summary() {
         return 0
     fi
     echo "malf lint: SUMMARY · mode=$mode · dir=$dir · $population, checked $checked, $findings finding(s), $not_linted not linted, $refused platform-refused · rc=$rc"
+}
+
+# WHAT THE RUN COST, in one line beside SUMMARY: how many translation units left a measurement,
+# the heaviest by max RSS and by peak address space, and the longest, each by name. It reads the
+# `<key>.cost` records the children wrote (`tu_cost.py`); a run none of whose children left one
+# prints nothing.
+_malf_lint_cost_line() {   # <scratch dir> <cwd> <file...>
+    local tmpdir="$1" cwd="$2" file key ms rss vm measured=0
+    local top_rss=0 top_rss_file="" top_vm=0 top_vm_file="" top_ms=0 top_ms_file=""
+    shift 2
+    for file in "$@"; do
+        key="$(printf '%s' "$file" | md5sum | cut -c1-8)"
+        read -r ms rss vm < "$tmpdir/${key}.cost" 2>/dev/null || continue
+        [[ "$ms" =~ ^[0-9]+$ && "$rss" =~ ^[0-9]+$ && "$vm" =~ ^[0-9]+$ ]] || continue
+        measured=$(( measured + 1 ))
+        if (( rss >= top_rss )); then top_rss="$rss"; top_rss_file="$file"; fi
+        if (( vm >= top_vm )); then top_vm="$vm"; top_vm_file="$file"; fi
+        if (( ms >= top_ms )); then top_ms="$ms"; top_ms_file="$file"; fi
+    done
+    (( measured > 0 )) || return 0
+    echo "malf lint: COST · $measured translation unit(s) measured · heaviest rss $(( top_rss / 1024 )) MiB (${top_rss_file#"$cwd"/}) · heaviest address space $(( top_vm / 1024 )) MiB (${top_vm_file#"$cwd"/}) · longest $(( top_ms / 1000 )).$(( top_ms % 1000 / 100 )) s (${top_ms_file#"$cwd"/})"
 }
 
 cmd_lint() {
@@ -2245,6 +2372,12 @@ PY
     export _MALF_TOTAL="${#files[@]}"
     export _MALF_COUNTER="$counter_file"
     export _MALF_TU_TIMEOUT="$MALF_LINT_TU_TIMEOUT_S"
+    # WHAT EACH TRANSLATION UNIT COST, recorded by the child that ran it (`tu_cost.py`, which also
+    # holds the per-TU time cap `timeout` used to): elapsed, max RSS, and peak ADDRESS SPACE — the
+    # one the cap below bounds, since `ulimit -v` limits virtual size and not resident memory. The
+    # width of this fan-out is derived from the memory one child may take, and that is a
+    # measurement, so every run leaves its own: on each progress line and in the COST line.
+    export _MALF_COST_TOOL="$MALF_DIR/tu_cost.py"
     export -f _malf_tidy_crashed
 
     # Pass each file as $1 to avoid xargs {} substitution inside the script body.
@@ -2253,8 +2386,9 @@ PY
         | xargs -0 -P "$jobs" -n 1 bash -c '
             f="$1"
             ulimit -v "$_MALF_MEM_LIMIT"
-            out=$(timeout "$_MALF_TU_TIMEOUT" $_MALF_TIDY $_MALF_ARGS -quiet "$f" 2>&1); rc=$?
             key=$(printf "%s" "$f" | md5sum | cut -c1-8)
+            out=$(python3 "$_MALF_COST_TOOL" "$_MALF_TU_TIMEOUT" "$_MALF_TMP/${key}.cost" \
+                      $_MALF_TIDY $_MALF_ARGS -quiet "$f" 2>&1); rc=$?
             # A DEAD TOOL IS NOT A FINDING, and conflating the two is how a file goes
             # unchecked without anyone learning it did. A clang-tidy that crashes on a TU
             # inspected NOTHING in it — no check ran to completion — yet its crash dump is
@@ -2274,7 +2408,11 @@ PY
             fi
             printf "x" >> "$_MALF_COUNTER"
             n=$(wc -c < "$_MALF_COUNTER")
-            printf "[%d/%d] %s\n" "$n" "$_MALF_TOTAL" "${f#"$_MALF_CWD/"}" >&2
+            cost_ms=0; cost_rss=0; cost_vm=0
+            read -r cost_ms cost_rss cost_vm < "$_MALF_TMP/${key}.cost" 2>/dev/null || true
+            printf "[%d/%d] %s  %d.%d s  rss %d MiB  vm %d MiB\n" "$n" "$_MALF_TOTAL" \
+                "${f#"$_MALF_CWD/"}" "$(( cost_ms / 1000 ))" "$(( cost_ms % 1000 / 100 ))" \
+                "$(( cost_rss / 1024 ))" "$(( cost_vm / 1024 ))" >&2
             exit $rc
         ' _ || lint_status=1
 
@@ -2367,9 +2505,12 @@ PY
         } >> "${output_file:-/dev/stdout}"
     fi
 
+    # Read BEFORE the scrub takes the records away; printed after SUMMARY, below.
+    local lint_cost_line
+    lint_cost_line="$(_malf_lint_cost_line "$tmpdir" "$CWD" "${files[@]}")"
     _malf_lint_scrub
     trap - EXIT INT TERM HUP
-    unset _MALF_TIDY _MALF_ARGS _MALF_TMP _MALF_CWD _MALF_TOTAL _MALF_COUNTER _MALF_MEM_LIMIT _MALF_TU_TIMEOUT
+    unset _MALF_TIDY _MALF_ARGS _MALF_TMP _MALF_CWD _MALF_TOTAL _MALF_COUNTER _MALF_MEM_LIMIT _MALF_TU_TIMEOUT _MALF_COST_TOOL
     export -nf _malf_tidy_crashed
 
     if [[ -n "$output_file" ]]; then
@@ -2380,6 +2521,7 @@ PY
     # must be the one the reader already has in front of them.
     _malf_lint_summary "$lint_mode" "$CWD" "$lint_selected" "$lint_headers" "${#files[@]}" \
         "$lint_findings" "${#crashed[@]}" "$lint_status" "$lint_refused"
+    [[ -z "$lint_cost_line" ]] || echo "$lint_cost_line"
     return "$lint_status"
 }
 

@@ -797,6 +797,38 @@ check "a TU whose checker exits 139 reads died (exit 139), never timed out" \
       "rc=1 died:src/engine.cpp" \
       "rc=$lk_die_rc $([[ "$lk_die_out" == *"src/engine.cpp — died (exit 139)"* && "$lk_die_out" != *"TIMED OUT at"* ]] && echo died:src/engine.cpp || echo "GOT: $lk_die_out")"
 
+echo "[7j3b] every linted translation unit leaves what it cost: elapsed, max RSS, peak address space"
+
+# The fan-out's width is derived from the memory one child may take, and that figure is a
+# measurement. So each child records its own, on its progress line, and the run names the heaviest.
+# The third figure is the one the child's cap actually bounds: `ulimit -v` limits address space.
+tc_tool="$MALF_ROOT/tu_cost.py"
+tc_tmp="$(mktemp -d)"
+python3 "$tc_tool" 5 "$tc_tmp/cost" bash -c 'exit 3'; tc_rc=$?
+check "tu_cost passes the command's exit code through and writes three integers" \
+      "rc=3 three" "rc=$tc_rc $([[ "$(cat "$tc_tmp/cost" 2>/dev/null)" =~ ^[0-9]+\ [0-9]+\ [0-9]+$ ]] && echo three || echo "GOT: $(cat "$tc_tmp/cost" 2>&1)")"
+python3 "$tc_tool" 0.3 "$tc_tmp/cost" sleep 30; tc_rc=$?
+read -r tc_ms _ _ < "$tc_tmp/cost"
+check "past its cap the command is ended and the exit code is timeout's 124, without waiting it out" \
+      "rc=124 ended" "rc=$tc_rc $([[ "${tc_ms:-99999}" -lt 5000 ]] && echo ended || echo "GOT: ${tc_ms:-none} ms")"
+python3 "$tc_tool" 5 "$tc_tmp/cost" bash -c 'kill -SEGV $$'; tc_rc=$?
+check "a command that dies on a signal reads 128 + the signal, as a shell reports it" \
+      "rc=139" "rc=$tc_rc"
+python3 "$tc_tool" 5 "$tc_tmp/cost" python3 -c 'x = bytearray(64 * 1024 * 1024); import time; time.sleep(0.5)'
+read -r _ tc_rss tc_vm < "$tc_tmp/cost"
+check "a command holding 64 MiB records at least that in max RSS and in peak address space" \
+      "rss vm" "$([[ "${tc_rss:-0}" -ge 65536 ]] && echo rss || echo "RSS:${tc_rss:-none}") $([[ "${tc_vm:-0}" -ge 65536 ]] && echo vm || echo "VM:${tc_vm:-none}")"
+rm -rf "$tc_tmp"
+lk_cost_out="$(lk_run "$lk_repo" "$lk_tmp/tidy.cost.log")"; lk_cost_rc=$?
+check "each progress line carries its translation unit's three figures" \
+      "rc=0 2" \
+      "rc=$lk_cost_rc $(grep -cE '^\[[0-9]+/2\] (core/src/engine|sift/src/other)\.cpp  [0-9]+\.[0-9] s  rss [0-9]+ MiB  vm [0-9]+ MiB$' <<< "$lk_cost_out")"
+check "the run ends with one COST line naming the heaviest and the longest translation unit" \
+      "named" "$(grep -qE '^malf lint: COST · 2 translation unit\(s\) measured · heaviest rss [0-9]+ MiB \((core/src/engine|sift/src/other)\.cpp\) · heaviest address space [0-9]+ MiB \([^)]+\) · longest [0-9]+\.[0-9] s \([^)]+\)$' <<< "$lk_cost_out" && echo named || echo "GOT: $(grep -E 'COST|SUMMARY' <<< "$lk_cost_out")")"
+check "a timed-out translation unit still leaves its cost, and the verdict is unchanged" \
+      "rc=1 1 timed-out" \
+      "$(out="$(cd "$lk_repo/core" && PATH="$lk_bin:$PATH" LK_TIDY_LOG="$lk_tmp/tidy.cost2.log" LK_TIDY_SLEEP_ON=engine.cpp MALF_LINT_TU_TIMEOUT_S=1 MALF_PROFILE_NAME="" bash "$MALF_BIN" lint --console 2>&1)"; echo "rc=$? $(grep -cE '^\[1/1\] src/engine\.cpp  [0-9]+\.[0-9] s  rss ' <<< "$out") $([[ "$out" == *"TIMED OUT at 1 s"* ]] && echo timed-out || echo no-timeout)")"
+
 echo "[7j4] lint de-systems FIRST-PARTY include roots, and leaves third-party ones alone"
 
 # WHY THIS EXISTS. Every dependency reaches a consumer as a CMake IMPORTED target, and CMake's
@@ -2456,6 +2488,54 @@ check "shared root absent -> the slot falls back to \${TMPDIR}/coderoast-build-s
 check "MALF_BUILD_SLOT_DIR set -> it wins over a present shared root" \
       "$sd_tmp/explicit" "$(sd_dir "$sd_tmp/shared" "$sd_tmp/explicit")"
 rm -rf "$sd_tmp"
+echo
+
+echo "[7s] a fan-out's width is derived from BOTH operands, the cores and the memory available NOW"
+
+# width = max(1, min(cores, floor((MemAvailable − reserve) / cap))). MemAvailable and not MemTotal:
+# a machine that hosts two builds at once hands the second one what the first already holds, where
+# a width read off MemTotal gives both their full width together and sends the machine into swap,
+# which reads as a slow build, never as a failure. Every figure below is KiB.
+wd_gib=1048576
+wd_cap="$MALF_BUILD_JOB_MEM_KB"; wd_reserve="$MALF_FANOUT_RESERVE_KB"
+check "the declared operands: 1.1 GiB a build job, 3 GiB a sanitizer job, 2 GiB of reserve" \
+      "1153434 3145728 2097152" "$MALF_BUILD_JOB_MEM_KB $MALF_SANITIZER_JOB_MEM_KB $MALF_FANOUT_RESERVE_KB"
+check "an idle 16-core machine (20 GiB available) keeps all 16 jobs" \
+      "16" "$(_malf_width 16 $(( 20 * wd_gib )) "$wd_reserve" "$wd_cap")"
+check "beside a build holding 7.8 GiB (12.2 GiB available) the second build gets 9 jobs, not 16" \
+      "9" "$(_malf_width 16 12792627 "$wd_reserve" "$wd_cap")"
+check "the cores bind when memory is plentiful: 8 cores, 20 GiB available" \
+      "8" "$(_malf_width 8 $(( 20 * wd_gib )) "$wd_reserve" "$wd_cap")"
+check "less available than the reserve is one job, never zero and never negative" \
+      "1" "$(_malf_width 16 $(( 1 * wd_gib )) "$wd_reserve" "$wd_cap")"
+check "a sanitizer build's 3 GiB cap: 20 GiB available is 6 jobs" \
+      "6" "$(_malf_width 16 $(( 20 * wd_gib )) "$wd_reserve" "$MALF_SANITIZER_JOB_MEM_KB")"
+check "a machine that does not report MemAvailable keeps the cores alone" \
+      "16" "$(_malf_width 16 "" "$wd_reserve" "$wd_cap")"
+wd_tmp="$(mktemp -d)"
+printf 'MemTotal:       24610264 kB\nMemFree:         1000000 kB\nMemAvailable:   12792627 kB\n' > "$wd_tmp/meminfo"
+printf 'MemTotal:       24610264 kB\nMemFree:         1000000 kB\n' > "$wd_tmp/meminfo_old"
+check "the memory operand is the MemAvailable line, never MemTotal or MemFree" \
+      "12792627" "$(_malf_mem_available_kib "$wd_tmp/meminfo")"
+check "a meminfo without MemAvailable answers nothing, and says so by its exit code" \
+      "rc=1 []" "rc=$(_malf_mem_available_kib "$wd_tmp/meminfo_old" >/dev/null; echo $?) [$(_malf_mem_available_kib "$wd_tmp/meminfo_old")]"
+check "the printed derivation carries the four operands and the width" \
+      "malf build: -j9 = max(1, min(16 cores, floor((MemAvailable 12492 MiB - reserve 2048 MiB) / 1126 MiB a job)))" \
+      "$(_malf_width_line "malf build" 9 16 12792627 "$wd_reserve" "$wd_cap")"
+check "on a machine with no MemAvailable the derivation says the memory operand was not applied" \
+      "malf build: -j16 = 16 cores; MemAvailable is not reported here, so memory does not bound the width" \
+      "$(_malf_width_line "malf build" 16 16 "" "$wd_reserve" "$wd_cap")"
+# THE CAP IS A MEASUREMENT AND IT AGES as translation units grow. A build whose largest process
+# peaked above the cap the width was derived from says so — a note, never a failure: a width
+# changes scheduling, never a verdict.
+wd_out="$(_malf_run_measured "$wd_tmp/peak" bash -c 'exit 7' 2>&1)"; wd_rc=$?
+check "a measured run returns its command's exit code and records a peak" \
+      "rc=7 recorded" "rc=$wd_rc $([[ "$(cat "$wd_tmp/peak" 2>/dev/null)" =~ ^[0-9]+$ ]] && echo recorded || echo "GOT: $(cat "$wd_tmp/peak" 2>&1)")"
+check "a largest process above the cap prints the note, naming both figures and the knob" \
+      "noted" "$(_malf_cap_note "malf build" 2097152 "$wd_cap" MALF_BUILD_JOB_MEM_KB 2>&1 | tr '\n' ' ' | grep -q '2048 MiB.*1126 MiB.*MALF_BUILD_JOB_MEM_KB' && echo noted || echo "GOT: $(_malf_cap_note "malf build" 2097152 "$wd_cap" MALF_BUILD_JOB_MEM_KB 2>&1)")"
+check "a largest process under the cap, or an unmeasured one, prints nothing" \
+      "[] []" "[$(_malf_cap_note "malf build" 500000 "$wd_cap" MALF_BUILD_JOB_MEM_KB 2>&1)] [$(_malf_cap_note "malf build" "" "$wd_cap" MALF_BUILD_JOB_MEM_KB 2>&1)]"
+rm -rf "$wd_tmp"
 echo
 
 echo "[8] invocation-point independence — malf VERB DIR == cd DIR then malf VERB"
