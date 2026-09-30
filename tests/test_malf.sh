@@ -3085,6 +3085,13 @@ import sys
 print("cv_alpha\t$cv_ws/alpha\t")
 print("cv_beta\t$cv_ws/beta\tcv_alpha")
 PY
+# The workspace's owned namespaces, as the real module derives them from its package declarations.
+# `cv_gamma` below is first-party but outside the RELEASED set (a package no cut ships): a copy an
+# earlier run left in the home is consumed all the same, so the purge is by namespace.
+cat > "$cv_ws/scripts/workspace_layout.py" <<'PY'
+def owned_package_prefixes():
+    return ("cv_",)
+PY
 # A conan whose cache is one file per recipe name under <home>/refs, logging every call in order.
 cat > "$cv_bin/conan" <<'STUB'
 #!/usr/bin/env bash
@@ -3098,7 +3105,8 @@ esac
 exit 0
 STUB
 chmod +x "$cv_bin/conan"
-touch "$cv_home/cut-verify/refs/cv_alpha" "$cv_home/cut-verify/refs/cv_beta" "$cv_home/cut-verify/refs/zlib"
+touch "$cv_home/cut-verify/refs/cv_alpha" "$cv_home/cut-verify/refs/cv_beta" \
+      "$cv_home/cut-verify/refs/cv_gamma" "$cv_home/cut-verify/refs/zlib"
 cv_out="$(cd "$cv_ws" && PATH="$cv_bin:$PATH" CV_LOG="$cv_log" CONAN_HOME="$cv_home" \
           MALF_WORKSPACE_ROOT="$cv_ws" bash "$MALF_BIN" cut-verify 2>&1)"; cv_rc=$?
 cv_first_create="$(grep -n '^create ' "$cv_log" | head -1 | cut -d: -f1)"
@@ -3106,10 +3114,13 @@ check "cut-verify exits 0 over the stub" "rc=0" "rc=$cv_rc"
 check "both first-party packages are removed from the cut-verify home, before the first create" \
       "yes yes" \
       "$(awk -v f="${cv_first_create:-0}" 'NR<f && /^remove cv_alpha\/\*/ {a=1} NR<f && /^remove cv_beta\/\*/ {b=1} END {print (a?"yes":"no"), (b?"yes":"no")}' "$cv_log")"
-check "a third-party package is never removed: the purge is the first-party set, nothing wider" \
+check "a first-party package outside the released set is removed too, before the first create" \
+      "yes" \
+      "$(awk -v f="${cv_first_create:-0}" 'NR<f && /^remove cv_gamma\/\*/ {g=1} END {print (g?"yes":"no")}' "$cv_log")"
+check "a third-party package is never removed: the purge is the owned namespaces, nothing wider" \
       "0" "$(grep -c '^remove zlib' "$cv_log" || true)"
 check "cut-verify says what it purged, naming the home" \
-      "said" "$(grep -q 'purged 2 first-party package(s) from' <<< "$cv_out" && echo said || echo "GOT: $(grep -i purge <<< "$cv_out")")"
+      "said" "$(grep -q 'purged 3 first-party package(s) from' <<< "$cv_out" && echo said || echo "GOT: $(grep -i purge <<< "$cv_out")")"
 rm -rf "$cv_tmp"
 echo
 

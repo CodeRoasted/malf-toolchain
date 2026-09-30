@@ -4701,21 +4701,38 @@ cmd_inventory() {
     MALF_SWEEP="" MALF_SKIP_INVENTORY="" _malf_run_inventory "$root"
 }
 
-# The first-party packages (one name a line) in the current CONAN_HOME, removed; says which. A
-# conan that cannot list or remove is a failure: an unproven purge would read as a clean export.
+# Every first-party package in the current CONAN_HOME, removed; says which. FIRST-PARTY IS THE OWNED
+# NAMESPACES, derived from the workspace's package declarations, never the released set: a package
+# no cut ships is first-party all the same, and a copy an earlier run left in a home that outlives
+# the job is consumed by whatever requires it. Measured on a warm home: two such packages survived
+# a purge of the released set and were reused ("Already installed!"). A conan that cannot list or
+# remove, or a workspace whose namespaces cannot be derived, is a failure: an unproven purge would
+# read as a clean export.
 _malf_cut_verify_purge() {
-    local names="$1" listed present name removed=()
+    local prefixes listed owned name removed=()
+    prefixes="$(python3 - "$MALF_WORKSPACE_ROOT" <<'PY'
+import pathlib, sys
+
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "scripts"))
+import workspace_layout
+
+print("\n".join(workspace_layout.owned_package_prefixes()))
+PY
+)" && [[ -n "$prefixes" ]] \
+        || { echo "malf cut-verify: the owned package namespaces of $MALF_WORKSPACE_ROOT could not be derived — the purge cannot be proven" >&2; return 1; }
     listed="$(conan list '*' --format=json)" \
         || { echo "malf cut-verify: 'conan list' failed in $CONAN_HOME — the purge cannot be proven" >&2; return 1; }
-    present="$(python3 -c 'import json, sys; print("\n".join(sorted({ref.split("/")[0] for ref in json.loads(sys.argv[1]).get("Local Cache", {})})))' "$listed")" \
+    owned="$(python3 -c 'import json, sys
+prefixes = tuple(sys.argv[2].split())
+names = sorted({ref.split("/")[0] for ref in json.loads(sys.argv[1]).get("Local Cache", {})})
+print("\n".join(name for name in names if name.startswith(prefixes)))' "$listed" "$prefixes")" \
         || { echo "malf cut-verify: 'conan list' in $CONAN_HOME printed no readable JSON" >&2; return 1; }
     while IFS= read -r name; do
         [[ -n "$name" ]] || continue
-        grep -qxF -- "$name" <<< "$present" || continue
         conan remove "$name/*" -c >/dev/null \
             || { echo "malf cut-verify: could not remove $name from $CONAN_HOME" >&2; return 1; }
         removed+=("$name")
-    done <<< "$names"
+    done <<< "$owned"
     if [[ ${#removed[@]} -gt 0 ]]; then
         echo "    purged ${#removed[@]} first-party package(s) from $CONAN_HOME: ${removed[*]}"
     else
@@ -4775,7 +4792,7 @@ cmd_cut_verify() {
     # only REQUIRES, so a first-party package an earlier run left here — a conan home that outlives
     # the job keeps every package — would be consumed instead of the clean export. Purged by the
     # cache's STATE, whatever each recipe's revision mode, and the purge says what it removed.
-    _malf_cut_verify_purge "$(printf '%s\n' "$released" | awk -F'\t' 'NF>=2 {print $1}')" || return 1
+    _malf_cut_verify_purge || return 1
 
     local profile_args=(
         --profile:host="$MALF_PROFILE"
