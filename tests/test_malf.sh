@@ -1446,7 +1446,10 @@ read -r sc_dir sc_child < "$sc_tmp/state"
 _malf_lint_owner_alive "$sc_dir"
 check "scratch — a running owner reads ALIVE" "0" "$?"
 check "scratch — _owner tells a reader the exact command that answers it" \
-      "yes" "$(grep -q "stat -c %Y /proc/" "$sc_dir/_owner" && echo yes || echo no)"
+      "yes" "$(grep -qF "/proc/$sc_owner/stat | awk '{print \$20}'" "$sc_dir/_owner" && echo yes || echo no)"
+check "scratch — _owner records its run's START, field 22 of /proc/<pid>/stat, not a /proc mtime" \
+      "pid $sc_owner start $(sed 's/.*) //' "/proc/$sc_owner/stat" | awk '{print $20}')" \
+      "$(head -1 "$sc_dir/_owner")"
 
 # SIGKILL: no trap can run, so this is the case the recorded identity exists for. The orphaned
 # child is deliberately left RUNNING — an flock-based owner stamp reads ALIVE here, because a
@@ -2349,6 +2352,60 @@ check "release --force removes it, and prints what it destroyed before doing so"
       "rc=0 recorded GONE" \
       "rc=$sl_unk_force_rc $([[ "$sl_unk_force" == *"it contained"* && "$sl_unk_force" == *"holder"* ]] \
           && echo recorded || echo "GOT: $sl_unk_force") $(sl_dir_exists)"
+
+# A PROCESS'S START IS FIELD 22 OF /proc/<pid>/stat, NEVER THE MTIME OF ITS /proc DIRECTORY.
+# That mtime is the moment the kernel instantiated the entry's inode — its first lookup, not the
+# process's start — and the entry is instantiated again whenever its inode is evicted. Measured
+# 2026-09-29: a shell started 20:19:19 read 20:19:20. A stamp holding one reading and a check
+# holding another read a LIVE anchor as gone, and `acquire` then deleted the holder's slot.
+# WHEN the kernel instantiates the fixture's entry is not this suite's to choose — any `ps` on the
+# machine instantiates every entry — so no arm depends on it. The arms below discriminate anyway:
+# a true start is clock ticks after boot and an mtime is seconds since the epoch, so the former
+# reading never equals a stamp holding the true start.
+sleep 300 & sl_live=$!
+sl_live_start="$(sed 's/.*) //' "/proc/$sl_live/stat" | awk '{print $20}')"
+sl_live_mtime="$(stat -c %Y "/proc/$sl_live")"
+sl_as "$sl_live" acquire --label suite-lane-start >/dev/null 2>&1
+read -r sl_magic _ sl_live_tok _ _ _ sl_stamped < "$sl_dir/stamp"
+check "acquire stamps the anchor's START (field 22 of /proc/<pid>/stat), in a stamp of format 2" \
+      "malf-slot-2 $sl_live_start" "$sl_magic $sl_stamped"
+sl_held_out="$(sl status)"; sl_held_rc=$?
+check "a live anchor whose /proc mtime is not its start reads HELD (exit 1), never STALE" \
+      "rc=1 held" \
+      "rc=$sl_held_rc $([[ "$sl_held_out" == *"is ALIVE"* ]] && echo held || echo "GOT: $sl_held_out")"
+sl_steal_out="$(sl_as 1 acquire --label suite-lane-thief)"; sl_steal_rc=$?
+check "acquire never reclaims that holder's slot, and the slot survives" \
+      "rc=1 refused present" \
+      "rc=$sl_steal_rc $([[ "$sl_steal_out" != *"reclaiming"* ]] && echo refused || echo "GOT: $sl_steal_out") $(sl_dir_exists)"
+sl release --token "$sl_live_tok" >/dev/null 2>&1
+# THE DELETION ITSELF: a stamp holding its live anchor's TRUE start, in either format, is never
+# reclaimed. Read against the /proc mtime, that start is a different number, the anchor reads GONE,
+# and `acquire` deletes the slot and takes it — the failure, reproduced without waiting for the
+# kernel to evict an inode.
+mkdir -p "$sl_dir"
+printf 'malf-slot-1 token %s anchor %s start %s\nlabel suite-lane-true\nsince now\n' \
+       "$(printf 'b%.0s' {1..32})" "$sl_live" "$sl_live_start" > "$sl_dir/stamp"
+sl_true_acq="$(sl_as 1 acquire --label suite-lane-thief)"; sl_true_acq_rc=$?
+check "a stamp holding its live anchor's true start is never reclaimed, and the slot survives" \
+      "rc=1 refused present" \
+      "rc=$sl_true_acq_rc $([[ "$sl_true_acq" != *"reclaiming"* ]] && echo refused || echo "GOT: $sl_true_acq") $(sl_dir_exists)"
+rm -rf "$sl_dir"
+# A STAMP OF THE FORMER FORMAT holds a directory mtime, which says nothing about its anchor. Read as
+# the current format it would compare an mtime against a start and call a live holder dead — so it
+# is UNKNOWN: never confirmed, never reclaimed without a human.
+mkdir -p "$sl_dir"
+printf 'malf-slot-1 token %s anchor %s start %s\nlabel suite-lane-old\nsince now\n' \
+       "$(printf 'a%.0s' {1..32})" "$sl_live" "$sl_live_mtime" > "$sl_dir/stamp"
+sl_old_out="$(sl status)"; sl_old_rc=$?
+check "a stamp of the former format reads UNKNOWN (exit 3), whatever its anchor" \
+      "rc=3 unknown" \
+      "rc=$sl_old_rc $([[ "$sl_old_out" == *"UNKNOWN"* ]] && echo unknown || echo "GOT: $sl_old_out")"
+sl_old_acq="$(sl_as 1 acquire --label suite-lane-D)"; sl_old_acq_rc=$?
+check "acquire does not reclaim a stamp of the former format, and the directory survives" \
+      "rc=1 refused present" \
+      "rc=$sl_old_acq_rc $([[ "$sl_old_acq" == *"NOT reclaimed automatically"* ]] && echo refused || echo "GOT: $sl_old_acq") $(sl_dir_exists)"
+rm -rf "$sl_dir"
+kill "$sl_live" 2>/dev/null; wait "$sl_live" 2>/dev/null
 
 # THE PATH ITSELF IS A GUARD, because an `rm -rf` runs against it. A mis-set variable must red
 # here rather than delete a level up.

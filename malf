@@ -2590,6 +2590,22 @@ _malf_lint_assert_no_test_tu() {
     return 1
 }
 
+# A PROCESS'S START TIME: field 22 of /proc/<pid>/stat, in clock ticks after boot — the ONE
+# reading every liveness proof in this file uses (the lint scratch's owner, the build slot's
+# anchor). Never the mtime of the /proc/<pid> directory: that is the moment the kernel instantiated
+# the entry's inode, its first lookup rather than the process's start, and the entry is
+# instantiated again whenever its inode is evicted. Measured 2026-09-29: a shell started 20:19:19
+# read 20:19:20, and a live anchor read against a stamp holding the other value was called GONE —
+# `acquire` then deleted the holder's slot. Field 2, the comm, is in parentheses and may contain
+# spaces and ") ", so the fields are taken after the LAST ") ": the fixed part begins at field 3,
+# which puts field 22 twentieth. Fails (non-zero, nothing printed) when the process is gone.
+_malf_proc_start() {   # <pid>
+    local st
+    st="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+    [[ -n "$st" ]] || return 1
+    awk '{print $20}' <<< "${st##*') '}"
+}
+
 # THE SCRATCH DIRECTORY MUST SAY WHETHER ITS RUN IS ALIVE. A killed `malf lint` left
 # /tmp/malf_lint.*/ behind with its _progress counter frozen mid-count, and a run that is merely
 # slow leaves the identical shape — so a lane inspecting the directory could not tell a stall
@@ -2606,24 +2622,22 @@ _malf_lint_assert_no_test_tu() {
 # read ALIVE — for as long as one clang-tidy survived, bounded only by MALF_LINT_TU_TIMEOUT_S
 # per remaining TU. Closing the descriptor on the fan-out does not repair it either: bash forks
 # an intermediate subshell to run a function in a pipeline, and that subshell holds the
-# descriptor while its child runs. `stat -c %Y /proc/<pid>` is inheritable by nothing, and
-# comparing it against the value recorded at birth also closes the pid-reuse hole a bare
-# `kill -0 <pid>` has: a recycled pid carries a different start time.
+# descriptor while its child runs. A process's start time (`_malf_proc_start`) is inheritable by
+# nothing, and comparing it against the value recorded at birth also closes the pid-reuse hole a
+# bare `kill -0 <pid>` has: a recycled pid carries a different start time.
 #
-# RESIDUAL, stated: that stamp has one-second resolution, so a pid recycled inside the same
-# second as the dead owner's start would read as alive. Bounded and far narrower than the two
-# holes above; the alternative is parsing field 22 of /proc/<pid>/stat, whose comm field can
-# contain the delimiter.
+# RESIDUAL, stated: the start has clock-tick resolution (1/`getconf CLK_TCK` s), so a pid recycled
+# inside the same tick as the dead owner's start would read as alive.
 _malf_lint_open_scratch() {
     _MALF_LINT_SCRATCH="$(mktemp -d -t malf_lint.XXXXXX)"
     local owner="$_MALF_LINT_SCRATCH/_owner"
-    local start; start="$(stat -c %Y "/proc/$$")"
+    local start; start="$(_malf_proc_start $$)"
     {
         # Line 1 is the MACHINE line and its shape is a contract — _malf_lint_owner_alive parses it.
         echo "pid $$ start $start"
         echo "malf lint scratch — started $(date -Is), host $(uname -n), cwd ${CWD:-$PWD}"
         echo
-        echo "IS THAT RUN STILL ALIVE?   stat -c %Y /proc/$$"
+        echo "IS THAT RUN STILL ALIVE?   sed 's/.*) //' /proc/$$/stat | awk '{print \$20}'"
         echo "  prints $start -> ALIVE: that is the owner, still running; _progress advances."
         echo "  anything else, or an error -> DEAD: the owner is gone. This directory is a"
         echo "                                corpse and 'rm -rf' on it is safe."
@@ -2646,8 +2660,7 @@ _malf_lint_owner_alive() {          # <scratch dir>
     [[ -r "$d/_owner" ]] || return 1
     read -r tag pid key start _ < "$d/_owner" || return 1
     [[ "$tag" == "pid" && "$key" == "start" && -n "$pid" && -n "$start" ]] || return 1
-    [[ -d "/proc/$pid" ]] || return 1
-    live="$(stat -c %Y "/proc/$pid")" || return 1
+    live="$(_malf_proc_start "$pid")" || return 1
     [[ "$live" == "$start" ]]
 }
 
@@ -4946,16 +4959,6 @@ _malf_slot_anchor_pid() {
     echo "$last"
 }
 
-# A process's start time, read exactly as _malf_lint_owner_alive reads it: the mtime of its /proc
-# directory. ONE mechanism in this file rather than two that differ by a detail. Its residual is
-# stated at that function — one-second resolution, so a pid recycled inside the same second as the
-# dead anchor reads as alive. Here that residual fails SAFE: the slot then reads HELD when it is
-# free, which stalls a lane and asks a human, where the other direction would hand out a build
-# nobody is protecting.
-_malf_slot_proc_start() {   # <pid>
-    stat -c %Y "/proc/$1" 2>/dev/null
-}
-
 # Would THIS process anchor on the pid the stamp names? If so, the stamp's "anchor is ALIVE" is
 # true of a process this reader is itself running under, so it proves the SESSION is alive and
 # says nothing about the holding LANE. Callers use it to qualify a liveness claim and to withdraw
@@ -4986,6 +4989,13 @@ _malf_slot_shared_anchor_note() {
     echo "malf slot: holding lane is over is what this command can no longer do for you."
 }
 
+# THE STAMP'S FORMAT, its first word. Format 2 records the anchor's start as `_malf_proc_start`
+# reads it, clock ticks after boot. Format 1 recorded the mtime of the anchor's /proc directory,
+# which says nothing about the anchor, so a format-1 stamp is a stamp this malf did not write:
+# UNKNOWN, never reclaimed without a human. Read as format 2, its mtime would be compared with a
+# start and a live holder called GONE, the failure format 2 exists to remove.
+MALF_BUILD_SLOT_FORMAT="malf-slot-2"
+
 # Read the slot. Answers through globals rather than stdout because every caller needs several
 # fields at once and a command substitution per field would fork per field.
 #   free     the directory does not exist
@@ -5002,13 +5012,13 @@ _malf_slot_read() {
     [[ -r "$stamp" ]] || return 0
     local magic k_tok token k_anc anchor k_start start
     read -r magic k_tok token k_anc anchor k_start start _ < "$stamp" || return 0
-    [[ "$magic" == "malf-slot-1" && "$k_tok" == "token" && "$k_anc" == "anchor" \
+    [[ "$magic" == "$MALF_BUILD_SLOT_FORMAT" && "$k_tok" == "token" && "$k_anc" == "anchor" \
        && "$k_start" == "start" && -n "$token" && -n "$anchor" && -n "$start" ]] || return 0
     _MALF_SLOT_TOKEN="$token"; _MALF_SLOT_ANCHOR="$anchor"; _MALF_SLOT_ANCHOR_START="$start"
     _MALF_SLOT_LABEL="$(sed -n '2s/^label //p' "$stamp")"
     _MALF_SLOT_SINCE="$(sed -n '3s/^since //p' "$stamp")"
     local live=""
-    live="$(_malf_slot_proc_start "$anchor")" || true
+    live="$(_malf_proc_start "$anchor")" || true
     if [[ -n "$live" && "$live" == "$start" ]]; then
         _MALF_SLOT_STATE=held
     else
@@ -5031,7 +5041,7 @@ _malf_slot_write_stamp() {   # <token> <anchor pid> <anchor start> <label>
         # Lines 2 and 3 are `label ` and `since ` for the same reason. Everything below is for a
         # human who found this directory and has to decide what to do about it WITHOUT reading
         # this file, which is the whole failure the incident turned on.
-        echo "malf-slot-1 token $1 anchor $2 start $3"
+        echo "$MALF_BUILD_SLOT_FORMAT token $1 anchor $2 start $3"
         echo "label $4"
         echo "since $(date -Is)"
         echo "host $(uname -n)  cwd ${CWD:-$PWD}"
@@ -5147,7 +5157,7 @@ cmd_slot() {
             [[ -n "$label" ]] || label="${MALF_BUILD_SLOT_LABEL:-$(id -un)@$(uname -n):$$}"
             local anchor start tok
             anchor="$(_malf_slot_anchor_pid)"
-            start="$(_malf_slot_proc_start "$anchor")" || start=""
+            start="$(_malf_proc_start "$anchor")" || start=""
             if [[ -z "$start" ]]; then
                 echo "malf slot: error: cannot read the start time of anchor pid $anchor, so this slot" >&2
                 echo "malf slot: would carry no liveness proof at all. Name a live anchor explicitly:" >&2
@@ -5232,7 +5242,7 @@ cmd_slot() {
             slot_rc=0 ;;
         held)
             echo "malf slot: HELD by '${_MALF_SLOT_LABEL:-<unlabelled>}' since ${_MALF_SLOT_SINCE:-<unknown>}"
-            echo "malf slot: anchor pid $_MALF_SLOT_ANCHOR is ALIVE (started $_MALF_SLOT_ANCHOR_START, same value as the stamp)"
+            echo "malf slot: anchor pid $_MALF_SLOT_ANCHOR is ALIVE (its start, $_MALF_SLOT_ANCHOR_START clock ticks after boot, is the stamp's)"
             echo "malf slot: token $_MALF_SLOT_TOKEN"
             echo "malf slot: a holder with no malf process running is between runs — that is the normal state."
             _malf_slot_anchor_is_shared && _malf_slot_shared_anchor_note
