@@ -4,7 +4,9 @@
 #
 #   pwsh -ExecutionPolicy Bypass -File malf\runner\isolate-runner-windows.selftest.ps1
 #
-# What it proves: both scripts parse; the reparse-point walk finds a junction without walking
+# What it proves: the scripts parse; the instance table names two runners that share no directory,
+# the release one carrying a single label in the release group; the registration token reaches
+# config.cmd through the environment on the install and on the removal; the reparse-point walk finds a junction without walking
 # through it, reports a folder it cannot list, and with a repair hands that folder alone to it and
 # then finds a junction inside; step 5 walks, re-owns then resets the job workspace AFTER the
 # runner directory's grant that reset inherits; the plan and the rollback's plan name the
@@ -14,7 +16,9 @@
 
 param(
     [string]$Script = (Join-Path $PSScriptRoot 'isolate-runner-windows.ps1'),
-    [string]$Rollback = (Join-Path $PSScriptRoot 'isolate-runner-windows-rollback.ps1')
+    [string]$Rollback = (Join-Path $PSScriptRoot 'isolate-runner-windows-rollback.ps1'),
+    [string]$Instances = (Join-Path $PSScriptRoot 'runner-instances.ps1'),
+    [string]$Installer = (Join-Path $PSScriptRoot 'install-runner.ps1')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -26,8 +30,8 @@ function Check([string]$label, $expected, $actual) {
     else { $script:fail++; Write-Host "  FAIL $label`n       expected: $expected`n       actual:   $actual" }
 }
 
-Write-Host '[1] both scripts parse'
-foreach ($file in $Script, $Rollback) {
+Write-Host '[1] the scripts parse'
+foreach ($file in $Script, $Rollback, $Instances, $Installer) {
     $errors = $null
     [Management.Automation.Language.Parser]::ParseFile($file, [ref]$null, [ref]$errors) | Out-Null
     Check "$(Split-Path -Leaf $file) parses" 0 @($errors).Count
@@ -89,6 +93,32 @@ $planAt = $text.IndexOf('PLAN ONLY - nothing was changed')
 Check 'the walk runs in the preflight, before the plan and before anything changes' 'True' "$($scanAt -ge 0 -and $scanAt -lt $planAt)"
 Check 'the plan prints the job workspace' 'True' "$($text.Contains('  job workspace     $workPlan'))"
 Check 'the rollback plan says the workspace DACLs come back and owners do not' 'True' "$((Get-Content -Raw -LiteralPath $Rollback).Contains('NOT restored - icacls /save records DACLs only'))"
+
+Write-Host '[4] the instance table: two runners, nothing shared, the release one reached by one label'
+. $Instances
+$ci = Select-RunnerInstance 'ci'
+$release = Select-RunnerInstance 'release'
+Check 'the table lists ci and release' 'ci release' ($RunnerInstances -join ' ')
+$paths = @($ci.RunnerDir, $ci.DataRoot, $release.RunnerDir, $release.DataRoot)
+Check 'four distinct directories' 4 @($paths | Select-Object -Unique).Count
+$nested = @(foreach ($a in $paths) { foreach ($b in $paths) { if ($a -ne $b -and "$b\".StartsWith("$a\", [StringComparison]::OrdinalIgnoreCase)) { "$b under $a" } } })
+Check 'none inside another (a grant on one would reach the other)' '' ($nested -join '; ')
+Check 'two runner names' 'True' "$($ci.RunnerName -ne $release.RunnerName)"
+Check 'release: installed, in the release group, one label and no default' 'install coderoast-release coderoast-release-windows True' "$($release.Lifecycle) $($release.Group) $($release.Labels) $($release.OnlyLabels)"
+Check 'release: the desk does not read its directory; ci: it does' 'False True' "$($release.DeskReads) $($ci.DeskReads)"
+$unknown = try { Select-RunnerInstance 'nope' | Out-Null; 'accepted' } catch { 'refused' }
+Check 'an unknown instance is refused' 'refused' $unknown
+$empty = try { Select-RunnerInstance '' | Out-Null; 'accepted' } catch { 'refused' }
+Check 'no instance is refused (there is no default runner to change)' 'refused' $empty
+
+Write-Host '[5] a registration or removal token reaches config.cmd through the environment, never an argument'
+$install = Get-Content -Raw -LiteralPath $Installer
+Check 'the installer sets ACTIONS_RUNNER_INPUT_TOKEN around config.cmd and removes it after' 'True' "$($install.Contains('$env:ACTIONS_RUNNER_INPUT_TOKEN = $Token') -and $install.Contains('Remove-Item Env:ACTIONS_RUNNER_INPUT_TOKEN'))"
+Check 'the installer passes no --token argument' 'False' "$($install.Contains(`"'--token'`"))"
+$undo = Get-Content -Raw -LiteralPath $Rollback
+Check 'the rollback removes a runner with the token in the environment' 'True' "$($undo.Contains('$env:ACTIONS_RUNNER_INPUT_TOKEN = $token') -and $undo.Contains(`"@('remove')`"))"
+Check 'the install names the group and refuses a runner registered elsewhere' 'True' "$($text.Contains('-RunnerGroup $inst.Group') -and $text.Contains('if ($pool -ne $inst.Group)'))"
+Check 'a runner the desk does not read names three principals: every other explicit entry is removed, then checked' 'True' "$($text.Contains('$kept = @($SidSystem, $SidAdmins, $VirtualSid)') -and $text.Contains(`"'/remove', `"))"
 
 Write-Host "`nisolate-runner-windows selftest: $($script:pass) passed, $($script:fail) failed"
 if ($script:fail -gt 0) { exit 1 }

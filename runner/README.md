@@ -30,7 +30,12 @@ the isolation scripts then move each runner onto an account of its own. **Run th
 |---|---|---|
 | WSL `malf-runner` (`ghrunner`) | `sudo bash malf/runner/isolate-runner-wsl.sh --instance ci --apply` | `isolate-runner-wsl-rollback.sh --instance ci --apply` |
 | WSL `malf-release` (`ghrelease`) | `sudo bash malf/runner/isolate-runner-wsl.sh --instance release --apply` | `isolate-runner-wsl-rollback.sh --instance release --apply` |
-| Windows `malf-runner-win` | elevated `pwsh -File malf\runner\isolate-runner-windows.ps1 -Apply` | `isolate-runner-windows-rollback.ps1 -Apply` |
+| Windows `malf-runner-win` | elevated `pwsh -File malf\runner\isolate-runner-windows.ps1 -Instance ci -Apply` | `isolate-runner-windows-rollback.ps1 -Instance ci -Apply` |
+| Windows `malf-release-win` | elevated `pwsh -File malf\runner\isolate-runner-windows.ps1 -Instance release -Apply` (it installs the runner too) | `isolate-runner-windows-rollback.ps1 -Instance release -Apply` |
+
+The Windows instances are one table, `runner-instances.ps1`: runner, directory, data root, group,
+labels, and whether the desk reads the runner's directory. A script run names its instance; there
+is no default.
 
 The WSL instances are one table, `runner-instances.sh`: account, directory, Docker unit, the bank
 roots each writes, whether the desk reads its home, and who holds the build slot. The plan (no flag)
@@ -40,10 +45,11 @@ alone (below).
 
 Each script's header names every door it closes and what stays open. In short: the WSL runner runs
 as the system account `ghrunner` inside a systemd sandbox that hides the Windows drives and WSL
-interop, with a rootless Docker of its own (never the `docker` group); the Windows runner logs on
+interop, with a rootless Docker of its own (never the `docker` group); each Windows runner logs on
 as its service's virtual account `NT SERVICE\<service>`, not the Founder. The proof is the
-superproject's `runner-isolation-probe.yml`, one `workflow_dispatch` run after both scripts: it
-tries every door from inside a job and passes only if each is refused and every control works.
+superproject's `runner-isolation-probe.yml`, one `workflow_dispatch` run after the scripts, one leg
+per runner: it tries every door from inside a job and passes only if each is refused and every
+control works.
 The probe runs in a FRESH workspace, so it cannot see what earlier jobs left: the Windows script
 also re-owns and resets the runner's job workspace (`_work`), and the parts of it that need no
 elevation are proven on the Windows host by `pwsh -File malf\runner\isolate-runner-windows.selftest.ps1`.
@@ -93,7 +99,8 @@ gh api orgs/CodeRoasted/actions/runner-groups/<id>/repositories --jq '.repositor
 gh api orgs/CodeRoasted/actions/runners --jq '.runners[] | {name, labels: [.labels[].name]}'
 ```
 
-`Default` reads `"visibility": "all"` (2026-09-29), with `malf-runner` and `malf-runner-win` in it.
+`Default` reads `"visibility": "all"` (2026-09-29), with `malf-runner` and `malf-runner-win` in it;
+`coderoast-release` holds `malf-release` and `malf-release-win` (2026-09-30).
 
 ### The release runner (`DN-119.D8`, option A)
 
@@ -280,46 +287,80 @@ gh variable set WIN_RUNS_ON --org CodeRoasted --body malf-windows --visibility p
 gh variable delete WIN_RUNS_ON --org CodeRoasted                                          # → windows-2025
 ```
 
-### The Windows release runner — the plan for its own session (`DN-119.D8`, not yet built)
-
-**Today (read 2026-09-29):** `malf-runner-win` runs as the service's virtual account
-`NT SERVICE\actions.runner.CodeRoasted.malf-runner-win`, from `C:\actions-runner-malf-win`, in the
-group `Default`. The directory's ACL: SYSTEM, Administrators, the runner-made local group
-`GITHUB_ActionsRunner_Gb37c3` (FullControl) and the virtual account (Modify). MSVC 14.52 is reached
-through a junction to the Founder's `%LOCALAPPDATA%\malf-msvc1452`, read+execute only. So every
-private repository's Windows CI and the public `sift-windows-x64.exe` (insight-eidos
-`sift-windows.yml` `build`, `vars.WIN_RUNS_ON`) and the golden proof's MSVC leg run as ONE account —
-the Windows half of what the release runner closed on Linux.
-
-**Why a session of its own:** it needs an elevated PowerShell on the host, a second service, a
-registration, and a per-instance `isolate-runner-windows.ps1` whose selftest runs on Windows; none of
-it can be driven from WSL, and the WSL instance was the prerequisite.
-
-**The steps, in order, each red first where it is a claim:**
-1. `isolate-runner-windows.ps1 -Instance ci|release`, the same table as `runner-instances.sh`:
-   `release` = `malf-release-win`, directory `C:\actions-runner-release-win`, label
-   `coderoast-release-windows` ONLY (`--no-default-labels`), group `coderoast-release`, token through
-   the environment (`ACTIONS_RUNNER_INPUT_TOKEN`), never an argv. A second SERVICE is a second virtual
-   account (`NT SERVICE\actions.runner.CodeRoasted.malf-release-win`) by construction.
-2. Read, before trusting that: whether `config.cmd` adds the new service to the SAME
-   `GITHUB_ActionsRunner_*` group, which holds FullControl on the ci runner's directory. If it does,
-   each runner's directory ACL drops that group and names its own virtual account alone.
-3. Python: the release instance unpacks its own NuGet `python` 3.12.10 (the same two-producer pin),
-   never the ci runner's copy. MSVC: the same read-only junction to the Founder's install — a
-   directory neither virtual account can write.
-4. Prove it, red first, from inside a job: the superproject's `runner-isolation-probe.yml` `windows`
-   job runs as the ci virtual account, so it gains the Linux legs' "other runner" section — open for
-   writing the release runner's `bin\Runner.Worker.exe`, its Python and its `_work`, every one
-   refused — and a `windows-release` leg doing the same the other way, with the owner's controls
-   writable. Red first: the same writes aimed at today's release builder, the ci runner itself.
-5. Route: `sift-windows.yml` (`subjects` and `build`) and `golden.yaml` `proof-msvc` take a `runs-on`
-   input that `release.yaml` sets to `coderoast-release-windows`; the actionlint config gains that
-   label.
 **Only the PRIVATE `insight-eidos` probe reads `WIN_RUNS_ON`.** canon + metalog Windows
 probes stay hard-pinned to `windows-2025` (public = free + fork-safe). First run installs
 MSVC 14.52 (Insiders Preview, ~GBs) on the host via `setup-msvc1452`; needs git + python +
 gh on Windows. (The eidos probe also needs Heph's `provision.cpp` Win32 port to go green —
 the runner solves *minutes*, not that source blocker.)
+
+### The Windows release runner (`DN-119.D8`)
+
+`malf-release-win` is a second service on the same host, so a second virtual account:
+`NT SERVICE\actions.runner.CodeRoasted.malf-release-win`, from `C:\actions-runner-release-win`, in the
+group `coderoast-release`. It carries **one label, `coderoast-release-windows`, and none of the
+defaults**. It builds what a release publishes or is gated on from Windows: the public
+`sift-windows-x64.exe` (insight-eidos `sift-windows.yml`, job `build`) and the golden proof's MSVC
+leg (`golden.yaml`, job `proof-msvc`). Until 2026-09-30 both ran on `malf-runner-win`, as the one
+account every private repository's Windows CI runs as.
+
+| Control | Why |
+|---|---|
+| a service of its own | the virtual account is derived from the service's name, so no ci job runs as it |
+| its directory and its data root (`C:\malf-release-win`) name SYSTEM, Administrators and its own account, no other | no ci job writes its `Runner.Worker.exe`, its Python or its job workspace; the desk account, non-elevated, is refused too |
+| its own NuGet `python` 3.12.10, the same two-producer pin | a ci job can write the ci runner's Python, so that copy is not a trusted source |
+| the same MSVC 14.52 install, through a junction of its own, read+execute only | one toolset for both runners, in a directory neither account can write |
+| the registration token through `ACTIONS_RUNNER_INPUT_TOKEN`, never an argument | a process's command line is readable on the host for as long as it runs; the token enrols a runner into any group for an hour |
+
+**What `config.cmd` does with its local group (read 2026-09-30).** It makes one group PER RUNNER
+DIRECTORY and grants it FullControl there: `GITHUB_ActionsRunner_Gb37c3` for the ci runner (members
+SYSTEM and the desk account, which is how the desk reads that runner's logs) and
+`GITHUB_ActionsRunner_G51f72` for the release runner (member SYSTEM alone). Neither virtual account
+is a member of either. The release instance's directory drops its group's entry all the same; the
+group itself stays, granted nothing (whether `config.cmd remove` needs to find it was not tried).
+
+**The install runs as LocalSystem for a few seconds.** `config.cmd` can only register a service
+under an account that exists, and the virtual account exists once the service does. So step 0
+installs under LocalSystem, step 1 stops the service, and step 6 moves it. In between it is
+reachable only by a job naming `coderoast-release-windows`, which no workflow named before the
+runner was proven.
+
+**Applied 2026-09-30 by the Founder** (`-Instance release -Apply`), each undone by
+`isolate-runner-windows-rollback.ps1 -Instance release -Apply` unless marked kept:
+
+| Host change | As measured | Undo |
+|---|---|---|
+| runner | actions/runner 2.337.0, SHA-256 `1150692a…5cfc` verified; registered `malf-release-win` (id 27), group `coderoast-release` (id 3), label `coderoast-release-windows` only | deregistered (`config.cmd remove`, removal token through the environment) |
+| service | `actions.runner.CodeRoasted.malf-release-win`, auto start, logon its virtual account (SID `S-1-5-80-1724857083-…-2950988242`), SID type unrestricted | deleted with the registration |
+| `C:\actions-runner-release-win` | owner Administrators, inheritance from `C:\` cut; SYSTEM and Administrators full, the virtual account modify; the entry of `GITHUB_ActionsRunner_G51f72` removed | kept, unconfigured |
+| `C:\malf-release-win` | same three entries; `python312` (Python 3.12.10, pip 25.0.1), `LocalAppData`, `isolation\manifest.json` | kept (the last line the rollback prints deletes it) |
+| MSVC | read+execute for the virtual account on `C:\Users\Windows\AppData\Local\malf-msvc1452`; junction `C:\malf-release-win\LocalAppData\malf-msvc1452` to it | grant and junction removed |
+| local group | `GITHUB_ActionsRunner_G51f72` (made by `config.cmd`), member SYSTEM, no grant left | left to `config.cmd remove` (not tried) |
+
+**The boundary proof, as run** (superproject `runner-isolation-probe.yml` at `129aa894`), from
+inside a job and red first. Each Windows leg tries to write eight targets of the other instance
+(its `bin\Runner.Worker.exe`, `bin`, the runner directory, `_work`, `python.exe`, the Python
+directory, `LocalAppData`, the data root), then the MSVC install and every directory of the machine
+PATH. Only an access refusal counts: a target that does not exist is `BROKEN`, and a busy file is a
+`LEAK`, since Windows checks sharing after access.
+
+* **Red first, run 36687835154** (`-f windows-red-first=true`, the ci leg aimed at the ci runner
+  itself, then the builder of every release): 8 of 8 targets written; the MSVC install, its
+  `cl.exe` and the 13 machine PATH directories refused; 9 of 9 controls.
+* **After, run 36688880978**, four legs green. Windows `ci`, as the ci virtual account: 8 of 8
+  targets of `malf-release-win` refused. Windows `release`, as the release virtual account: 8 of 8
+  targets of `malf-runner-win` refused. Each: 40 attempts, 9 controls, 0 failed.
+
+**The routing** (insight-eidos). `sift-windows.yml` and `golden.yaml` take `runs-on-windows`, and
+`release.yaml` sets it to `coderoast-release-windows` (with `runs-on: coderoast-release` for
+`sift-windows.yml`'s Linux `subjects` job). The pre-tag reading (`-f record-run=<step 0 run>`)
+takes the same Windows runner with no input, so the release runner's MSVC build is read before the
+first tag. The weekly schedule and a plain dispatch keep `vars.WIN_RUNS_ON`. The label appears only
+inside expressions and `with:` values, which actionlint does not check as runner labels, so no
+`actionlint.yaml` names it.
+
+**What the proof cannot see:** who the group admits (read it back with the three commands above),
+and a directory ADDED to the machine PATH later: the probe tries the PATH as it is on the day it
+runs, and each runner's `.env` carries the PATH as it was when its script last ran.
 
 ## Notes
 

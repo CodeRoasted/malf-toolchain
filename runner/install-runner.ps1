@@ -21,6 +21,10 @@
 #   or with a token minted by hand:
 #     $env:RUNNER_TOKEN='XXXX'; pwsh -ExecutionPolicy Bypass -File malf\runner\install-runner.ps1
 #
+# The RELEASE instance (malf-release-win, DN-119.D8) is installed by isolate-runner-windows.ps1
+# -Instance release, which calls this script with -RunnerGroup and -NoDefaultLabels and then moves
+# the service onto its virtual account; do not call it for that instance by hand.
+#
 # Toggle: set the org variable WIN_RUNS_ON=malf-windows to route the eidos Windows probe
 # here; delete it to fall back to GitHub-hosted windows-2025.
 #     gh variable set WIN_RUNS_ON --org CodeRoasted --body malf-windows --visibility private
@@ -33,6 +37,8 @@ param(
     [string]$RunnerDir,
     [string]$RunnerArch,
     [string]$Token,
+    [string]$RunnerGroup,
+    [switch]$NoDefaultLabels,
     [string]$WindowsLogonAccount,
     [string]$WindowsLogonPassword,
     [string]$LegacyTaskName
@@ -475,9 +481,12 @@ Close any Services console or running runner process and re-run the installer.
 Log "Configuring org runner '$RunnerName'..."
 Log "Labels: $Labels"
 
+# The registration token reaches config.cmd through its ENVIRONMENT (the runner reads any argument
+# it was not given from ACTIONS_RUNNER_INPUT_<NAME>), never as an argument: a process's command line
+# is readable by other processes on the host for as long as it runs, and this token enrols a runner
+# into any group of the organisation for an hour.
 $configArgs = @(
     '--url', "https://github.com/$Org"
-    '--token', $Token
     '--name', $RunnerName
     '--labels', $Labels
     '--unattended'
@@ -486,13 +495,28 @@ $configArgs = @(
     '--windowslogonaccount', $WindowsLogonAccount
 )
 
+# A runner group other than Default, and no label but the ones named: the release instance is
+# reached only by a job that names its one label, from a repository its group admits.
+if ($RunnerGroup) {
+    $configArgs += @('--runnergroup', $RunnerGroup)
+    Log "Runner group: $RunnerGroup"
+}
+if ($NoDefaultLabels) {
+    $configArgs += @('--no-default-labels')
+}
+
 if ($WindowsLogonAccount -ne 'NT AUTHORITY\SYSTEM') {
     $configArgs += @(
         '--windowslogonpassword', $WindowsLogonPassword
     )
 }
 
-Invoke-Native $configCmd $configArgs
+$env:ACTIONS_RUNNER_INPUT_TOKEN = $Token
+try {
+    Invoke-Native $configCmd $configArgs
+} finally {
+    Remove-Item Env:ACTIONS_RUNNER_INPUT_TOKEN -ErrorAction SilentlyContinue
+}
 
 if ($LASTEXITCODE -ne 0) {
     Fail "config.cmd failed ($LASTEXITCODE)"
@@ -692,9 +716,13 @@ Log "Do NOT create a Scheduled Task for this runner."
 Log "Do NOT launch start-runner.ps1 for this runner."
 Log "Do NOT use a \\wsl.localhost path for the runner launcher."
 Write-Host ""
-Log "Route the eidos Windows probe here:"
-Write-Host "  gh variable set WIN_RUNS_ON --org $Org --body $Labels --visibility private"
-Log "Fall back to GitHub-hosted windows-2025:"
-Write-Host "  gh variable delete WIN_RUNS_ON --org $Org"
-Log "(Only the PRIVATE eidos probe reads WIN_RUNS_ON; canon/metalog stay on windows-2025.)"
+if ($RunnerGroup) {
+    Log "Runner group: $RunnerGroup. A job reaches this runner only by naming the label '$Labels'."
+} else {
+    Log "Route the eidos Windows probe here:"
+    Write-Host "  gh variable set WIN_RUNS_ON --org $Org --body $Labels --visibility private"
+    Log "Fall back to GitHub-hosted windows-2025:"
+    Write-Host "  gh variable delete WIN_RUNS_ON --org $Org"
+    Log "(Only the PRIVATE eidos probe reads WIN_RUNS_ON; canon/metalog stay on windows-2025.)"
+}
 Write-Host ""

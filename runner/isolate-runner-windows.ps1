@@ -1,10 +1,16 @@
-# isolate-runner-windows.ps1 - move the Windows self-hosted runner (malf-runner-win) off the
-# Founder's own account onto its service's VIRTUAL account, NT SERVICE\<service> - an account with
-# no password to hand around, not an administrator, with a profile of its own (ROADMAP N214).
+# isolate-runner-windows.ps1 - put a Windows self-hosted runner on its service's VIRTUAL account,
+# NT SERVICE\<service> - an account with no password to hand around, not an administrator, with a
+# profile of its own - with a Python, a LOCALAPPDATA and a directory ACL of its own. One instance
+# per run, from the table runner-instances.ps1:
 #
-#   pwsh -ExecutionPolicy Bypass -File malf\runner\isolate-runner-windows.ps1          # PLAN only
-#   pwsh -ExecutionPolicy Bypass -File malf\runner\isolate-runner-windows.ps1 -Apply   # do it
-#   pwsh -ExecutionPolicy Bypass -File malf\runner\isolate-runner-windows-rollback.ps1 # undo it
+#   ci       malf-runner-win: MOVED off the Founder's own account, which registered it (ROADMAP N214).
+#   release  malf-release-win: INSTALLED here, in the runner group `coderoast-release`, carrying the
+#            one label `coderoast-release-windows` (DN-119.D8). A second service is a second virtual
+#            account, so nothing a ci job runs as can write what a release job executes.
+#
+#   pwsh -ExecutionPolicy Bypass -File malf\runner\isolate-runner-windows.ps1 -Instance release          # PLAN only
+#   pwsh -ExecutionPolicy Bypass -File malf\runner\isolate-runner-windows.ps1 -Instance release -Apply   # do it
+#   pwsh -ExecutionPolicy Bypass -File malf\runner\isolate-runner-windows-rollback.ps1 -Instance release # undo it
 # From an ELEVATED PowerShell (Run as Administrator).
 #
 # WHAT A JOB COULD DO BEFORE THIS, measured 2026-09-26 on this host: the service logged on as the
@@ -30,19 +36,33 @@
 #     the 1.10.5 cut (2026-09-28); the Founder re-owned and reset the tree by hand that night. Step
 #     5 does it: owner Administrators, then every entry reset to inherit the runner directory's ACL.
 #
-# IDEMPOTENT; REFUSES, changing nothing, on anything it did not expect: a job running, a service in
-# neither the before nor the after shape, a missing MSVC install, a pin that does not verify, a
-# reparse point under the job workspace (a workspace folder it cannot list is re-owned, alone, and
-# walked before any /T runs).
+#   * The release instance's directory names SYSTEM, Administrators and its own virtual account and
+#     NO OTHER: config.cmd grants FullControl to a local group it makes (GITHUB_ActionsRunner_*),
+#     and step 5 removes every explicit entry but those three, whoever the group's members are.
+#
+# THE RELEASE INSTANCE'S INSTALL (step 0, only while its directory holds no runner): the installer
+# beside this script downloads the latest actions/runner, verified against two producers, and
+# registers it as a service under LocalSystem - the one account config.cmd can name before the
+# service, and so its virtual account, exists. The registration token reaches config.cmd through
+# the environment, never an argument. The service then runs as LocalSystem for the seconds until
+# step 1 stops it, reachable only by a job naming a label no workflow names before this script has
+# finished; step 6 moves it to the virtual account.
+#
+# IDEMPOTENT; REFUSES, changing nothing, on anything it did not expect: a job running on this
+# instance, a service in neither the before nor the after shape, a missing MSVC install, a pin that
+# does not verify, a reparse point under the job workspace (a workspace folder it cannot list is
+# re-owned, alone, and walked before any /T runs).
 # Uses SIDs, never group NAMES: this host's Windows is localized (Administrateurs, Utilisateurs).
 
-param([switch]$Apply)
+param([string]$Instance, [switch]$Apply)
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$RunnerDir    = 'C:\actions-runner-malf-win'
-$DataRoot     = 'C:\malf-runner-win'
+. (Join-Path $PSScriptRoot 'runner-instances.ps1')
+$inst = Select-RunnerInstance $Instance
+$RunnerDir    = $inst.RunnerDir
+$DataRoot     = $inst.DataRoot
 $PythonDir    = Join-Path $DataRoot 'python312'
 $LocalAppData = Join-Path $DataRoot 'LocalAppData'
 $StateDir     = Join-Path $DataRoot 'isolation'
@@ -110,49 +130,84 @@ $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Refuse 'run this from an ELEVATED PowerShell (Run as Administrator)'
 }
-if (-not (Test-Path -LiteralPath (Join-Path $RunnerDir '.runner'))) { Refuse "$RunnerDir is not a configured runner (.runner missing)" }
-
 # The service is identified by the binary it EXECUTES, never by a name glob (install-runner.ps1,
 # Get-RunnerService, says why).
-$svc = @(Get-CimInstance -ClassName Win32_Service | Where-Object {
-    $_.Name -like 'actions.runner.*' -and $_.PathName -and
-    $_.PathName.IndexOf($RunnerDir, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
-if ($svc.Count -ne 1) { Refuse "expected exactly one actions.runner.* service executing from $RunnerDir, found $($svc.Count)" }
-$svc = $svc[0]
-$ServiceName = $svc.Name
-$Virtual = "NT SERVICE\$ServiceName"
-$VirtualSid = (New-Object Security.Principal.NTAccount($Virtual)).Translate([Security.Principal.SecurityIdentifier]).Value
-
+function Get-InstanceService {
+    @(Get-CimInstance -ClassName Win32_Service | Where-Object {
+        $_.Name -like 'actions.runner.*' -and $_.PathName -and
+        $_.PathName.IndexOf("$RunnerDir\", [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+}
+$SystemLogons = @('LocalSystem', 'NT AUTHORITY\SYSTEM')
 $manifestPath = Join-Path $StateDir 'manifest.json'
-if ($svc.StartName -ieq $Virtual) {
-    $State = 'applied'
-    if (-not (Test-Path -LiteralPath $manifestPath)) { Refuse "the service already logs on as $Virtual but $manifestPath is absent - not this script's work" }
-    $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-    $DeskAccount = $manifest.DeskAccount
-} elseif (Test-Path -LiteralPath $manifestPath) {
-    # A run that stopped after step 1: the manifest holds the pre-isolation state and is never re-recorded.
-    $State = 'partial'
-    $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-    if ($manifest.DeskAccount -ine $svc.StartName) { Refuse "the service logs on as $($svc.StartName) but $manifestPath records $($manifest.DeskAccount) - not this script's work" }
-    $DeskAccount = $manifest.DeskAccount
+$configured = Test-Path -LiteralPath (Join-Path $RunnerDir '.runner')
+$svc = @(Get-InstanceService)
+
+if ($inst.Lifecycle -eq 'install' -and -not $configured -and $svc.Count -eq 0) {
+    # Nothing of this instance exists yet: step 0 installs it. The service name is the one config.cmd
+    # derives (actions.runner.<org>.<runner>), read back from the service itself after the install.
+    $State = 'absent'
+    $ServiceName = "actions.runner.$RunnerOrg.$($inst.RunnerName)"
+    $Virtual = "NT SERVICE\$ServiceName"
+    $VirtualSid = '(known once the service exists)'
+    $logonNow = '(no service yet)'
 } else {
-    $State = 'fresh'
-    $DeskAccount = $svc.StartName
-    if ($DeskAccount -in @('LocalSystem', 'NT AUTHORITY\SYSTEM', 'NT AUTHORITY\LocalService', 'NT AUTHORITY\NetworkService')) {
-        Refuse "the service logs on as $DeskAccount, not a desk account - this script moves a runner off a HUMAN account; to move it off $DeskAccount, change the logon by hand with the same grants"
+    if (-not $configured) { Refuse "$RunnerDir is not a configured runner (.runner missing)" }
+    if ($svc.Count -ne 1) { Refuse "expected exactly one actions.runner.* service executing from $RunnerDir, found $($svc.Count)" }
+    $svc = $svc[0]
+    $ServiceName = $svc.Name
+    $Virtual = "NT SERVICE\$ServiceName"
+    $VirtualSid = (New-Object Security.Principal.NTAccount($Virtual)).Translate([Security.Principal.SecurityIdentifier]).Value
+    $logonNow = $svc.StartName
+
+    if ($svc.StartName -ieq $Virtual) {
+        $State = 'applied'
+        if (-not (Test-Path -LiteralPath $manifestPath)) { Refuse "the service already logs on as $Virtual but $manifestPath is absent - not this script's work" }
+        $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+    } elseif ($inst.Lifecycle -eq 'install') {
+        # The install's own before-shape: a service config.cmd registered under LocalSystem, by step 0
+        # of a run that then stopped, or of this one.
+        if ($svc.StartName -notin $SystemLogons) { Refuse "the service logs on as $($svc.StartName): the $($inst.Name) instance is installed under LocalSystem and moved to $Virtual, and this is neither" }
+        $State = 'installed'
+    } elseif (Test-Path -LiteralPath $manifestPath) {
+        # A run that stopped after step 1: the manifest holds the pre-isolation state and is never re-recorded.
+        $State = 'partial'
+        $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+        if ($manifest.DeskAccount -ine $svc.StartName) { Refuse "the service logs on as $($svc.StartName) but $manifestPath records $($manifest.DeskAccount) - not this script's work" }
+    } else {
+        $State = 'fresh'
+        if ($svc.StartName -in ($SystemLogons + @('NT AUTHORITY\LocalService', 'NT AUTHORITY\NetworkService'))) {
+            Refuse "the service logs on as $($svc.StartName), not a desk account - the $($inst.Name) instance is MOVED off a HUMAN account; to move it off $($svc.StartName), change the logon by hand with the same grants"
+        }
     }
 }
-$deskName = $DeskAccount -replace '^\.\\', "$env:COMPUTERNAME\"
-$DeskSid = (New-Object Security.Principal.NTAccount($deskName)).Translate([Security.Principal.SecurityIdentifier]).Value
-$DeskProfile = (Get-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$DeskSid").ProfileImagePath
-$MsvcSource = Join-Path $DeskProfile "AppData\Local\$MsvcName"
+
+# The MSVC install both instances read. The ci instance was the desk account's, so it is that
+# account's %LOCALAPPDATA%; the release instance takes the SAME directory from the ci instance's
+# record, so the two runners cannot come to read different toolsets.
+if ($inst.Lifecycle -eq 'move') {
+    $DeskAccount = if ($State -eq 'fresh') { $svc.StartName } else { $manifest.DeskAccount }
+    $deskName = $DeskAccount -replace '^\.\\', "$env:COMPUTERNAME\"
+    $DeskSid = (New-Object Security.Principal.NTAccount($deskName)).Translate([Security.Principal.SecurityIdentifier]).Value
+    $DeskProfile = (Get-ItemProperty -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$DeskSid").ProfileImagePath
+    $MsvcSource = Join-Path $DeskProfile "AppData\Local\$MsvcName"
+} else {
+    $ciManifest = Join-Path (Select-RunnerInstance 'ci').DataRoot 'isolation\manifest.json'
+    if (-not (Test-Path -LiteralPath $ciManifest)) { Refuse "no record of the ci instance at $ciManifest - apply -Instance ci first: the release instance reads the MSVC install that record names" }
+    $MsvcSource = (Get-Content -Raw -LiteralPath $ciManifest | ConvertFrom-Json).MsvcSource
+    if (-not $MsvcSource) { Refuse "$ciManifest names no MsvcSource" }
+}
 if (-not (Test-Path -LiteralPath (Join-Path $MsvcSource 'VC\Tools\MSVC'))) {
-    Refuse "no MSVC install at $MsvcSource - setup-msvc1452 needs elevation to install one, which the virtual account will not have. Provision it first (one run of the probe job under the current account does it), then re-run"
+    Refuse "no MSVC install at $MsvcSource - setup-msvc1452 needs elevation to install one, which the virtual account will not have. Provision it first (one run of the probe job under the desk account does it), then re-run"
 }
 
-# A job must not be running: the logon change restarts the service.
-$worker = @(Get-Process -Name 'Runner.Worker' -ErrorAction SilentlyContinue)
-if ($worker.Count -gt 0) { Refuse "a job is running (Runner.Worker pid $($worker.Id -join ', ')) - let it finish, then re-run" }
+# A job must not be running ON THIS INSTANCE: the logon change restarts its service. A job on the
+# other instance is another service's and is left alone.
+function Get-InstanceProcess([string]$exe) {
+    @(Get-CimInstance Win32_Process -Filter "Name='$exe'" | Where-Object {
+        $_.ExecutablePath -and $_.ExecutablePath.StartsWith("$RunnerDir\", [StringComparison]::OrdinalIgnoreCase) })
+}
+$worker = @(Get-InstanceProcess 'Runner.Worker.exe')
+if ($worker.Count -gt 0) { Refuse "a job is running on $($inst.RunnerName) (Runner.Worker pid $($worker.ProcessId -join ', ')) - let it finish, then re-run" }
 
 # What the jobs resolve from the MACHINE path, the only path the virtual account has.
 $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
@@ -169,9 +224,13 @@ foreach ($exe in 'pwsh.exe', 'git.exe') {
 if ($machinePath -match '\\Users\\') { Refuse "the machine PATH names a directory under a user profile - the runner's PATH is built from it: $machinePath" }
 
 # The job workspace, where .runner says it is (relative to the runner directory unless rooted).
-$workFolder = (Get-Content -Raw -LiteralPath (Join-Path $RunnerDir '.runner') | ConvertFrom-Json).workFolder
-if (-not $workFolder) { Refuse "$RunnerDir\.runner names no workFolder" }
-$WorkDir = if ([IO.Path]::IsPathRooted($workFolder)) { $workFolder } else { Join-Path $RunnerDir $workFolder }
+# note: an instance not installed yet has no .runner; config.cmd's default workFolder is _work.
+function Get-WorkDir {
+    $workFolder = (Get-Content -Raw -LiteralPath (Join-Path $RunnerDir '.runner') | ConvertFrom-Json).workFolder
+    if (-not $workFolder) { Refuse "$RunnerDir\.runner names no workFolder" }
+    if ([IO.Path]::IsPathRooted($workFolder)) { $workFolder } else { Join-Path $RunnerDir $workFolder }
+}
+$WorkDir = if ($State -eq 'absent') { Join-Path $RunnerDir '_work' } else { Get-WorkDir }
 if (Test-Path -LiteralPath $WorkDir) {
     if ((Get-Item -LiteralPath $WorkDir -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { Refuse "$WorkDir is itself a reparse point - step 5's /T would rewrite its target" }
     $scan = Find-ReparsePoint $WorkDir
@@ -182,12 +241,18 @@ if (Test-Path -LiteralPath $WorkDir) {
     $workPlan = "$WorkDir - absent (no job has run here): nothing to reset"
 }
 
+$registration = if ($inst.Lifecycle -eq 'install') {
+    if ($State -eq 'absent') { "step 0 INSTALLS it: the latest actions/runner, verified, registered as $($inst.RunnerName) in group $($inst.Group) with ONLY the label $($inst.Labels); the token through the environment" }
+    else { "kept: $($inst.RunnerName), group $($inst.Group), the one label $($inst.Labels) (no re-register: its RSA key is DPAPI LocalMachine-scoped)" }
+} else { 'kept (no re-register: its RSA key is DPAPI LocalMachine-scoped)' }
+$aclPlan = if ($inst.DeskReads) { "SYSTEM and Administrators full, $Virtual modify; the local group config.cmd made keeps its grant (the desk reads this runner)" }
+           else { "SYSTEM and Administrators full, $Virtual modify, and NO OTHER entry: every other explicit grant is removed, config.cmd's local group included" }
 @"
 
-[isolate] state: $State
-  service           $ServiceName  (logon now: $($svc.StartName))
+[isolate] instance: $($inst.Name)   state: $State
+  service           $ServiceName  (logon now: $logonNow)
   new logon         $Virtual  (SID $VirtualSid) - no password, not an administrator
-  runner directory  $RunnerDir - owner Administrators; SYSTEM and Administrators full, $Virtual modify;
+  runner directory  $RunnerDir - owner Administrators; $aclPlan;
                     inheritance from C:\ cut (it gave Authenticated Users MODIFY on the runner's own binaries)
   Python            $PythonDir - NuGet python 3.12.10, SHA-256 + SHA-512 pinned, signer checked
   LOCALAPPDATA      $LocalAppData, holding a junction $MsvcName -> $MsvcSource
@@ -195,27 +260,55 @@ if (Test-Path -LiteralPath $WorkDir) {
   runner .env       LOCALAPPDATA and PATH ($PythonDir, its Scripts, then the machine PATH)
   job workspace     $workPlan
                     (a pre-isolation folder keeps its creator's ACL; the virtual account could not delete one)
-  kept              the runner registration (no re-register: its RSA key is DPAPI LocalMachine-scoped)
+  registration      $registration
 "@ | Write-Host
 
 if (-not $Apply) { Write-Host "`n[isolate] PLAN ONLY - nothing was changed. Re-run with -Apply to do it."; exit 0 }
 
 # --- Apply --------------------------------------------------------------------------------------
 
+if ($State -eq 'absent') {
+    Step "0/6 install $($inst.RunnerName) in group $($inst.Group), label $($inst.Labels) only"
+    $installer = Join-Path $PSScriptRoot 'install-runner.ps1'
+    $here = Get-Location
+    try {
+        & $installer -Org $RunnerOrg -RunnerName $inst.RunnerName -RunnerDir $RunnerDir -Labels $inst.Labels `
+            -RunnerGroup $inst.Group -NoDefaultLabels:$inst.OnlyLabels
+    } finally { Set-Location $here }
+    $svc = @(Get-InstanceService)
+    if ($svc.Count -ne 1) { Refuse "the install left $($svc.Count) actions.runner.* service(s) executing from $RunnerDir, not one" }
+    $svc = $svc[0]
+    if ($svc.StartName -notin $SystemLogons) { Refuse "the installed service logs on as $($svc.StartName), not LocalSystem" }
+    $ServiceName = $svc.Name
+    $Virtual = "NT SERVICE\$ServiceName"
+    $VirtualSid = (New-Object Security.Principal.NTAccount($Virtual)).Translate([Security.Principal.SecurityIdentifier]).Value
+    $pool = (Get-Content -Raw -LiteralPath (Join-Path $RunnerDir '.runner') | ConvertFrom-Json).poolName
+    if ($pool -ne $inst.Group) { Refuse "the runner registered into the group '$pool', not '$($inst.Group)' - undo: isolate-runner-windows-rollback.ps1 -Instance $($inst.Name) -Apply" }
+    $WorkDir = Get-WorkDir
+    $State = 'installed'
+    Say "$($inst.RunnerName) registered in $pool as $ServiceName; its virtual account is $Virtual ($VirtualSid)"
+}
+
 Step "1/6 stop the service and record the rollback manifest"
 Stop-Service -Name $ServiceName -Force
 (Get-Service -Name $ServiceName).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(60))
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
-if ($State -eq 'fresh') {
+if (-not (Test-Path -LiteralPath $manifestPath)) {
     $envFile = Join-Path $RunnerDir '.env'
     $envOrig = if (Test-Path -LiteralPath $envFile) { Get-Content -Raw -LiteralPath $envFile } else { '' }
     Set-Content -LiteralPath (Join-Path $StateDir 'env.orig') -Value $envOrig -NoNewline
-    $aclSave = Join-Path $StateDir 'runner-acl.icacls'
-    Native 'icacls.exe' @($RunnerDir, '/save', $aclSave, '/T', '/C', '/Q')
-    $sidType = ((sc.exe qsidtype $ServiceName) -match 'SERVICE_SID_TYPE' | Select-Object -First 1) -replace '.*:\s*', ''
-    @{ DeskAccount = $svc.StartName; ServiceName = $ServiceName; SidType = $sidType.Trim();
-       MsvcSource = $MsvcSource; Applied = (Get-Date).ToString('s') } |
-        ConvertTo-Json | Set-Content -LiteralPath $manifestPath
+    if ($inst.Lifecycle -eq 'move') {
+        $aclSave = Join-Path $StateDir 'runner-acl.icacls'
+        Native 'icacls.exe' @($RunnerDir, '/save', $aclSave, '/T', '/C', '/Q')
+        $sidType = ((sc.exe qsidtype $ServiceName) -match 'SERVICE_SID_TYPE' | Select-Object -First 1) -replace '.*:\s*', ''
+        @{ Lifecycle = 'move'; DeskAccount = $svc.StartName; ServiceName = $ServiceName; SidType = $sidType.Trim();
+           MsvcSource = $MsvcSource; Applied = (Get-Date).ToString('s') } |
+            ConvertTo-Json | Set-Content -LiteralPath $manifestPath
+    } else {
+        # An installed instance is undone by removing it, so there is no earlier ACL or logon to keep.
+        @{ Lifecycle = 'install'; ServiceName = $ServiceName; MsvcSource = $MsvcSource; Applied = (Get-Date).ToString('s') } |
+            ConvertTo-Json | Set-Content -LiteralPath $manifestPath
+    }
 }
 Say "service stopped; rollback manifest in $StateDir"
 
@@ -280,6 +373,22 @@ Step "5/6 runner directory $RunnerDir - cut inheritance from C:\, grant $Virtual
 Native 'icacls.exe' @($RunnerDir, '/setowner', "*$SidAdmins", '/Q')
 Native 'icacls.exe' @($RunnerDir, '/inheritance:r', '/grant:r',
     "*${SidSystem}:(OI)(CI)F", "*${SidAdmins}:(OI)(CI)F", "*${VirtualSid}:(OI)(CI)M", '/Q')
+if (-not $inst.DeskReads) {
+    # config.cmd granted FullControl to a local group it made (GITHUB_ActionsRunner_*); whoever its
+    # members are, this instance's directory names three principals and no other.
+    $kept = @($SidSystem, $SidAdmins, $VirtualSid)
+    $others = @((Get-Acl -LiteralPath $RunnerDir).Access | Where-Object { -not $_.IsInherited } |
+        ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } |
+        Select-Object -Unique | Where-Object { $_ -notin $kept })
+    foreach ($sid in $others) {
+        Native 'icacls.exe' @($RunnerDir, '/remove', "*$sid", '/Q')
+        Say "removed the explicit entry of $sid from $RunnerDir"
+    }
+    $left = @((Get-Acl -LiteralPath $RunnerDir).Access |
+        ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } |
+        Select-Object -Unique | Where-Object { $_ -notin $kept })
+    if ($left.Count -gt 0) { Refuse "$RunnerDir still names $($left -join ', ') beside SYSTEM, Administrators and $Virtual" }
+}
 # note: AFTER the grant above, so the reset inherits it. Owner first: an owner may always rewrite a DACL, whatever it denies.
 if (Test-Path -LiteralPath $WorkDir) {
     # The walk again, now re-owning a folder it cannot list (that folder alone, no /T) before
@@ -325,15 +434,16 @@ foreach ($i in 1..90) {
     if ($log -and (Select-String -LiteralPath $log.FullName -Pattern 'Listening for Jobs' -Quiet)) { $listening = $log.FullName; break }
     Start-Sleep -Seconds 1
 }
-if (-not $listening) { Refuse "the runner did not reach 'Listening for Jobs' within 90 s - read $RunnerDir\_diag. Undo: malf\runner\isolate-runner-windows-rollback.ps1 -Apply" }
-$listener = Get-CimInstance Win32_Process -Filter "Name='Runner.Listener.exe'" | Select-Object -First 1
+if (-not $listening) { Refuse "the runner did not reach 'Listening for Jobs' within 90 s - read $RunnerDir\_diag. Undo: malf\runner\isolate-runner-windows-rollback.ps1 -Instance $($inst.Name) -Apply" }
+$listener = Get-InstanceProcess 'Runner.Listener.exe' | Select-Object -First 1
+if (-not $listener) { Refuse "no Runner.Listener.exe runs from $RunnerDir" }
 $owner = Invoke-CimMethod -InputObject $listener -MethodName GetOwner
 if ("$($owner.Domain)\$($owner.User)" -ne $Virtual) { Refuse "Runner.Listener runs as $($owner.Domain)\$($owner.User), not $Virtual" }
 
 @"
 
-[isolate] DONE - the runner listens as $Virtual ($listening).
-  Once the WSL runner is moved too, the probe (one run on each runner):
+[isolate] DONE - $($inst.RunnerName) listens as $Virtual ($listening).
+  The probe, one leg on each runner:
     gh workflow run runner-isolation-probe.yml -R CodeRoasted/coderoast
-  Undo: pwsh -ExecutionPolicy Bypass -File malf\runner\isolate-runner-windows-rollback.ps1 -Apply
+  Undo: pwsh -ExecutionPolicy Bypass -File malf\runner\isolate-runner-windows-rollback.ps1 -Instance $($inst.Name) -Apply
 "@ | Write-Host
