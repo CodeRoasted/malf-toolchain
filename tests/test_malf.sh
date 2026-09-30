@@ -3044,28 +3044,67 @@ check "setup-build-env derives CONAN_HOME through this script, and skips actions
 rm -rf "$ch_tmp"
 echo
 
-echo "[7q8] at job end every conan home drops its build and temp folders, and reports its size (DN-119.D2)"
+echo "[7q8] at job end every conan home drops its build and temp folders and its superseded versions, and reports its own size"
 
-cc_script="$MALF_ROOT/.github/actions/setup-build-env/clean-conan-homes.sh"
+# The script runs from a toolchain tree and reads that tree's conan.lock, three levels up, so the
+# fixture is a copy of it inside a tree carrying a lock of its own.
 cc_tmp="$(realpath "$(mktemp -d)")"
+cc_tree="$cc_tmp/toolchain/.github/actions/setup-build-env"; mkdir -p "$cc_tree"
+cp "$MALF_ROOT/.github/actions/setup-build-env/clean-conan-homes.sh" "$cc_tree/"
+cc_script="$cc_tree/clean-conan-homes.sh"
+cat > "$cc_tmp/toolchain/conan.lock" <<'LOCK'
+{"version": "0.5",
+ "requires": ["zlib/1.3.2#aaaa%1.0", "cc_first/2.0.0#bbbb%1.0"],
+ "build_requires": ["cmake/4.4.3#cccc%1.0"],
+ "python_requires": []}
+LOCK
 cc_bin="$cc_tmp/bin"; cc_home="$cc_tmp/conan"; mkdir -p "$cc_bin" "$cc_home"
+# A conan whose cache is one line per recipe reference in <home>/refs, logging every call.
 cat > "$cc_bin/conan" <<'STUB'
 #!/usr/bin/env bash
 echo "$CONAN_HOME :: $*" >> "$CC_LOG"
+case "$1" in
+    list)   python3 -c 'import json, sys; print(json.dumps({"Local Cache": {line.strip(): {} for line in open(sys.argv[1]) if line.strip()}}))' "$CONAN_HOME/refs" ;;
+    remove) grep -vxF -- "$2" "$CONAN_HOME/refs" > "$CONAN_HOME/refs.next" || true; mv "$CONAN_HOME/refs.next" "$CONAN_HOME/refs" ;;
+esac
+exit 0
 STUB
 chmod +x "$cc_bin/conan"
 for h in "$cc_home" "$cc_home/gcc16-release" "$cc_home/cut-verify"; do
     mkdir -p "$h/p/b/build1" && touch "$h/settings.yml"
+    printf 'zlib/1.3.2\ncmake/4.4.3\n' > "$h/refs"
 done
+# The base holds two versions the lock no longer names, one it names, and a package the lock does
+# not know at all; a keyed home holds a superseded version of its own.
+printf 'zlib/1.3.1\ncc_first/1.9.0\nunlocked_tool/0.1\n' >> "$cc_home/refs"
+printf 'cmake/3.31.0\n' >> "$cc_home/gcc16-release/refs"
+# The base's own content is 2 MB; a keyed home nested under it weighs 40 MB.
+head -c 2097152 /dev/zero > "$cc_home/p/b/build1/object"
+head -c 41943040 /dev/zero > "$cc_home/gcc16-release/p/b/build1/object"
 # conan's own structural children carry a settings.yml when a stray run seeded them (malf's
 # `_malf_conan_homes` guard); they are not homes, and a clean pointed at one would seed it more.
 mkdir -p "$cc_home/profiles" "$cc_home/p/pkg1" && touch "$cc_home/profiles/settings.yml"
 cc_out="$(PATH="$cc_bin:$PATH" CC_LOG="$cc_tmp/log" CONAN_HOME="$cc_home" bash "$cc_script" 2>&1)"; cc_rc=$?
 check "the base home and each keyed home run \`conan cache clean '*' --build --temp\`, no structural child" \
       "rc=0 $cc_home :: cache clean * --build --temp|$cc_home/cut-verify :: cache clean * --build --temp|$cc_home/gcc16-release :: cache clean * --build --temp" \
-      "rc=$cc_rc $(sort "$cc_tmp/log" 2>/dev/null | tr '\n' '|' | sed 's/|$//')"
-check "each home's size is printed, its build folders apart, so the log carries gate G2's number" \
+      "rc=$cc_rc $(grep ':: cache clean' "$cc_tmp/log" 2>/dev/null | sort | tr '\n' '|' | sed 's/|$//')"
+check "each home's size is printed, its build folders apart" \
       "3" "$(grep -c '^conan home .* MB, of which p/b ' <<< "$cc_out")"
+cc_base_mb="$(sed -n "s|^conan home $cc_home: \([0-9]*\) MB.*|\1|p" <<< "$cc_out")"
+check "the base home's line is its OWN size: the keyed homes nested under it are not counted in it" \
+      "own" "$([[ -n "$cc_base_mb" && "$cc_base_mb" -lt 10 ]] && echo own || echo "GOT: ${cc_base_mb:-no line} MB — $(grep "^conan home $cc_home:" <<< "$cc_out")")"
+check "a version the lock no longer names is removed from the home that holds it — and only that" \
+      "$cc_home :: remove cc_first/1.9.0 -c|$cc_home :: remove zlib/1.3.1 -c|$cc_home/gcc16-release :: remove cmake/3.31.0 -c" \
+      "$(grep ':: remove ' "$cc_tmp/log" 2>/dev/null | sort | tr '\n' '|' | sed 's/|$//')"
+check "the version the lock names, and a package the lock does not know, both stay" \
+      "zlib/1.3.2 cmake/4.4.3 unlocked_tool/0.1" "$(tr '\n' ' ' < "$cc_home/refs" | sed 's/ $//')"
+check "the prune says what it removed, per home" \
+      "said" "$(grep -q "pruned 2 superseded version(s) from $cc_home: cc_first/1.9.0 zlib/1.3.1" <<< "$cc_out" && echo said || echo "GOT: $(grep -i 'superseded' <<< "$cc_out")")"
+rm -f "$cc_tmp/toolchain/conan.lock"; : > "$cc_tmp/log"
+cc_out="$(PATH="$cc_bin:$PATH" CC_LOG="$cc_tmp/log" CONAN_HOME="$cc_home" bash "$cc_script" 2>&1)"; cc_rc=$?
+check "without a lock nothing is pruned, the clean still runs, and the output says which was skipped" \
+      "rc=0 0 3 said" \
+      "rc=$cc_rc $(grep -c ':: remove ' "$cc_tmp/log" || true) $(grep -c ':: cache clean' "$cc_tmp/log" || true) $(grep -q 'no conan.lock at' <<< "$cc_out" && echo said || echo "GOT: $cc_out")"
 cc_out="$(PATH="$cc_bin:$PATH" CC_LOG="$cc_tmp/log" CONAN_HOME="$cc_tmp/absent" bash "$cc_script" 2>&1)"; cc_rc=$?
 check "no conan home at all is exit 0, saying so" \
       "rc=0 said" "rc=$cc_rc $(grep -q 'no conan home at' <<< "$cc_out" && echo said || echo "GOT: $cc_out")"
