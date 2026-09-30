@@ -89,9 +89,11 @@ MALF_AUTO_WORKSPACE_DEPS="${MALF_AUTO_WORKSPACE_DEPS:-1}"
 # Two independent guards, because either alone leaves a hole:
 #   size cap — keeps pathological inputs out of the tool entirely
 #   address-space cap — bounds the damage when a *small* file behaves badly
-# The largest real source file in this workspace is ~99 KB and a real clang-tidy
-# TU peaks at ~436 MB, so both defaults sit an order of magnitude above anything
-# legitimate and well below the RAM whose exhaustion kills the box.
+# The largest real source file in this workspace is ~99 KB, so both defaults sit
+# an order of magnitude above anything legitimate and well below the RAM whose
+# exhaustion kills the box. The address-space cap here is `format`'s; `lint`
+# holds each clang-tidy to its own measured cap, MALF_LINT_MEM_LIMIT_KB below,
+# because its fan-out's width is derived from that figure.
 MALF_SOURCE_MAX_FILE_KB="${MALF_SOURCE_MAX_FILE_KB:-2048}"
 MALF_SOURCE_MEM_LIMIT_KB="${MALF_SOURCE_MEM_LIMIT_KB:-4194304}"
 
@@ -109,9 +111,23 @@ MALF_SOURCE_MEM_LIMIT_KB="${MALF_SOURCE_MEM_LIMIT_KB:-4194304}"
 #     for what OTHER processes grow by while the fan-out runs. It is also the largest round figure
 #     that leaves an idle 16-core, 23.5 GiB machine its 16 jobs: with about 20 GiB available, 16
 #     jobs of 1.1 GiB fit under any reserve up to about 2.4 GiB.
+#   cap, a lint child — 1.75 GiB. Measured over 352 translation units of eight repositories, one
+#     full `malf lint --all-files` each: the peak ADDRESS SPACE of a clang-tidy had a median of
+#     729 MiB, a 99th percentile of 1 184 MiB and a maximum of 1 376 MiB, never more than 165 MiB
+#     above its max RSS, and no unit above 1 536 MiB. The cap is that maximum plus 30 %. The
+#     distribution is not heavy-tailed (maximum under twice the median), so one cap for every
+#     child wastes little; were a few units several times the rest, the width would be better
+#     served by admitting each unit at its own measured peak.
+#     It is ENFORCED, which the build's cap is not: each clang-tidy runs under `ulimit -v` at this
+#     figure, so it bounds ADDRESS SPACE and no child can take more than the width counted it for.
+#     A translation unit that reaches it dies and is reported NOT LINTED, by name and by cause.
 MALF_BUILD_JOB_MEM_KB="${MALF_BUILD_JOB_MEM_KB:-1153434}"
 MALF_SANITIZER_JOB_MEM_KB="${MALF_SANITIZER_JOB_MEM_KB:-3145728}"
 MALF_FANOUT_RESERVE_KB="${MALF_FANOUT_RESERVE_KB:-2097152}"
+MALF_LINT_MEM_LIMIT_KB="${MALF_LINT_MEM_LIMIT_KB:-1835008}"
+# A died translation unit whose address space peaked within this share of the cap is reported as
+# having reached it: the process grows in steps, so its last sampled peak sits just under the cap.
+MALF_LINT_CAP_REACHED_PERCENT=90
 # Files per clang-format process. Bounds the blast radius of a pathological
 # file to its own batch instead of the whole run; ~15 processes for this
 # workspace's 713 files, so the startup cost is noise. (`lint` fans out at
@@ -2353,13 +2369,19 @@ PY
 
     echo "malf lint: checking ${#files[@]} file(s) ..."
 
-    # Parallel execution via xargs -P. Cap at 4 jobs (a real TU peaks at ~436 MB,
-    # measured) AND cap each child's address space below — the job count alone
-    # bounds how MANY processes run, not how large any one of them grows, which
-    # is the half that lets a single pathological TU take the box down.
-    local jobs
-    jobs="$(( $(nproc) < 4 ? $(nproc) : 4 ))"
-    export _MALF_MEM_LIMIT="$MALF_SOURCE_MEM_LIMIT_KB"
+    # Parallel execution via xargs -P, its width derived like every fan-out's (`_malf_width`):
+    # from the cores and from the memory available now, at MALF_LINT_MEM_LIMIT_KB a child. The
+    # same figure caps each child's address space below — the job count alone bounds how MANY
+    # processes run, not how large any one of them grows, which is the half that lets a single
+    # pathological TU take the box down. The derivation is printed, so a log says why a run was
+    # narrow.
+    local jobs lint_cores lint_avail=""
+    lint_cores="$(nproc 2>/dev/null || echo 2)"
+    lint_avail="$(_malf_mem_available_kib)" || lint_avail=""
+    jobs="$(_malf_width "$lint_cores" "$lint_avail" "$MALF_FANOUT_RESERVE_KB" "$MALF_LINT_MEM_LIMIT_KB")"
+    _malf_width_line "malf lint" "$jobs" "$lint_cores" "$lint_avail" "$MALF_FANOUT_RESERVE_KB" \
+        "$MALF_LINT_MEM_LIMIT_KB"
+    export _MALF_MEM_LIMIT="$MALF_LINT_MEM_LIMIT_KB"
 
     local tmpdir="$_MALF_LINT_SCRATCH"
 
@@ -2473,11 +2495,28 @@ PY
         for file in "${timed_out[@]}"; do
             echo "  ${file#"$CWD"/} — TIMED OUT at ${MALF_LINT_TU_TIMEOUT_S} s (MALF_LINT_TU_TIMEOUT_S)" >&2
         done
+        # A THIRD CAUSE, read from the cost the child recorded: a unit that died with its address
+        # space at the cap was ended by the cap, not by a check. Named, or a reader hunts a crash in
+        # a check that never failed — and the remedy is a different one.
+        local capped=0 cvm
         for file in "${died[@]}"; do
             ckey="$(printf '%s' "$file" | md5sum | cut -c1-8)"
-            echo "  ${file#"$CWD"/} — died (exit $(cat "$tmpdir/${ckey}.crashrc" 2>/dev/null || echo '?'))" >&2
+            cvm=0
+            read -r _ _ cvm < "$tmpdir/${ckey}.cost" 2>/dev/null || cvm=0
+            [[ "$cvm" =~ ^[0-9]+$ ]] || cvm=0
+            if (( cvm * 100 >= MALF_LINT_MEM_LIMIT_KB * MALF_LINT_CAP_REACHED_PERCENT )); then
+                capped=$(( capped + 1 ))
+                echo "  ${file#"$CWD"/} — died (exit $(cat "$tmpdir/${ckey}.crashrc" 2>/dev/null || echo '?')) AT THE MEMORY CAP: address space $(( cvm / 1024 )) MiB of $(( MALF_LINT_MEM_LIMIT_KB / 1024 )) MiB (MALF_LINT_MEM_LIMIT_KB)" >&2
+            else
+                echo "  ${file#"$CWD"/} — died (exit $(cat "$tmpdir/${ckey}.crashrc" 2>/dev/null || echo '?'))" >&2
+            fi
         done
         echo "malf lint: these files were checked by ZERO checks. This is a coverage hole, not a finding." >&2
+        if (( capped > 0 )); then
+            echo "malf lint: A unit AT THE MEMORY CAP was ended by this run's per-child address-space cap, not by a" >&2
+            echo "malf lint: check: the cap is a measurement and the unit has outgrown it. Re-run it under a higher" >&2
+            echo "malf lint: MALF_LINT_MEM_LIMIT_KB before reading its dump as a checker crash; the width narrows with it." >&2
+        fi
         if (( ${#timed_out[@]} > 0 )); then
             echo "malf lint: A TIMED OUT unit is a slow TU under THIS RUN's per-TU cap, not a checker death:" >&2
             echo "malf lint: re-run it under a higher MALF_LINT_TU_TIMEOUT_S (default ${MALF_LINT_TU_TIMEOUT_DEFAULT_S} s) before" >&2

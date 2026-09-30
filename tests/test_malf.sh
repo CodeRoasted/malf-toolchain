@@ -703,6 +703,20 @@ if [[ -n "${LK_TIDY_WARN_ON:-}" && "$last" == *"$LK_TIDY_WARN_ON" ]]; then
 fi
 [[ -n "${LK_TIDY_SLEEP_ON:-}" && "$last" == *"$LK_TIDY_SLEEP_ON" ]] && exec sleep 5
 [[ -n "${LK_TIDY_DIE_ON:-}" && "$last" == *"$LK_TIDY_DIE_ON" ]] && exit 139
+# The address-space limit this process runs under ([7j3c]): the width counts each child at that cap.
+[[ -n "${LK_TIDY_ULIMIT_LOG:-}" ]] && ulimit -v >> "$LK_TIDY_ULIMIT_LOG"
+# Grow until the address-space limit refuses, as a checker on a too-heavy unit does, then abort.
+# It stays at its peak for a moment first, so the peak is one a sampler can read.
+if [[ -n "${LK_TIDY_HOG_ON:-}" && "$last" == *"$LK_TIDY_HOG_ON" ]]; then
+    exec python3 -c 'import os, time
+held = []
+try:
+    while True:
+        held.append(bytearray(8 * 1024 * 1024))
+except MemoryError:
+    time.sleep(0.6)
+    os.abort()'
+fi
 exit 0
 LKTIDY
 chmod +x "$lk_bin/clang-21" "$lk_bin/clang-tidy"
@@ -828,6 +842,29 @@ check "the run ends with one COST line naming the heaviest and the longest trans
 check "a timed-out translation unit still leaves its cost, and the verdict is unchanged" \
       "rc=1 1 timed-out" \
       "$(out="$(cd "$lk_repo/core" && PATH="$lk_bin:$PATH" LK_TIDY_LOG="$lk_tmp/tidy.cost2.log" LK_TIDY_SLEEP_ON=engine.cpp MALF_LINT_TU_TIMEOUT_S=1 MALF_PROFILE_NAME="" bash "$MALF_BIN" lint --console 2>&1)"; echo "rc=$? $(grep -cE '^\[1/1\] src/engine\.cpp  [0-9]+\.[0-9] s  rss ' <<< "$out") $([[ "$out" == *"TIMED OUT at 1 s"* ]] && echo timed-out || echo no-timeout)")"
+
+echo "[7j3c] the lint's width is derived like the build's, at a cap each child is held to"
+
+check "the lint child's declared cap is 1.75 GiB, and on an idle 16-core machine that is 10 jobs" \
+      "1835008 10" "$MALF_LINT_MEM_LIMIT_KB $(_malf_width 16 21486592 "$MALF_FANOUT_RESERVE_KB" "$MALF_LINT_MEM_LIMIT_KB")"
+check "beside a build holding 7.8 GiB (12.2 GiB available) the lint gets 5 jobs" \
+      "5" "$(_malf_width 16 12792627 "$MALF_FANOUT_RESERVE_KB" "$MALF_LINT_MEM_LIMIT_KB")"
+check "the run prints its width's derivation, the four operands and the width" \
+      "1" "$(grep -cE '^malf lint: -j[0-9]+ = (max\(1, min\([0-9]+ cores, floor\(\(MemAvailable [0-9]+ MiB - reserve 2048 MiB\) / [0-9]+ MiB a job\)\)\)|[0-9]+ cores; MemAvailable is not reported)' <<< "$lk_cost_out")"
+lk_ul_out="$(cd "$lk_repo/core" && PATH="$lk_bin:$PATH" LK_TIDY_LOG="$lk_tmp/tidy.ul.log" \
+    LK_TIDY_ULIMIT_LOG="$lk_tmp/ulimit.log" MALF_LINT_MEM_LIMIT_KB=3000000 MALF_PROFILE_NAME="" bash "$MALF_BIN" lint --console 2>&1)"
+check "each child runs under the address-space cap the width counted it at (MALF_LINT_MEM_LIMIT_KB)" \
+      "3000000 2929" \
+      "$(cat "$lk_tmp/ulimit.log" 2>/dev/null) $(sed -n 's|^malf lint: -j.* / \([0-9]*\) MiB a job.*|\1|p' <<< "$lk_ul_out")"
+# A unit the cap ends is a THIRD cause, beside a checker death and a timeout: named, because its
+# remedy is the cap and not the check.
+lk_hog_out="$(cd "$lk_repo/core" && PATH="$lk_bin:$PATH" LK_TIDY_LOG="$lk_tmp/tidy.hog.log" \
+    LK_TIDY_HOG_ON=engine.cpp MALF_LINT_MEM_LIMIT_KB=307200 MALF_PROFILE_NAME="" bash "$MALF_BIN" lint --console 2>&1)"; lk_hog_rc=$?
+check "a unit that dies with its address space at the cap reads AT THE MEMORY CAP, naming both figures" \
+      "rc=1 capped" \
+      "rc=$lk_hog_rc $(grep -qE 'src/engine\.cpp — died \(exit 134\) AT THE MEMORY CAP: address space [0-9]+ MiB of 300 MiB \(MALF_LINT_MEM_LIMIT_KB\)' <<< "$lk_hog_out" && echo capped || echo "GOT: $(grep -E 'engine.cpp|NOT LINTED' <<< "$lk_hog_out")")"
+check "a unit that dies far under the cap is a plain death, with no cap wording" \
+      "plain" "$([[ "$lk_die_out" == *"src/engine.cpp — died (exit 139)"* && "$lk_die_out" != *"AT THE MEMORY CAP"* ]] && echo plain || echo "GOT: $lk_die_out")"
 
 echo "[7j4] lint de-systems FIRST-PARTY include roots, and leaves third-party ones alone"
 
