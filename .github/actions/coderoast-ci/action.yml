@@ -22,6 +22,13 @@ inputs:
       defaults to v<version>. `#` starts a comment. Blank / omitted = no vendoring (a tower-root repo).
     required: false
     default: ''
+  deps:
+    description: |
+      How the `vendor` rows reach the cache — `vendor` (their release tarballs) or `build` (each
+      created from its repository's `main`). Passed to coderoast-vendor, which refuses rows with no
+      declared `deps`; see its description for the two paths.
+    required: false
+    default: ''
   modules:
     description: |
       Newline-separated modules to build in order, one per row:
@@ -74,6 +81,8 @@ runs:
       uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-vendor@d975bb0f021ae9995f2f1ded7adf860b16678b87
       with:
         vendor: ${{ inputs.vendor }}
+        deps: ${{ inputs.deps }}
+        profile: ${{ inputs.profile }}
         github-token: ${{ inputs.github-token }}
         release-token: ${{ inputs.release-token }}
 

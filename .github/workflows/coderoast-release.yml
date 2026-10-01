@@ -102,6 +102,8 @@ jobs:
         uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-vendor@d2097218bf363dee1d32874e4c6f768e678c920f
         with:
           vendor: ${{ inputs.vendor }}
+          # A release consumes the upstream waves already cut, never their main.
+          deps: vendor
           github-token: ${{ secrets.GITHUB_TOKEN }}
           release-token: ${{ secrets.CR_RELEASE_TOKEN }}
 

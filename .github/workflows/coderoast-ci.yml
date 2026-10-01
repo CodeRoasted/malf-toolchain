@@ -28,6 +28,11 @@ on:
         type: string
         required: false
         default: ''
+      deps:
+        description: 'How the `vendor` rows reach the cache: `vendor` (release tarballs — the release path) or `build` (each created from its repository''s main — a run on an open version). Required whenever `vendor` has a row.'
+        type: string
+        required: false
+        default: ''
       extra-apt:
         description: 'Extra apt packages for the build env (e.g. "libpq-dev redis-tools").'
         type: string
@@ -74,6 +79,7 @@ jobs:
         uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-ci@d2097218bf363dee1d32874e4c6f768e678c920f
         with:
           vendor: ${{ inputs.vendor }}
+          deps: ${{ inputs.deps }}
           modules: ${{ inputs.modules }}
           extra-apt: ${{ inputs.extra-apt }}
           github-token: ${{ secrets.GITHUB_TOKEN }}

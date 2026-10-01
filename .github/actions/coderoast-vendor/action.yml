@@ -1,10 +1,12 @@
 name: 'CodeRoast vendor'
 description: |
-  Restore cross-repo Conan deps from their GitHub Releases into the local cache, driven by a data
-  manifest. Single-sources the fetch script (ci_fetch_conan_package.sh ships here) and the
-  token-by-visibility selection. Used by both coderoast-ci (build half) and coderoast-release.
+  Put cross-repo Conan deps into the local cache, driven by a data manifest, in one of two declared
+  ways (`deps`): `vendor` restores each row's release tarball (ci_fetch_conan_package.sh), `build`
+  creates each row from its repository's `main` (ci_build_conan_package.sh). Single-sources both
+  scripts and the token-by-visibility selection. Used by coderoast-ci (build half) and
+  coderoast-release, which always vendors.
 
-  Assumes setup-build-env already ran (CONAN_HOME staged). Does not check out or build anything.
+  Assumes setup-build-env already ran (CONAN_HOME, the profile and MALF_TOOLCHAIN_DIR staged).
 
 inputs:
   vendor:
@@ -15,6 +17,20 @@ inputs:
       defaults to v<version>. `#` starts a comment. Blank / omitted = no vendoring.
     required: false
     default: ''
+  deps:
+    description: |
+      How the manifest's rows reach the cache: `vendor` (download the release tarball at
+      v<version> — the release path, where the upstream waves are already cut) or `build` (clone the
+      row's repository at `main` and `conan create` the package — every run on an open version, whose
+      release does not exist yet). Required whenever the manifest has a row; a row with no declared
+      `deps` is refused rather than defaulted. In `build` mode rows are created in manifest order, so
+      list them dependency-first.
+    required: false
+    default: ''
+  profile:
+    description: 'Conan profile name (staged by setup-build-env) a `build` row is created with.'
+    required: false
+    default: 'linux-gcc16-release'
   github-token:
     description: 'Token for PUBLIC-repo release reads — pass secrets.GITHUB_TOKEN. Required only if any vendor row is `public`.'
     required: false
@@ -31,14 +47,27 @@ runs:
       shell: bash
       env:
         VENDOR: ${{ inputs.vendor }}
+        DEPS: ${{ inputs.deps }}
+        PROFILE_NAME: ${{ inputs.profile }}
         GH_PUBLIC_TOKEN: ${{ inputs.github-token }}
         GH_RELEASE_TOKEN: ${{ inputs.release-token }}
         CIFETCH: ${{ github.action_path }}/ci_fetch_conan_package.sh
+        CIBUILD: ${{ github.action_path }}/ci_build_conan_package.sh
       run: |
         set -euo pipefail
-        # Restore each declared cross-repo dep from its GitHub Release, choosing the token by declared
-        # visibility (public -> GITHUB_TOKEN; private -> CR_RELEASE_TOKEN). The fetch script is
-        # single-sourced with this action (no per-repo copy) and is itself idempotent.
+        rows="$(sed -e 's/#.*//' <<< "$VENDOR" | awk 'NF' )"
+        case "$DEPS" in
+          vendor|build) ;;
+          '') if [ -n "$rows" ]; then
+                echo "::error::coderoast-vendor: the manifest has rows but no \`deps\` was declared (want vendor|build)"; exit 1
+              fi ;;
+          *) echo "::error::coderoast-vendor: deps '$DEPS' is neither vendor nor build"; exit 1 ;;
+        esac
+        export DEPS_SRC_ROOT="$RUNNER_TEMP/coderoast-deps-src"
+        # Each declared row reaches the cache the way `deps` declares: restored from its GitHub Release
+        # (vendor) or created from its repository's main (build). The token follows the row's declared
+        # visibility (public -> GITHUB_TOKEN; private -> CR_RELEASE_TOKEN). Both scripts are
+        # single-sourced with this action (no per-repo copy).
         while IFS= read -r row; do
           row="${row%%#*}"                                 # strip trailing comments
           # shellcheck disable=SC2086                       # intentional word-split of the manifest row
@@ -56,6 +85,11 @@ runs:
           esac
           if [ -z "$tok" ]; then
             echo "::error::vendor row '$pkg' is '$vis' but coderoast-vendor got no ${vis}-token"; exit 1
+          fi
+          if [ "$DEPS" = build ]; then
+            echo "coderoast-vendor: building $pkg/$ver from $repo main ($vis)"
+            GH_TOKEN="$tok" bash "$CIBUILD" "$pkg" "$ver" "$repo"
+            continue
           fi
           echo "coderoast-vendor: vendoring $pkg/$ver from $repo ($vis)"
           GH_TOKEN="$tok" bash "$CIFETCH" "$pkg" "$ver" "$repo" ${tag:+"$tag"}
