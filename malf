@@ -299,6 +299,22 @@ export CONAN_HOME="${CONAN_HOME:-$MALF_WORKSPACE_ROOT/.conan2}"
 MALF_CONAN_HOME_BASE="$CONAN_HOME"
 
 # ─── Profile resolution ──────────────────────────────────────────────────────
+# A FILE ANOTHER malf MAY BE READING IS REPLACED BY ONE rename(2), never rewritten in place. Every
+# invocation, whatever its verb, copies its profile into the shared conan cache and syncs global.conf
+# there, and `cp` truncates its destination before writing it. Measured 2026-10-01: eight concurrent
+# `malf format --check` runs (one per format-armed repository, the commit gate's `cpp_format`
+# sweep), and one read the profile mid-copy, found no build_type and exited 1. A staging file in
+# the destination's own directory, renamed over it, is never seen half-written (tests [3b]).
+_malf_install_file() {
+    local src="$1" dst="$2" staged
+    staged="$(mktemp "$dst.malf-staged.XXXXXX")" || return 1
+    if cp -f --preserve=mode "$src" "$staged" && mv -f "$staged" "$dst"; then
+        return 0
+    fi
+    rm -f "$staged"
+    return 1
+}
+
 # 1) CONAN_HOME/profiles/, 2) malf dir, 3) per-repo dir (if in a subdirectory)
 _malf_profile_path() {
     # Resolve a conan profile by name to a path in the conan cache (conan create finds
@@ -311,13 +327,13 @@ _malf_profile_path() {
     local src
     for src in "$MALF_DIR/profiles/$name" "$MALF_DIR/$name"; do
         if [[ -f "$src" ]]; then
-            mkdir -p "$CONAN_HOME/profiles"; cp -f "$src" "$cache_p"; echo "$cache_p"; return
+            mkdir -p "$CONAN_HOME/profiles"; _malf_install_file "$src" "$cache_p" || exit 1; echo "$cache_p"; return
         fi
     done
     local repo_p
     while IFS= read -r repo_p; do
         if [[ -f "$repo_p/$name" ]]; then
-            mkdir -p "$CONAN_HOME/profiles"; cp -f "$repo_p/$name" "$cache_p"; echo "$cache_p"; return
+            mkdir -p "$CONAN_HOME/profiles"; _malf_install_file "$repo_p/$name" "$cache_p" || exit 1; echo "$cache_p"; return
         fi
     done < <(find "$MALF_WORKSPACE_ROOT" -maxdepth 1 -type d ! -name '.*' ! -path "$MALF_WORKSPACE_ROOT")
     # No in-tree source: fall back to a pre-existing cache profile (e.g. conan-detected).
@@ -442,7 +458,7 @@ _malf_sync_conan_conf() {
         [[ -f "$MALF_DIR/$conf_file" ]] || continue
         mkdir -p "$CONAN_HOME"
         if [[ ! -f "$CONAN_HOME/$conf_file" ]] || ! cmp -s "$MALF_DIR/$conf_file" "$CONAN_HOME/$conf_file"; then
-            cp "$MALF_DIR/$conf_file" "$CONAN_HOME/$conf_file"
+            _malf_install_file "$MALF_DIR/$conf_file" "$CONAN_HOME/$conf_file" || exit 1
         fi
     done
 }

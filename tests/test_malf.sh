@@ -175,6 +175,35 @@ check "linux-clang21-asan -> clang21-asan" \
 check "a non-linux profile passes through verbatim" \
       "windows-msvc-release" "$(MALF_PROFILE_NAME=windows-msvc-release _malf_profile_key)"
 
+echo "[3b] a file another malf may be reading is replaced by ONE rename, never rewritten in place"
+# Every invocation, whatever its verb, copies its profile into the shared conan cache and syncs
+# global.conf there. Measured 2026-10-01: eight concurrent `malf format --check` runs, one per
+# format-armed repository, and one read the profile while another's `cp` had truncated it, found no
+# build_type and exited 1. The property is held at the INODE: a reader that opened the cached file
+# before the install still reads the OLD bytes whole, and the path names the new ones. An in-place
+# `cp` fails it — the reader's inode is the one being truncated and rewritten.
+ri_tmp="$(mktemp -d)"
+mkdir -p "$ri_tmp/profiles"
+printf 'stale profile, no build type\n' > "$ri_tmp/profiles/$MALF_DEFAULT_PROFILE"
+exec 9< "$ri_tmp/profiles/$MALF_DEFAULT_PROFILE"
+ri_path="$(CONAN_HOME="$ri_tmp" MALF_PROFILE_NAME="$MALF_DEFAULT_PROFILE" _malf_profile_path)"
+check "the profile lands at the cache path" "$ri_tmp/profiles/$MALF_DEFAULT_PROFILE" "$ri_path"
+check "the cached profile is the registry's bytes" "same" \
+      "$(cmp -s "$MALF_ROOT/profiles/$MALF_DEFAULT_PROFILE" "$ri_path" && echo same || echo differs)"
+check "a reader holding the old file still reads it whole (replaced by rename, not rewritten)" \
+      "stale profile, no build type" "$(cat <&9)"
+exec 9<&-
+printf 'stale conf\n' > "$ri_tmp/global.conf"
+exec 9< "$ri_tmp/global.conf"
+(CONAN_HOME="$ri_tmp" _malf_sync_conan_conf)
+check "global.conf is synced to the in-tree bytes" "same" \
+      "$(cmp -s "$MALF_ROOT/global.conf" "$ri_tmp/global.conf" && echo same || echo differs)"
+check "a reader holding the old global.conf still reads it whole" "stale conf" "$(cat <&9)"
+exec 9<&-
+check "no staging file is left behind" "" \
+      "$(find "$ri_tmp" -name '*.malf-staged.*' -printf '%P\n')"
+rm -rf "$ri_tmp"
+
 echo "[4] build key — which build-<key>/ tree a build writes"
 
 # ALWAYS named, default included. The old asymmetry (default squatting on a bare build/)
