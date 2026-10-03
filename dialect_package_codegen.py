@@ -45,6 +45,13 @@ here. A row that declares none omits the key, keeps its content hash and emits t
 it emitted before. The coordinate is a reader-side derivation, so it appears on the
 recognition row alone and the derived emit row carries no copy of it.
 
+A DIALECT MAY DECLARE A KEY A STREAM'S ACQUIRER SUPPLIES A VALUE UNDER. A row of the
+optional `declared_values:` section names the key and the markers behind which the core
+masks a digit run equal to the declared value (DN-133.D1): the dialect owns the vocabulary
+(`PR-`), the acquirer owns the value (a run's own pull-request number), and the core owns the
+mechanism. No value appears here, ever. A declaration with no such section keeps its content
+hash and emits the bytes it emitted before.
+
 A MARKER ROW MAY OPEN A UNIT WITHOUT NAMING IT. The optional `role: Opens` states that the
 row's line opens a unit of its kind and carries no identity; the unit is named by a
 naming row of the same kind that follows. A row that declares no role NAMES its unit, as
@@ -97,7 +104,7 @@ from codegen_common import (
     required_scalar,
 )
 
-TOOL_VERSION = "4"  # 4: a marker row may open a unit without naming it
+TOOL_VERSION = "5"  # 5: a dialect may declare a key a stream supplies a value under
 SCHEMA_VERSION = "1"
 
 DIALECT_FILE_SUFFIX = ".dialect.yaml"
@@ -148,7 +155,7 @@ _CHANNEL_GATE_ANY = "any"
 # declared-absence seat, which lives at the intersection.
 
 _ROW_SECTIONS = ("roles", "markers", "level_lifts", "outcome_tokens",
-                 "outcome_markers", "locations", "value_classes")
+                 "outcome_markers", "locations", "value_classes", "declared_values")
 _VOCABULARY_SECTIONS = ("channels", "revisions")
 _SECTION_NAMES = _ROW_SECTIONS + _VOCABULARY_SECTIONS
 
@@ -469,7 +476,50 @@ def _validate_outcome_token_row(row: dict, context: str, source: str) -> dict:
     }
 
 
+def _validate_declared_value_row(row: dict, context: str, source: str) -> dict:
+    """A key a stream's acquirer supplies a value under, and the markers the core masks behind.
+
+    The key is what a caller types (`--changed-context pull_request=<n>`), so it is spelled like
+    a dialect name. A marker ending in a digit is refused here as composition refuses it: the
+    digit run after it would not be the run the marker introduces.
+    """
+    expect_keys(row, ("key", "markers", "dialect_gate", "why"), context, source,
+                _DIALECT_REJECTIONS)
+    key = required_scalar(row, "key", context, source)
+    _ascii_field(key, f"{context}: `key:`", source)
+    if not key or not key.replace("_", "a").isalnum() or not key[0].isalpha() \
+            or key != key.lower():
+        fail(source, None,
+             f"{context}: `key: {key}` must match [a-z][a-z0-9_]* — it is what a caller "
+             "declares a value under")
+    markers = row.get("markers")
+    if not isinstance(markers, list) or not markers:
+        fail(source, None,
+             f"{context}: `markers:` must be a non-empty sequence — a key with no marker "
+             "could never mask anything")
+    seen: set[str] = set()
+    for position, marker in enumerate(markers):
+        marker_context = f"{context} markers[{position}]"
+        if not isinstance(marker, str) or not marker:
+            fail(source, None, f"{marker_context}: a marker is a non-empty scalar")
+        _ascii_field(marker, marker_context, source)
+        if marker[-1].isdigit():
+            fail(source, None,
+                 f"{marker_context}: {marker!r} ends in a digit — the digit run after a "
+                 "marker would then not be the run the marker introduces")
+        if marker in seen:
+            fail(source, None, f"{marker_context}: duplicate marker {marker!r}")
+        seen.add(marker)
+    return {
+        "key": key,
+        "markers": list(markers),
+        "dialect_gate": _dialect_gate(row, context, source),
+        "why": _validate_why(row, context, source),
+    }
+
+
 _ROW_VALIDATORS = {
+    "declared_values": _validate_declared_value_row,
     "roles": _validate_role_row,
     "level_lifts": _validate_level_lift_row,
     "outcome_tokens": _validate_outcome_token_row,
@@ -719,6 +769,7 @@ def _check_row_uniqueness(declaration: dict, source: str) -> None:
         "markers": lambda row: (row["prefix"], row["dialect_gate"], row["channel_gate"]),
         "level_lifts": lambda row: (row["prefix"], row["dialect_gate"]),
         "outcome_tokens": lambda row: (row["token"], row["dialect_gate"]),
+        "declared_values": lambda row: (row["key"],),
     }
     for section, key_of in keys.items():
         seen: dict[tuple, int] = {}
@@ -902,6 +953,7 @@ def emit_inc(declaration: dict, *, module_suffix: str, source_name: str) -> str:
     _emit_marker_rows(out, declaration)
     _emit_level_lift_rows(out, declaration)
     _emit_outcome_token_rows(out, declaration)
+    _emit_declared_value_rows(out, declaration)
     _emit_declared_absences(out, declaration)
     _emit_manifest(out, declaration)
 
@@ -1119,6 +1171,32 @@ def _emit_outcome_token_rows(out: list[str], declaration: dict) -> None:
     out.append("")
 
 
+def _emit_declared_value_rows(out: list[str], declaration: dict) -> None:
+    section = declaration.get("declared_values")
+    if section is None or not section["rows"]:
+        return
+    _emit_why(out, section["why"])
+    for position, row in enumerate(section["rows"]):
+        values = ", ".join(_quoted(marker) for marker in row["markers"])
+        out.append(f"inline constexpr std::array<std::string_view, {len(row['markers'])}> "
+                   f"kDeclaredValueMarkers{position}{{{{{values}}}}};")
+    _emit_array(out, "DeclaredValueRow", "kDeclaredValues", len(section["rows"]))
+    for position, row in enumerate(section["rows"]):
+        _emit_row(out, [
+            ("key", _quoted(row["key"])),
+            ("markers", f"kDeclaredValueMarkers{position}"),
+            ("dialect_gate", _gate_expression(row["dialect_gate"])),
+        ], row["why"])
+    out.append("}};")
+    name = declaration["name"]
+    out.append("static_assert(std::ranges::all_of(kDeclaredValues, "
+               "insight::semantic::declared_value_row_well_formed),")
+    out.append(f'              "{name}: a declared value names no key or no marker, or a '
+               'marker is empty or ends in a "')
+    out.append('              "digit -- composition would refuse the package");')
+    out.append("")
+
+
 def _emit_declared_absences(out: list[str], declaration: dict) -> None:
     """An empty section's argument is emitted where the manifest member is left empty.
 
@@ -1160,6 +1238,8 @@ def _emit_manifest(out: list[str], declaration: dict) -> None:
         ("outcome_markers", "{}"),
         ("channels", "kChannels" if declaration.get("channels", {}).get("names") else "{}"),
         ("dialect_revisions", "kDialectRevisions"),
+        ("declared_values",
+         "kDeclaredValues" if declaration.get("declared_values", {}).get("rows") else "{}"),
     ]
     for kind in _HOOK_KINDS:
         entry = tier.get(kind)
@@ -1683,6 +1763,54 @@ def selftest() -> int:
                           '"Opened at "\n        kind: Job', '"Opened at "\n        kind: Step', 1)
                           .replace('      - prefix: "Run "\n        kind: Step\n',
                                    '      - prefix: "Run "\n        kind: Job\n', 1)))
+    # ── a declared value: a key a stream's acquirer supplies a value under ───────────────
+    _with_value = _SYNTHETIC.replace(
+        "  outcome_markers:\n",
+        "  declared_values:\n    why: [\"The acquirer knows the number; the dialect knows the "
+        "marker.\"]\n    rows:\n      - key: pull_request\n        markers: [\"PR-\", \"pull-\"]\n"
+        "        dialect_gate: self\n        why: [\"Both spellings name the run's own request.\"]\n"
+        "  outcome_markers:\n", 1)
+    _case("declared value: a declared row reaches the manifest with its markers and argument",
+          failures, lambda: _assert(
+              'kDeclaredValueMarkers0{{"PR-", "pull-"}};' in render_fixture(text=_with_value)
+              and '{.key = "pull_request",\n     .markers = kDeclaredValueMarkers0,\n'
+                  '     .dialect_gate = kDialect},' in render_fixture(text=_with_value)
+              and ".declared_values = kDeclaredValues," in render_fixture(text=_with_value)
+              and "// > Both spellings name the run's own request."
+              in render_fixture(text=_with_value),
+              "the declared value did not reach kDeclaredValues and the manifest whole"))
+    _case("declared value: declaring none emits none and leaves the content hash alone",
+          failures, lambda: _assert(
+              "kDeclaredValues" not in rendered and ".declared_values = {}," in rendered
+              and declaration_hash(_parse_fixture(_SYNTHETIC)) == base_hash
+              and declaration_hash(_parse_fixture(_with_value)) != base_hash,
+              "an undeclared value was emitted, or a declared one did not move the hash"))
+    _case("declared value: marker order is content and never sorted", failures,
+          lambda: _assert(
+              'kDeclaredValueMarkers0{{"pull-", "PR-"}};' in render_fixture(
+                  text=_with_value.replace('[\"PR-\", \"pull-\"]', '[\"pull-\", \"PR-\"]')),
+              "the markers were reordered on the way to the emitted array"))
+    _expect_rejection("refuse: a declared-value marker ending in a digit", failures,
+                      "ends in a digit",
+                      lambda: _parse_fixture(_with_value.replace('\"PR-\"', '\"PR2\"')))
+    _expect_rejection("refuse: a declared value with no marker", failures,
+                      "must be a non-empty sequence",
+                      lambda: _parse_fixture(_with_value.replace(
+                          'markers: [\"PR-\", \"pull-\"]', "markers: []")))
+    _expect_rejection("refuse: a declared-value key outside the caller's spelling", failures,
+                      "must match [a-z][a-z0-9_]*",
+                      lambda: _parse_fixture(_with_value.replace(
+                          "key: pull_request", "key: PullRequest")))
+    _expect_rejection("refuse: a duplicate declared-value marker", failures,
+                      "duplicate marker",
+                      lambda: _parse_fixture(_with_value.replace('\"pull-\"', '\"PR-\"')))
+    _expect_rejection("refuse: two declared values under one key", failures,
+                      "duplicates rows[0]",
+                      lambda: _parse_fixture(_with_value.replace(
+                          "        why: [\"Both spellings name the run's own request.\"]\n",
+                          "        why: [\"Both spellings name the run's own request.\"]\n"
+                          "      - key: pull_request\n        markers: [\"MR-\"]\n"
+                          "        dialect_gate: self\n", 1)))
     _expect_rejection("refuse: an EMPTY-only section declared non-empty", failures,
                       "may be declared EMPTY with an argument",
                       lambda: _parse_fixture(_SYNTHETIC.replace(
