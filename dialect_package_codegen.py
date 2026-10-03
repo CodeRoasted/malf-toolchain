@@ -63,6 +63,16 @@ it could never take effect. When an opener takes effect is the core's algorithm,
 by the consumer that segments; nothing here decides it. The derived emit row carries the
 role, so a writer selecting a unit's banner selects the naming row and never the opener.
 
+A ROLE ROW MAY MATCH THE LINE'S WHOLE SHAPE INSTEAD OF ITS PREFIX (DN-134.D9). A row declares
+exactly one of `prefix:` and `shape:`. A shape is literal bytes with `{n}` holes, each a decimal
+number, and the core matches it against the whole content after the transport peel and a
+trailing-whitespace trim. It is one closed core kind, not a pattern language: no other hole, no
+escape, no literal brace, and no shape whose match would depend on how much a hole takes. The
+`Progress` role is declared by a shape alone, because the lines it samples share their prefix
+with lines that are content. The emitted row carries the shape in the bytes member and adds
+`.match = RoleMatchKind::Shape`; a prefix row emits no match kind, so a declaration of prefix
+rows alone keeps its content hash and its emitted bytes.
+
 DETERMINISM (DN-17.D19). Strict YAML subset -> canonical content hash -> byte-stable
 emission, strings end-to-end with no typed conversion, LF-only output, write-if-changed.
 The emitted text is Python output and cannot vary with the C++ compiler; the axes that
@@ -104,7 +114,7 @@ from codegen_common import (
     required_scalar,
 )
 
-TOOL_VERSION = "5"  # 5: a dialect may declare a key a stream supplies a value under
+TOOL_VERSION = "6"  # 6: a role row may match a whole-line shape, and the Progress role
 SCHEMA_VERSION = "1"
 
 DIALECT_FILE_SUFFIX = ".dialect.yaml"
@@ -118,7 +128,12 @@ DIALECT_FILE_SUFFIX = ".dialect.yaml"
 # enumerator in `canon.spi.cppm` / `canon.api.cppm` — and this file follows it, never
 # leads it.
 
-_STRUCTURAL_ROLES = ("None", "GroupBegin", "GroupEnd", "Terminator")
+_STRUCTURAL_ROLES = ("None", "GroupBegin", "GroupEnd", "Terminator", "Progress")
+# The role a row may announce ONLY through a shape: a sample line shares its prefix with lines
+# that are content (DN-134.D9), so a prefix row announcing it would take them too.
+_SHAPE_ONLY_ROLES = ("Progress",)
+# The one hole a shape admits: a decimal number, `\d+(\.\d+)?`, matched by the core.
+_SHAPE_HOLE = "{n}"
 _MARKER_KINDS = ("None", "Job", "Step")
 _CHILD_ORDERS = ("Ordered", "Unordered")
 _PAYLOAD_EXTRACTS = ("None", "RemainderAfterPrefix", "RemainderToClosingParen",
@@ -368,12 +383,71 @@ def _prefix(node: dict, key: str, context: str, source: str) -> str:
     return value
 
 
+def _shape(node: dict, context: str, source: str) -> str:
+    """A whole-line SHAPE: literal bytes with `{n}` holes, each a decimal number.
+
+    The core matches it against the line's whole content after the transport peel and a
+    trailing-whitespace trim, greedily and without backtracking, so every refusal below
+    names a shape whose match would depend on how much a hole takes: a hole is exactly the
+    number the line prints, never a part of one.
+    """
+    value = _prefix(node, "shape", context, source)
+    if _SHAPE_HOLE not in value:
+        fail(source, None,
+             f"{context}: `shape: {value}` has no hole — a shape carries at least one hole "
+             f"`{_SHAPE_HOLE}`, the sampled quantity; a line with none is no sample")
+    if value != value.rstrip():
+        fail(source, None,
+             f"{context}: `shape:` ends in trailing whitespace — the core trims a line's "
+             "trailing whitespace before matching, so this shape could never match")
+    literals = value.split(_SHAPE_HOLE)
+    if any("{" in literal or "}" in literal for literal in literals):
+        fail(source, None,
+             f"{context}: `shape: {value}` — a hole is spelled `{_SHAPE_HOLE}` and nothing "
+             "else, and a brace is never literal: the hole is the one closed core kind")
+    if any(not between for between in literals[1:-1]):
+        fail(source, None,
+             f"{context}: `shape: {value}` puts a hole against a digit or another hole — "
+             "the line's number would then be split between them")
+    for before, after in zip(literals, literals[1:]):
+        if (before and before[-1].isdigit()) or (after and after[0].isdigit()):
+            fail(source, None,
+                 f"{context}: `shape: {value}` puts a hole against a digit or another hole — "
+                 "the line's number would then be split between them")
+        if (after.startswith(".") and (len(after) == 1 or after[1].isdigit())) \
+                or (before.endswith(".") and len(before) > 1 and before[-2].isdigit()):
+            fail(source, None,
+                 f"{context}: `shape: {value}` puts a decimal point between a hole and a "
+                 "digit or a hole — a hole takes a decimal fraction, so the line's number "
+                 "would then be split")
+    return value
+
+
 def _validate_role_row(row: dict, context: str, source: str) -> dict:
-    expect_keys(row, ("prefix", "role", "dialect_gate", "why"), context, source,
+    """A role row announces its role by a line PREFIX, or by the line's whole SHAPE.
+
+    The validated row carries `prefix` or `shape` and never both, so a declaration of prefix
+    rows alone keeps its content hash and its emitted bytes.
+    """
+    expect_keys(row, ("prefix", "shape", "role", "dialect_gate", "why"), context, source,
                 _DIALECT_REJECTIONS)
+    if ("prefix" in row) == ("shape" in row):
+        fail(source, None,
+             f"{context}: a role row declares exactly one of `prefix:` and `shape:` — the "
+             "line's opening bytes, or its whole content with `{n}` holes")
+    role = _enum_value(row, "role", _STRUCTURAL_ROLES, context, source)
+    if "prefix" in row:
+        if role in _SHAPE_ONLY_ROLES:
+            fail(source, None,
+                 f"{context}: `role: {role}` on a prefix row — the role is declared by its "
+                 "exact shape, because the lines it samples share their prefix with lines "
+                 "that are content (DN-134.D9)")
+        matched = {"prefix": _prefix(row, "prefix", context, source)}
+    else:
+        matched = {"shape": _shape(row, context, source)}
     return {
-        "prefix": _prefix(row, "prefix", context, source),
-        "role": _enum_value(row, "role", _STRUCTURAL_ROLES, context, source),
+        **matched,
+        "role": role,
         "dialect_gate": _dialect_gate(row, context, source),
         "why": _validate_why(row, context, source),
     }
@@ -765,7 +839,8 @@ def _check_row_uniqueness(declaration: dict, source: str) -> None:
     names the declaration and the row position instead of the composed table.
     """
     keys = {
-        "roles": lambda row: (row["prefix"], row["dialect_gate"]),
+        "roles": lambda row: ("prefix" in row, row.get("prefix", row.get("shape")),
+                              row["dialect_gate"]),
         "markers": lambda row: (row["prefix"], row["dialect_gate"], row["channel_gate"]),
         "level_lifts": lambda row: (row["prefix"], row["dialect_gate"]),
         "outcome_tokens": lambda row: (row["token"], row["dialect_gate"]),
@@ -997,11 +1072,16 @@ def _emit_role_rows(out: list[str], declaration: dict) -> None:
     _emit_why(out, section["why"])
     _emit_array(out, "StructuralRoleRow", "kRoles", len(section["rows"]))
     for row in section["rows"]:
-        _emit_row(out, [
-            ("prefix", _quoted(row["prefix"])),
+        # A shape row carries its bytes in the same member and adds its match kind; a prefix
+        # row emits none, the core's default, so its bytes are the ones it emitted before.
+        fields = [
+            ("prefix", _quoted(row.get("prefix", row.get("shape")))),
             ("role", f"insight::StructuralRole::{row['role']}"),
             ("dialect_gate", _gate_expression(row["dialect_gate"])),
-        ], row["why"])
+        ]
+        if "shape" in row:
+            fields.append(("match", "RoleMatchKind::Shape"))
+        _emit_row(out, fields, row["why"])
     out.append("}};")
     out.append("")
 
@@ -1811,6 +1891,96 @@ def selftest() -> int:
                           "        why: [\"Both spellings name the run's own request.\"]\n"
                           "      - key: pull_request\n        markers: [\"MR-\"]\n"
                           "        dialect_gate: self\n", 1)))
+    # ── a role row matching a whole-line SHAPE (DN-134.D9) ─────────────────────────────
+    _shape = "Received {n} of {n} ({n}%), {n} MBs/sec"
+    _shape_row = (f'      - shape: "{_shape}"\n        role: Progress\n'
+                  '        dialect_gate: self\n'
+                  '        why: ["A transfer gauge sampled on a timer, never an event."]\n')
+    _with_shape = _SYNTHETIC.replace("  markers:\n", _shape_row + "  markers:\n", 1)
+    _case("shape: a declared shape row reaches kRoles byte-exact, with the Shape match kind "
+          "and its argument", failures, lambda: _assert(
+              f'    {{.prefix = "{_shape}",\n'
+              "     .role = insight::StructuralRole::Progress,\n"
+              "     .dialect_gate = kDialect,\n"
+              "     .match = RoleMatchKind::Shape},"
+              in render_fixture(text=_with_shape)
+              and "// > A transfer gauge sampled on a timer, never an event."
+              in render_fixture(text=_with_shape)
+              and _row_prefixes(render_fixture(text=_with_shape), "kRoles")
+              == ['"##[group]"', '"##[endgroup]"', f'"{_shape}"'],
+              "the shape row is not the third kRoles row with its bytes, its role and "
+              "RoleMatchKind::Shape"))
+    _case("shape: a prefix row carries no match kind, and declaring no shape leaves the "
+          "content hash alone", failures, lambda: _assert(
+              "RoleMatchKind" not in rendered
+              and render_fixture(text=_with_shape).count("RoleMatchKind::") == 1
+              and declaration_hash(_parse_fixture(_SYNTHETIC)) == base_hash
+              and declaration_hash(_parse_fixture(_with_shape)) != base_hash,
+              "a prefix row was emitted with a match kind (its bytes would move), or a "
+              "declared shape did not move the hash"))
+    _case("shape: the shape and the prefix spelling of the same bytes are distinct content",
+          failures, lambda: _assert(
+              declaration_hash(_parse_fixture(_with_shape)) != declaration_hash(
+                  _parse_fixture(_with_shape.replace(
+                      f'      - shape: "{_shape}"\n        role: Progress\n',
+                      f'      - prefix: "{_shape}"\n        role: GroupBegin\n', 1))),
+              "a shape row and a prefix row over the same bytes hash alike — the match kind "
+              "is recognition content and must enter the hash"))
+    for _edge_shape in ("Progress: resolved {n}, reused {n}, downloaded {n}, added {n}",
+                        "{n} files left"):
+        _case(f"shape: a hole may open or close the shape ({_edge_shape!r})", failures,
+              lambda edge=_edge_shape: _assert(
+                  f'{{.prefix = "{edge}",' in render_fixture(text=_with_shape.replace(
+                      f'shape: "{_shape}"', f'shape: "{edge}"', 1)),
+                  "a shape opening or closing on a hole was not emitted"))
+    _expect_rejection("refuse: `role: Progress` on a prefix row", failures,
+                      "declared by its exact shape",
+                      lambda: _parse_fixture(_with_shape.replace(
+                          f'      - shape: "{_shape}"\n', '      - prefix: "Received "\n', 1)))
+    _expect_rejection("refuse: a role row declaring both `prefix:` and `shape:`", failures,
+                      "exactly one of `prefix:` and `shape:`",
+                      lambda: _parse_fixture(_with_shape.replace(
+                          f'      - shape: "{_shape}"\n',
+                          f'      - shape: "{_shape}"\n        prefix: "Received "\n', 1)))
+    _expect_rejection("refuse: a role row declaring neither `prefix:` nor `shape:`", failures,
+                      "exactly one of `prefix:` and `shape:`",
+                      lambda: _parse_fixture(_with_shape.replace(
+                          f'      - shape: "{_shape}"\n        role: Progress\n',
+                          "      - role: Progress\n", 1)))
+    for _label, _bad, _needle in (
+            ("with no hole", "Received bytes", "at least one hole"),
+            ("with a hole spelled other than {n}", "Received {x} of {n}", "spelled `{n}`"),
+            ("with a stray brace", "Received {n} of {n} }", "spelled `{n}`"),
+            ("with two adjacent holes", "Received {n}{n} bytes", "a digit or another hole"),
+            ("with a digit against a hole", "Received {n}0 bytes", "a digit or another hole"),
+            ("with a digit before a hole", "Received 1{n} bytes", "a digit or another hole"),
+            ("with a hole followed by a decimal point and a digit", "Received {n}.5 bytes",
+             "decimal point"),
+            ("with a hole followed by a decimal point and a hole", "Received {n}.{n} bytes",
+             "decimal point"),
+            ("with a decimal point and a digit before a hole", "Received 1.{n} bytes",
+             "decimal point"),
+            ("ending in whitespace", "Received {n} bytes ", "trailing whitespace"),
+            ("empty", "", "must be non-empty")):
+        _expect_rejection(f"refuse: a shape {_label}", failures, _needle,
+                          lambda bad=_bad: _parse_fixture(_with_shape.replace(
+                              f'shape: "{_shape}"', f'shape: "{bad}"', 1)))
+    _expect_rejection("refuse: a shape carrying a non-ASCII byte", failures,
+                      "non-ASCII or control byte",
+                      lambda: _parse_fixture(_with_shape.replace(
+                          "MBs/sec", "MB s/sec", 1)))
+    _expect_rejection("refuse: two shape rows on one shape and gate", failures,
+                      "could never fire",
+                      lambda: _parse_fixture(_with_shape.replace(
+                          _shape_row, _shape_row + _shape_row.replace(
+                              '        why: ["A transfer gauge sampled on a timer, never an '
+                              'event."]\n', ""), 1)))
+    _case("shape: a prefix row and a shape row over the same bytes are not duplicates",
+          failures, lambda: _assert(
+              _parse_fixture(_with_shape.replace(
+                  _shape_row, _shape_row + f'      - prefix: "{_shape}"\n'
+                  "        role: GroupBegin\n        dialect_gate: self\n", 1)) is not None,
+              "unreachable"))
     _expect_rejection("refuse: an EMPTY-only section declared non-empty", failures,
                       "may be declared EMPTY with an argument",
                       lambda: _parse_fixture(_SYNTHETIC.replace(
