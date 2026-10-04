@@ -3008,6 +3008,83 @@ check "every install of the sweep — members' and cells' alike — ran in the l
 rm -rf "$rg_tmp"
 echo
 
+echo "[7q12] under \`malf test\` only, an inventory cell runs the tests its project registers (DN-121.D9)"
+
+# note: canon's showcase view gate is registered by its inventory project `proof/` and by no
+# package, so `malf test` never ran it; `golden.yaml` runs on pull requests, the cut, a dispatch and
+# Mondays, and this trunk commits to `main` — a showcase leak could stand green for a week.
+# note: conan and cmake are stubbed, ctest and the inventory tool are real: the stub configure
+# copies the cell's fixture CTestTestfile.cmake into the cell's build tree, which is what ctest reads.
+ct_tmp="$(realpath "$(mktemp -d)")"
+ct_bin="$ct_tmp/bin"; ct_ws="$ct_tmp/ws"; mkdir -p "$ct_bin" "$ct_ws"
+cat > "$ct_bin/conan" <<'STUB'
+#!/usr/bin/env bash
+out=""; prev=""
+for a in "$@"; do
+    [[ "$prev" == "-of" ]] && out="$a"
+    prev="$a"
+done
+[[ "$1" == install && -n "$out" ]] && mkdir -p "$out" && : > "$out/conan_toolchain.cmake"
+exit 0
+STUB
+cat > "$ct_bin/cmake" <<'STUB'
+#!/usr/bin/env bash
+source=""; build=""; target=""; prev=""; linking=false
+for a in "$@"; do
+    [[ "$a" == --build ]] && linking=true
+    case "$prev" in --build) build="$a" ;; --target) target="$a" ;; -B) build="$a" ;; -S) source="$a" ;; esac
+    prev="$a"
+done
+mkdir -p "$build"
+if $linking; then
+    printf '#!/bin/sh\n' > "$build/$target"; chmod +x "$build/$target"; exit 0
+fi
+rm -f "$build/CTestTestfile.cmake"
+[[ -f "$source/tests.cmake" ]] && cp "$source/tests.cmake" "$build/CTestTestfile.cmake"
+exit 0
+STUB
+chmod +x "$ct_bin/conan" "$ct_bin/cmake"
+git -C "$ct_ws" init -q
+ct_repo="$ct_ws/repo"; mkdir -p "$ct_repo/pkg" "$ct_repo/cell"
+printf 'from conan import ConanFile\nclass C(ConanFile):\n    name = "ct_pkg"\n    version = "1.0"\n' > "$ct_repo/pkg/conanfile.py"
+printf 'option(X "x" ON)\n' > "$ct_repo/pkg/CMakeLists.txt"
+printf 'project(ct_tool)\n' > "$ct_repo/cell/CMakeLists.txt"
+printf 'inventory:\n  ct_cell:\n    path: cell\n    toolchain_from: pkg\n    target: ct_tool\n' > "$ct_repo/packages.yml"
+git -C "$ct_repo" init -q && git -C "$ct_repo" add -A && \
+    git -C "$ct_repo" -c user.name=fixture -c user.email=fixture@example.invalid commit -qm fixture
+ct_run() {   # <build|test> — the real inventory plumbing, sourced; prints its log, then rc=<status>
+    rm -f "$ct_tmp/ran"
+    (cd "$ct_ws" && PATH="$ct_bin:$PATH" MALF_WORKSPACE_ROOT="$ct_ws" MALF_AUTO_WORKSPACE_DEPS=0 \
+        setsid timeout --kill-after=5 120 bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1
+            _malf_run_inventory "$2" "$3"' _ "$MALF_BIN" "$1" "$ct_repo" 2>&1; echo "rc=$?")
+}
+ct_ran() { [[ -e "$ct_tmp/ran" ]] && echo ran || echo not-run; }
+# The registered test: it leaves a mark that it ran, and reds while the RED file exists.
+printf 'add_test(ct_check "sh" "-c" "touch %s/ran; test ! -e %s/RED")\n' "$ct_tmp" "$ct_tmp" \
+    > "$ct_repo/cell/tests.cmake"
+
+ct_out="$(ct_run test)"
+check "malf test: the cell's one registered test runs, and passes" \
+      "rc=0 ran 1" "$(tail -1 <<< "$ct_out") $(ct_ran) $(grep -c 'the project registers 1' <<< "$ct_out")"
+touch "$ct_tmp/RED"
+ct_out="$(ct_run test)"
+check "malf test: a red registered test reds the run, naming the project and the cell" \
+      "rc=1 ran 1" \
+      "$(tail -1 <<< "$ct_out") $(ct_ran) $(grep -c "tests FAILED for ct_cell (repo/cell) in the cell build-inventory-" <<< "$ct_out")"
+ct_out="$(ct_run build)"
+check "malf build: the same red test is never run — a build stays compile-and-link" \
+      "rc=0 not-run 0" "$(tail -1 <<< "$ct_out") $(ct_ran) $(grep -c 'tests:' <<< "$ct_out")"
+rm -f "$ct_tmp/RED" "$ct_repo/cell/tests.cmake"
+ct_out="$(ct_run test)"
+check "malf test: a project registering no test runs nothing, and says so" \
+      "rc=0 not-run 1" "$(tail -1 <<< "$ct_out") $(ct_ran) $(grep -c 'registers none' <<< "$ct_out")"
+printf 'add_test(\n' > "$ct_repo/cell/tests.cmake"
+ct_out="$(ct_run test)"
+check "malf test: a test listing ctest cannot read is a red, never a count of zero" \
+      "rc=1 1" "$(tail -1 <<< "$ct_out") $(grep -c 'cannot count the tests ct_cell' <<< "$ct_out")"
+rm -rf "$ct_tmp"
+echo
+
 echo "[7j6] lint --all-files NAMES a TU the build gates off this platform, and refuses nothing else"
 
 # note: two sift *_win32.cpp files are named only inside if(WIN32), so no Linux compile command can

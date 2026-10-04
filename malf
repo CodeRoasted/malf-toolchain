@@ -681,7 +681,7 @@ _malf_resolve_target_or_sweep() {
     echo "=== malf $verb: all ${#members[@]} packages done ==="
     _malf_sweep_settle_db "$root" "${members[@]}" || exit 1
     if [[ "$verb" == "build" || "$verb" == "test" ]]; then
-        _malf_run_inventory "$root" "${members[@]}" || exit 1
+        _malf_run_inventory "$verb" "$root" "${members[@]}" || exit 1
     fi
     exit 0
 }
@@ -825,8 +825,10 @@ _malf_repo_root_of() {
 # post: each distinct repository those dirs sit in has built its inventory cells ONCE, in the order
 # the dirs name them, after ONE workspace lint; a dir inside no repository contributes none.
 # post: every cell resolved in the active profile's keyed cache, whatever cache the caller held.
-# refs: ADR-3.D9, ADR-3.D10
-_malf_run_inventory() {            # <dir>...
+# post: under verb `test`, each cell has also run the tests its project registers (DN-121.D9).
+# refs: ADR-3.D9, ADR-3.D10, DN-121.D9
+_malf_run_inventory() {            # <build|test> <dir>...
+    local verb="$1"; shift
     [[ -n "${MALF_SWEEP:-}" ]] && return 0            # a sweep member — the root runs it once
     [[ -n "${MALF_SKIP_INVENTORY:-}" ]] && return 0   # the mutation arms drive the tool directly
     # note: a sweep reaches this line without having keyed its cache — every member keys its own,
@@ -846,7 +848,7 @@ _malf_run_inventory() {            # <dir>...
     [[ ${#repos[@]} -gt 0 ]] || return 0
     python3 "$MALF_DIR/build_inventory.py" lint --workspace "$MALF_WORKSPACE_ROOT" || return 1
     for repo in "${repos[@]}"; do
-        _malf_run_repo_inventory "$repo" || return 1
+        _malf_run_repo_inventory "$verb" "$repo" || return 1
     done
 }
 
@@ -861,10 +863,11 @@ _malf_run_inventory() {            # <dir>...
 # note: registration only, never the dependency BUILD `_malf_bootstrap_workspace_deps` runs — the
 # cells compile their towers from source, and a dependency-role build here would demote the trees
 # `_malf_sweep_settle_db` has just settled in target role.
-_malf_run_repo_inventory() {       # <repo>
-    local repo="$1"
+_malf_run_repo_inventory() {       # <build|test> <repo>
+    local verb="$1" repo="$2"
     local toolchains toolchain_dir
-    local -a entries=()
+    local -a entries=() tests=()
+    [[ "$verb" == "test" ]] && tests=(--run-tests)
     toolchains="$(python3 "$MALF_DIR/build_inventory.py" toolchains \
                       --workspace "$MALF_WORKSPACE_ROOT" --repo "$repo")" || return 1
     while IFS= read -r toolchain_dir; do
@@ -875,7 +878,7 @@ _malf_run_repo_inventory() {       # <repo>
     python3 "$MALF_DIR/build_inventory.py" build \
         --workspace "$MALF_WORKSPACE_ROOT" --repo "$repo" \
         --build-key "$(_malf_build_key)" --profile "$MALF_PROFILE_NAME" \
-        --build-type "$MALF_CONFIG" || return 1
+        --build-type "$MALF_CONFIG" "${tests[@]}" || return 1
 
     # FOLD THE INVENTORY CELLS' DATABASES INTO THE REPO ROOT, exactly as a package build folds its
     # own. An inventory cell configures into `<dir>/build-inventory-$(_malf_build_key)/` and emits a
@@ -1560,7 +1563,7 @@ cmd_build() {
     echo "=== malf build: $target ($MALF_CONFIG${MALF_PROFILE_NAME:+, $MALF_PROFILE_NAME}) ==="
     _malf_build_flow "$target"
     echo "=== done: $(_malf_build_dir "$target") ==="
-    _malf_run_inventory "$target"
+    _malf_run_inventory build "$target"
 }
 
 # A TEST RUN THAT SELECTS NOTHING IS NOT A GREEN. ctest over a tree registering zero tests prints
@@ -1686,7 +1689,7 @@ cmd_test() {
         ctest_args+=(--no-tests=error)
     fi
     ctest "${ctest_args[@]}"
-    _malf_run_inventory "$target"
+    _malf_run_inventory test "$target"
 }
 
 # Did this clang-tidy invocation DIE, rather than report? A dead run checked nothing at all,
@@ -4542,6 +4545,8 @@ malf — coderoast build system
 Commands:
     build   [target] [--asan|--profile <name>]
     test    [target] [--asan|--profile <name>] [--verbose] [--filter REGEX]
+                               also runs, in each inventory cell it builds, the tests that
+                               inventory project registers itself (DN-121.D9); `build` never does
     lint    [--all-files] [-c|--console]
                                a translation unit clang-tidy DIES on is reported as NOT LINTED,
                                by name and separately from the findings, and fails the run —
@@ -4895,7 +4900,7 @@ cmd_inventory() {
     done
     local root; root="$(_malf_resolve_dir "$subdir")" || exit 1
     _malf_use_keyed_cache
-    MALF_SWEEP="" MALF_SKIP_INVENTORY="" _malf_run_inventory "$root"
+    MALF_SWEEP="" MALF_SKIP_INVENTORY="" _malf_run_inventory build "$root"
 }
 
 # Every first-party package in the current CONAN_HOME, removed; says which. FIRST-PARTY IS THE OWNED

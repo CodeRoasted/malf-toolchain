@@ -28,7 +28,8 @@ false green for the fourteen days before it. The repair belongs to the build sys
               build-system defect. Fails on the difference, so a new orphan reds on the
               commit that adds it.
   * `build` — each inventory entry configures and builds to a LINKED artifact, in ONE
-              canonical cell.
+              canonical cell; under `malf test` only (`--run-tests`), the tests the project
+              itself registers then run in that same cell (DN-121.D9).
 
 `proof/` is NOT made a conan package, deliberately: a package carries one profile and one
 build, which is exactly what would flatten its 8-cell determinism matrix. Being in the
@@ -48,6 +49,11 @@ driven by its own script, untouched and unflattened by this file.
 That boundary is DECLARED rather than discovered because an undeclared one is
 indistinguishable from an oversight, and gets "fixed" by widening the daily gate into an
 8-cell run nobody can afford.
+
+ONE AMENDMENT, and its limits are the point (DN-121.D9): under `malf test` only, the cell also
+runs the tests the project itself registers (`add_test`), in that same one cell. Never a second
+cell, never a toolchain matrix, never a golden-digest compare. `malf build` stays
+compile-and-link.
 
 ── WHY DERIVED AND NEVER ENUMERATED (ADR-3.D9) ──────────────────────────────────────────
 
@@ -319,8 +325,49 @@ def workspace_grain_absences(entry: dict, workspace: Path, repo: Path) -> list[t
     return absent
 
 
+# `ctest -N`'s count line. A count this reader cannot find is a FAILURE, never a zero: reading an
+# unparsed listing as "no test registered" would skip the project's tests and print the same
+# green a project registering none prints (MEM:synthetic-gate-vacuity-vs-judgment).
+CTEST_TOTAL_RE = re.compile(r"^Total Tests: (\d+)$", re.MULTILINE)
+
+
+def run_cell_tests(name: str, label: str, build_dir: Path, conan_out: Path) -> int:
+    """DN-121.D9 — under `malf test` only, run the tests the inventory project ITSELF registers,
+    in the cell just built. The population is derived from `ctest -N`, never listed: a project
+    registering no `add_test` runs nothing. One cell, never a matrix and never a digest compare —
+    those stay the tag's (ADR-3.D9's boundary, amended by DN-121.D9's three nevers)."""
+    listing = subprocess.run(["ctest", "--test-dir", str(build_dir), "-N"],
+                             capture_output=True, text=True)
+    found = CTEST_TOTAL_RE.search(listing.stdout)
+    if listing.returncode != 0 or not found:
+        print(f"malf inventory: cannot count the tests {name} ({label}) registers — "
+              f"`ctest -N` in {build_dir} exited {listing.returncode} with no "
+              "'Total Tests:' line", file=sys.stderr)
+        print("\n".join((listing.stdout + listing.stderr).split("\n")[-20:]), file=sys.stderr)
+        return 1
+    registered = int(found.group(1))
+    if registered == 0:
+        print("   tests: the project registers none — nothing to run (DN-121.D9)")
+        return 0
+    print(f"   tests: the project registers {registered} — ctest in {build_dir}")
+    # The run env (conanrun.sh), not the build env: a test executes the cell's binaries, and a
+    # profile linking a non-system runtime finds it only through the run env.
+    script = " ".join(shlex.quote(part) for part in
+                      ["ctest", "--test-dir", str(build_dir), "--output-on-failure"])
+    runenv = conan_out / "conanrun.sh"
+    if runenv.exists():
+        script = f". {shlex.quote(str(runenv))} >/dev/null && {script}"
+    sys.stdout.flush()
+    if subprocess.run(["bash", "-c", script]).returncode != 0:
+        print(f"malf inventory: tests FAILED for {name} ({label}) in the cell "
+              f"{build_dir.name} — the project's own registered tests (DN-121.D9)",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
 def run_build(workspace: Path, repo_root: Path, build_key: str, profile: str,
-              build_type: str) -> int:
+              build_type: str, run_tests: bool) -> int:
     inventory = load_inventory(repo_root)
     if not inventory:
         return 0
@@ -415,6 +462,9 @@ def run_build(workspace: Path, repo_root: Path, build_key: str, profile: str,
                   f"artifact under {build_dir}", file=sys.stderr)
             return 1
         print(f"   linked: {produced[0]}")
+        if run_tests and run_cell_tests(name, f"{repo_root.name}/{entry['path']}",
+                                        build_dir, conan_out) != 0:
+            return 1
     if skipped:
         # COUNTED as well as declared: a skip that is only a per-cell line can scroll
         # away; the count is the one-glance fact a CI log reader checks against the
@@ -452,6 +502,10 @@ def main() -> int:
     # declaration of the build type.
     parser.add_argument("--build-type",
                         help="the active profile's declared build_type (malf passes it)")
+    # `malf test` passes it and `malf build`/`malf inventory` never do (DN-121.D9): a build stays
+    # compile-and-link.
+    parser.add_argument("--run-tests", action="store_true",
+                        help="build mode: also run the tests each project registers (malf test)")
     args = parser.parse_args()
     workspace = Path(args.workspace)
     # A bad path is a MISTAKE and must say so, not raise. A traceback here reads as "the tool is
@@ -470,7 +524,7 @@ def main() -> int:
     if not args.build_type:
         parser.error("build mode needs --build-type (the active profile's declared build_type)")
     return run_build(workspace, Path(args.repo).resolve(), args.build_key, args.profile,
-                     args.build_type)
+                     args.build_type, args.run_tests)
 
 
 if __name__ == "__main__":
