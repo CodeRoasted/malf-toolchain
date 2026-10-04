@@ -20,6 +20,7 @@
         "jsoncpp/1.9.5#9415a4cf4d2e8965408f3a01a8339b48%1726135495.806",
         "insight_sift/1.10.6",
         "insight_semantic_test_frameworks/1.10.6",
+        "insight_semantic_package_managers/1.10.6",
         "insight_semantic_jenkins/1.10.6",
         "insight_semantic_gitlab/1.10.6",
         "insight_semantic_github/1.10.6",
