@@ -335,7 +335,7 @@ def run_cell_tests(name: str, label: str, build_dir: Path, conan_out: Path) -> i
     """DN-121.D9 — under `malf test` only, run the tests the inventory project ITSELF registers,
     in the cell just built. The population is derived from `ctest -N`, never listed: a project
     registering no `add_test` runs nothing. One cell, never a matrix and never a digest compare —
-    those stay the tag's (ADR-3.D9's boundary, amended by DN-121.D9's three nevers)."""
+    those stay the tag's — the inventory boundary's three nevers (DN-121.D9)."""
     listing = subprocess.run(["ctest", "--test-dir", str(build_dir), "-N"],
                              capture_output=True, text=True)
     found = CTEST_TOTAL_RE.search(listing.stdout)
