@@ -827,8 +827,8 @@ _malf_repo_root_of() {
 # post: each distinct repository those dirs sit in has built its inventory cells ONCE, in the order
 # the dirs name them, after ONE workspace lint; a dir inside no repository contributes none.
 # post: every cell resolved in the active profile's keyed cache, whatever cache the caller held.
-# post: under verb `test`, each cell has also run the tests its project registers (DN-121.D9).
-# refs: ADR-3.D9, ADR-3.D10, DN-121.D9
+# post: under verb `test`, each cell has also run the tests its project registers (ADR-3.D9).
+# refs: ADR-3.D9, ADR-3.D10
 _malf_run_inventory() {            # <build|test> <dir>...
     local verb="$1"; shift
     [[ -n "${MALF_SWEEP:-}" ]] && return 0            # a sweep member — the root runs it once
@@ -4552,7 +4552,7 @@ Commands:
     build   [target] [--asan|--profile <name>]
     test    [target] [--asan|--profile <name>] [--verbose] [--filter REGEX]
                                also runs, in each inventory cell it builds, the tests that
-                               inventory project registers itself (DN-121.D9); `build` never does
+                               inventory project registers itself (ADR-3.D9); `build` never does
     lint    [--all-files] [-c|--console]
                                a translation unit clang-tidy DIES on is reported as NOT LINTED,
                                by name and separately from the findings, and fails the run —

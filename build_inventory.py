@@ -29,7 +29,7 @@ false green for the fourteen days before it. The repair belongs to the build sys
               commit that adds it.
   * `build` — each inventory entry configures and builds to a LINKED artifact, in ONE
               canonical cell; under `malf test` only (`--run-tests`), the tests the project
-              itself registers then run in that same cell (DN-121.D9).
+              itself registers then run in that same cell (ADR-3.D9).
 
 `proof/` is NOT made a conan package, deliberately: a package carries one profile and one
 build, which is exactly what would flatten its 8-cell determinism matrix. Being in the
@@ -50,7 +50,7 @@ That boundary is DECLARED rather than discovered because an undeclared one is
 indistinguishable from an oversight, and gets "fixed" by widening the daily gate into an
 8-cell run nobody can afford.
 
-ONE AMENDMENT, and its limits are the point (DN-121.D9): under `malf test` only, the cell also
+ONE AMENDMENT, and its limits are the point (ADR-3.D9): under `malf test` only, the cell also
 runs the tests the project itself registers (`add_test`), in that same one cell. Never a second
 cell, never a toolchain matrix, never a golden-digest compare. `malf build` stays
 compile-and-link.
@@ -332,10 +332,10 @@ CTEST_TOTAL_RE = re.compile(r"^Total Tests: (\d+)$", re.MULTILINE)
 
 
 def run_cell_tests(name: str, label: str, build_dir: Path, conan_out: Path) -> int:
-    """DN-121.D9 — under `malf test` only, run the tests the inventory project ITSELF registers,
+    """ADR-3.D9 — under `malf test` only, run the tests the inventory project ITSELF registers,
     in the cell just built. The population is derived from `ctest -N`, never listed: a project
     registering no `add_test` runs nothing. One cell, never a matrix and never a digest compare —
-    those stay the tag's — the inventory boundary's three nevers (DN-121.D9)."""
+    those stay the tag's — the inventory boundary's three nevers (ADR-3.D9)."""
     listing = subprocess.run(["ctest", "--test-dir", str(build_dir), "-N"],
                              capture_output=True, text=True)
     found = CTEST_TOTAL_RE.search(listing.stdout)
@@ -347,7 +347,7 @@ def run_cell_tests(name: str, label: str, build_dir: Path, conan_out: Path) -> i
         return 1
     registered = int(found.group(1))
     if registered == 0:
-        print("   tests: the project registers none — nothing to run (DN-121.D9)")
+        print("   tests: the project registers none — nothing to run (ADR-3.D9)")
         return 0
     print(f"   tests: the project registers {registered} — ctest in {build_dir}")
     # The run env (conanrun.sh), not the build env: a test executes the cell's binaries, and a
@@ -360,7 +360,7 @@ def run_cell_tests(name: str, label: str, build_dir: Path, conan_out: Path) -> i
     sys.stdout.flush()
     if subprocess.run(["bash", "-c", script]).returncode != 0:
         print(f"malf inventory: tests FAILED for {name} ({label}) in the cell "
-              f"{build_dir.name} — the project's own registered tests (DN-121.D9)",
+              f"{build_dir.name} — the project's own registered tests (ADR-3.D9)",
               file=sys.stderr)
         return 1
     return 0
@@ -502,7 +502,7 @@ def main() -> int:
     # declaration of the build type.
     parser.add_argument("--build-type",
                         help="the active profile's declared build_type (malf passes it)")
-    # `malf test` passes it and `malf build`/`malf inventory` never do (DN-121.D9): a build stays
+    # `malf test` passes it and `malf build`/`malf inventory` never do (ADR-3.D9): a build stays
     # compile-and-link.
     parser.add_argument("--run-tests", action="store_true",
                         help="build mode: also run the tests each project registers (malf test)")

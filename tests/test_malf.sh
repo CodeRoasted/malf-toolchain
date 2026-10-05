@@ -3008,7 +3008,7 @@ check "every install of the sweep — members' and cells' alike — ran in the l
 rm -rf "$rg_tmp"
 echo
 
-echo "[7q12] under \`malf test\` only, an inventory cell runs the tests its project registers (DN-121.D9)"
+echo "[7q12] under \`malf test\` only, an inventory cell runs the tests its project registers (ADR-3.D9)"
 
 # note: canon's showcase view gate is registered by its inventory project `proof/` and by no
 # package, so `malf test` never ran it; `golden.yaml` runs on pull requests, the cut, a dispatch and
