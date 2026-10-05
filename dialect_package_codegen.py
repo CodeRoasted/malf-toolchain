@@ -73,6 +73,14 @@ with lines that are content. The emitted row carries the shape in the bytes memb
 `.match = RoleMatchKind::Shape`; a prefix row emits no match kind, so a declaration of prefix
 rows alone keeps its content hash and its emitted bytes.
 
+A MARKER ROW MAY CLOSE THE STEPS OF ITS JOB. The optional `role: Closes` states that the
+row's line enters the current job's epilogue, a step-level unit the core supplies and names
+(DN-89.D40): the runner's own teardown, which no line names. A closing row is legal only on
+`kind: Step`, and like an opening row it declares no `child_order:`, no `extract:` and no
+`version_coordinate:`, since the unit it enters carries no class, instance or version of the
+dialect's. What the row does to the open unit is the core's algorithm; the derived emit row
+carries the role, so a writer never selects it as a banner.
+
 DETERMINISM (DN-17.D19). Strict YAML subset -> canonical content hash -> byte-stable
 emission, strings end-to-end with no typed conversion, LF-only output, write-if-changed.
 The emitted text is Python output and cannot vary with the C++ compiler; the axes that
@@ -114,7 +122,7 @@ from codegen_common import (
     required_scalar,
 )
 
-TOOL_VERSION = "6"  # 6: a role row may match a whole-line shape, and the Progress role
+TOOL_VERSION = "7"  # 7: a marker row may close the steps of its job
 SCHEMA_VERSION = "1"
 
 DIALECT_FILE_SUFFIX = ".dialect.yaml"
@@ -145,8 +153,8 @@ _VERSION_PAYLOAD_SHAPES = ("OneToken",)
 # The roles a marker row may declare. A row that declares none NAMES its unit: the core's
 # `Names` role is an ABSENCE here, never an authorable value, so "names" has exactly one
 # spelling.
-_MARKER_ROLES = ("Opens",)
-_OPENING_ROW_KEYS = ("prefix", "kind", "role", "dialect_gate", "channel_gate", "why")
+_MARKER_ROLES = ("Opens", "Closes")
+_ROLE_ROW_KEYS = ("prefix", "kind", "role", "dialect_gate", "channel_gate", "why")
 _LOG_LEVELS = ("Trace", "Debug", "Info", "Warn", "Error", "Fatal")
 _RUN_OUTCOMES = ("Unknown", "Success", "Failure", "Unstable", "Aborted")
 
@@ -473,30 +481,36 @@ def _validate_version_coordinate(node, context: str, source: str) -> dict:
     }
 
 
-def _validate_opening_row(row: dict, channels: list[str], context: str, source: str) -> dict:
-    """A row that OPENS a unit of its kind and carries no identity: a prefix, never a payload.
+def _validate_unit_role_row(row: dict, channels: list[str], context: str, source: str) -> dict:
+    """A row that OPENS a unit of its kind, or CLOSES the steps of its job: a prefix, never a payload.
 
-    The naming row that follows names the unit, so everything a payload derives — the class,
-    the instance, the version — is the naming row's, and an opening row declaring any of it
-    would be a second, silent source of the same fact.
+    An opener's unit is named by the naming row that follows, and a closer's unit is the
+    core's supplied epilogue, so everything a payload derives — the class, the instance, the
+    version — is never this row's, and a row declaring any of it would be a second, silent
+    source of the same fact.
     """
+    role = _enum_value(row, "role", _MARKER_ROLES, context, source)
     for key in ("child_order", "extract", "version_coordinate"):
         if key in row:
             fail(source, None,
-                 f"{context}: `{key}:` on a row declaring `role: Opens` — an opening row "
-                 "carries no identity: the naming row of its kind that follows names the "
-                 "unit, and its payload is the only source of the class, the instance and "
-                 "the version")
-    expect_keys(row, _OPENING_ROW_KEYS, context, source, _DIALECT_REJECTIONS)
+                 f"{context}: `{key}:` on a row declaring `role: {role}` — a row that opens "
+                 "or closes a unit carries no identity: an opened unit is named by the naming "
+                 "row of its kind that follows, a closed job's epilogue is the core's own unit, "
+                 "and neither takes its class, instance or version from this row")
+    expect_keys(row, _ROLE_ROW_KEYS, context, source, _DIALECT_REJECTIONS)
     kind = _enum_value(row, "kind", _MARKER_KINDS, context, source)
-    if kind == "None":
+    if role == "Opens" and kind == "None":
         fail(source, None,
              f"{context}: `kind: None` on a row declaring `role: Opens` — an opening row "
              "opens a unit of a kind, and `None` is no unit")
+    if role == "Closes" and kind != "Step":
+        fail(source, None,
+             f"{context}: `kind: {kind}` on a row declaring `role: Closes` — a closing row "
+             "enters its job's epilogue, a step-level unit, so it is legal only on `kind: Step`")
     return {
         "prefix": _prefix(row, "prefix", context, source),
         "kind": kind,
-        "role": _enum_value(row, "role", _MARKER_ROLES, context, source),
+        "role": role,
         "dialect_gate": _dialect_gate(row, context, source),
         "channel_gate": _channel_gate(row, channels, context, source),
         "why": _validate_why(row, context, source),
@@ -507,7 +521,7 @@ def _validate_marker_row(row: dict, channels: list[str], context: str, source: s
     # The key enters the validated row ONLY when declared, so a declaration whose rows all
     # name their units keeps its content hash and its emitted bytes.
     if "role" in row:
-        return _validate_opening_row(row, channels, context, source)
+        return _validate_unit_role_row(row, channels, context, source)
     expect_keys(row, ("prefix", "kind", "child_order", "dialect_gate", "extract",
                       "channel_gate", "version_coordinate", "why"), context, source,
                 _DIALECT_REJECTIONS)
@@ -644,7 +658,7 @@ def _validate_section(node, name: str, source: str, channels: list[str] | None =
                 for position, item in enumerate(items)]
         named = {row["kind"] for row in rows if "role" not in row}
         for position, row in enumerate(rows):
-            if "role" in row and row["kind"] not in named:
+            if row.get("role") == "Opens" and row["kind"] not in named:
                 fail(source, None,
                      f"section `{name}:` rows[{position}]: an opening row of kind "
                      f"`{row['kind']}`, and no row of this section names a unit of that "
@@ -1123,8 +1137,9 @@ def _emit_marker_rows(out: list[str], declaration: dict) -> None:
     _emit_array(out, "IntentMarkerRow", "kMarkers", len(rows))
     for row in rows:
         if "role" in row:
-            # An opening row carries no payload: its order and extractor are the core's
-            # defaults, inert on a row that names nothing, and its role is the one fact it adds.
+            # An opening or closing row carries no payload: its order and extractor are the
+            # core's defaults, inert on a row that names nothing, and its role is the one fact
+            # it adds.
             _emit_row(out, [
                 ("prefix", _quoted(row["prefix"])),
                 ("kind", f"insight::tokenization::IntentMarkerKind::{row['kind']}"),
@@ -1843,6 +1858,34 @@ def selftest() -> int:
                           '"Opened at "\n        kind: Job', '"Opened at "\n        kind: Step', 1)
                           .replace('      - prefix: "Run "\n        kind: Step\n',
                                    '      - prefix: "Run "\n        kind: Job\n', 1)))
+    # ── the closing role: a row that enters its job's supplied epilogue ──────────────────
+    _closer = ('      - prefix: "Teardown."\n        kind: Step\n        role: Closes\n'
+               '        dialect_gate: self\n        channel_gate: any\n'
+               '        why: ["The runner\'s teardown line names no step."]\n')
+    _with_closer = _SYNTHETIC.replace('      - prefix: "Job: "\n', _closer + '      - prefix: "Job: "\n', 1)
+    _case("role: a closing row is emitted with its role on both projections, and no other row "
+          "carries one", failures, lambda: _assert(
+              render_fixture(text=_with_closer).count(".role = MarkerRole::Closes") == 2
+              and render_fixture(text=_with_closer).count("MarkerRole::") == 2
+              and '{.prefix = "Teardown.",\n     .kind = insight::tokenization::IntentMarkerKind::Step,'
+              '\n     .dialect_gate = kDialect,\n     .extract = PayloadExtract::None,'
+              in render_fixture(text=_with_closer)
+              and declaration_hash(_parse_fixture(_with_closer)) != base_hash,
+              "the closing row's role is not on exactly its recognition and its emit row, it "
+              "carries a payload field, or it did not move the hash"))
+    _expect_rejection("refuse: a closing row of kind Job — it enters a step-level unit", failures,
+                      "`kind: Job` on a row declaring `role: Closes`",
+                      lambda: _parse_fixture(_with_closer.replace(
+                          '"Teardown."\n        kind: Step', '"Teardown."\n        kind: Job', 1)))
+    _expect_rejection("refuse: a closing row of kind None", failures,
+                      "`kind: None` on a row declaring `role: Closes`",
+                      lambda: _parse_fixture(_with_closer.replace(
+                          '"Teardown."\n        kind: Step', '"Teardown."\n        kind: None', 1)))
+    _expect_rejection("refuse: a closing row declaring an extractor", failures,
+                      "`extract:` on a row declaring `role: Closes`",
+                      lambda: _parse_fixture(_with_closer.replace(
+                          "        role: Closes\n",
+                          "        role: Closes\n        extract: RemainderAfterPrefix\n", 1)))
     # ── a declared value: a key a stream's acquirer supplies a value under ───────────────
     _with_value = _SYNTHETIC.replace(
         "  outcome_markers:\n",
