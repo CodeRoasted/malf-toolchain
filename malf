@@ -524,7 +524,9 @@ MALF_EDITABLE_BUILD_DIR="build-$(_malf_build_key)"
 # instrument build tools (an ASan-built m4 breaks libcurl/autotools autoreconf).
 MALF_BUILD_PROFILE="${MALF_BUILD_PROFILE:-$MALF_PROFILE}"
 # The profile `--asan` selects (sugar for `--profile $MALF_ASAN_PROFILE`): clang-21 +
-# libstdc++ + ASan/UBSan (libFuzzer via the harness target). Requires clang-21 installed.
+# libc++ + ASan/UBSan. Under it insight-eidos's parse_fuzzer builds as the standalone ASan/UBSan
+# replay, never libFuzzer (its SIFT_LIBFUZZER branch needs clang + libstdc++, which no profile
+# here builds). Requires clang-21 + libc++-21 installed.
 MALF_ASAN_PROFILE="${MALF_ASAN_PROFILE:-linux-clang21-asan}"
 
 # ─── Conan global.conf ───────────────────────────────────────────────────────
@@ -1544,7 +1546,7 @@ cmd_build() {
             # Select any registry profile (malf/profiles/<name>): build type + clean
             # build-context for sanitizers are derived from the profile.
             --profile) fwd+=("$1" "$2"); shift; _malf_apply_profile "$1" ;;
-            # Sugar: ASan/UBSan(+libFuzzer-via-target) gate profile (canon→eidos parse path).
+            # Sugar: the ASan/UBSan gate profile (canon→eidos parse path).
             --asan)    _malf_apply_profile "$MALF_ASAN_PROFILE"; fwd+=("$1") ;;
             # Build exactly the recipe at the resolved dir, never the recipes below it.
             # Not forwarded: a sweep cannot occur under it, so a member never sees it.

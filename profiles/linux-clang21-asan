@@ -3,9 +3,10 @@
 # libc++ (NOT libstdc++) is MANDATORY: the instrumented targets are C++23 modules that
 # `import std`, and clang's std module ships ONLY with libc++-21 — a clang+libstdc++ build
 # CANNOT compile `import std` (it ICEs/errors in libstdc++'s std.cc: "cannot befriend target
-# of using declaration"). libFuzzer (-fsanitize=fuzzer, added by the harness TARGET only — it
-# provides main) links fine against libc++. -fno-sanitize-recover=all → any UB aborts (gate
-# fails). Build tools stay uninstrumented via malf's clean build-context (auto when -fsanitize
+# of using declaration"). libFuzzer does NOT link here: clang's packaged libFuzzer runtime is
+# libstdc++-built, so insight-eidos/fuzz/CMakeLists.txt leaves SIFT_LIBFUZZER off under libc++
+# and parse_fuzzer builds as the standalone ASan/UBSan replay of the committed seeds.
+# -fno-sanitize-recover=all → any UB aborts (gate fails). Build tools stay uninstrumented via malf's clean build-context (auto when -fsanitize
 # is present). This leg also widens the byte-identity check to cross-stdlib, since it compares
 # a libc++ build against the libstdc++ release legs.
 # Requires clang-21 + libc++-21-dev + libc++abi-21-dev (apt.llvm.org) + the libc++.modules.json
