@@ -1373,9 +1373,13 @@ _malf_configure_and_build() {
     shift 2
     local preset
     preset="$(_malf_preset)"
+    # THE CONFIGURE'S STATUS IS RETURNED BY HAND, because `set -e` never sees it: every caller runs
+    # this function under `||` or `if !`, which suspends errexit for its whole body. Without the
+    # `|| return`, a failed configure over a warm tree fell through to `cmake --build` on the
+    # previous configuration and malf exited 0 in every form — the [7q13] selftest arm.
     cmake --preset "$preset" -S "$target" -B "$build_dir" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-        "$@"
+        "$@" || return
     _malf_assert_tree_matches_profile "$build_dir"
     _malf_build_width
     echo "$_MALF_BUILD_WIDTH_LINE" >&2
@@ -5515,6 +5519,15 @@ if [[ "$COMMAND" != help ]]; then
     unset _arg
 fi
 
+# THE DISPATCH AND ITS `exit` ARE ONE COMPOUND COMMAND, so bash has parsed both before any verb runs
+# and never reads this file again. Bash reads a script by file OFFSET, one command at a time: when a
+# verb returned it read on from the old offset, and an in-place rewrite of malf during the run
+# (2026-10-05, a python `open('w')` edit of the working copy every lane executes) put that offset in
+# the middle of the new text — "line 5542: syntax error", exit 2, at the end of a finished build.
+# Every function is already parsed by the time a verb runs. The residual is the load itself, the
+# milliseconds before this block is read; a sweep starts each member as a fresh malf, which reads
+# the file as it is then. The [7q13] selftest arm rewrites a copy mid-run.
+{
 case "$COMMAND" in
     build)            cmd_build "$@" ;;
     test)             cmd_test "$@" ;;
@@ -5541,3 +5554,5 @@ case "$COMMAND" in
         exit 1
         ;;
 esac
+exit
+}

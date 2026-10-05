@@ -3085,6 +3085,111 @@ check "malf test: a test listing ctest cannot read is a red, never a count of ze
 rm -rf "$ct_tmp"
 echo
 
+echo "[7q13] a failed configure or compile reds build and test in every form, and a malf rewritten mid-run finishes its run"
+
+# note: `_malf_configure_and_build` runs only under `||` or `if !`, which suspends `set -e` inside it,
+# so a failed `cmake --preset` was discarded whenever `cmake --build` over the previous tree passed.
+# note: an in-place rewrite of malf mid-run (2026-10-05, a python `open('w')` edit) killed a live build
+# with "line 5542: syntax error": bash reads a script by offset, and resumed in the new bytes.
+ex_tmp="$(realpath "$(mktemp -d)")"
+ex_bin="$ex_tmp/bin"; ex_ws="$ex_tmp/ws"; mkdir -p "$ex_bin" "$ex_ws"
+cat > "$ex_bin/conan" <<'STUB'
+#!/usr/bin/env bash
+out=""
+for a in "$@"; do [[ "$a" == --output-folder=* ]] && out="${a#--output-folder=}"; done
+if [[ "$1" == install && -n "$out" ]]; then
+    mkdir -p "$out" && printf '{"version":4,"configurePresets":[{"name":"conan-release"}]}\n' > "$out/CMakePresets.json"
+fi
+exit 0
+STUB
+cat > "$ex_bin/cmake" <<'STUB'
+#!/usr/bin/env bash
+build=""; prev=""; compiling=false
+for a in "$@"; do
+    if $compiling && [[ -z "$build" ]]; then build="$a"; fi
+    [[ "$a" == --build ]] && compiling=true
+    [[ "$prev" == -B ]] && build="$a"
+    prev="$a"
+done
+pkg="$(dirname "$build")"
+if $compiling; then
+    if [[ -e "$pkg/HOLD" ]]; then
+        : > "$pkg/HELD"
+        while [[ ! -e "$pkg/GO" ]]; do sleep 0.1; done
+    fi
+    [[ -e "$pkg/COMPILE_RED" ]] && { echo "FAILED: stub compile error in $pkg" >&2; exit 1; }
+    exit 0
+fi
+mkdir -p "$build"
+[[ -e "$pkg/CONFIGURE_RED" ]] && { echo "CMake Error: stub configure error in $pkg" >&2; exit 1; }
+echo "CMAKE_BUILD_TYPE:STRING=Release" > "$build/CMakeCache.txt"
+echo '[]' > "$build/compile_commands.json"
+STUB
+chmod +x "$ex_bin/conan" "$ex_bin/cmake"
+ex_pkg() {   # <subdir> <name> [<requires>]
+    local d="$ex_ws/repo/$1"
+    mkdir -p "$d"
+    printf 'from conan import ConanFile\nclass C(ConanFile):\n    name = "%s"\n    version = "1.0"\n' "$2" > "$d/conanfile.py"
+    [[ -n "${3:-}" ]] && printf '    requires = "%s"\n' "$3" >> "$d/conanfile.py"
+    printf 'project(%s)\n' "$2" > "$d/CMakeLists.txt"
+}
+# The insight-eidos shape: a root recipe that both sub-recipes require, swept root first.
+ex_pkg . ex_root; ex_pkg sub ex_sub ex_root/1.0; ex_pkg leaf ex_leaf ex_root/1.0
+git -C "$ex_ws/repo" init -q
+ex_run() {   # <malf> <verb args...> -> rc=<status>; the log is $ex_tmp/log
+    local malf="$1"; shift
+    (cd "$ex_ws/repo" && PATH="$ex_bin:$PATH" MALF_WORKSPACE_ROOT="$ex_ws" MALF_SKIP_INVENTORY=1 \
+        MALF_PROFILE_NAME="" timeout --kill-after=5 120 bash "$malf" "$@" > "$ex_tmp/log" 2>&1
+     echo "rc=$?")
+}
+ex_forms() {   # <package dir for --only> -> the status of every form, one word each
+    local out=""
+    out+="$(ex_run "$MALF_BIN" build sub) "
+    out+="$(ex_run "$MALF_BIN" test sub) "
+    out+="$(ex_run "$MALF_BIN" build "$1" --only) "
+    out+="$(ex_run "$MALF_BIN" build) "
+    out+="$(ex_run "$MALF_BIN" test)"
+    echo "$out"
+}
+check "a clean tree builds green in every form (guards a fixture that reds by itself)" \
+      "rc=0 rc=0 rc=0 rc=0 rc=0" "$(ex_forms sub)"
+touch "$ex_ws/repo/sub/CONFIGURE_RED"
+check "a failed configure of the target reds build, test, --only and both sweeps, over a warm tree" \
+      "rc=1 rc=1 rc=1 rc=1 rc=1" "$(ex_forms sub)"
+mv "$ex_ws/repo/sub/CONFIGURE_RED" "$ex_ws/repo/CONFIGURE_RED"
+check "a failed configure of a DEPENDENCY reds every form that builds it" \
+      "rc=1 rc=1 rc=1 rc=1 rc=1" "$(ex_forms .)"
+mv "$ex_ws/repo/CONFIGURE_RED" "$ex_ws/repo/sub/COMPILE_RED"
+check "a failed compile of the target, the last member of the sweep, reds every form" \
+      "rc=1 rc=1 rc=1 rc=1 rc=1" "$(ex_forms sub)"
+mv "$ex_ws/repo/sub/COMPILE_RED" "$ex_ws/repo/COMPILE_RED"
+check "a failed compile of a DEPENDENCY reds every form that builds it" \
+      "rc=1 rc=1 rc=1 rc=1 rc=1" "$(ex_forms .)"
+rm -f "$ex_ws/repo/COMPILE_RED"
+# A private copy of the toolchain, so the rewrite never touches the malf every lane runs.
+mkdir -p "$ex_tmp/toolchain"
+for ex_entry in "$MALF_ROOT"/*; do
+    [[ "$(basename "$ex_entry")" == tests ]] || cp -a "$ex_entry" "$ex_tmp/toolchain/"
+done
+touch "$ex_ws/repo/leaf/HOLD"
+ex_run "$ex_tmp/toolchain/malf" build leaf --only > "$ex_tmp/rc" &
+ex_pid=$!
+for _ in $(seq 1 600); do [[ -e "$ex_ws/repo/leaf/HELD" ]] && break; sleep 0.1; done
+python3 - "$ex_tmp/toolchain/malf" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+first, rest = text.split("\n", 1)
+with open(path, "w", encoding="utf-8") as script:
+    script.write(first + "\n" + "# a lane's in-place edit\n" * 40 + rest)
+PY
+: > "$ex_ws/repo/leaf/GO"
+wait "$ex_pid"
+check "a malf rewritten in place mid-run exits with its own run's status, never a syntax error" \
+      "rc=0 0" "$(cat "$ex_tmp/rc") $(grep -c 'syntax error' "$ex_tmp/log")"
+rm -rf "$ex_tmp"
+echo
+
 echo "[7j6] lint --all-files NAMES a TU the build gates off this platform, and refuses nothing else"
 
 # note: two sift *_win32.cpp files are named only inside if(WIN32), so no Linux compile command can
