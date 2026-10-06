@@ -896,14 +896,22 @@ _malf_run_repo_inventory() {       # <build|test> <repo>
     # which is the trade this whole command refuses to make.
     local _inv_root; _inv_root="$repo/build-$(_malf_build_key)"
     if [[ -f "$_inv_root/compile_commands.json" ]]; then
-        local _inv_db
-        while IFS= read -r _inv_db; do
-            [[ -n "$_inv_db" ]] || continue
-            _malf_merge_db_tree "$_inv_root" "$(dirname "$_inv_db")"
-        done < <(find "$repo" -type d -name "build-inventory-$(_malf_build_key)" \
-                     -exec test -f '{}/compile_commands.json' \; -print 2>/dev/null \
-                 | sed 's|$|/compile_commands.json|')
+        local _inv_dir
+        while IFS= read -r _inv_dir; do
+            [[ -n "$_inv_dir" ]] || continue
+            _malf_merge_db_tree "$_inv_root" "$_inv_dir"
+        done < <(_malf_inventory_db_dirs "$repo")
     fi
+}
+
+# post: prints, one per line in byte order, every inventory cell tree of the active profile under
+# <dir> that holds a compile_commands.json — the ONE enumeration both database folds read, the
+# inventory build's and `malf commands`'.
+# note: a cell that never configured has no database and is absent here; `malf lint --all-files`
+# reds on its translation units as uncovered, so the absence is reported where it costs coverage.
+_malf_inventory_db_dirs() {        # <dir>
+    find "$1" -type d -name "build-inventory-$(_malf_build_key)" \
+         -exec test -f '{}/compile_commands.json' \; -print 2>/dev/null | LC_ALL=C sort
 }
 
 _malf_build_dir() {
@@ -2357,8 +2365,9 @@ PY
                     echo "malf lint: refusing to report success — --all-files walks the TREE, so these are a" >&2
                     echo "malf lint: coverage hole in the subject this mode named, not files you chose to skip." >&2
                     echo "malf lint: the root database is built up by 'malf build <pkg>' one package at a time," >&2
-                    echo "malf lint: so a partial build leaves a partial subject. Rebuild it whole: 'malf commands'" >&2
-                    echo "malf lint: (or 'malf build' with no argument, which sweeps every package here)." >&2
+                    echo "malf lint: so a partial build leaves a partial subject. Rebuild it whole: 'malf build' with no" >&2
+                    echo "malf lint: argument sweeps every package here and compiles its inventory cells; 'malf commands'" >&2
+                    echo "malf lint: re-indexes without compiling, so it folds only the inventory cells already built." >&2
                 fi
             fi
             files=("${_in_db[@]}")
@@ -3800,6 +3809,17 @@ cmd_compile_commands() {
     done
     (( reasserted == 0 )) || echo "malf commands: re-asserted the target role on $reasserted member(s)"
 
+    # THE INVENTORY CELLS' DATABASES ARE FOLDED TOO, after every member so a member's own entry for
+    # a shared source wins the merge's first-writer dedup. The rm above cleared the root database
+    # whole, and a cell is configured by `malf build`/`malf test`/`malf inventory`, never here, so
+    # without this fold a `malf build` followed by a `malf commands` lost every cell-only TU.
+    # Measured on insight-metalog 2026-10-06: 125 entries holding scripts/determinism_fixture.cpp
+    # became 127 holding none, and `malf lint --all-files` then refused on it as uncovered.
+    local inventory_dirs=()
+    mapfile -t inventory_dirs < <(_malf_inventory_db_dirs "$CWD")
+    db_dirs+=("${inventory_dirs[@]}")
+    echo "malf commands: folding ${#inventory_dirs[@]} inventory cell database(s) under $CWD"
+
     _malf_merge_db_tree "$build_root" "${db_dirs[@]}"
 
     # THE TWO RESIDUALS, DERIVED. `unaccounted` is the members the loop reached no outcome for and
@@ -4578,7 +4598,9 @@ Commands:
                                scratch file. Never committed — regenerate it. --declarations-only
                                is the narrower shape; --selftest proves the renderer on a fixture.
     commands | compile-commands
-                               rebuild the repo-level compile_commands.json the editor reads.
+                               rebuild the repo-level compile_commands.json the editor reads,
+                               folding in every inventory cell database a build left under the
+                               root (a cell is compiled by build/test/inventory, never here).
                                Every run STATES ITS SCOPE — members selected/configured, the
                                entry total split first-party vs external, and per member its
                                entries and how many are test/bench TUs. A member left sitting in

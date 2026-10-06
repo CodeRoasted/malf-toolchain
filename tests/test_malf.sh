@@ -2822,6 +2822,69 @@ check "a member another member's bootstrap demoted ends the sweep in TARGET role
 rm -rf "$sw_tmp"
 echo
 
+echo "[7q14] malf commands folds every built inventory cell's database, after the members"
+
+# note: `malf commands` cleared the root database and merged member and dependency trees only, so
+# after a `malf build` it dropped every cell-only TU — insight-metalog 2026-10-06: 125 entries with
+# scripts/determinism_fixture.cpp became 127 without it, and lint --all-files refused on the hole.
+# note: driven end to end through the real verb with conan and cmake stubbed; the cell's database is
+# the one a prior `malf build` left, and it also carries the member's TU under the cell's own flags.
+ic_tmp="$(realpath "$(mktemp -d)")"
+ic_bin="$ic_tmp/bin"; ic_repo="$ic_tmp/ws/repo"; mkdir -p "$ic_bin" "$ic_repo/pkg/src" "$ic_repo/cell"
+ic_key="${MALF_DEFAULT_PROFILE#linux-}"
+cat > "$ic_bin/conan" <<'STUB'
+#!/usr/bin/env bash
+out=""
+for a in "$@"; do [[ "$a" == --output-folder=* ]] && out="${a#--output-folder=}"; done
+if [[ "$1" == install && -n "$out" ]]; then
+    mkdir -p "$out" && printf '{"version":4,"configurePresets":[{"name":"conan-release"}]}\n' > "$out/CMakePresets.json"
+fi
+exit 0
+STUB
+cat > "$ic_bin/cmake" <<'STUB'
+#!/usr/bin/env bash
+src=""; prev=""; preset=false
+for a in "$@"; do
+    [[ "$a" == --preset ]] && preset=true
+    [[ "$prev" == -S ]] && src="$a"
+    prev="$a"
+done
+$preset && [[ -n "$src" ]] || exit 0
+build="$src/build-$IC_KEY"; mkdir -p "$build"
+echo "CMAKE_BUILD_TYPE:STRING=Release" > "$build/CMakeCache.txt"
+printf '[{"directory": "%s", "command": "member-flags -c %s/src/lib.cpp", "file": "%s/src/lib.cpp"}]\n' \
+    "$build" "$src" "$src" > "$build/compile_commands.json"
+STUB
+chmod +x "$ic_bin/conan" "$ic_bin/cmake"
+printf 'from conan import ConanFile\nclass C(ConanFile):\n    name = "ic_pkg"\n    version = "1.0"\n' > "$ic_repo/pkg/conanfile.py"
+printf 'project(ic_pkg)\n' > "$ic_repo/pkg/CMakeLists.txt"
+printf 'int lib() { return 0; }\n' > "$ic_repo/pkg/src/lib.cpp"
+printf 'int main() { return 0; }\n' > "$ic_repo/cell/fixture.cpp"
+ic_cell="$ic_repo/cell/build-inventory-$ic_key"; mkdir -p "$ic_cell"
+printf '[{"directory": "%s", "command": "cell-flags -c %s", "file": "%s"},\n {"directory": "%s", "command": "cell-flags -c %s", "file": "%s"}]\n' \
+    "$ic_cell" "$ic_repo/cell/fixture.cpp" "$ic_repo/cell/fixture.cpp" \
+    "$ic_cell" "$ic_repo/pkg/src/lib.cpp" "$ic_repo/pkg/src/lib.cpp" > "$ic_cell/compile_commands.json"
+# A cell tree of ANOTHER profile is not this run's subject, and folding it would mix configurations.
+mkdir -p "$ic_repo/cell/build-inventory-other-profile"
+printf '[{"directory": "x", "command": "other-flags", "file": "%s/cell/other.cpp"}]\n' "$ic_repo" \
+    > "$ic_repo/cell/build-inventory-other-profile/compile_commands.json"
+git -C "$ic_repo" init -q
+ic_out="$(cd "$ic_repo" && PATH="$ic_bin:$PATH" IC_KEY="$ic_key" MALF_WORKSPACE_ROOT="$ic_tmp/ws" \
+    MALF_AUTO_WORKSPACE_DEPS=0 MALF_PROFILE_NAME="" setsid timeout --kill-after=5 120 bash "$MALF_BIN" commands 2>&1)"
+ic_rc=$?
+ic_db="$ic_repo/build-$ic_key/compile_commands.json"
+check "malf commands exits 0 and says how many cell databases it folded" \
+      "rc=0 folding 1" \
+      "rc=$ic_rc $(grep -oE 'folding [0-9]+' <<< "$ic_out" || echo "GOT: $ic_out")"
+check "the cell-only TU is in the root database, and no other profile's cell is" \
+      "cell/fixture.cpp pkg/src/lib.cpp" \
+      "$(python3 -c "import json,sys; print(' '.join(sorted(e['file'].split('/repo/',1)[1] for e in json.load(open(sys.argv[1])))))" "$ic_db" 2>&1)"
+check "a source both the member and the cell compile keeps the MEMBER's command" \
+      "member-flags" \
+      "$(python3 -c "import json,sys; print(next(e['command'].split()[0] for e in json.load(open(sys.argv[1])) if e['file'].endswith('pkg/src/lib.cpp')))" "$ic_db" 2>&1)"
+rm -rf "$ic_tmp"
+echo
+
 echo "[7q4] a WORKSPACE-ROOT sweep builds every member repository's inventory cells, and terminates"
 
 # note: the inventory ran once per sweep, for the repository the sweep ROOT sits in — at the
