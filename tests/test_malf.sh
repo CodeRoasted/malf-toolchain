@@ -1039,9 +1039,13 @@ check "--all-files names ITS mode, so the fact that was invisible is on both pat
          && echo named || echo "GOT: $(lk_sum "$lk_af_out")")"
 
 lk_warn_out="$(lk_af_run "$lk_tmp/tidy.warn.log" LK_TIDY_WARN_ON=engine.cpp)"; lk_warn_rc=$?
-check "STATE 3/3 — a run WITH findings counts them, and a diagnostic's note lines are not findings" \
-      "rc=0 selected 1 = 1 translation unit(s) + 0 header(s), checked 1, 1 finding(s), 0 not linted" \
+# note: the fixture's clang-tidy exits 0 on its warning, as the real one does on any check outside
+# WarningsAsErrors; the run used to return that 0, so a gate reading the exit passed 14 findings.
+check "STATE 3/3 — a run WITH findings counts them, a note line is not one, and a WARNING fails the run" \
+      "rc=1 selected 1 = 1 translation unit(s) + 0 header(s), checked 1, 1 finding(s), 0 not linted" \
       "rc=$lk_warn_rc $(lk_counts "$lk_warn_out")"
+check "the failing run says why: every finding fails it, a warning as much as an error" \
+      "1" "$(grep -c '1 finding(s) — every finding fails the run' <<< "$lk_warn_out")"
 
 # A TU THE CHECKER NEVER READ IS ITS OWN COLUMN. Clean, dirty and UNREAD are three states and the
 # summary must not fold the third into either of the first two — 1 finding and 1 not-linted are

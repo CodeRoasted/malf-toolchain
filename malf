@@ -2501,6 +2501,13 @@ PY
             printf '%s\n' "$deduped"
         fi
     fi
+    # A FINDING IS A RED, whatever its severity. clang-tidy exits non-zero only on a check named in
+    # WarningsAsErrors, so a readability-* or modernize-* finding left the run at rc 0 and a gate
+    # reading the exit code passed it: insight-metalog 2026-10-06, 14 findings at rc 0.
+    if (( lint_findings > 0 )); then
+        lint_status=1
+        echo "malf lint: $lint_findings finding(s) — every finding fails the run, a warning as much as an error." >&2
+    fi
 
     # THE TRANSLATION UNITS THAT WERE NOT CHECKED AT ALL — named, counted, and fatal.
     # This is the half a lint gate normally has no word for: a file can be clean, dirty, or

@@ -96,10 +96,35 @@ CheckOptions:
   - key: modernize-use-uniform-initialization.UseAssignment
     value: 'false'
 
+  # The identifier floor is DECLARED here rather than inherited, so the doctrine and its gate read
+  # one number (ADR-26.D1: every name is explicit, and none is shorter than the lint's minimum).
+  # The values are clang-tidy 21's own defaults, dumped with `clang-tidy-21 --dump-config`
+  # (Ubuntu LLVM 21.1.8, 2026-10-06), so declaring them moved no finding; the exemptions are the
+  # tool's, and the doctrine adds none. A justified short name takes an own-line
+  # `NOLINTNEXTLINE(readability-identifier-length)` under its `note:`, never a widened pattern here.
+  - key: readability-identifier-length.MinimumVariableNameLength
+    value: '3'
+  - key: readability-identifier-length.MinimumParameterNameLength
+    value: '3'
+  - key: readability-identifier-length.MinimumLoopCounterNameLength
+    value: '2'
+  - key: readability-identifier-length.IgnoredLoopCounterNames
+    value: '^[ijk_]$'
+  - key: readability-identifier-length.MinimumExceptionNameLength
+    value: '2'
+  - key: readability-identifier-length.IgnoredExceptionVariableNames
+    value: '^[e]$'
+  - key: readability-identifier-length.IgnoredParameterNames
+    value: '^[n]$'
+  - key: readability-identifier-length.IgnoredVariableNames
+    value: ''
+
   # Cognitive-complexity bar is DELIBERATELY the default 25 (an explicit policy call,
   # 2026-07-23), made explicit so it is a CHOSEN standard rather than an inherited default,
-  # and so there is one place to tune. This is a readability-* check → a warning, NOT in
-  # WarningsAsErrors, so it never blocks a build. Handle a finding by TRIAGE, never by raising
+  # and so there is one place to tune. This is a readability-* check → a warning, and `malf lint`
+  # fails on every finding whatever its severity (the Founder, 2026-10-06, LEXICON.md § Rulings
+  # closed), so a finding here reds the lint gate like any other. Handle a finding by TRIAGE, never
+  # by raising
   # this number to silence it: a genuinely sprawling function is refactored (single
   # responsibility); a legitimately-complex algorithmic / hot-path function whose split
   # would fragment a coherent routine gets an OWN-LINE
@@ -119,6 +144,8 @@ CheckOptions:
   - key: readability-function-cognitive-complexity.Threshold
     value: '25'
 
+# WarningsAsErrors sets clang-tidy's OWN severity and exit code; it no longer decides the gate,
+# because `malf lint` fails on every finding it counts, a warning as much as an error.
 WarningsAsErrors: >
   bugprone-*,
   performance-*,

@@ -64,7 +64,7 @@ import re
 import sys
 from pathlib import Path
 
-TOOL_VERSION = "1"
+TOOL_VERSION = "2"
 
 INTENT_FILE_SUFFIX = ".intent.yaml"
 
@@ -501,6 +501,14 @@ def discover_entries(library_dir: Path, linked_dialects: frozenset[str]) -> dict
 
 # ── C++ emission (deterministic; the shape the api partition defines) ────────
 
+# Every aggregate this file emits with more than one member, initialized by designator only:
+# the generated file reaches clang-tidy through the TU that includes it, so a positional form
+# is a lint finding nobody can fix at the site. A single-member aggregate (IntentIdentity) is
+# outside modernize-use-designated-initializers' reach and keeps its braced form.
+_DESIGNATED_AGGREGATES = ("ClosedDomain", "OpenDomain", "NumericContract", "FieldContractView",
+                          "StructuralHalfView", "BodyContractView", "RatificationEvidence",
+                          "StructureGrainView", "BodyGrainView", "IntentLibraryEntryView")
+
 
 def _emit_field(entry_symbol: str, index: int, field: dict, out: list[str]) -> str:
     """Emit one field's backing array (if any); return the FieldContractView initializer."""
@@ -511,19 +519,20 @@ def _emit_field(entry_symbol: str, index: int, field: dict, out: list[str]) -> s
         values = ", ".join(f'"{_cpp_escape(v)}"sv' for v in field["domain"])
         out.append(f"inline constexpr std::array<std::string_view, {len(field['domain'])}> "
                    f"{array_name}{{{values}}};")
-        domain = f"FieldDomain{{ClosedDomain{{std::span<const std::string_view>{{{array_name}}}}}}}"
+        domain = (f"FieldDomain{{ClosedDomain{{.values = "
+                  f"std::span<const std::string_view>{{{array_name}}}}}}}")
     elif role == "Identifier":
         cardinality = "Bounded" if field["cardinality"] == "bounded" else "Unbounded"
-        domain = f"FieldDomain{{OpenDomain{{CardinalityClass::{cardinality}}}}}"
+        domain = f"FieldDomain{{OpenDomain{{.cardinality = CardinalityClass::{cardinality}}}}}"
     else:  # Numeric
         constraint = field.get("constraint")
         if constraint is None:
             minimum = "std::nullopt"
         else:
             minimum = f"std::int64_t{{{constraint.removeprefix('>= ')}}}"
-        domain = (f'FieldDomain{{NumericContract{{"{_cpp_escape(field["unit"])}"sv, '
-                  f"{minimum}}}}}")
-    return f'FieldContractView{{"{_cpp_escape(name)}"sv, {domain}}}'
+        domain = (f'FieldDomain{{NumericContract{{.unit = "{_cpp_escape(field["unit"])}"sv, '
+                  f".min_inclusive = {minimum}}}}}")
+    return f'FieldContractView{{.name = "{_cpp_escape(name)}"sv, .domain = {domain}}}'
 
 
 def _emit_ratification(out: list[str], record: dict | None, grain_enumerator: str,
@@ -535,16 +544,16 @@ def _emit_ratification(out: list[str], record: dict | None, grain_enumerator: st
     half it actually measures.
     """
     if record is None:
-        out.append(f"            Ratification::authored(RatificationGrain::{grain_enumerator})")
+        out.append(f"            .ratification = Ratification::authored(RatificationGrain::{grain_enumerator})")
         return
     ratified_names.append(name)
-    out.append(f"            Ratification::ratified(RatificationGrain::{grain_enumerator},")
+    out.append(f"            .ratification = Ratification::ratified(RatificationGrain::{grain_enumerator},")
     out.append("                                   RatificationEvidence{")
-    out.append(f'                                       "{_cpp_escape(record["corpus"])}"sv, '
-               f'"{_cpp_escape(record["residual"])}"sv,')
-    out.append(f'                                       "{_cpp_escape(record["floor"])}"sv, '
-               f'"{_cpp_escape(record["study"])}"sv,')
-    out.append(f'                                       "{_cpp_escape(record["date"])}"sv}})')
+    out.append(f'                                       .corpus = "{_cpp_escape(record["corpus"])}"sv,')
+    out.append(f'                                       .residual = "{_cpp_escape(record["residual"])}"sv,')
+    out.append(f'                                       .floor = "{_cpp_escape(record["floor"])}"sv,')
+    out.append(f'                                       .study = "{_cpp_escape(record["study"])}"sv,')
+    out.append(f'                                       .date = "{_cpp_escape(record["date"])}"sv}})')
 
 
 def _emit_view_index(out: list[str], index_name: str, initializers: list[str],
@@ -604,12 +613,8 @@ def emit_cpp(entries: dict[str, dict], resolution: dict[str, dict | None],
     out.append("    insight::tokenization::IntentMarkerKind kind,")
     out.append("    std::span<const insight::semantic::IntentMarkerRow> markers)")
     out.append("{")
-    out.append("    for (const insight::semantic::IntentMarkerRow& row : markers)")
-    out.append("    {")
-    out.append("        if (row.kind == kind)")
-    out.append("            return true;")
-    out.append("    }")
-    out.append("    return false;")
+    out.append("    return std::ranges::any_of(markers, [kind](const insight::semantic::IntentMarkerRow& row)")
+    out.append("                               { return row.kind == kind; });")
     out.append("}")
     out.append("")
     out.append("// sec 2.4 -- the payload CONTRACT must agree with the dialect's emit rows:")
@@ -618,15 +623,11 @@ def emit_cpp(entries: dict[str, dict], resolution: dict[str, dict | None],
     out.append("    insight::tokenization::IntentMarkerKind kind, PayloadContract contract,")
     out.append("    std::span<const insight::semantic::IntentEmitRow> emits)")
     out.append("{")
-    out.append("    for (const insight::semantic::IntentEmitRow& row : emits)")
-    out.append("    {")
-    out.append("        if (row.kind != kind)")
-    out.append("            continue;")
-    out.append("        const bool payload_bearing{row.emit != insight::semantic::PayloadEmit::None};")
-    out.append("        if (payload_bearing == (contract == PayloadContract::Declared))")
-    out.append("            return true;")
-    out.append("    }")
-    out.append("    return false;")
+    out.append("    const bool payload_declared{contract == PayloadContract::Declared};")
+    out.append("    return std::ranges::any_of(")
+    out.append("        emits, [kind, payload_declared](const insight::semantic::IntentEmitRow& row)")
+    out.append("        { return row.kind == kind")
+    out.append("                 && (row.emit != insight::semantic::PayloadEmit::None) == payload_declared; });")
     out.append("}")
     out.append("")
 
@@ -660,9 +661,9 @@ def emit_cpp(entries: dict[str, dict], resolution: dict[str, dict | None],
         if structure is not None:
             out.append("    static constexpr std::optional<StructureGrainView> structure{")
             out.append("        StructureGrainView{")
-            out.append(f"            StructuralHalfView{{IntentKind::{structure['kind']}, "
-                       f"PayloadContract::{structure['payload']}}},")
-            out.append(f'            "{grain_hash(declaration, "structure")}"sv,')
+            out.append(f"            .contract = StructuralHalfView{{.kind = IntentKind::{structure['kind']}, "
+                       f".payload = PayloadContract::{structure['payload']}}},")
+            out.append(f'            .declaration_hash = "{grain_hash(declaration, "structure")}"sv,')
             _emit_ratification(out, resolution[(name, "structure")], "Structure",
                                structure_ratified_names, name)
             out.append("        }};")
@@ -673,9 +674,9 @@ def emit_cpp(entries: dict[str, dict], resolution: dict[str, dict | None],
                            if field_views else "std::span<const FieldContractView>{}")
             out.append("    static constexpr std::optional<BodyGrainView> body{")
             out.append("        BodyGrainView{")
-            out.append(f'            BodyContractView{{"{_cpp_escape(body["message_template"])}"sv, '
-                       f"{fields_span}}},")
-            out.append(f'            "{grain_hash(declaration, "body")}"sv,')
+            out.append(f'            .contract = BodyContractView{{.message_template = '
+                       f'"{_cpp_escape(body["message_template"])}"sv, .fields = {fields_span}}},')
+            out.append(f'            .declaration_hash = "{grain_hash(declaration, "body")}"sv,')
             _emit_ratification(out, resolution[(name, "body")], "Body", body_ratified_names, name)
             out.append("        }};")
         else:
@@ -696,8 +697,8 @@ def emit_cpp(entries: dict[str, dict], resolution: dict[str, dict | None],
             out.append(f'              "{name}: payload contract has no serving emit row");')
         dialect_view = f'"{_cpp_escape(dialect)}"sv' if dialect is not None else '""sv'
         view_initializers.append(
-            f"IntentLibraryEntryView{{{symbol}Entry::identity, {dialect_view}, "
-            f"{symbol}Entry::structure, {symbol}Entry::body}}")
+            f"IntentLibraryEntryView{{.identity = {symbol}Entry::identity, .dialect = {dialect_view}, "
+            f".structure = {symbol}Entry::structure, .body = {symbol}Entry::body}}")
         out.append("")
 
     # Index emission note: the indices are SPANS over conditionally-emitted storage arrays.
@@ -1311,6 +1312,15 @@ def selftest() -> int:
         and rendered_a.count(f'"{demo_body_hash}"sv') == 1
         and demo_structure_hash != demo_body_hash,
         "each declared grain must carry exactly its own hash in the generated entry"))
+    # The emitted file is linted through logcraft's TU, and `malf lint` fails on every finding:
+    # a positional initializer of a multi-member aggregate is a modernize-use-designated-
+    # initializers finding in a file no one can edit, so the emitter is held to the designated form.
+    positional = sorted({match.group(1) for rendered in (rendered_a, empty_rendered)
+                         for match in re.finditer(
+                             r"\b(" + "|".join(_DESIGNATED_AGGREGATES) + r")\{(?!\s*[.}])", rendered)})
+    _selftest_case("emit: every multi-member aggregate is initialized by designator", failures,
+                   lambda: _assert(not positional,
+                                   f"positional initializer emitted for {positional}"))
 
     if failures:
         for failure in failures:
