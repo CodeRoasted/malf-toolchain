@@ -83,6 +83,16 @@ The key is `(package, profile)` and has **no dimension for role**, deliberately 
 *Compile commands* below for what that costs the editor index, why the tree is not split by
 role, and the rule that replaces splitting it (**the richer role wins the tree**).
 
+The role switch also costs **ninja dependency records**, and that cost is paid by every build
+rather than the index: a recompaction of `.ninja_deps` while a tree is in the dependency role
+drops the record of every test and bench object, the objects stay on disk, and in a C++ module
+tree ninja can then link such an object stale while every test passes (measured 2026-10-06:
+`malf test insight-metalog` 357/357 over a header edit it never compiled). So before every
+`cmake --build` — a package's and an inventory cell's — `ninja_deps_guard.py` deletes each
+existing output its tree's own ninja holds no record for, naming them, and refuses the build if
+the records cannot be read. A deleted output is dirty on every path through ninja, so the build
+that follows recompiles it.
+
 ### Commands
 
 | Command | Description |

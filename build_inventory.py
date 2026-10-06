@@ -440,6 +440,10 @@ def run_build(workspace: Path, repo_root: Path, build_key: str, profile: str,
         # source of truth that silently disagrees the day a profile moves.
         buildenv = conan_out / "conanbuild.sh"
         for stage, cmd in (("configure", configure),
+                           ("dependency records", [sys.executable,
+                                                   str(Path(__file__).with_name(
+                                                       "ninja_deps_guard.py")),
+                                                   str(build_dir)]),
                            ("build", ["cmake", "--build", str(build_dir),
                                       "--target", entry["target"]])):
             script = " ".join(shlex.quote(part) for part in cmd)
@@ -452,6 +456,8 @@ def run_build(workspace: Path, repo_root: Path, build_key: str, profile: str,
                 tail = (proc.stdout + proc.stderr).split("\n")[-40:]
                 print("\n".join(tail), file=sys.stderr)
                 return 1
+            if stage == "dependency records" and proc.stdout.strip():
+                print(proc.stdout.rstrip())
         # A LINKED ARTIFACT, not merely a successful build command (ADR-3.D9). Compile alone
         # misses a symbol declared and never defined; the binary existing is what proves the
         # link happened.

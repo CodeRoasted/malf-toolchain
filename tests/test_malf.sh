@@ -2885,6 +2885,101 @@ check "a source both the member and the cell compile keeps the MEMBER's command"
 rm -rf "$ic_tmp"
 echo
 
+echo "[7q15] an object with no ninja dependency record never reaches a build: malf deletes it first"
+
+# note: a tree configured in the dependency role drops its test objects' records at ninja's next
+# recompaction; back in the target role ninja's dyndep re-visits let such an object link stale, and
+# `malf test insight-metalog` passed 357/357 over a header edit it never compiled (W477, 2026-10-06).
+# note: real ninja over a compiler-free manifest — `cp` with a depfile under `deps = gcc` — so the
+# records, their loss by recompaction and the guard's reading are ninja's own, not a model of them.
+dg_tmp="$(realpath "$(mktemp -d)")"
+dg_bin="$dg_tmp/bin"; dg_pkg="$dg_tmp/ws/repo/pkg"; mkdir -p "$dg_bin" "$dg_pkg"
+cat > "$dg_bin/conan" <<'STUB'
+#!/usr/bin/env bash
+out=""
+for a in "$@"; do [[ "$a" == --output-folder=* ]] && out="${a#--output-folder=}"; done
+if [[ "$1" == install && -n "$out" ]]; then
+    mkdir -p "$out" && printf '{"version":4,"configurePresets":[{"name":"conan-release"}]}\n' > "$out/CMakePresets.json"
+fi
+exit 0
+STUB
+cat > "$dg_bin/cmake" <<'STUB'
+#!/usr/bin/env bash
+build=""; prev=""; compiling=false
+for a in "$@"; do
+    if $compiling && [[ -z "$build" ]]; then build="$a"; fi
+    [[ "$a" == --build ]] && compiling=true
+    [[ "$prev" == -B ]] && build="$a"
+    prev="$a"
+done
+pkg="$(dirname "$build")"
+if $compiling; then
+    if [[ -e "$build/test.o" ]]; then echo present > "$pkg/AT_BUILD"; else echo absent > "$pkg/AT_BUILD"; fi
+    ninja -C "$build" > /dev/null || exit 1
+    if [[ -e "$pkg/DEPROLE" ]]; then ninja -C "$build" -t recompact || exit 1; fi
+    exit 0
+fi
+mkdir -p "$build"
+make_program="$(command -v ninja)"
+[[ -e "$pkg/BADNINJA" ]] && make_program="$pkg/../../../bin/badninja"
+printf 'CMAKE_BUILD_TYPE:STRING=Release\nCMAKE_MAKE_PROGRAM:FILEPATH=%s\n' "$make_program" > "$build/CMakeCache.txt"
+echo '[]' > "$build/compile_commands.json"
+mkdir -p "$build/CMakeFiles"
+printf 'rule CXX_COMPILER__stub\n  depfile = $out.d\n  deps = gcc\n  command = cp $in $out && printf "%%s: %%s %%s\\n" $out $in %s/header.hpp > $out.d\n' \
+    "$pkg" > "$build/CMakeFiles/rules.ninja"
+printf 'rule CXX_EXECUTABLE_LINKER__stub\n  depfile = app.d\n  deps = gcc\n  command = cat $in > app && touch app_tests.cmake && echo "app: $in" > app.d\n' \
+    >> "$build/CMakeFiles/rules.ninja"
+{
+    echo "include CMakeFiles/rules.ninja"
+    echo "workdir = $build/"
+    echo "build lib.o: CXX_COMPILER__stub $pkg/lib.cpp"
+    if [[ ! -e "$pkg/DEPROLE" ]]; then
+        echo "build test.o: CXX_COMPILER__stub $pkg/test.cpp"
+        echo "build app app_tests.cmake | \${workdir}app_tests.cmake: CXX_EXECUTABLE_LINKER__stub lib.o test.o"
+    fi
+} > "$build/build.ninja"
+STUB
+printf '#!/usr/bin/env bash\necho "ninja: error: loading .ninja_deps: stub failure" >&2\nexit 1\n' > "$dg_bin/badninja"
+chmod +x "$dg_bin/conan" "$dg_bin/cmake" "$dg_bin/badninja"
+printf 'from conan import ConanFile\nclass C(ConanFile):\n    name = "dg_pkg"\n    version = "1.0"\n' > "$dg_pkg/conanfile.py"
+printf 'project(dg_pkg)\n' > "$dg_pkg/CMakeLists.txt"
+echo 'int lib();' > "$dg_pkg/lib.cpp"; echo 'int test();' > "$dg_pkg/test.cpp"; echo '// h' > "$dg_pkg/header.hpp"
+git -C "$dg_tmp/ws/repo" init -q
+dg_key="${MALF_DEFAULT_PROFILE#linux-}"
+dg_tree="$dg_pkg/build-$dg_key"
+dg_run() {   # -> rc=<status>; the log is $dg_tmp/log
+    (cd "$dg_pkg" && PATH="$dg_bin:$PATH" MALF_WORKSPACE_ROOT="$dg_tmp/ws" MALF_SKIP_INVENTORY=1 \
+        MALF_AUTO_WORKSPACE_DEPS=0 MALF_PROFILE_NAME="" timeout --kill-after=5 120 bash "$MALF_BIN" build --only \
+        > "$dg_tmp/log" 2>&1; echo "rc=$?")
+}
+dg_record() { ninja -n -C "$dg_tree" -t deps test.o 2>&1 | head -1 | sed -E 's/, deps mtime.*//'; }
+if ! command -v ninja > /dev/null; then
+    check "ninja is on PATH, which this arm and every malf build need" "ninja" "absent"
+else
+    check "the target role builds and records test.o (guards a fixture that cannot record)" \
+          "rc=0 test.o: #deps 2" "$(dg_run) $(dg_record)"
+    touch "$dg_pkg/DEPROLE"
+    check "a dependency-role build and its recompaction drop test.o's record and keep the file" \
+          "rc=0 0 yes" \
+          "$(dg_run) $(ninja -n -C "$dg_tree" -t deps | grep -c '^test.o:') $([[ -e "$dg_tree/test.o" ]] && echo yes)"
+    rm -f "$dg_pkg/DEPROLE"
+    dg_rc="$(dg_run)"
+    check "back in the target role, the record-less test.o is gone before ninja starts, and malf says so" \
+          "rc=0 absent 1" \
+          "$dg_rc $(cat "$dg_pkg/AT_BUILD") $(grep -c '2 existing output(s) have no ninja dependency record' "$dg_tmp/log")"
+    check "the build that follows recompiles it, and its record is back" "test.o: #deps 2" "$(dg_record)"
+    dg_rc="$(dg_run)"
+    check "a rebuild deletes nothing, and the link edge's second output, named twice, survives it" \
+          "rc=0 0 present" \
+          "$dg_rc $(grep -c 'no ninja dependency record' "$dg_tmp/log") $([[ -e "$dg_tree/app_tests.cmake" ]] && echo present)"
+    touch "$dg_pkg/BADNINJA"
+    check "a tree whose records its own ninja cannot read is refused, never built unchecked" \
+          "rc=1 1" "$(dg_run) $(grep -c 'refusing to build' "$dg_tmp/log")"
+    rm -f "$dg_pkg/BADNINJA"
+fi
+rm -rf "$dg_tmp"
+echo
+
 echo "[7q4] a WORKSPACE-ROOT sweep builds every member repository's inventory cells, and terminates"
 
 # note: the inventory ran once per sweep, for the repository the sweep ROOT sits in — at the

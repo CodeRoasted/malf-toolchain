@@ -1389,6 +1389,9 @@ _malf_configure_and_build() {
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
         "$@" || return
     _malf_assert_tree_matches_profile "$build_dir"
+    # An object with no record in .ninja_deps can be linked stale while every test passes; the
+    # guard deletes it so ninja must recompile it, and refuses the build when it cannot check.
+    python3 "$MALF_DIR/ninja_deps_guard.py" "$build_dir" || return
     _malf_build_width
     echo "$_MALF_BUILD_WIDTH_LINE" >&2
     if [[ "${MALF_IS_SANITIZER:-0}" == "1" ]]; then
