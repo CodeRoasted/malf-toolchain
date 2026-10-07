@@ -63,7 +63,7 @@ it could never take effect. When an opener takes effect is the core's algorithm,
 by the consumer that segments; nothing here decides it. The derived emit row carries the
 role, so a writer selecting a unit's banner selects the naming row and never the opener.
 
-A ROLE ROW MAY MATCH THE LINE'S WHOLE SHAPE INSTEAD OF ITS PREFIX (DN-134.D9). A row declares
+A ROLE ROW MAY MATCH THE LINE'S WHOLE SHAPE INSTEAD OF ITS PREFIX (ADR-17.D14). A row declares
 exactly one of `prefix:` and `shape:`. A shape is literal bytes with `{n}` holes, each a decimal
 number, and the core matches it against the whole content after the transport peel and a
 trailing-whitespace trim. It is one closed core kind, not a pattern language: no other hole, no
@@ -138,7 +138,7 @@ DIALECT_FILE_SUFFIX = ".dialect.yaml"
 
 _STRUCTURAL_ROLES = ("None", "GroupBegin", "GroupEnd", "Terminator", "Progress")
 # The role a row may announce ONLY through a shape: a sample line shares its prefix with lines
-# that are content (DN-134.D9), so a prefix row announcing it would take them too.
+# that are content (ADR-17.D14), so a prefix row announcing it would take them too.
 _SHAPE_ONLY_ROLES = ("Progress",)
 # The one hole a shape admits: a decimal number, `\d+(\.\d+)?`, matched by the core.
 _SHAPE_HOLE = "{n}"
@@ -449,7 +449,7 @@ def _validate_role_row(row: dict, context: str, source: str) -> dict:
             fail(source, None,
                  f"{context}: `role: {role}` on a prefix row — the role is declared by its "
                  "exact shape, because the lines it samples share their prefix with lines "
-                 "that are content (DN-134.D9)")
+                 "that are content (ADR-17.D14)")
         matched = {"prefix": _prefix(row, "prefix", context, source)}
     else:
         matched = {"shape": _shape(row, context, source)}
@@ -1934,7 +1934,7 @@ def selftest() -> int:
                           "        why: [\"Both spellings name the run's own request.\"]\n"
                           "      - key: pull_request\n        markers: [\"MR-\"]\n"
                           "        dialect_gate: self\n", 1)))
-    # ── a role row matching a whole-line SHAPE (DN-134.D9) ─────────────────────────────
+    # ── a role row matching a whole-line SHAPE (ADR-17.D14) ─────────────────────────────
     _shape = "Received {n} of {n} ({n}%), {n} MBs/sec"
     _shape_row = (f'      - shape: "{_shape}"\n        role: Progress\n'
                   '        dialect_gate: self\n'
