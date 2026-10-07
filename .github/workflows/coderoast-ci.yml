@@ -76,7 +76,7 @@ jobs:
     runs-on: ${{ inputs.runs-on }}
     steps:
       - name: CI — checkout + toolchain + build env + cross-repo vendor + build/test
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-ci@35d3eac5fed212efe5f69016cf58b421c8b330a8
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-ci@d3808db8ee0659f887fe768873734cd7cdd52789
         with:
           vendor: ${{ inputs.vendor }}
           deps: ${{ inputs.deps }}
@@ -88,7 +88,7 @@ jobs:
       - name: Sift dogfood (advisory; never fails the build)
         if: ${{ always() && inputs.sift-mode != 'off' }}
         continue-on-error: true    # the advisory guarantee lives here, at the job-step boundary
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-ci-sift@35d3eac5fed212efe5f69016cf58b421c8b330a8
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-ci-sift@d3808db8ee0659f887fe768873734cd7cdd52789
         with:
           mode: ${{ inputs.sift-mode == 'public' && 'render' || 'comment' }}
           changed-outcome: ${{ job.status }}   # the NATIVE token — the engine maps it four-class
