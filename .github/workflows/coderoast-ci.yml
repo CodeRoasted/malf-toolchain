@@ -7,11 +7,13 @@ name: CodeRoast CI
 # data manifests. A caller becomes ~4 lines: permissions + `uses:` + `with: {vendor, modules}` +
 # `secrets: inherit`.
 #
-# Exceptions: `coderoast-server` (the SBOM freshness check, which must run inside the build job after
-# the conan graph is materialised) and `insight-eidos` (the hub export between the Sift chain and the
-# insight_e2e build) each need a step INSIDE the job, which this workflow has no slot for, so both stay
-# bespoke composite-based jobs that call the `coderoast-ci` composite directly.
-#
+# Every C++ repository's CI build job is this workflow, coderoast-server's and insight-eidos's included
+# (ROADMAP N357). Their two mid-job steps are slots of it rather than reasons to copy it: `hub-scenarios`
+# + `late-modules` export the public coderoast-hub's `insight_scenarios` recipe after `modules` and
+# build the modules that test_require it (the server's `server`, eidos's `insight-e2e`), and
+# `sbom-path` byte-compares a committed linked-closure SBOM against the resolved graph once every
+# module has built (the server's `server/sbom.cdx.json`, eidos's `sift/sbom.cdx.json`; ADR-4.D5/D6).
+
 # Sift dogfood is the standard `sift-action@v1` integration only — the internal courtesy `--explain`
 # endpoint is intentionally NOT wired here (retired from in-CI dogfood; the composite still supports it
 # opt-in if ever re-armed).
@@ -61,6 +63,31 @@ on:
         type: string
         required: false
         default: 'true'
+      hub-scenarios:
+        description: 'Export the public coderoast-hub''s insight_scenarios recipe after `modules`, before `late-modules`: at the release''s recorded commit on a tag (`hub-ref`, refused when absent), at main off a tag.'
+        type: boolean
+        required: false
+        default: false
+      hub-ref:
+        description: 'The coderoast-hub commit the release build record verified — the release passes its attest job''s `hub` output. Read only on a tag run.'
+        type: string
+        required: false
+        default: ''
+      late-modules:
+        description: 'Modules built after the hub export, same grammar as `modules`.'
+        type: string
+        required: false
+        default: ''
+      sbom-package-dir:
+        description: 'The package whose resolved graph `sbom-path` must match. Empty: no SBOM check.'
+        type: string
+        required: false
+        default: ''
+      sbom-path:
+        description: 'The committed CycloneDX SBOM byte-compared against `sbom-package-dir`''s resolved graph after every module built. Fix a red with `malf sbom`.'
+        type: string
+        required: false
+        default: ''
       runs-on:
         description: 'Runner label for the build job. Defaults to hosted ubuntu-latest. PUBLIC callers MUST omit it — a self-hosted runner reachable from a public repo fork PR is an RCE. PRIVATE callers pass vars.CI_RUNS_ON (fallback ubuntu-latest) to route to the self-hosted fleet.'
         type: string
@@ -82,8 +109,21 @@ jobs:
           deps: ${{ inputs.deps }}
           modules: ${{ inputs.modules }}
           extra-apt: ${{ inputs.extra-apt }}
+          hub-scenarios: ${{ inputs.hub-scenarios }}
+          hub-ref: ${{ inputs.hub-ref }}
+          late-modules: ${{ inputs.late-modules }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           release-token: ${{ secrets.CR_RELEASE_TOKEN }}
+
+      - name: SBOM freshness — the committed SBOM must match the RESOLVED graph
+        # Homed after the build because --check re-resolves the graph and here it is materialised.
+        # The byte-compare is also what makes the coderoast:cpe-coverage ratio a control: a component
+        # entering without a CPE mapping changes the ratio and reds this step.
+        if: inputs.sbom-path != ''
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-sbom-check@6a0f0b6268977bf5715e15294c45e9b53c93dcf6
+        with:
+          package-dir: ${{ inputs.sbom-package-dir }}
+          sbom-path: ${{ inputs.sbom-path }}
 
       - name: Sift dogfood (advisory; never fails the build)
         if: ${{ always() && inputs.sift-mode != 'off' }}

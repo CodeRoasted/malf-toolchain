@@ -1,0 +1,62 @@
+name: CodeRoast Script Gate
+
+# A repository's own committed gate scripts, run at its checkout — the job shape every "run my lint
+# script" job in the workspace had copied (insight-canon's SP1 lint and its OPS-7.O9 disclosure set,
+# twice). The scripts stay in the calling repository: what a gate asserts is that repository's. What
+# lives here is the one job around them: the checkout (shallow, or the full ref set a ref-ranging
+# predicate needs), a hosted runner, and the loop that runs EVERY gate, names each red in its own
+# error annotation and fails if any did.
+
+on:
+  workflow_call:
+    inputs:
+      gates:
+        description: 'Newline-separated commands, each one gate (e.g. `bash scripts/x_lint.sh arg`). Each runs under bash -euo pipefail.'
+        type: string
+        required: true
+      full-history:
+        description: 'true: fetch every commit and tag (a predicate that ranges over refs fails closed on a partial fetch).'
+        type: boolean
+        required: false
+        default: false
+      runs-on:
+        description: 'The runner. PUBLIC callers MUST omit it (a self-hosted runner a fork can reach is an RCE); PRIVATE callers pass vars.CI_RUNS_ON.'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: ${{ inputs.full-history && '0' || '1' }}
+          fetch-tags: ${{ inputs.full-history }}
+          persist-credentials: false
+
+      - name: Run every gate (each red is named; every gate runs)
+        env:
+          GATES: ${{ inputs.gates }}
+        run: |
+          set -uo pipefail
+          failed=0
+          ran=0
+          while IFS= read -r gate; do
+            [ -n "${gate// }" ] || continue
+            ran=$((ran + 1))
+            echo "::group::gate: $gate"
+            if bash -euo pipefail -c "$gate"; then
+              echo "::endgroup::"
+            else
+              echo "::endgroup::"
+              echo "::error title=gate failed::$gate"
+              failed=$((failed + 1))
+            fi
+          done <<< "$GATES"
+          echo "gates: $ran run, $failed red"
+          [ "$ran" -gt 0 ] || { echo "::error::no gate was given, so nothing was judged"; exit 1; }
+          [ "$failed" -eq 0 ]

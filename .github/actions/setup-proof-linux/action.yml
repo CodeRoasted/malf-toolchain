@@ -1,0 +1,146 @@
+name: 'Setup a raw determinism leg (Linux)'
+description: |
+  The provisioning half of a RAW determinism leg on Linux — the brick every golden proof's Linux
+  legs share (insight-canon, insight-metalog and insight-eidos call it; they keep only WHAT they
+  build and prove). The pinned compiler of the leg (gcc-16.2 from our published asset, or clang-21 +
+  libc++-21), Ninja and CMake 4.3.x, Conan, the restore of a keyed conan cache, and the leg's conan
+  profiles staged from a malf-toolchain checkout.
+
+  RAW, NOT THE CI COMPOSITE. A determinism leg must not inherit the CI wiring's assumptions
+  (`coderoast-ci` exports the lockfile and the build env), or it could no longer tell "the build is
+  deterministic" from "the wiring made it look so" — so this brick provisions tools and stages
+  profiles and nothing else. The caller still declares MALF_TOOLCHAIN_DIR itself.
+
+  GUARDED FOR BOTH RUNNER KINDS. A self-hosted runner's service runs with NoNewPrivileges=yes under
+  an account in no sudo group, so any sudo there fails at once — that is the security boundary, and
+  it is never relaxed to green a leg. Every install below is therefore guarded by a probe of what is
+  already present; a hosted runner starts bare, fails every probe, and installs.
+
+  THE CACHE IS RESTORE-ONLY HERE. Save it with `conan-cache-save` as the job's LAST step, which drops
+  the first-party packages first: a cached first-party binary would let a later build skip the very
+  compile it claims to prove (ROADMAP N367).
+
+inputs:
+  leg:
+    description: "The compiler family: `gcc` (gcc-16.2 + libstdc++) or `clang` (clang-21 + libc++)."
+    required: true
+  conan-home:
+    description: 'The CONAN_HOME of this leg. Per leg on a persistent runner: two legs sharing one home extract one cache onto the other''s leftovers.'
+    required: true
+  cache-key:
+    description: 'The exact cache key (the caller computes it with hashFiles over its dependency set).'
+    required: true
+  cache-restore-key:
+    description: 'The prefix a miss falls back to.'
+    required: true
+  profiles:
+    description: 'Newline-separated conan profile names to stage from `<malf-dir>/profiles` into CONAN_HOME. Empty stages none (a caller passing malf''s profiles by path).'
+    required: false
+    default: ''
+  global-conf:
+    description: "'true' stages `<malf-dir>/global.conf` into CONAN_HOME when the home has none."
+    required: false
+    default: 'false'
+  malf-dir:
+    description: 'Where the caller checked malf-toolchain out (relative to the workspace).'
+    required: false
+    default: 'malf'
+  conan-version:
+    description: 'The Conan version the leg runs.'
+    required: false
+    default: '2.28.1'
+
+outputs:
+  cache-hit:
+    description: "'true' when the exact key was restored."
+    value: ${{ steps.restore.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Refuse an unknown leg
+      shell: bash
+      env:
+        LEG: ${{ inputs.leg }}
+      run: |
+        case "$LEG" in gcc|clang) ;; *) echo "::error::setup-proof-linux: leg '$LEG' is neither gcc nor clang"; exit 1 ;; esac
+
+    - name: Provision gcc-16.2 (our own published asset; arm64 picked by uname -m)
+      if: inputs.leg == 'gcc'
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-gcc@a7262a8fa0e9d3070180bc3d03e9fb756922b310
+
+    - name: Provision clang-21 + libc++-21
+      if: inputs.leg == 'clang'
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-clang21-libcxx@a7262a8fa0e9d3070180bc3d03e9fb756922b310
+
+    - name: Base — Ninja + CMake 4.3.x (+ the gcc-16.2 /opt wiring on the gcc leg), each guarded
+      shell: bash
+      env:
+        LEG: ${{ inputs.leg }}
+      run: |
+        set -euo pipefail
+        for pkg in ninja-build python3 build-essential; do
+          if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ninja-build python3 build-essential
+            break
+          fi
+        done
+        cmake_banner="$(cmake --version 2>/dev/null || true)"
+        case "${cmake_banner%%$'\n'*}" in
+          *" 4.3."*) ;;
+          *) sudo python3 -m pip install --break-system-packages "cmake==4.3.1"; hash -r ;;
+        esac
+        # CMake 4.3.x workspace-wide: the import-std experimental gate UUID 451f2fe2 lives only there.
+        case "$(cmake --version | head -1)" in *" 4.3."*) cmake --version ;; *) echo "::error::expected CMake 4.3.x (got: $(cmake --version | head -1))"; exit 1 ;; esac
+        if [ "$LEG" = "gcc" ] \
+           && { [ "$(readlink -f "$(command -v gcc)")" != /opt/gcc-16.2/bin/gcc ] \
+                || [ "$(readlink -f "$(command -v g++)")" != /opt/gcc-16.2/bin/g++ ]; }; then
+          sudo update-alternatives --install /usr/bin/gcc gcc /opt/gcc-16.2/bin/gcc 1000
+          sudo update-alternatives --install /usr/bin/g++ g++ /opt/gcc-16.2/bin/g++ 1000
+          sudo update-alternatives --set gcc /opt/gcc-16.2/bin/gcc
+          sudo update-alternatives --set g++ /opt/gcc-16.2/bin/g++
+        fi
+        if [ "$LEG" = "gcc" ]; then
+          # By IDENTITY, never a version grep: bare g++ must BE the wired /opt binary.
+          test "$(readlink -f "$(command -v g++)")" = /opt/gcc-16.2/bin/g++ \
+            || { echo "::error::bare g++ is not /opt/gcc-16.2/bin/g++"; exit 1; }
+        fi
+
+    - name: Setup Conan
+      uses: conan-io/setup-conan@ed3942a6883243f4af84e13e49c972f9440fa1c2 # v1.4.0
+      with:
+        version: ${{ inputs.conan-version }}
+        home: ${{ inputs.conan-home }}
+        cache_packages: false
+        profile_detect: false
+
+    - name: Restore the leg's conan cache
+      id: restore
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.conan-home }}
+        key: ${{ inputs.cache-key }}
+        restore-keys: |
+          ${{ inputs.cache-restore-key }}
+
+    - name: Stage the conan profiles (+ settings_user.yml, + global.conf on request)
+      shell: bash
+      env:
+        HOME_DIR: ${{ inputs.conan-home }}
+        PROFILES: ${{ inputs.profiles }}
+        GLOBAL_CONF: ${{ inputs.global-conf }}
+        MALF_DIR: ${{ inputs.malf-dir }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$HOME_DIR/profiles"
+        while IFS= read -r name; do
+          [ -n "$name" ] || continue
+          cp "$MALF_DIR/profiles/$name" "$HOME_DIR/profiles/$name"
+        done <<< "$PROFILES"
+        # settings_user.yml rides with the profiles: the gcc16 profile pins compiler.version=16.2,
+        # which the built-in settings.yml does not know.
+        cp "$MALF_DIR/settings_user.yml" "$HOME_DIR/settings_user.yml"
+        if [ "$GLOBAL_CONF" = "true" ] && [ ! -f "$HOME_DIR/global.conf" ]; then
+          cp "$MALF_DIR/global.conf" "$HOME_DIR/global.conf"
+        fi

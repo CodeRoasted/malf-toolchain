@@ -1,0 +1,68 @@
+name: 'Save a conan cache, third-party only'
+description: |
+  The save half of the keyed conan cache `setup-proof-linux` and `setup-proof-msvc` restore. Run it
+  as the job's LAST step: it removes every first-party package (`insight_*`, `coderoast_*`,
+  `logcraft_*` and the caller's extra patterns) from CONAN_HOME, then saves the home under the key.
+
+  WHY FIRST-PARTY NEVER ENTERS THE CACHE (ROADMAP N367). `conan create --build=missing` reuses any
+  cached binary whose package id matches, so a cached first-party binary lets a later run skip the
+  compile it exists to prove — a release would publish, or a determinism leg would compare, bytes
+  an earlier run built. Third-party binaries carry no such claim; they are what the cache is for.
+
+  An exact-key hit saves nothing (the entry is immutable), and a failed job saves nothing (a
+  `success()` default the caller keeps by not overriding `if:`).
+
+inputs:
+  conan-home:
+    description: 'The CONAN_HOME the restore filled.'
+    required: true
+  cache-key:
+    description: 'The exact key the restore was given.'
+    required: true
+  cache-hit:
+    description: "The restore's `cache-hit` output; 'true' skips the save."
+    required: false
+    default: 'false'
+  drop:
+    description: 'Newline-separated extra conan reference patterns to remove before the save.'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Drop every first-party package from the cache (Linux)
+      if: inputs.cache-hit != 'true' && runner.os != 'Windows'
+      shell: bash
+      env:
+        CONAN_HOME: ${{ inputs.conan-home }}
+        DROP: ${{ inputs.drop }}
+      run: |
+        set -euo pipefail
+        patterns=("insight_*" "coderoast_*" "logcraft_*")
+        while IFS= read -r pattern; do
+          [ -n "$pattern" ] && patterns+=("$pattern")
+        done <<< "$DROP"
+        for pattern in "${patterns[@]}"; do
+          conan remove "$pattern" --confirm
+        done
+        conan list "*" --format=compact
+
+    - name: Drop every first-party package from the cache (Windows)
+      if: inputs.cache-hit != 'true' && runner.os == 'Windows'
+      shell: pwsh
+      env:
+        CONAN_HOME: ${{ inputs.conan-home }}
+        DROP: ${{ inputs.drop }}
+      run: |
+        $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true
+        $patterns = @('insight_*', 'coderoast_*', 'logcraft_*') + @($env:DROP -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        foreach ($pattern in $patterns) { conan remove "$pattern" --confirm }
+        conan list "*" --format=compact
+
+    - name: Save the cache
+      if: inputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.conan-home }}
+        key: ${{ inputs.cache-key }}

@@ -1,0 +1,118 @@
+name: 'Setup an MSVC leg (Windows)'
+description: |
+  The provisioning half of every CodeRoast MSVC leg — the brick insight-canon's, insight-metalog's
+  and insight-eidos's golden `proof-msvc` legs and insight-eidos's `sift-windows` build share; they
+  keep only WHAT they build and prove. MSVC 14.52 installed, activated and verified against the fix
+  floor; CMake 4.3.x and Ninja; Conan; zstd; the restore of a keyed conan cache; the MSVC conan
+  profile staged from a malf-toolchain checkout.
+
+  ONE FORM FOR BOTH RUNNER KINDS. The org variable WINDOWS_RUNNER routes a private repository's
+  Windows leg to our self-hosted Windows runners, which lack CMake, Ninja, Conan and zstd; the hosted
+  image has some of them. Every install here is pwsh and pip, never `bash` (on the self-hosted host
+  `bash` resolves to WSL) and never conan-io/setup-conan (a bash action), and each is a no-op or a
+  fresh install on either kind. The runner itself is the CALLER's job-level `runs-on` — a composite
+  holds no runner, so this brick can never pin one.
+
+  THE CACHE IS RESTORE-ONLY HERE. Save it with `conan-cache-save` as the job's LAST step, which drops
+  the first-party packages first (ROADMAP N367). The restore and the save live under the caller's
+  CONAN_HOME, whose absolute path is part of the cache `version`, so a hosted run and a self-hosted
+  run never read each other's entries: each runner kind warms its own.
+
+inputs:
+  conan-home:
+    description: 'The CONAN_HOME of this leg.'
+    required: true
+  cache-key:
+    description: 'The exact cache key (the caller computes it with hashFiles over its dependency set).'
+    required: true
+  cache-restore-key:
+    description: 'The prefix a miss falls back to.'
+    required: true
+  profile:
+    description: 'The conan profile to stage from `<malf-dir>/profiles`.'
+    required: false
+    default: 'windows-msvc-release'
+  global-conf:
+    description: "'true' stages `<malf-dir>/global.conf` into CONAN_HOME when the home has none."
+    required: false
+    default: 'false'
+  malf-dir:
+    description: 'Where the caller checked malf-toolchain out (relative to the workspace).'
+    required: false
+    default: 'malf'
+  conan-version:
+    description: 'The Conan version the leg runs.'
+    required: false
+    default: '2.29.0'
+
+outputs:
+  cache-hit:
+    description: "'true' when the exact key was restored."
+    value: ${{ steps.restore.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install + activate MSVC 14.52 (the C++23-modules fix floor; not pre-installed)
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-msvc1452@a7262a8fa0e9d3070180bc3d03e9fb756922b310
+
+    - name: Verify the active toolset is MSVC 14.52, not a fallback
+      shell: pwsh
+      run: |
+        if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) { Write-Error "cl.exe not on PATH — MSVC env not activated"; exit 1 }
+        if (-not $env:VCToolsVersion) { Write-Error "VCToolsVersion not set — MSVC env not activated"; exit 1 }
+        if ([version]$env:VCToolsVersion -lt [version]'14.52') { Write-Error "active toolset $env:VCToolsVersion < 14.52 (the fix floor)"; exit 1 }
+        Write-Host "active VCToolsVersion: $env:VCToolsVersion"
+
+    - name: CMake 4.3.x + Ninja (pip; the import-std gate UUID 451f2fe2 lives only in 4.3.x)
+      shell: pwsh
+      run: |
+        python -m pip install --disable-pip-version-check "cmake==4.3.1" "ninja>=1.12"
+        $v = (cmake --version | Select-Object -First 1)
+        if ($v -notmatch ' 4\.3\.') { Write-Error "expected CMake 4.3.x (got: $v)"; exit 1 }
+        cmake --version; ninja --version
+
+    - name: Conan (pip)
+      shell: pwsh
+      env:
+        CONAN_VERSION: ${{ inputs.conan-version }}
+      run: |
+        python -m pip install --disable-pip-version-check "conan==$env:CONAN_VERSION"
+        conan --version
+
+    - name: zstd (without it actions/cache falls back to MSYS2 tar -z, whose gzip child is absent, and the save fails)
+      shell: pwsh
+      run: |
+        if (Get-Command zstd -ErrorAction SilentlyContinue) { Write-Host "zstd present: $(zstd --version)"; exit 0 }
+        $ver = '1.5.6'
+        $zip = "$env:RUNNER_TEMP/zstd.zip"
+        Invoke-WebRequest -Uri "https://github.com/facebook/zstd/releases/download/v$ver/zstd-v$ver-win64.zip" -OutFile $zip
+        Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP/zstd" -Force
+        $dir = (Get-ChildItem -Recurse "$env:RUNNER_TEMP/zstd" -Filter zstd.exe | Select-Object -First 1).DirectoryName
+        if (-not $dir) { Write-Error 'zstd.exe not found in the downloaded archive'; exit 1 }
+        "$dir" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+        & "$dir/zstd.exe" --version
+
+    - name: Restore the leg's conan cache
+      id: restore
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.conan-home }}
+        key: ${{ inputs.cache-key }}
+        restore-keys: |
+          ${{ inputs.cache-restore-key }}
+
+    - name: Stage the conan profile (+ global.conf on request)
+      shell: pwsh
+      env:
+        HOME_DIR: ${{ inputs.conan-home }}
+        PROFILE_NAME: ${{ inputs.profile }}
+        GLOBAL_CONF: ${{ inputs.global-conf }}
+        MALF_DIR: ${{ inputs.malf-dir }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        New-Item -ItemType Directory -Force -Path "$env:HOME_DIR/profiles" | Out-Null
+        Copy-Item "$env:MALF_DIR/profiles/$env:PROFILE_NAME" "$env:HOME_DIR/profiles/$env:PROFILE_NAME"
+        if ($env:GLOBAL_CONF -eq 'true' -and -not (Test-Path "$env:HOME_DIR/global.conf")) {
+          Copy-Item "$env:MALF_DIR/global.conf" "$env:HOME_DIR/global.conf"
+        }

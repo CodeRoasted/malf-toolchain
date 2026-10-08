@@ -1,0 +1,193 @@
+name: CodeRoast Node CI
+
+# The CI build job of every CodeRoast TypeScript repository (coderoast-web, sift-action), as one
+# reusable workflow: checkout, Node with the npm cache, `npm ci`, the caller's checks, the commands
+# whose output Sift diffs (each appended to build.log), the caller's post-build checks, then the
+# advisory Sift dogfood over build.log. The commands are the caller's; the job around them is here.
+#
+# PIPEFAIL IS THE WORD THAT MATTERS. `cmd 2>&1 | tee -a build.log` under the default `bash -e` reads
+# tee's status, which always succeeds: measured 2026-08-22 on both callers, those steps were
+# structurally incapable of failing (sift-action's suite crashed before a single assertion and the
+# job read SUCCESS). Every logged command here runs under `set -o pipefail`, so its own status is the
+# verdict, and the first red stops the job as separate steps would.
+#
+# THE SIFT DOGFOOD IS ADVISORY at the step boundary (`continue-on-error`), skipped on a fork's pull
+# request (a read-only token), and diffs THIS run's build.log. `sift: local` runs the action at the
+# caller's checkout (sift-action dogfooding its own code); `published` runs CodeRoasted/sift-action@v1.
+# `walltime-record: true` brackets it with one advisory `SIFT-WALLTIME` line (input bytes and lines,
+# step wall time, change counts), which never gates: CI wall time on a shared runner is noise.
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'The Node major the job proves on (sift-action: the runtime its action.yml declares).'
+        type: string
+        required: true
+      checks:
+        description: 'Newline-separated commands after `npm ci`, before the logged ones, not appended to build.log.'
+        type: string
+        required: false
+        default: ''
+      logged:
+        description: 'Newline-separated commands whose output is appended to build.log (what Sift diffs), in order; the first red stops the job.'
+        type: string
+        required: true
+      post-checks:
+        description: 'Newline-separated commands after the logged ones, not appended to build.log.'
+        type: string
+        required: false
+        default: ''
+      sift:
+        description: '`published` (CodeRoasted/sift-action@v1), `local` (the action at the caller''s checkout) or `off`.'
+        type: string
+        required: false
+        default: 'published'
+      walltime-record:
+        description: 'true: record the dogfood''s input size and wall time as one advisory SIFT-WALLTIME line.'
+        type: boolean
+        required: false
+        default: false
+      runs-on:
+        description: 'The runner. PUBLIC callers MUST omit it (a self-hosted runner a fork can reach is an RCE).'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+
+# NO `permissions:` HERE, deliberately. A called workflow can only DOWNGRADE the token its caller
+# grants, so a `contents: read` here would strip the dogfood's commit comment, pull-request comment
+# and baseline artifact upload — silently, since the dogfood is advisory. The caller grants exactly
+# what its dogfood needs (`contents: write`, `pull-requests: write`, `actions: write`), or less.
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Checks before the logged build
+        if: inputs.checks != ''
+        shell: bash
+        env:
+          COMMANDS: ${{ inputs.checks }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r command; do
+            [ -n "${command// }" ] || continue
+            echo "::group::$command"
+            bash -euo pipefail -c "$command"
+            echo "::endgroup::"
+          done <<< "$COMMANDS"
+
+      - name: Logged build (each command appended to build.log, which Sift diffs)
+        shell: bash
+        env:
+          COMMANDS: ${{ inputs.logged }}
+        run: |
+          set -euo pipefail
+          : > "$GITHUB_WORKSPACE/build.log"
+          ran=0
+          while IFS= read -r command; do
+            [ -n "${command// }" ] || continue
+            ran=$((ran + 1))
+            echo "::group::$command"
+            bash -euo pipefail -c "$command" 2>&1 | tee -a "$GITHUB_WORKSPACE/build.log"
+            echo "::endgroup::"
+          done <<< "$COMMANDS"
+          [ "$ran" -gt 0 ] || { echo "::error::no logged command was given, so nothing was built"; exit 1; }
+
+      - name: Checks after the logged build
+        if: inputs.post-checks != ''
+        shell: bash
+        env:
+          COMMANDS: ${{ inputs.post-checks }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r command; do
+            [ -n "${command// }" ] || continue
+            echo "::group::$command"
+            bash -euo pipefail -c "$command"
+            echo "::endgroup::"
+          done <<< "$COMMANDS"
+
+      - name: Sift dogfood — record the input size (advisory)
+        id: sift-input
+        if: ${{ always() && inputs.walltime-record && inputs.sift != 'off' && github.event.pull_request.head.repo.fork != true }}
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          log="$GITHUB_WORKSPACE/build.log"
+          bytes=0; lines=0
+          if [ -f "$log" ]; then
+            bytes=$(stat -c%s "$log" || echo 0)
+            lines=$(wc -l < "$log" || echo 0)
+          fi
+          {
+            echo "bytes=$bytes"
+            echo "lines=$lines"
+            echo "started=$(date +%s.%N)"
+          } >> "$GITHUB_OUTPUT"
+          echo "sift-dogfood: input build.log = $bytes bytes, $lines lines"
+
+      - name: Sift — structural diff of this run's build log (advisory; the action at this checkout)
+        id: sift-local
+        if: ${{ always() && inputs.sift == 'local' && github.event.pull_request.head.repo.fork != true }}
+        continue-on-error: true
+        uses: ./
+        with:
+          log: build.log
+          fail-on: none
+          commit-comment: regression
+          changed-outcome: ${{ job.status }}   # the NATIVE token — the engine maps it four-class (ADR-17.D5)
+
+      - name: Sift — structural diff of this run's build log (advisory; the published action)
+        id: sift-published
+        if: ${{ always() && inputs.sift == 'published' && github.event.pull_request.head.repo.fork != true }}
+        continue-on-error: true
+        uses: CodeRoasted/sift-action@v1
+        with:
+          log: build.log
+          fail-on: none
+          commit-comment: regression
+          changed-outcome: ${{ job.status }}   # the NATIVE token — the engine maps it four-class (ADR-17.D5)
+
+      - name: Sift dogfood — emit the wall-time record (advisory; never gates)
+        if: ${{ always() && inputs.walltime-record && inputs.sift != 'off' && github.event.pull_request.head.repo.fork != true }}
+        continue-on-error: true
+        env:
+          IN_BYTES: ${{ steps.sift-input.outputs.bytes }}
+          IN_LINES: ${{ steps.sift-input.outputs.lines }}
+          STARTED: ${{ steps.sift-input.outputs.started }}
+          TOTAL_CHANGES: ${{ steps.sift-local.outputs.total-changes || steps.sift-published.outputs.total-changes }}
+          SIG_CHANGES: ${{ steps.sift-local.outputs.significant-changes || steps.sift-published.outputs.significant-changes }}
+          STATE: ${{ steps.sift-local.outputs.state || steps.sift-published.outputs.state }}
+          RUNNER_LABEL: ${{ inputs.runs-on }}
+        run: |
+          set -uo pipefail
+          elapsed=""
+          if [ -n "${STARTED:-}" ]; then
+            elapsed=$(echo "$(date +%s.%N) - $STARTED" | bc || echo "")
+          fi
+          # ONE line, fixed `SIFT-WALLTIME` prefix and `k=v` fields: the run log spans the whole
+          # history, so the prefix makes it parseable in one sweep. `significant=0` is recorded rather
+          # than hidden because it disqualifies the row as a throughput sample (nothing was ranked or
+          # rendered); a reader must see such rows to exclude them.
+          echo "SIFT-WALLTIME runner=${RUNNER_LABEL} bytes=${IN_BYTES:-} lines=${IN_LINES:-} elapsed_s=${elapsed:-} total_changes=${TOTAL_CHANGES:-} significant=${SIG_CHANGES:-} state=${STATE:-}"
+          {
+            echo "### Sift dogfood — wall time (advisory)"
+            echo ""
+            echo "| input bytes | input lines | step wall time | total changes | significant | state |"
+            echo "|---:|---:|---:|---:|---:|:--|"
+            echo "| ${IN_BYTES:-?} | ${IN_LINES:-?} | ${elapsed:-?} s | ${TOTAL_CHANGES:-?} | ${SIG_CHANGES:-?} | ${STATE:-?} |"
+            echo ""
+            echo "_Advisory only. \`significant=0\` disqualifies the row as a throughput sample:"
+            echo "the ranking/rendering path is never entered, so the time is not comparable._"
+          } >> "$GITHUB_STEP_SUMMARY"
