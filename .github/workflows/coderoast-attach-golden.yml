@@ -1,0 +1,54 @@
+name: CodeRoast attach golden
+
+# The determinism golden's publication, as a reusable workflow: download the `determinism-golden`
+# artifact the caller's `golden` job validated IN THIS RUN (all legs byte-identical, the compare
+# job's verdict), rename it to the caller's asset name, write its sha256 beside it, and attach both
+# to the caller's Release. One body for every engine that publishes a golden (canon, metalog,
+# eidos) instead of one copy each.
+#
+# THE CALLER GATES IT. It is wired `needs: [attest, <the job that created the Release>, golden]`,
+# so it runs only after the attestation passed, the Release exists and the golden agreed. It runs
+# no build and checks nothing out: the artifact is the only input, and it never leaves the run that
+# produced it.
+
+on:
+  workflow_call:
+    inputs:
+      asset:
+        description: 'The Release asset name the golden is published under, e.g. `canon.det_proof.txt`; its sha256 is attached as `<asset>.sha256`.'
+        type: string
+        required: true
+      runs-on:
+        description: 'Runner label. PUBLIC callers MUST omit it (hosted ubuntu-latest) — a self-hosted runner reachable from a public repository is an RCE. A PRIVATE caller may pass the release runner.'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+
+jobs:
+  attach:
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: write   # upload the golden to the caller's Release
+    steps:
+      - name: Download the validated golden
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: determinism-golden
+
+      - name: Attach the golden (+ sha256) to the Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}   # no checkout here — gh can't infer the repo from .git, name it
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          ASSET: ${{ inputs.asset }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$ASSET" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::asset '$ASSET' is not a plain file name ([A-Za-z0-9._-]+)"
+            exit 1
+          fi
+          mv determinism-golden.txt "$ASSET"
+          sha256sum "$ASSET" | awk -v name="$ASSET" '{ print $1"  "name }' > "$ASSET.sha256"
+          gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber
+          echo "attached $ASSET (+ .sha256) to Release $TAG"
