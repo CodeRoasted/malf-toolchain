@@ -54,7 +54,7 @@ runs:
   using: composite
   steps:
     - name: Install + activate MSVC 14.52 (the C++23-modules fix floor; not pre-installed)
-      uses: CodeRoasted/malf-toolchain/.github/actions/setup-msvc1452@b688e01476e7d2b3bc90fea5e33f0b3527ad10de
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-msvc1452@e030967558fa73a81459d8fc013d32616532af2a
 
     - name: Verify the active toolset is MSVC 14.52, not a fallback
       shell: pwsh
