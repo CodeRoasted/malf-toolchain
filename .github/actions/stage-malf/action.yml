@@ -1,0 +1,54 @@
+name: 'Stage malf-toolchain at this action''s own revision'
+description: |
+  Copies the malf-toolchain tree this action was fetched at into `<path>` under the workspace, so a
+  malf REUSABLE WORKFLOW gets the build tool and the conan profiles of the very revision it runs.
+
+  WHY NOT AN actions/checkout OF malf-toolchain AT A SHA. Inside malf-toolchain such a checkout is a
+  self-reference written as a `ref:` line, and a self-reference has no fixed point: every layered
+  re-pin rewrites it, and a re-pinned line other than a `uses:` ref makes the file differ from its
+  pin by more than `uses:` lines, which `pin_coherence` INV-17 refuses — so the layers would never
+  converge. A runner fetches an action as the whole repository at the action's ref, so the tree
+  beside this manifest IS malf-toolchain at the revision the calling `uses:` line pins: the only
+  pin is that line, and the layered re-pin moves it like every other.
+
+  A caller that already has `<path>` (it checked malf-toolchain out itself) is refused rather than
+  overwritten: two revisions of one tool in one job is the shape INV-17 exists to prevent.
+
+inputs:
+  path:
+    description: 'Where to stage the tree, relative to the workspace.'
+    required: false
+    default: 'malf'
+
+runs:
+  using: composite
+  steps:
+    - name: Copy malf-toolchain at this action's revision into the workspace (Linux, macOS)
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        DEST: ${{ github.workspace }}/${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        root="$(cd "$GITHUB_ACTION_PATH/../../.." && pwd)"
+        [ -x "$root/malf" ] && [ -d "$root/profiles" ] \
+          || { echo "::error::$root holds no malf-toolchain tree (no malf, no profiles/)"; exit 1; }
+        [ ! -e "$DEST" ] || { echo "::error::$DEST already exists — the caller staged malf-toolchain itself"; exit 1; }
+        cp -a "$root" "$DEST"
+        echo "malf-toolchain staged from $root into $DEST"
+
+    # pwsh, never bash: on the self-hosted Windows runners `bash` resolves to WSL.
+    - name: Copy malf-toolchain at this action's revision into the workspace (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        DEST: ${{ github.workspace }}/${{ inputs.path }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $root = (Resolve-Path (Join-Path $env:GITHUB_ACTION_PATH '../../..')).Path
+        if (-not ((Test-Path (Join-Path $root 'malf')) -and (Test-Path (Join-Path $root 'profiles')))) {
+          Write-Error "$root holds no malf-toolchain tree (no malf, no profiles/)"; exit 1
+        }
+        if (Test-Path $env:DEST) { Write-Error "$env:DEST already exists — the caller staged malf-toolchain itself"; exit 1 }
+        Copy-Item -Recurse -Path $root -Destination $env:DEST
+        Write-Host "malf-toolchain staged from $root into $env:DEST"
