@@ -103,7 +103,7 @@ jobs:
     runs-on: ${{ inputs.runs-on }}
     steps:
       - name: CI — checkout + toolchain + build env + cross-repo vendor + build/test
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-ci@6a0f0b6268977bf5715e15294c45e9b53c93dcf6
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-ci@9ff293c9366b1e5c9898c456a6737b83b2b53bcc
         with:
           vendor: ${{ inputs.vendor }}
           deps: ${{ inputs.deps }}
@@ -120,7 +120,7 @@ jobs:
         # The byte-compare is also what makes the coderoast:cpe-coverage ratio a control: a component
         # entering without a CPE mapping changes the ratio and reds this step.
         if: inputs.sbom-path != ''
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-sbom-check@6a0f0b6268977bf5715e15294c45e9b53c93dcf6
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-sbom-check@9ff293c9366b1e5c9898c456a6737b83b2b53bcc
         with:
           package-dir: ${{ inputs.sbom-package-dir }}
           sbom-path: ${{ inputs.sbom-path }}
@@ -128,7 +128,7 @@ jobs:
       - name: Sift dogfood (advisory; never fails the build)
         if: ${{ always() && inputs.sift-mode != 'off' }}
         continue-on-error: true    # the advisory guarantee lives here, at the job-step boundary
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-ci-sift@6a0f0b6268977bf5715e15294c45e9b53c93dcf6
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-ci-sift@9ff293c9366b1e5c9898c456a6737b83b2b53bcc
         with:
           mode: ${{ inputs.sift-mode == 'public' && 'render' || 'comment' }}
           changed-outcome: ${{ job.status }}   # the NATIVE token — the engine maps it four-class

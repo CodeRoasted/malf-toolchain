@@ -145,7 +145,7 @@ jobs:
     # The caller's cheap guards, through the one script-gate job: a red here stops every leg before
     # a metered minute is spent.
     if: inputs.guards != ''
-    uses: CodeRoasted/malf-toolchain/.github/workflows/coderoast-script-gate.yml@5b1bf15d376be17a3e793416e6ec76ad21893700
+    uses: CodeRoasted/malf-toolchain/.github/workflows/coderoast-script-gate.yml@9ff293c9366b1e5c9898c456a6737b83b2b53bcc
     with:
       gates: ${{ inputs.guards }}
 
@@ -179,7 +179,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: CodeRoasted/malf-toolchain
-          ref: 6feff2bd0e4fc06ed53fe89f7c2a548e7f4bc121
+          ref: 9ff293c9366b1e5c9898c456a6737b83b2b53bcc
           path: malf
           fetch-depth: 1
           persist-credentials: false
@@ -200,7 +200,7 @@ jobs:
 
       - name: Provision the leg
         id: setup
-        uses: CodeRoasted/malf-toolchain/.github/actions/setup-proof-linux@5b1bf15d376be17a3e793416e6ec76ad21893700
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-proof-linux@9ff293c9366b1e5c9898c456a6737b83b2b53bcc
         with:
           leg: ${{ matrix.leg }}
           conan-home: ${{ env.CONAN_HOME }}
@@ -234,7 +234,7 @@ jobs:
           if-no-files-found: error
 
       - name: Save the leg's conan cache (third-party only)
-        uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@5b1bf15d376be17a3e793416e6ec76ad21893700
+        uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@9ff293c9366b1e5c9898c456a6737b83b2b53bcc
         with:
           conan-home: ${{ env.CONAN_HOME }}
           cache-key: ${{ steps.key.outputs.key }}
@@ -255,7 +255,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: CodeRoasted/malf-toolchain
-          ref: 6feff2bd0e4fc06ed53fe89f7c2a548e7f4bc121
+          ref: 9ff293c9366b1e5c9898c456a6737b83b2b53bcc
           path: malf
           fetch-depth: 1
           persist-credentials: false
@@ -276,7 +276,7 @@ jobs:
 
       - name: Provision the leg
         id: setup
-        uses: CodeRoasted/malf-toolchain/.github/actions/setup-proof-msvc@5b1bf15d376be17a3e793416e6ec76ad21893700
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-proof-msvc@9ff293c9366b1e5c9898c456a6737b83b2b53bcc
         with:
           conan-home: ${{ env.CONAN_HOME }}
           cache-key: ${{ steps.key.outputs.key }}
@@ -300,7 +300,7 @@ jobs:
           if-no-files-found: error
 
       - name: Save the leg's conan cache (third-party only)
-        uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@5b1bf15d376be17a3e793416e6ec76ad21893700
+        uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@9ff293c9366b1e5c9898c456a6737b83b2b53bcc
         with:
           conan-home: ${{ env.CONAN_HOME }}
           cache-key: ${{ steps.key.outputs.key }}
