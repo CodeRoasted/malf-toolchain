@@ -1,14 +1,14 @@
 # install-runner.ps1 — register an ORG-level self-hosted *Windows* GitHub Actions runner
-# (native Windows host, NOT WSL2) as a Windows SERVICE, so the PRIVATE eidos Windows
-# Portability Probe stops consuming GitHub-hosted minutes. Linux twin: install-runner.sh.
+# (native Windows host, NOT WSL2) as a Windows SERVICE. It carried the PRIVATE eidos Windows
+# Portability Probe until 2026-10-08, when that leg moved to GitHub-hosted windows-2025. Linux
+# twin: install-runner.sh.
 #
 # SECURITY (same rule as Linux): a self-hosted runner must NEVER serve a PUBLIC / fork-
 # exposed repo — a fork PR would execute attacker code on this box. On GitHub Free an org
 # runner is visible to ALL repos, so safety is enforced at the WORKFLOW layer: only the
-# PRIVATE eidos windows-portability-probe carries
-# `runs-on: ${{ vars.WIN_RUNS_ON || 'windows-2025' }}`; the canon + metalog Windows probes
-# stay pinned to `windows-2025` (public = free + fork-safe). Do not add the `malf-windows`
-# label to a public repo's workflow.
+# superproject's runner-isolation-probe names this runner; every release and golden Windows leg
+# runs on GitHub-hosted `windows-2025` since 2026-10-08 (the Founder's ruling). Do not add the
+# `malf-windows` label to a public repo's workflow.
 #
 # A SERVICE, never a Scheduled Task and never a foreground helper. The task
 # `\CodeRoast Runner Win` ran start-runner.ps1 over a \\wsl.localhost\… path at logon and
@@ -25,8 +25,8 @@
 # -Instance release, which calls this script with -RunnerGroup and -NoDefaultLabels and then moves
 # the service onto its virtual account; do not call it for that instance by hand.
 #
-# Toggle: set the org variable WIN_RUNS_ON=malf-windows to route the eidos Windows probe
-# here; delete it to fall back to GitHub-hosted windows-2025.
+# The org variable WIN_RUNS_ON=malf-windows names this runner for runner-isolation-probe.yml, its
+# one reader:
 #     gh variable set WIN_RUNS_ON --org CodeRoasted --body malf-windows --visibility private
 #     gh variable delete WIN_RUNS_ON --org CodeRoasted
 

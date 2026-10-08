@@ -287,8 +287,10 @@ gh variable set WIN_RUNS_ON --org CodeRoasted --body malf-windows --visibility p
 gh variable delete WIN_RUNS_ON --org CodeRoasted                                          # → windows-2025
 ```
 
-**Only the PRIVATE `insight-eidos` probe reads `WIN_RUNS_ON`.** canon + metalog Windows
-probes stay hard-pinned to `windows-2025` (public = free + fork-safe). First run installs
+**No release or golden leg reads `WIN_RUNS_ON` any more** (the Founder, 2026-10-08: the
+Windows legs run on a GitHub-hosted runner, Actions minutes are not a constraint). The eidos
+MSVC golden leg and `sift-windows.yml` are hard-pinned to `windows-2025` like the canon +
+metalog probes; the superproject's `runner-isolation-probe.yml` is the one reader left. First run installs
 MSVC 14.52 (Insiders Preview, ~GBs) on the host via `setup-msvc1452`; needs git + python +
 gh on Windows. (The eidos probe also needs Heph's `provision.cpp` Win32 port to go green —
 the runner solves *minutes*, not that source blocker.)
@@ -350,13 +352,12 @@ PATH. Only an access refusal counts: a target that does not exist is `BROKEN`, a
   targets of `malf-release-win` refused. Windows `release`, as the release virtual account: 8 of 8
   targets of `malf-runner-win` refused. Each: 40 attempts, 9 controls, 0 failed.
 
-**The routing** (insight-eidos). `sift-windows.yml` and `golden.yaml` take `runs-on-windows`, and
-`release.yaml` sets it to `coderoast-release-windows` (with `runs-on: coderoast-release` for
-`sift-windows.yml`'s Linux `subjects` job). The pre-tag reading (`-f record-run=<step 0 run>`)
-takes the same Windows runner with no input, so the release runner's MSVC build is read before the
-first tag. The weekly schedule and a plain dispatch keep `vars.WIN_RUNS_ON`. The label appears only
-inside expressions and `with:` values, which actionlint does not check as runner labels, so no
-`actionlint.yaml` names it.
+**The routing — retired 2026-10-08.** insight-eidos's `sift-windows.yml` and `golden.yaml` ran
+their MSVC jobs here (`runs-on-windows: coderoast-release-windows` from `release.yaml`, and on the
+pre-tag reading). The Founder ruled the Windows legs onto a GitHub-hosted runner (`DN-142.O2`
+question 2, answered): both jobs now run on `windows-2025` at every coordinate, and no workflow
+names `coderoast-release-windows` but the superproject's `runner-isolation-probe.yml`. The runner
+stays registered until the Founder decides its decommissioning; nothing in a release path reaches it.
 
 **What the proof cannot see:** who the group admits (read it back with the three commands above),
 and a directory ADDED to the machine PATH later: the probe tries the PATH as it is on the day it
