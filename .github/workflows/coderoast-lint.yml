@@ -203,7 +203,7 @@ jobs:
 
       - name: C++ modules conformance
         if: ${{ inputs.module-conformance }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-module-conformance@1ed427daddd86df30794eb6f8e15fe2e74b68fed
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-module-conformance@5b7d7d189611816254860613ec2dab9f9cdb473e
 
       # Last, because it provisions clang-21 to get a version-matched clang-format. On the
       # self-hosted fleet that provisioning is an idempotent no-op (the toolchain persists between
@@ -211,7 +211,7 @@ jobs:
       # above report first and a repo never pays for the toolchain to learn its workflows are broken.
       - name: C++ format conformance
         if: ${{ inputs.format-check }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-format-check@1ed427daddd86df30794eb6f8e15fe2e74b68fed
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-format-check@5b7d7d189611816254860613ec2dab9f9cdb473e
 
       # Cheap (no toolchain, no build — it reads text), but placed last on purpose: it is the
       # newest gate here, and a repo should learn its workflows, modules and formatting are sound
@@ -261,7 +261,7 @@ jobs:
 
       - name: Dead symbol in comment
         if: ${{ inputs.dead-symbol-check }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dead-symbol@1ed427daddd86df30794eb6f8e15fe2e74b68fed
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dead-symbol@5b7d7d189611816254860613ec2dab9f9cdb473e
         with:
           range: ${{ steps.dead-symbol-range.outputs.range }}
 
@@ -277,7 +277,7 @@ jobs:
       # comments are sound before it pays for a compiler.
       - name: C++ clang-tidy conformance
         if: ${{ !cancelled() && inputs.lint }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-lint-tidy@1ed427daddd86df30794eb6f8e15fe2e74b68fed
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-lint-tidy@5b7d7d189611816254860613ec2dab9f9cdb473e
         with:
           siblings: ${{ inputs.lint-siblings }}
           checkout-token: ${{ secrets.lint-checkout-token }}
