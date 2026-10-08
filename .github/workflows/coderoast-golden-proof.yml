@@ -170,19 +170,13 @@ jobs:
       DETERMINISM_CLANG_PROFILE: ${{ matrix.clang_profile }}
       # MALF_TOOLCHAIN_DIR is the generator's resolution mechanism (DN-17.D31/D32), declared because
       # these legs are deliberately RAW and inherit nothing from the CI composites. True by
-      # construction: malf-toolchain is checked out at `path: malf`.
+      # construction: `stage-malf` copies malf-toolchain into `malf`.
       MALF_TOOLCHAIN_DIR: ${{ github.workspace }}/malf
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Check out malf-toolchain into malf/ (profiles; public, anonymous)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: CodeRoasted/malf-toolchain
-          ref: 9ff293c9366b1e5c9898c456a6737b83b2b53bcc
-          path: malf
-          fetch-depth: 1
-          persist-credentials: false
+      - name: Stage malf-toolchain into malf/ at this workflow's own revision (the build tool and profiles)
+        uses: CodeRoasted/malf-toolchain/.github/actions/stage-malf@1148e2b09a5990a0ba621006e344441ec4fc1dfc
 
       - name: Check out insight-canon SOURCE into _canon/ (the tower's from-source canon; public, anonymous)
         if: inputs.tower
@@ -251,14 +245,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Check out malf-toolchain into malf/ (profile; public, anonymous)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: CodeRoasted/malf-toolchain
-          ref: 9ff293c9366b1e5c9898c456a6737b83b2b53bcc
-          path: malf
-          fetch-depth: 1
-          persist-credentials: false
+      - name: Stage malf-toolchain into malf/ at this workflow's own revision (the build tool and profiles)
+        uses: CodeRoasted/malf-toolchain/.github/actions/stage-malf@1148e2b09a5990a0ba621006e344441ec4fc1dfc
 
       - name: Check out insight-canon SOURCE into _canon/ (the tower's from-source canon; public, anonymous)
         if: inputs.tower
