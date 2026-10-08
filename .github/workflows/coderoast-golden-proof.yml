@@ -1,0 +1,307 @@
+name: CodeRoast Golden Proof
+
+# The five raw determinism legs of a PUBLIC repository's golden proof, as one reusable workflow:
+# gcc-x86 · clang-x86 · gcc-arm64 · clang-arm64 · msvc each build the caller's proof subject from
+# source and upload its digest as `golden-digest-<arch>-<leg>` / `golden-digest-msvc`, which the
+# caller's `compare` job (coderoast-golden-compare.yml) asserts byte-identical. insight-canon and
+# insight-metalog call it; insight-eidos is PRIVATE and its legs stay in its own repository, built on
+# the same two provisioning bricks this workflow uses (`setup-proof-linux`, `setup-proof-msvc`), so
+# the three proofs share every line of mechanics and differ only in what they build.
+#
+# WHAT THE CALLER OWNS: its two proof drivers (a bash script the Linux legs run with DETERMINISM_LEG,
+# DETERMINISM_OUT and the leg's profiles in the environment; a pwsh script the MSVC leg runs, which
+# writes digest-msvc.txt at the workspace root), the cheap guards to run before any leg, and whether
+# the subject is the canon+metalog TOWER (insight-canon's source checked out into _canon/ at the
+# resolved ref, and metalog-spec's ref resolved for the compare's SPEC §8 gate).
+#
+# WHICH insight-canon AND metalog-spec A TOWER READS — `subjects` resolves them, in this order:
+#   0. `record-run` — the pre-tag reading: the commits step 0's record verified, read with
+#      BUILD_RECORD_READ_TOKEN; the caller's own commit must be the one the record names for
+#      `record-self`, and an unreadable record refuses — never a fallback to `main`;
+#   1. `canon-ref` — a manual dispatch naming a ref (an epic branch);
+#   2. the caller's tag on a tag run (the cut tags canon in an earlier wave, so it exists);
+#   3. `main`. metalog-spec is `main` off the reading: it never carries the uniform tag.
+#
+# PUBLIC CALLERS, HOSTED RUNNERS. The Linux legs run on hosted ubuntu images and the MSVC leg on
+# `windows-runner`, whose default is the hosted windows-2025: a self-hosted runner a public
+# repository's fork can reach is an RCE, and our runner groups refuse public repositories anyway.
+
+on:
+  workflow_call:
+    inputs:
+      linux-proof:
+        description: 'The bash proof driver the four Linux legs run (relative to the caller''s checkout).'
+        type: string
+        required: true
+      msvc-proof:
+        description: 'The pwsh proof driver the MSVC leg runs; it writes digest-msvc.txt at the workspace root.'
+        type: string
+        required: true
+      guards:
+        description: 'Newline-separated cheap commands run on one hosted job before any leg; a red stops every leg.'
+        type: string
+        required: false
+        default: ''
+      tower:
+        description: 'true: check insight-canon''s source out into _canon/ at the resolved ref for every leg.'
+        type: boolean
+        required: false
+        default: false
+      linux-seed:
+        description: 'Newline-separated commands each Linux leg runs after provisioning, before its driver (e.g. `conan editable add _canon/core`).'
+        type: string
+        required: false
+        default: ''
+      global-conf:
+        description: 'true: stage malf''s global.conf into each leg''s conan home.'
+        type: boolean
+        required: false
+        default: false
+      canon-ref:
+        description: 'An explicit insight-canon ref for a tower (a dispatch on an epic branch). Empty: the tag on a tag run, else main.'
+        type: string
+        required: false
+        default: ''
+      record-run:
+        description: 'The pre-tag reading: the pharos-build run of this cut''s step 0, whose record names the commits a tower reads.'
+        type: string
+        required: false
+        default: ''
+      record-self:
+        description: 'The caller''s repository name in step 0''s record (required with `record-run`).'
+        type: string
+        required: false
+        default: ''
+      windows-runner:
+        description: 'The MSVC leg''s runner. Public callers omit it (hosted windows-2025).'
+        type: string
+        required: false
+        default: 'windows-2025'
+    secrets:
+      BUILD_RECORD_READ_TOKEN:
+        description: 'Actions: Read-only on CodeRoasted/coderoast; read only on the pre-tag reading.'
+        required: false
+    outputs:
+      canon:
+        description: 'The insight-canon ref the legs read.'
+        value: ${{ jobs.subjects.outputs.canon }}
+      spec:
+        description: 'The metalog-spec ref the compare validates against.'
+        value: ${{ jobs.subjects.outputs.spec }}
+
+permissions:
+  contents: read
+
+jobs:
+  subjects:
+    name: Resolve the insight-canon and metalog-spec this run reads
+    # Hosted, and nothing else runs in it: on the pre-tag reading it holds the record-read token.
+    runs-on: ubuntu-latest
+    outputs:
+      canon: ${{ steps.resolve.outputs.canon }}
+      spec: ${{ steps.resolve.outputs.spec }}
+    steps:
+      - name: Resolve (GATING — on the pre-tag reading an unread record refuses, never main)
+        id: resolve
+        env:
+          RECORD_RUN: ${{ inputs.record-run }}
+          RECORD_SELF: ${{ inputs.record-self }}
+          NAMED_REF: ${{ inputs.canon-ref || (github.ref_type == 'tag' && github.ref_name) || 'main' }}
+          RECORD_TOKEN: ${{ secrets.BUILD_RECORD_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RECORD_RUN" ]; then
+            printf 'canon=%s\nspec=main\n' "$NAMED_REF" >> "$GITHUB_OUTPUT"
+            echo "insight-canon at $NAMED_REF, metalog-spec at main"
+            exit 0
+          fi
+          if [ -z "$RECORD_SELF" ]; then
+            echo "::error::record-run is set and record-self is not, so the record cannot be matched to this commit"
+            exit 1
+          fi
+          if [ -z "$RECORD_TOKEN" ]; then
+            echo "::error::BUILD_RECORD_READ_TOKEN is not set, so step 0's record cannot be read — and without it this reading would build commits nobody recorded"
+            exit 1
+          fi
+          record="$RUNNER_TEMP/pharos-build-record"
+          GH_TOKEN="$RECORD_TOKEN" gh run download "$RECORD_RUN" --repo CodeRoasted/coderoast \
+            --name pharos-build-record --dir "$record"
+          python3 - "$record/preflight.json" >> "$GITHUB_OUTPUT" <<'PY'
+          import json, os, re, sys
+          repos = json.load(open(sys.argv[1], encoding="utf-8")).get("repos", {})
+          me = os.environ["RECORD_SELF"]
+          commits = {name: repos.get(name) for name in (me, "insight-canon", "metalog-spec")}
+          for name, sha in commits.items():
+              if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+                  sys.exit(f"step 0 run {os.environ['RECORD_RUN']}'s record names no commit for {name}")
+          if commits[me] != os.environ["GITHUB_SHA"]:
+              sys.exit(f"step 0 run {os.environ['RECORD_RUN']} recorded {me} at {commits[me]} and this run is at {os.environ['GITHUB_SHA']}: dispatch it while main is the recorded commit, or the reading judges a commit no tag will carry")
+          print(f"canon={commits['insight-canon']}")
+          print(f"spec={commits['metalog-spec']}")
+          print(f"the pre-tag reading of step 0 run {os.environ['RECORD_RUN']}: insight-canon {commits['insight-canon']}, metalog-spec {commits['metalog-spec']}", file=sys.stderr)
+          PY
+
+  guards:
+    # The caller's cheap guards, through the one script-gate job: a red here stops every leg before
+    # a metered minute is spent.
+    if: inputs.guards != ''
+    uses: CodeRoasted/malf-toolchain/.github/workflows/coderoast-script-gate.yml@5b1bf15d376be17a3e793416e6ec76ad21893700
+    with:
+      gates: ${{ inputs.guards }}
+
+  proof-linux:
+    needs: [subjects, guards]
+    if: ${{ !cancelled() && needs.subjects.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.guards.result) }}
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { leg: gcc,   arch: x86,   runner: ubuntu-latest,    label: "gcc-16 · libstdc++ · x86",   require: "g++",     gcc_profile: linux-gcc16-release,       clang_profile: linux-clang21-libcxx-release }
+          - { leg: clang, arch: x86,   runner: ubuntu-latest,    label: "clang-21 · libc++ · x86",    require: "clang++", gcc_profile: linux-gcc16-release,       clang_profile: linux-clang21-libcxx-release }
+          - { leg: gcc,   arch: arm64, runner: ubuntu-24.04-arm, label: "gcc-16 · libstdc++ · arm64", require: "g++",     gcc_profile: linux-gcc16-arm64-release, clang_profile: linux-clang21-libcxx-arm64-release }
+          - { leg: clang, arch: arm64, runner: ubuntu-24.04-arm, label: "clang-21 · libc++ · arm64",  require: "clang++", gcc_profile: linux-gcc16-arm64-release, clang_profile: linux-clang21-libcxx-arm64-release }
+    env:
+      # PER LEG: on a persistent runner one fixed workspace path would give two legs one conan home,
+      # and a restore extracts onto whatever is already there.
+      CONAN_HOME: ${{ github.workspace }}/.conan2-${{ matrix.arch }}-${{ matrix.leg }}
+      DETERMINISM_GCC_PROFILE: ${{ matrix.gcc_profile }}
+      DETERMINISM_CLANG_PROFILE: ${{ matrix.clang_profile }}
+      # MALF_TOOLCHAIN_DIR is the generator's resolution mechanism (DN-17.D31/D32), declared because
+      # these legs are deliberately RAW and inherit nothing from the CI composites. True by
+      # construction: malf-toolchain is checked out at `path: malf`.
+      MALF_TOOLCHAIN_DIR: ${{ github.workspace }}/malf
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check out malf-toolchain into malf/ (profiles; public, anonymous)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CodeRoasted/malf-toolchain
+          ref: 6feff2bd0e4fc06ed53fe89f7c2a548e7f4bc121
+          path: malf
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out insight-canon SOURCE into _canon/ (the tower's from-source canon; public, anonymous)
+        if: inputs.tower
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CodeRoasted/insight-canon
+          ref: ${{ needs.subjects.outputs.canon }}
+          path: _canon
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: The cache key (over the dependency set, computed once, before the conan home fills)
+        id: key
+        run: echo "key=conan-golden-${{ matrix.arch }}-${{ matrix.leg }}-${{ runner.os }}-${{ hashFiles('**/conanfile.py') }}" >> "$GITHUB_OUTPUT"
+
+      - name: Provision the leg
+        id: setup
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-proof-linux@5b1bf15d376be17a3e793416e6ec76ad21893700
+        with:
+          leg: ${{ matrix.leg }}
+          conan-home: ${{ env.CONAN_HOME }}
+          cache-key: ${{ steps.key.outputs.key }}
+          cache-restore-key: conan-golden-${{ matrix.arch }}-${{ matrix.leg }}-${{ runner.os }}-
+          profiles: |
+            ${{ matrix.gcc_profile }}
+            ${{ matrix.clang_profile }}
+          global-conf: ${{ inputs.global-conf }}
+
+      - name: Seed the conan workspace
+        if: inputs.linux-seed != ''
+        env:
+          SEED: ${{ inputs.linux-seed }}
+        run: bash -euo pipefail -c "$SEED"
+
+      - name: Determinism proof — ${{ matrix.label }} (sweep-invariance + emit the leg's digest)
+        env:
+          DETERMINISM_LEG: ${{ matrix.leg }}
+          DETERMINISM_REQUIRE_COMPILERS: ${{ matrix.require }}
+          DETERMINISM_CANON_ROOT: ${{ inputs.tower && format('{0}/_canon', github.workspace) || '' }}
+          DETERMINISM_OUT: ${{ github.workspace }}/digest-${{ matrix.arch }}-${{ matrix.leg }}.txt
+          PROOF: ${{ inputs.linux-proof }}
+        run: bash "$PROOF"
+
+      - name: Upload this leg's digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: golden-digest-${{ matrix.arch }}-${{ matrix.leg }}
+          path: digest-${{ matrix.arch }}-${{ matrix.leg }}.txt
+          if-no-files-found: error
+
+      - name: Save the leg's conan cache (third-party only)
+        uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@5b1bf15d376be17a3e793416e6ec76ad21893700
+        with:
+          conan-home: ${{ env.CONAN_HOME }}
+          cache-key: ${{ steps.key.outputs.key }}
+          cache-hit: ${{ steps.setup.outputs.cache-hit }}
+
+  proof-msvc:
+    needs: [subjects, guards]
+    if: ${{ !cancelled() && needs.subjects.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.guards.result) }}
+    name: "msvc-14.52 · O2-fast"
+    runs-on: ${{ inputs.windows-runner }}
+    env:
+      CONAN_HOME: ${{ github.workspace }}/.conan2
+      MALF_TOOLCHAIN_DIR: ${{ github.workspace }}/malf
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check out malf-toolchain into malf/ (profile; public, anonymous)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CodeRoasted/malf-toolchain
+          ref: 6feff2bd0e4fc06ed53fe89f7c2a548e7f4bc121
+          path: malf
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out insight-canon SOURCE into _canon/ (the tower's from-source canon; public, anonymous)
+        if: inputs.tower
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CodeRoasted/insight-canon
+          ref: ${{ needs.subjects.outputs.canon }}
+          path: _canon
+          persist-credentials: false
+
+      - name: The cache key (over the dependency set, computed once, before the conan home fills)
+        id: key
+        shell: pwsh
+        run: '"key=conan-golden-msvc1452-${{ runner.os }}-${{ hashFiles(''**/conanfile.py'', ''malf/profiles/windows-msvc-release'') }}" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8'
+
+      - name: Provision the leg
+        id: setup
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-proof-msvc@5b1bf15d376be17a3e793416e6ec76ad21893700
+        with:
+          conan-home: ${{ env.CONAN_HOME }}
+          cache-key: ${{ steps.key.outputs.key }}
+          cache-restore-key: conan-golden-msvc1452-${{ runner.os }}-
+          global-conf: ${{ inputs.global-conf }}
+
+      - name: Build the proof subject @ O2-fast and emit the MSVC digest
+        shell: pwsh
+        env:
+          PROOF: ${{ inputs.msvc-proof }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & "./$env:PROOF"
+          if (-not (Test-Path digest-msvc.txt)) { Write-Error "$env:PROOF wrote no digest-msvc.txt"; exit 1 }
+
+      - name: Upload the MSVC digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: golden-digest-msvc
+          path: digest-msvc.txt
+          if-no-files-found: error
+
+      - name: Save the leg's conan cache (third-party only)
+        uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@5b1bf15d376be17a3e793416e6ec76ad21893700
+        with:
+          conan-home: ${{ env.CONAN_HOME }}
+          cache-key: ${{ steps.key.outputs.key }}
+          cache-hit: ${{ steps.setup.outputs.cache-hit }}
