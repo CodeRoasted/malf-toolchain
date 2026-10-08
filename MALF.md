@@ -151,9 +151,10 @@ The dev-default profile `linux-clang21-libcxx-release` (and any `--profile <name
 `runner/` provisions an org-level self-hosted runner (label `malf-local`) so the
 **private** repos' CI + `release-publish` stop consuming GitHub-hosted minutes. Toggle
 hosted⇄local with one org variable (`CI_RUNS_ON=malf-local`). A Windows twin
-(`install-runner.ps1`, which registers a Windows **service**; label `malf-windows`, toggle
-`WIN_RUNS_ON`) served the private eidos Windows probe until 2026-10-08, when the Windows legs moved
-to the GitHub-hosted `windows-2025` runner. Public repos stay on the GitHub-hosted runners and
+(`install-runner.ps1`, which registers a Windows **service**; label `malf-windows`, named by
+`WIN_RUNS_ON`) and the Windows release runner (`coderoast-release-windows`) stand behind one switch:
+every private Windows leg runs on GitHub-hosted `windows-2025` by default and on these runners when
+the org variable `WINDOWS_RUNNER=self-hosted` (the Founder, 2026-10-08). Public repos stay on the GitHub-hosted runners and
 must never target either (fork-PR RCE). Full guide: `runner/README.md`.
 
 ## Bundled fallbacks

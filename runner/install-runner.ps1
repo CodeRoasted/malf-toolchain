@@ -1,13 +1,14 @@
 # install-runner.ps1 — register an ORG-level self-hosted *Windows* GitHub Actions runner
-# (native Windows host, NOT WSL2) as a Windows SERVICE. It carried the PRIVATE eidos Windows
-# Portability Probe until 2026-10-08, when that leg moved to GitHub-hosted windows-2025. Linux
-# twin: install-runner.sh.
+# (native Windows host, NOT WSL2) as a Windows SERVICE: the self-hosted side of the Windows
+# runner switch (org variable WINDOWS_RUNNER; hosted windows-2025 by default). Linux twin:
+# install-runner.sh.
 #
 # SECURITY (same rule as Linux): a self-hosted runner must NEVER serve a PUBLIC / fork-
 # exposed repo — a fork PR would execute attacker code on this box. On GitHub Free an org
 # runner is visible to ALL repos, so safety is enforced at the WORKFLOW layer: only the
-# superproject's runner-isolation-probe names this runner; every release and golden Windows leg
-# runs on GitHub-hosted `windows-2025` since 2026-10-08 (the Founder's ruling). Do not add the
+# PRIVATE repositories' Windows legs reach this runner, and only through the switch
+# `${{ vars.WINDOWS_RUNNER == 'self-hosted' && ... || 'windows-2025' }}`; public repositories'
+# Windows legs stay pinned to hosted images (public = free + fork-safe). Do not add the
 # `malf-windows` label to a public repo's workflow.
 #
 # A SERVICE, never a Scheduled Task and never a foreground helper. The task
@@ -25,10 +26,10 @@
 # -Instance release, which calls this script with -RunnerGroup and -NoDefaultLabels and then moves
 # the service onto its virtual account; do not call it for that instance by hand.
 #
-# The org variable WIN_RUNS_ON=malf-windows names this runner for runner-isolation-probe.yml, its
-# one reader:
+# The org variable WIN_RUNS_ON=malf-windows names this runner, for the switched Windows legs'
+# non-release runs and for runner-isolation-probe.yml; WINDOWS_RUNNER is the switch itself:
 #     gh variable set WIN_RUNS_ON --org CodeRoasted --body malf-windows --visibility private
-#     gh variable delete WIN_RUNS_ON --org CodeRoasted
+#     gh variable set WINDOWS_RUNNER --org CodeRoasted --body self-hosted --visibility private
 
 param(
     [string]$Org,

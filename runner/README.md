@@ -282,15 +282,24 @@ otherwise claim the same registration at logon.
 **Do not run `start-runner.ps1` against a service-installed runner** — that is the foreground
 launcher, and only for a runner you deliberately configured without a service.
 
+**THE WINDOWS RUNNER SWITCH** (the Founder, 2026-10-08: the self-hosted Windows runners stay, and
+every Windows leg keeps a runner switch — hosted by default, our own runners selectable, *"if
+someday we lack github action minutes, we will end up stuck"*). ONE org variable flips every
+private Windows leg at once:
+
 ```bash
-gh variable set WIN_RUNS_ON --org CodeRoasted --body malf-windows --visibility private   # → local
-gh variable delete WIN_RUNS_ON --org CodeRoasted                                          # → windows-2025
+gh variable set WINDOWS_RUNNER --org CodeRoasted --body self-hosted --visibility private  # → our runners
+gh variable set WINDOWS_RUNNER --org CodeRoasted --body hosted --visibility private       # → windows-2025
 ```
 
-**No release or golden leg reads `WIN_RUNS_ON` any more** (the Founder, 2026-10-08: the
-Windows legs run on a GitHub-hosted runner, Actions minutes are not a constraint). The eidos
-MSVC golden leg and `sift-windows.yml` are hard-pinned to `windows-2025` like the canon +
-metalog probes; the superproject's `runner-isolation-probe.yml` is the one reader left. First run installs
+Unset reads as `hosted`. Under `self-hosted`, a leg at a release coordinate (the release, and the
+pre-tag reading of step 0's record) runs on the Windows release runner, `coderoast-release-windows`,
+and every other run (the weekly schedule, a plain dispatch) on the label `WIN_RUNS_ON` names, this
+runner (`malf-windows`); the superproject's `runner-isolation-probe.yml` reads `WIN_RUNS_ON` too.
+The legs: insight-eidos's `golden.yaml` `proof-msvc` and `sift-windows.yml` `build`. The
+superproject's `workflow_source` check module reds on a private repository's Windows leg that
+hard-codes a hosted image. canon + metalog (and sift-action) Windows legs stay on hosted runners
+with no switch: public = free minutes, and the runner groups refuse public repositories. First run installs
 MSVC 14.52 (Insiders Preview, ~GBs) on the host via `setup-msvc1452`; needs git + python +
 gh on Windows. (The eidos probe also needs Heph's `provision.cpp` Win32 port to go green —
 the runner solves *minutes*, not that source blocker.)
@@ -352,12 +361,12 @@ PATH. Only an access refusal counts: a target that does not exist is `BROKEN`, a
   targets of `malf-release-win` refused. Windows `release`, as the release virtual account: 8 of 8
   targets of `malf-runner-win` refused. Each: 40 attempts, 9 controls, 0 failed.
 
-**The routing — retired 2026-10-08.** insight-eidos's `sift-windows.yml` and `golden.yaml` ran
-their MSVC jobs here (`runs-on-windows: coderoast-release-windows` from `release.yaml`, and on the
-pre-tag reading). The Founder ruled the Windows legs onto a GitHub-hosted runner (`DN-142.O2`
-question 2, answered): both jobs now run on `windows-2025` at every coordinate, and no workflow
-names `coderoast-release-windows` but the superproject's `runner-isolation-probe.yml`. The runner
-stays registered until the Founder decides its decommissioning; nothing in a release path reaches it.
+**The routing** (insight-eidos), behind the switch above. With `WINDOWS_RUNNER=self-hosted`,
+`sift-windows.yml`'s `build` (which runs only at the release and on the pre-tag reading) and
+`golden.yaml`'s `proof-msvc` at those two coordinates run here, so the release runner's MSVC build
+is read before the first tag; by default they run on `windows-2025`, the image the release then
+uses too. The label appears only inside expressions, which actionlint does not check as runner
+labels, so no `actionlint.yaml` names it.
 
 **What the proof cannot see:** who the group admits (read it back with the three commands above),
 and a directory ADDED to the machine PATH later: the probe tries the PATH as it is on the day it
