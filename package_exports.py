@@ -1,24 +1,29 @@
 #!/usr/bin/env python3
-"""The released packages' exports, measured against a fresh clone: the one helper behind `malf exports-verify`.
+"""First-party recipes' exports, measured against a fresh clone: the one helper behind `malf exports-verify`.
 
 DN-142.D4 (b) names the property — a recipe's revision is a function of its commit, never of the
-disk it was exported from — and its gate: export every released recipe from the desk checkout and
+disk it was exported from — and its gate: export every first-party recipe from the desk checkout and
 from a fresh clone of the same commit, and compare the two recipe revisions. A recipe revision is
 the hash of the export's manifest, so two equal revisions mean byte-equal exports.
 
-    package_exports.py verify <conan home> <released tsv> <scratch dir>
+    package_exports.py recipes <workspace root>
+        every first-party recipe that declares `exports_sources`: each tracked `conanfile.py` of
+        each repository the workspace declares, test_package recipes excluded, as
+        `<repository>/<path>\t<absolute directory>` lines
+    package_exports.py verify <conan home> <recipes tsv> <scratch dir>
 
 The home must be staged as malf stages one (global.conf naming `malf_recipe_exports.py` beside
 it). Each repository is cloned once into <scratch dir>, from its own object store, at the commit
 its desk checkout has checked out. A package whose TRACKED files are modified on the desk is not
 judged: its desk export differs from its commit's by right.
 
-Exit 0 when every released package's two revisions are equal, 1 when one differs (named with the
+Exit 0 when every recipe's two revisions are equal, 1 when one differs (named with the
 files whose bytes differ, or that one side alone exports), 2 when a package could not be judged.
 """
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import subprocess
@@ -83,7 +88,7 @@ def verify(home: Path, released: Path, scratch: Path) -> int:
         print(f"  DIFFER {name}: desk {desk_ref.split('#')[1]} != clone {fresh_ref.split('#')[1]}; "
               f"{len(files)} file(s) differ, {only_desk} exported by the desk alone: "
               f"{', '.join(files[:NAMED_FILES])}{', …' if len(files) > NAMED_FILES else ''}")
-    print(f"package_exports: {len(equal)} of {len(rows)} released package(s) export the same recipe "
+    print(f"package_exports: {len(equal)} of {len(rows)} recipe(s) export the same recipe "
           f"revision from the desk and from a fresh clone; {len(differ)} differ, "
           f"{len(unjudged)} not judged")
     if differ:
@@ -91,7 +96,42 @@ def verify(home: Path, released: Path, scratch: Path) -> int:
     return 2 if unjudged or not rows else 0
 
 
+def _declares_exports(conanfile: Path) -> bool:
+    """Whether the recipe's class assigns `exports_sources` — the class this gate judges."""
+    tree = ast.parse(conanfile.read_text(encoding="utf-8"), filename=str(conanfile))
+    return any(isinstance(node, ast.Assign)
+               and any(getattr(target, "id", "") == "exports_sources" for target in node.targets)
+               for item in tree.body if isinstance(item, ast.ClassDef) for node in item.body)
+
+
+def recipes(workspace: Path) -> int:
+    """Print every first-party recipe declaring `exports_sources`; the repositories are the
+    workspace's DECLARED ones (scripts/workspace_layout.py), never whatever sits on the disk."""
+    workspace = workspace.resolve()
+    sys.path.insert(0, str(workspace / "scripts"))
+    import workspace_layout
+    found = 0
+    for name in workspace_layout.declared_repos(workspace):
+        repo = workspace / name
+        if not (repo / ".git").exists():
+            continue
+        listed = _run(["git", "-C", str(repo), "ls-files", "-z", "--", "*conanfile.py"])
+        for relative in sorted(path for path in listed.split("\0") if path):
+            recipe = repo / relative
+            if "test_package" in Path(relative).parts or recipe.name != "conanfile.py":
+                continue
+            if _declares_exports(recipe):
+                folder = Path(relative).parent.as_posix()
+                print(f"{name if folder == '.' else f'{name}/{folder}'}\t{recipe.parent}")
+                found += 1
+    if not found:
+        sys.exit(f"package_exports: no recipe declaring exports_sources under {workspace}")
+    return 0
+
+
 def main(argv: list[str]) -> int:
+    if len(argv) == 2 and argv[0] == "recipes":
+        return recipes(Path(argv[1]))
     if len(argv) == 4 and argv[0] == "verify":
         return verify(Path(argv[1]), Path(argv[2]), Path(argv[3]))
     print(__doc__, file=sys.stderr)

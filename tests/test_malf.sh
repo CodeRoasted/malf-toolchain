@@ -3783,19 +3783,54 @@ printf 'ex_probe\t%s\t\n' "$ex_pkg" > "$ex_tmp/released.tsv"
 ex_gate() {   # <scratch name> — package_exports verify over the fixture
     local out rc
     out="$(CONAN_HOME="$ex_home" python3 "$MALF_ROOT/package_exports.py" verify "$ex_home" "$ex_tmp/released.tsv" "$ex_tmp/$1" 2>&1)"; rc=$?
-    printf 'rc=%s %s|%s' "$rc" "$(grep -o '[0-9]* of [0-9]* released[^;]*; [0-9]* differ, [0-9]* not judged' <<< "$out")" "$(grep -E 'DIFFER|UNJUDGED' <<< "$out" | sed 's/ desk [0-9a-f]* != clone [0-9a-f]*//')"
+    printf 'rc=%s %s|%s' "$rc" "$(grep -o '[0-9]* of [0-9]* recipe[^;]*; [0-9]* differ, [0-9]* not judged' <<< "$out")" "$(grep -E 'DIFFER|UNJUDGED' <<< "$out" | sed 's/ desk [0-9a-f]* != clone [0-9a-f]*//')"
 }
 check "exports-verify: the helper's recipe exports the same revision from the desk and from a fresh clone, exit 0" \
-      "rc=0 1 of 1 released package(s) export the same recipe revision from the desk and from a fresh clone; 0 differ, 0 not judged|" "$(ex_gate g1)"
+      "rc=0 1 of 1 recipe(s) export the same recipe revision from the desk and from a fresh clone; 0 differ, 0 not judged|" "$(ex_gate g1)"
 cp "$ex_tmp/plain.py" "$ex_pkg/conanfile.py"; git -C "$ex_repo" -c user.name=t -c user.email=t@t commit -q -am plain
 check "exports-verify: a recipe that sweeps the desk is red, naming the files only the desk exports" \
-      "rc=1 0 of 1 released package(s) export the same recipe revision from the desk and from a fresh clone; 1 differ, 0 not judged|  DIFFER ex_probe:; 2 file(s) differ, 2 exported by the desk alone: export_source/src/build-x/junk.o, export_source/src/draft.cpp" \
+      "rc=1 0 of 1 recipe(s) export the same recipe revision from the desk and from a fresh clone; 1 differ, 0 not judged|  DIFFER ex_probe:; 2 file(s) differ, 2 exported by the desk alone: export_source/src/build-x/junk.o, export_source/src/draft.cpp" \
       "$(ex_gate g2)"
 cp "$ex_tmp/helper.py" "$ex_pkg/conanfile.py"
 check "exports-verify: a package whose tracked files are modified on the desk is not judged, exit 2" \
-      "rc=2 0 of 1 released package(s) export the same recipe revision from the desk and from a fresh clone; 0 differ, 1 not judged|  UNJUDGED ex_probe: tracked files modified on the desk —" \
+      "rc=2 0 of 1 recipe(s) export the same recipe revision from the desk and from a fresh clone; 0 differ, 1 not judged|  UNJUDGED ex_probe: tracked files modified on the desk —" \
       "$(ex_gate g3)"
 rm -rf "$ex_tmp"
+echo
+
+echo "[7q7f] twin-verify REFUSES before any build when its seed lacks a third-party binary the graphs need (DN-142.D4 (a))"
+# A seed lacking a binary made each twin home build it in a folder named per home, and that folder
+# reached a dependent's bytes: measured 2026-10-09, coderoast_infra_postgres differed across the two
+# homes by libpqxx header paths, 18 of 20 identical. The fixture: one third-party package, one
+# first-party package requiring it, a seed holding the binary, and the same seed without it.
+tm_tmp="$(realpath "$(mktemp -d)")"
+for tm_home in seed full lacking; do CONAN_HOME="$tm_tmp/$tm_home" bash "$MALF_BIN" profiles > /dev/null 2>&1; done
+mkdir -p "$tm_tmp/tpdep" "$tm_tmp/ex_top"
+printf 'from conan import ConanFile\n\n\nclass TpDep(ConanFile):\n    name = "tpdep"\n    version = "0.1"\n    package_type = "header-library"\n' > "$tm_tmp/tpdep/conanfile.py"
+printf 'from conan import ConanFile\n\n\nclass ExTop(ConanFile):\n    name = "ex_top"\n    version = "0.1"\n    package_type = "header-library"\n    requires = "tpdep/0.1"\n' > "$tm_tmp/ex_top/conanfile.py"
+printf '[settings]\nos=Linux\narch=x86_64\nbuild_type=Release\n' > "$tm_tmp/profile"
+CONAN_HOME="$tm_tmp/seed" conan create "$tm_tmp/tpdep" -pr:a "$tm_tmp/profile" > "$tm_tmp/create.log" 2>&1
+printf 'ex_top\t%s\t\n' "$tm_tmp/ex_top" > "$tm_tmp/released.tsv"
+python3 "$MALF_ROOT/package_twin.py" seed "$tm_tmp/seed" "ex_" "$tm_tmp/full" "$tm_tmp/lacking" > /dev/null
+CONAN_HOME="$tm_tmp/lacking" conan remove "tpdep/0.1:*" -c > /dev/null 2>&1
+tm_probe() {   # <home> — the probe's exit and its verdict lines
+    local out rc
+    out="$(python3 "$MALF_ROOT/package_twin.py" missing "$tm_tmp/$1" "$tm_tmp/released.tsv" "ex_" "$tm_tmp/profile" "$tm_tmp/profile" 2>&1)"; rc=$?
+    printf 'rc=%s|%s' "$rc" "$(grep -E 'MISSING|lacks' <<< "$out" | sed -E 's/#[0-9a-f]+:[0-9a-f]+//; s|'"$tm_tmp"'/||' | tr '\n' '|')"
+}
+check "the probe passes a seed holding every third-party binary the graph needs, exit 0" \
+      "rc=0|package_twin: full lacks 0 third-party binary(ies) the released graphs need|" "$(tm_probe full)"
+check "the probe names the third-party binary a seed lacks, exit 3" \
+      "rc=3|  MISSING tpdep/0.1 (host)|package_twin: lacking lacks 1 third-party binary(ies) the released graphs need|" "$(tm_probe lacking)"
+rm -rf "$tm_tmp"
+# The verb: the probe runs before the first create, and its finding is a refusal at exit 2 that
+# names the remedy; the sentence claiming a missing binary is "built in each home alike" is gone.
+tm_body="$(sed -n '/^cmd_twin_verify()/,/^}/p' "$MALF_BIN")"
+check "twin-verify probes the seed before its first cut-verify, refuses at exit 2 on its finding, and names 'malf cut-verify' as the remedy" \
+      "probe-first refuse-2 remedy" \
+      "$( (( $(grep -n 'package_twin.py" missing' <<< "$tm_body" | cut -d: -f1 | head -1) < $(grep -n 'cut-verify > ' <<< "$tm_body" | cut -d: -f1 | head -1) )) && printf probe-first) $(grep -A3 'probe_rc -eq 3' <<< "$tm_body" | grep -q 'return 2' && printf refuse-2) $(grep -q "Refresh the seed with 'malf cut-verify'" <<< "$tm_body" && printf remedy)"
+check "no line of malf still claims a missing third-party binary is built in each home alike" \
+      "0" "$(grep -c 'built in each home alike' "$MALF_BIN")"
 echo
 
 echo "[7q8] at job end every conan home drops its build and temp folders and its superseded versions, and reports its own size"

@@ -4659,11 +4659,12 @@ Commands:
     twin-verify                    the released set's path independence (ROADMAP N366, DN-142.D4):
                                    cut-verify into TWO fresh conan homes at two absolute paths,
                                    the second under another user (a user namespace), both seeded
-                                   with the cut-verify home's third-party packages; exit 0 only
+                                   with the cut-verify home's third-party packages — exit 2 before
+                                   any build when that seed lacks one the graphs need; exit 0 only
                                    when every released package's recipe revision, package id,
                                    package revision and file bytes are equal in both
-    exports-verify                 the released recipes' exports (DN-142.D4 (b)): every
-                                   released recipe exported from this checkout and from a fresh
+    exports-verify                 first-party recipes' exports (DN-142.D4 (b)): every recipe
+                                   declaring exports_sources exported from this checkout and a fresh
                                    clone of its commit; exit 0 only when every pair of recipe
                                    revisions is equal. No compile; seconds
     inventory [subdir] [--profile <name>]
@@ -4966,7 +4967,12 @@ cmd_relocate_verify() {
 #
 # WHAT IS HELD EQUAL: the commit (both runs read this checkout), the compiler and the third-party
 # binaries — restored from the cut-verify home into both from ONE save, so a first-party difference
-# is first-party. A third-party binary that home lacks is built in each home alike.
+# is first-party. A third-party binary the seed LACKS would not be held equal: each home would build
+# it in a folder whose name is drawn per home, and that folder reaches a dependent's bytes through
+# the headers it includes (malf/package_twin.py's header has the measurement). So before either
+# create the released graphs are resolved in the first home (cut-verify's purge then removes the
+# recipes the probe exported), and the verb REFUSES at
+# exit 2, naming every third-party binary the seed lacks: a green never rides a silent rebuild.
 #
 # Usage: malf twin-verify      (MALF_TWIN_DIR: where the homes go, default a fresh /tmp dir;
 #                               MALF_TWIN_SEED_HOME: the third-party source, default cut-verify's)
@@ -4993,9 +4999,20 @@ print(" ".join(workspace_layout.owned_package_prefixes()))
 PY
 )" && [[ -n "$prefixes" ]] \
         || { echo "malf twin-verify: the owned package namespaces of $MALF_WORKSPACE_ROOT could not be derived" >&2; return 1; }
+    local profile="$MALF_DIR/profiles/${MALF_CUT_VERIFY_PROFILE:-linux-gcc16-release}"
     mkdir -p "$first" "$second" "$second_home"
     echo "=== malf twin-verify: two homes — $first (uid $(id -u)) and $second (uid $second_uid, user malf-twin) ==="
     python3 "$MALF_DIR/package_twin.py" seed "$seed_home" "$prefixes" "$first" "$second" || return 1
+    python3 "$MALF_WORKSPACE_ROOT/scripts/version_line.py" released "$MALF_WORKSPACE_ROOT" > "$root/released.tsv" \
+        || { echo "malf twin-verify: failed to resolve the released-package list" >&2; return 1; }
+    local probe_rc=0
+    ( export CONAN_HOME="$first"; _malf_sync_conan_conf
+      python3 "$MALF_DIR/package_twin.py" missing "$first" "$root/released.tsv" "$prefixes" "$profile" "$profile" ) || probe_rc=$?
+    if [[ $probe_rc -eq 3 ]]; then
+        echo "malf twin-verify: REFUSED, nothing built — the seed $seed_home lacks the third-party binaries above, and a home that builds one carries its per-home folder into its dependents' bytes. Refresh the seed with 'malf cut-verify', then run again" >&2
+        return 2
+    fi
+    [[ $probe_rc -eq 0 ]] || { echo "malf twin-verify: the seed probe failed (exit $probe_rc) — nothing was judged" >&2; return 2; }
 
     # ONE AFTER THE OTHER, NEVER BOTH AT ONCE: a `conan create` builds its test_package in
     # `<test_package>/build/` inside THIS checkout, whatever the home, so two concurrent creates
@@ -5011,14 +5028,13 @@ PY
         "$MALF_DIR/malf" cut-verify > "$root/b.log" 2>&1 \
         || { echo "malf twin-verify: the second home's cut-verify failed — $root/b.log" >&2; return 1; }
 
-    python3 "$MALF_WORKSPACE_ROOT/scripts/version_line.py" released "$MALF_WORKSPACE_ROOT" > "$root/released.tsv" \
-        || { echo "malf twin-verify: failed to resolve the released-package list" >&2; return 1; }
     python3 "$MALF_DIR/package_twin.py" digest "$first" "$root/released.tsv" > "$root/a.jsonl" || return 1
     python3 "$MALF_DIR/package_twin.py" digest "$second" "$root/released.tsv" > "$root/b.jsonl" || return 1
     python3 "$MALF_DIR/package_twin.py" compare "$root/a.jsonl" "$root/b.jsonl"
 }
 
-# malf exports-verify — DN-142.D4 (b)'s gate: every released recipe exported from THIS checkout
+# malf exports-verify — DN-142.D4 (b)'s gate: every first-party recipe declaring exports_sources
+# (released or not; malf/package_exports.py `recipes` derives them) exported from THIS checkout
 # and from a fresh clone of its commit, into one scratch conan home staged as malf stages any home,
 # and the two recipe revisions compared (malf/package_exports.py owns the comparison). No compiler
 # runs: an export copies files and hashes them, so the gate costs seconds, not a build.
@@ -5028,10 +5044,10 @@ cmd_exports_verify() {
     [[ $# -eq 0 ]] || _malf_refuse_option exports-verify "$1"
     local scratch rc=0
     scratch="$(mktemp -d /tmp/malf-exports.XXXXXX)"
-    python3 "$MALF_WORKSPACE_ROOT/scripts/version_line.py" released "$MALF_WORKSPACE_ROOT" > "$scratch/released.tsv" \
-        || { echo "malf exports-verify: failed to resolve the released-package list" >&2; rm -rf "$scratch"; return 1; }
+    python3 "$MALF_DIR/package_exports.py" recipes "$MALF_WORKSPACE_ROOT" > "$scratch/recipes.tsv" \
+        || { echo "malf exports-verify: failed to derive the first-party recipe list" >&2; rm -rf "$scratch"; return 1; }
     ( export CONAN_HOME="$scratch/conan-home"; _malf_sync_conan_conf
-      python3 "$MALF_DIR/package_exports.py" verify "$CONAN_HOME" "$scratch/released.tsv" "$scratch" ) || rc=$?
+      python3 "$MALF_DIR/package_exports.py" verify "$CONAN_HOME" "$scratch/recipes.tsv" "$scratch" ) || rc=$?
     rm -rf "$scratch"
     return "$rc"
 }

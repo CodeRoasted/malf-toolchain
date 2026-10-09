@@ -10,12 +10,22 @@ ONE home share every path but the per-create folder hash, so they prove less.
         every package of <source home> OUTSIDE the owned namespaces (third-party, recipes and
         binaries) restored into each <target home>, so a create there rebuilds first-party code
         only; a third-party binary the source lacks is built in each target alike
+    package_twin.py missing <home> <released tsv> <owned prefixes> <host profile> <build profile>
+        every released recipe exported into <home> (a seeded home, before any create), then its graph resolved
+        there: exit 0 when the home holds every third-party binary the graphs need, 3 naming each
+        one it lacks (1 is a failed conan command, as for every subcommand)
     package_twin.py digest <home> <released tsv>
         one JSON object per released package: its recipe revision, package id, package revision
         and a content digest over the package folder's files
     package_twin.py compare <digest A> <digest B>
         exit 0 when every released package is identical in both, 1 otherwise; the differing ones
         are named with the files whose bytes differ
+
+A third-party binary the seed lacks is NOT built in each home alike: conan builds it in the home's
+per-create folder `p/b/<name><hash>/p`, the hash drawn per home, and a dependent's bytes then carry
+that folder through the headers it includes (measured 2026-10-09: libpqxx rebuilt in both homes put
+`conan-home/p/b/libpq<hash>/p/include/pqxx/params.hxx` into coderoast_infra_postgres, 18 of 20
+identical). So `missing` runs before either create, and twin-verify refuses on its finding.
 
 The content digest is SHA-256 over the sorted `(relative path, SHA-256 of bytes)` of the package
 folder, `conanmanifest.txt` excluded: its first line is a creation timestamp, so it differs between
@@ -36,10 +46,12 @@ from pathlib import Path
 MANIFEST = "conanmanifest.txt"
 
 
-def conan(home: Path, *argv: str) -> str:
+def conan(home: Path, *argv: str, tmpdir: Path | None = None) -> str:
     """`conan <argv>` in `home`; a failure is fatal and names the command."""
-    done = subprocess.run(["conan", *argv], capture_output=True, text=True,
-                          env={**os.environ, "CONAN_HOME": str(home)})
+    env = {**os.environ, "CONAN_HOME": str(home)}
+    if tmpdir is not None:
+        env["TMPDIR"] = str(tmpdir)
+    done = subprocess.run(["conan", *argv], capture_output=True, text=True, env=env)
     if done.returncode != 0:
         sys.exit(f"package_twin: `conan {' '.join(argv)}` failed in {home}:\n{done.stderr.strip()}")
     return done.stdout
@@ -55,11 +67,31 @@ def seed(source: Path, prefixes: tuple[str, ...], targets: list[Path]) -> None:
         pkglist = Path(scratch) / "pkglist.json"
         pkglist.write_text(json.dumps({"Local Cache": third}))
         archive = Path(scratch) / "third_party.tgz"
-        conan(source, "cache", "save", f"--list={pkglist}", f"--file={archive}")
+        # note: `conan cache save` stages its manifest at `<tempdir>/pkglist.json`, one fixed name, so two concurrent saves delete each other's (measured 2026-10-09); TMPDIR makes it private
+        conan(source, "cache", "save", f"--list={pkglist}", f"--file={archive}", tmpdir=Path(scratch))
         for target in targets:
             conan(target, "cache", "restore", str(archive))
             print(f"package_twin: seeded {len(third)} third-party reference(s) from {source} into "
                   f"{target}")
+
+
+def missing(home: Path, released: Path, prefixes: tuple[str, ...], host: str, build: str) -> int:
+    """Name every third-party binary the released graphs need that `home` does not hold."""
+    rows = [row.split("\t") for row in released.read_text().splitlines() if row.strip()]
+    for _name, folder, *_rest in rows:
+        conan(home, "export", folder)
+    lacking: set[str] = set()
+    for _name, folder, *_rest in rows:
+        graph = json.loads(conan(home, "graph", "info", folder, f"--profile:host={host}",
+                                 f"--profile:build={build}", "--format=json"))["graph"]["nodes"]
+        lacking.update(f"{node['ref']}:{node['package_id']} ({node['context']})"
+                       for node in graph.values()
+                       if node.get("binary") == "Missing"
+                       and not node["ref"].split("/")[0].startswith(prefixes))
+    for entry in sorted(lacking):
+        print(f"  MISSING {entry}")
+    print(f"package_twin: {home} lacks {len(lacking)} third-party binary(ies) the released graphs need")
+    return 3 if lacking else 0
 
 
 def _folder_digest(folder: Path) -> tuple[str, dict[str, str]]:
@@ -118,6 +150,8 @@ def main(argv: list[str]) -> int:
     if len(argv) >= 4 and argv[0] == "seed":
         seed(Path(argv[1]), tuple(argv[2].split()), [Path(target) for target in argv[3:]])
         return 0
+    if len(argv) == 6 and argv[0] == "missing":
+        return missing(Path(argv[1]), Path(argv[2]), tuple(argv[3].split()), argv[4], argv[5])
     if len(argv) == 3 and argv[0] == "digest":
         digest(Path(argv[1]), Path(argv[2]))
         return 0
