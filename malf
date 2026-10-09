@@ -451,14 +451,17 @@ _malf_default_build_root() {
 # than the installed conan — the from-source gcc legs). The profiles + hooks already re-seed every
 # run; these must too — a PERSISTENT conan home (the self-hosted runner) that was seeded once would
 # otherwise SHADOW a policy change forever (a `package_id` mode change silently never applied →
-# stale-binary ABI skew, 2026-07-10). cmp -s keeps it a no-op when already in sync.
+# stale-binary ABI skew, 2026-07-10). cmp -s keeps it a no-op when already in sync. The path-map
+# fragment rides with global.conf, which names it inside the home (ROADMAP N366).
 _malf_sync_conan_conf() {
-    local conf_file
-    for conf_file in global.conf settings_user.yml; do
-        [[ -f "$MALF_DIR/$conf_file" ]] || continue
+    local conf_file source
+    for conf_file in global.conf settings_user.yml malf-path-map.cmake; do
+        source="$MALF_DIR/$conf_file"
+        [[ "$conf_file" == *.cmake ]] && source="$MALF_DIR/cmake/$conf_file"
+        [[ -f "$source" ]] || continue
         mkdir -p "$CONAN_HOME"
-        if [[ ! -f "$CONAN_HOME/$conf_file" ]] || ! cmp -s "$MALF_DIR/$conf_file" "$CONAN_HOME/$conf_file"; then
-            _malf_install_file "$MALF_DIR/$conf_file" "$CONAN_HOME/$conf_file" || exit 1
+        if [[ ! -f "$CONAN_HOME/$conf_file" ]] || ! cmp -s "$source" "$CONAN_HOME/$conf_file"; then
+            _malf_install_file "$source" "$CONAN_HOME/$conf_file" || exit 1
         fi
     done
 }
@@ -4646,6 +4649,18 @@ Commands:
                                    release:true package (packages.yml), dep order, clean export —
                                    catches conan-create-only drift (test_package / sibling) before
                                    the tag. --list prints the canonical released set and exits.
+    relocate-verify [pkg]          the released set's relocatability (ROADMAP N366): every
+                                   released package of the cut-verify home is scanned for an
+                                   absolute path in the cmake files it ships, then restored into a
+                                   FRESH home at another path and consumed — every module it ships
+                                   compiled by a synthetic consumer — with the producer home
+                                   unreadable. Run after cut-verify; exit 0 only when both pass
+    twin-verify                    the released set's path independence (ROADMAP N366, DN-142.D4):
+                                   cut-verify into TWO fresh conan homes at two absolute paths,
+                                   the second under another user (a user namespace), both seeded
+                                   with the cut-verify home's third-party packages; exit 0 only
+                                   when every released package's recipe revision, package id,
+                                   package revision and file bytes are equal in both
     inventory [subdir] [--profile <name>]
                                    the build-inventory gate (ADR-3.D10) over the repo that owns subdir
     lock    [--update]             regenerate malf/conan.lock by accumulating EVERY workspace
@@ -4906,6 +4921,98 @@ cmd_bump() {
 # Usage: malf cut-verify [pkg-name] [--profile <name>] [--list]
 #   pkg-name   scope the sweep to one released package (else: the whole set)
 #   --list     print the canonical released set (dep order) and exit — build nothing
+# malf relocate-verify — ROADMAP N366's first half: is every package `malf cut-verify` created
+# consumable from ANOTHER home, by another account? malf/package_relocate.py owns both arms (the
+# scan of the cmake files every package ships, and the consumption from a fresh home with the
+# producer home unreadable) and says why each sees what the other cannot. The fresh home is
+# removed after the run, the producer home's mode restored.
+#
+# Usage: malf relocate-verify [pkg]   (MALF_RELOCATE_SOURCE_HOME: the producer home, default
+#                                      cut-verify's)
+cmd_relocate_verify() {
+    local only=""
+    if [[ $# -gt 0 ]]; then
+        [[ $# -eq 1 && "$1" != -* ]] || _malf_refuse_option relocate-verify "$1"
+        only="$1"
+    fi
+    local source="${MALF_RELOCATE_SOURCE_HOME:-$MALF_CONAN_HOME_BASE/cut-verify}"
+    [[ -f "$source/settings.yml" ]] \
+        || { echo "malf relocate-verify: $source is not a conan home — run 'malf cut-verify' first, or set MALF_RELOCATE_SOURCE_HOME" >&2; return 1; }
+    local scratch rc=0
+    scratch="$(mktemp -d /tmp/malf-relocate.XXXXXX)"
+    python3 "$MALF_WORKSPACE_ROOT/scripts/version_line.py" released "$MALF_WORKSPACE_ROOT" > "$scratch/released.tsv" \
+        || { echo "malf relocate-verify: failed to resolve the released-package list" >&2; rm -rf "$scratch"; return 1; }
+    python3 "$MALF_DIR/package_relocate.py" run "$source" "$scratch/conan-home" "$scratch/released.tsv" \
+        "${MALF_CUT_VERIFY_PROFILE:-linux-gcc16-release}" ${only:+"$only"} || rc=$?
+    rm -rf "$scratch"
+    return "$rc"
+}
+
+# malf twin-verify — DN-142.D4 (a)'s gate, run where its two homes can be made: two `malf
+# cut-verify` runs of ONE commit, each into a fresh conan home of its own, and every released
+# package compared across them (malf/package_twin.py owns the comparison and its digest).
+#
+# WHAT VARIES BETWEEN THE TWO, AND WHY EACH. The conan home's absolute path (and its length), so a
+# path the home contributes cannot hide; the per-create build folder `p/b/<name><12 hex>`, drawn
+# fresh in each home; and the user — the second create runs in a user namespace under another uid,
+# user name and HOME. Two runs in ONE home share every path but the folder hash, so they prove
+# less (DN-142.D4 (a)). The namespace is the whole second account: a real one needs root, and the
+# desk this verb was measured on has none.
+#
+# WHAT IS HELD EQUAL: the commit (both runs read this checkout), the compiler and the third-party
+# binaries — restored from the cut-verify home into both from ONE save, so a first-party difference
+# is first-party. A third-party binary that home lacks is built in each home alike.
+#
+# Usage: malf twin-verify      (MALF_TWIN_DIR: where the homes go, default a fresh /tmp dir;
+#                               MALF_TWIN_SEED_HOME: the third-party source, default cut-verify's)
+cmd_twin_verify() {
+    [[ $# -eq 0 ]] || _malf_refuse_option twin-verify "$1"
+    command -v unshare >/dev/null \
+        || { echo "malf twin-verify: unshare(1) not found — the second account cannot be made" >&2; return 1; }
+    local root="${MALF_TWIN_DIR:-$(mktemp -d /tmp/malf-twin.XXXXXX)}"
+    local seed_home="${MALF_TWIN_SEED_HOME:-$MALF_CONAN_HOME_BASE/cut-verify}"
+    local first="$root/a" second="$root/second-account/conan-home-b"
+    local second_home="$root/second-account/home" second_uid=$(( $(id -u) + 1 ))
+    unshare --user --map-user="$second_uid" --map-group="$second_uid" true \
+        || { echo "malf twin-verify: this host refuses an unprivileged user namespace — the second account cannot be made" >&2; return 1; }
+    [[ -f "$seed_home/settings.yml" ]] \
+        || { echo "malf twin-verify: $seed_home is not a conan home — run 'malf cut-verify' first, or set MALF_TWIN_SEED_HOME" >&2; return 1; }
+    local prefixes
+    prefixes="$(python3 - "$MALF_WORKSPACE_ROOT" <<'PY'
+import pathlib, sys
+
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "scripts"))
+import workspace_layout
+
+print(" ".join(workspace_layout.owned_package_prefixes()))
+PY
+)" && [[ -n "$prefixes" ]] \
+        || { echo "malf twin-verify: the owned package namespaces of $MALF_WORKSPACE_ROOT could not be derived" >&2; return 1; }
+    mkdir -p "$first" "$second" "$second_home"
+    echo "=== malf twin-verify: two homes — $first (uid $(id -u)) and $second (uid $second_uid, user malf-twin) ==="
+    python3 "$MALF_DIR/package_twin.py" seed "$seed_home" "$prefixes" "$first" "$second" || return 1
+
+    # ONE AFTER THE OTHER, NEVER BOTH AT ONCE: a `conan create` builds its test_package in
+    # `<test_package>/build/` inside THIS checkout, whatever the home, so two concurrent creates
+    # of one package write one tree. Measured 2026-10-09: run concurrently, the first home's
+    # creates of infra_postgres, infra_redis and insight_canon died on "opening dependency file
+    # ... No such file or directory" while the second home's passed.
+    echo "--- twin-verify: cut-verify into $first (log $root/a.log) ---"
+    MALF_CUT_VERIFY_CONAN_HOME="$first" "$MALF_DIR/malf" cut-verify > "$root/a.log" 2>&1 \
+        || { echo "malf twin-verify: the first home's cut-verify failed — $root/a.log" >&2; return 1; }
+    echo "--- twin-verify: cut-verify into $second as malf-twin (log $root/b.log) ---"
+    unshare --user --map-user="$second_uid" --map-group="$second_uid" \
+        env HOME="$second_home" USER=malf-twin LOGNAME=malf-twin MALF_CUT_VERIFY_CONAN_HOME="$second" \
+        "$MALF_DIR/malf" cut-verify > "$root/b.log" 2>&1 \
+        || { echo "malf twin-verify: the second home's cut-verify failed — $root/b.log" >&2; return 1; }
+
+    python3 "$MALF_WORKSPACE_ROOT/scripts/version_line.py" released "$MALF_WORKSPACE_ROOT" > "$root/released.tsv" \
+        || { echo "malf twin-verify: failed to resolve the released-package list" >&2; return 1; }
+    python3 "$MALF_DIR/package_twin.py" digest "$first" "$root/released.tsv" > "$root/a.jsonl" || return 1
+    python3 "$MALF_DIR/package_twin.py" digest "$second" "$root/released.tsv" > "$root/b.jsonl" || return 1
+    python3 "$MALF_DIR/package_twin.py" compare "$root/a.jsonl" "$root/b.jsonl"
+}
+
 # malf inventory [dir] — the ADR-3.D9 gate, standalone. Lints the WHOLE workspace (an orphan
 # anywhere is a defect, and the predicate is workspace-wide by nature), then configures and
 # builds every inventory entry of the resolved repo to a LINKED artifact in ONE canonical cell.
@@ -5574,6 +5681,8 @@ case "$COMMAND" in
     bump)             cmd_bump "$@" ;;
     inventory)        cmd_inventory "$@" ;;
     cut-verify)       cmd_cut_verify "$@" ;;
+    twin-verify)      cmd_twin_verify "$@" ;;
+    relocate-verify)  cmd_relocate_verify "$@" ;;
     lock)             cmd_lock "$@" ;;
     slot)             cmd_slot "$@" ;;
     sbom)             cmd_sbom "$@" ;;

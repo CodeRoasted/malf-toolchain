@@ -3652,6 +3652,75 @@ check "a restore that does not leave exactly the tag's revision fails the fetch"
 rm -rf "$vf_tmp"
 echo
 
+echo "[7q7d] released packages are relocatable and path-independent: the path-map fragment, the twin compare, the relocation scan (ROADMAP N366)"
+
+# The fragment, through a real configure and compile with whatever c++ and cmake the host has,
+# included from a stand-in conan home as conan includes it: __FILE__ and std::source_location come
+# out relative — a dependency header under the home included — and the binary names no path.
+pm_tmp="$(realpath "$(mktemp -d)")"
+mkdir -p "$pm_tmp/proj/src" "$pm_tmp/home/p/dep/p/include"
+cp "$MALF_ROOT/cmake/malf-path-map.cmake" "$pm_tmp/home/malf-path-map.cmake"
+printf 'inline const char* dep_file() { return __FILE__; }\n' > "$pm_tmp/home/p/dep/p/include/dep.hpp"
+printf 'cmake_minimum_required(VERSION 3.20)\nproject(pm CXX)\nadd_executable(pm src/main.cpp)\ntarget_include_directories(pm PRIVATE "%s/home/p/dep/p/include")\nset_target_properties(pm PROPERTIES CXX_STANDARD 20)\nget_directory_property(options COMPILE_OPTIONS)\nmessage(STATUS "pm-options=[${options}] pm-flags=[${CMAKE_CXX_FLAGS}]")\n' "$pm_tmp" > "$pm_tmp/proj/CMakeLists.txt"
+printf '#include <cstdio>\n#include <source_location>\n#include "dep.hpp"\nint main() { std::puts(__FILE__); std::puts(std::source_location::current().file_name()); std::puts(dep_file()); }\n' > "$pm_tmp/proj/src/main.cpp"
+pm_conf="$(cmake -S "$pm_tmp/proj" -B "$pm_tmp/proj/b" -DCMAKE_TOOLCHAIN_FILE="$pm_tmp/home/malf-path-map.cmake" 2>&1)"
+cmake --build "$pm_tmp/proj/b" > /dev/null 2>&1
+check "the fragment maps __FILE__ and std::source_location out of the source directory and a dependency header out of the conan home" \
+      "./src/main.cpp|./src/main.cpp|conan-home/p/dep/p/include/dep.hpp|" "$("$pm_tmp/proj/b/pm" 2>&1 | tr '\n' '|')"
+check "the built binary names no path of its source directory, build directory or conan home" \
+      "0" "$(grep -a -c "$pm_tmp" "$pm_tmp/proj/b/pm")"
+# A directory compile option is exported into a module package's IMPORTED_CXX_MODULES_COMPILE_OPTIONS
+# with the producer's folder in it; the language flags never are. So: flags carry it, options do not.
+check "the fragment rides the language flags, never a directory compile option a package config would export" \
+      "pm-options=[] flags-carry-map=1" \
+      "$(grep -o 'pm-options=\[[^]]*\]' <<< "$pm_conf") flags-carry-map=$(grep -c -- "pm-flags=\[.*-fmacro-prefix-map=$pm_tmp/home=conan-home .*-fmacro-prefix-map=$pm_tmp/proj=\. .*-fmacro-prefix-map=$pm_tmp/proj/b=build" <<< "$pm_conf")"
+rm -rf "$pm_tmp"
+
+# The fragment reaches every home global.conf names it in: malf syncs it beside global.conf, and
+# each CI action that stages global.conf stages it too.
+pm_home="$(mktemp -d)"
+CONAN_HOME="$pm_home" bash "$MALF_BIN" profiles > /dev/null 2>&1
+check "malf syncs the fragment into the conan home beside global.conf, byte for byte" \
+      "synced" "$(cmp -s "$MALF_ROOT/cmake/malf-path-map.cmake" "$pm_home/malf-path-map.cmake" && cmp -s "$MALF_ROOT/global.conf" "$pm_home/global.conf" && echo synced)"
+rm -rf "$pm_home"
+check "global.conf attaches the fragment from inside the home it configures" \
+      "1" "$(grep -c "^tools.cmake.cmaketoolchain:user_toolchain=\[\"{{ os.path.join(conan_home_folder, 'malf-path-map.cmake')" "$MALF_ROOT/global.conf")"
+check "every CI action that stages global.conf stages the fragment beside it" \
+      "3" "$(grep -l 'malf-path-map.cmake' "$MALF_ROOT"/.github/actions/setup-{build-env,proof-linux,proof-msvc}/action.yml | wc -l | tr -d ' ')"
+
+# package_twin compare: identical digests pass; one file's bytes fail, naming the package and the file.
+tw_tmp="$(mktemp -d)"
+printf '%s\n' '{"name":"p1","rrev":"r","package_id":"i","prev":"v","content":"c","files":{"lib/a.a":"1"}}' \
+              '{"name":"p2","rrev":"r","package_id":"i","prev":"v","content":"c","files":{"lib/b.a":"2"}}' > "$tw_tmp/a"
+cp "$tw_tmp/a" "$tw_tmp/b"
+tw_same="$(python3 "$MALF_ROOT/package_twin.py" compare "$tw_tmp/a" "$tw_tmp/b")"; tw_same_rc=$?
+sed -i 's/"prev":"v","content":"c","files":{"lib\/b.a":"2"}/"prev":"w","content":"d","files":{"lib\/b.a":"3"}/' "$tw_tmp/b"
+tw_diff="$(python3 "$MALF_ROOT/package_twin.py" compare "$tw_tmp/a" "$tw_tmp/b")"; tw_diff_rc=$?
+check "package_twin: two equal digests are N of N identical, exit 0" \
+      "rc=0 2 of 2" "rc=$tw_same_rc $(grep -o '[0-9]* of [0-9]*' <<< "$tw_same")"
+check "package_twin: a differing package revision and file fail, naming both" \
+      "rc=1 1 of 2|  DIFFER p2: prev, content; files: lib/b.a" \
+      "rc=$tw_diff_rc $(grep -o '[0-9]* of [0-9]*' <<< "$tw_diff")|$(grep DIFFER <<< "$tw_diff")"
+rm -rf "$tw_tmp"
+
+# package_relocate's scan: a producer path is a finding; the variable-anchored prefix, CMake's own
+# lone-root guard and a path inside a comment are not.
+rs_tmp="$(mktemp -d)"
+mkdir -p "$rs_tmp/lib/cmake/p"
+cat > "$rs_tmp/lib/cmake/p/pTargets.cmake" <<'CMK'
+# the host's /dev/shm is named in prose here
+if(_IMPORT_PREFIX STREQUAL "/")
+  set_target_properties(p PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${_IMPORT_PREFIX}/include"
+    IMPORTED_CXX_MODULES_INCLUDE_DIRECTORIES "/home/ghrunner/_work/p/.conan2/p/b/p0123/b/src"
+    IMPORTED_CXX_MODULES_COMPILE_OPTIONS "-fmacro-prefix-map=/tmp/producer/b=.")
+CMK
+check "package_relocate's scan names each producer path, and nothing a variable, the lone root or a comment holds" \
+      "p: lib/cmake/p/pTargets.cmake:5 names the absolute path /home/ghrunner/_work/p/.conan2/p/b/p0123/b/src|p: lib/cmake/p/pTargets.cmake:6 names the absolute path /tmp/producer/b=.|" \
+      "$(python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import package_relocate as r; from pathlib import Path; print("".join(f + "|" for f in r.scan([("p", "p/1", Path(sys.argv[2]))])))' "$MALF_ROOT" "$rs_tmp")"
+rm -rf "$rs_tmp"
+echo
+
 echo "[7q8] at job end every conan home drops its build and temp folders and its superseded versions, and reports its own size"
 
 # The script runs from a toolchain tree and reads that tree's conan.lock, three levels up, so the

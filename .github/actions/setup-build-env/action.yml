@@ -180,6 +180,8 @@ runs:
         # settings_user.yml rides the same single-source pipeline: compiler versions newer than
         # the pinned conan (the from-source gcc legs) must validate on a FRESH hosted cache too.
         cp "$ACTION_PATH/../../../settings_user.yml" "$GITHUB_WORKSPACE/.malf-toolchain/settings_user.yml"
+        # global.conf names the path-map fragment inside the home (ROADMAP N366): it rides along.
+        cp "$ACTION_PATH/../../../cmake/malf-path-map.cmake" "$GITHUB_WORKSPACE/.malf-toolchain/malf-path-map.cmake"
 
     - name: The cache key, computed ONCE, before the restore
       id: key
@@ -250,3 +252,4 @@ runs:
         # global.conf, and the compiler-version extensions must validate on any cache vintage.
         cp "$GITHUB_WORKSPACE/.malf-toolchain/global.conf" "$CONAN_HOME/global.conf"
         cp "$GITHUB_WORKSPACE/.malf-toolchain/settings_user.yml" "$CONAN_HOME/settings_user.yml"
+        cp "$GITHUB_WORKSPACE/.malf-toolchain/malf-path-map.cmake" "$CONAN_HOME/malf-path-map.cmake"

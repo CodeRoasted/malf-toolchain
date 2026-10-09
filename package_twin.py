@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""The released packages' path independence, measured: one helper behind `malf twin-verify`.
+
+DN-142.D4 (a) names the property — a package's bytes do not depend on the absolute path of the
+conan home or of its build folder, nor on the account that built it — and its gate: create every
+released package in two homes at two absolute paths under two user names, and compare. Two runs in
+ONE home share every path but the per-create folder hash, so they prove less.
+
+    package_twin.py seed <source home> <owned prefixes> <target home>...
+        every package of <source home> OUTSIDE the owned namespaces (third-party, recipes and
+        binaries) restored into each <target home>, so a create there rebuilds first-party code
+        only; a third-party binary the source lacks is built in each target alike
+    package_twin.py digest <home> <released tsv>
+        one JSON object per released package: its recipe revision, package id, package revision
+        and a content digest over the package folder's files
+    package_twin.py compare <digest A> <digest B>
+        exit 0 when every released package is identical in both, 1 otherwise; the differing ones
+        are named with the files whose bytes differ
+
+The content digest is SHA-256 over the sorted `(relative path, SHA-256 of bytes)` of the package
+folder, `conanmanifest.txt` excluded: its first line is a creation timestamp, so it differs between
+any two creates whatever the bytes. The package revision is compared beside it, because it is what
+a consumer pins and what N358's compare reads.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+MANIFEST = "conanmanifest.txt"
+
+
+def conan(home: Path, *argv: str) -> str:
+    """`conan <argv>` in `home`; a failure is fatal and names the command."""
+    done = subprocess.run(["conan", *argv], capture_output=True, text=True,
+                          env={**os.environ, "CONAN_HOME": str(home)})
+    if done.returncode != 0:
+        sys.exit(f"package_twin: `conan {' '.join(argv)}` failed in {home}:\n{done.stderr.strip()}")
+    return done.stdout
+
+
+def seed(source: Path, prefixes: tuple[str, ...], targets: list[Path]) -> None:
+    """Restore every third-party package of `source` into each of `targets`, from ONE save."""
+    listed = json.loads(conan(source, "list", "*#*:*#*", "--format=json"))["Local Cache"]
+    third = {ref: body for ref, body in listed.items() if not ref.split("/")[0].startswith(prefixes)}
+    if not third:
+        sys.exit(f"package_twin: {source} holds no third-party package to seed from")
+    with tempfile.TemporaryDirectory(prefix="package_twin.") as scratch:
+        pkglist = Path(scratch) / "pkglist.json"
+        pkglist.write_text(json.dumps({"Local Cache": third}))
+        archive = Path(scratch) / "third_party.tgz"
+        conan(source, "cache", "save", f"--list={pkglist}", f"--file={archive}")
+        for target in targets:
+            conan(target, "cache", "restore", str(archive))
+            print(f"package_twin: seeded {len(third)} third-party reference(s) from {source} into "
+                  f"{target}")
+
+
+def _folder_digest(folder: Path) -> tuple[str, dict[str, str]]:
+    files = {path.relative_to(folder).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+             for path in sorted(folder.rglob("*")) if path.is_file() and path.name != MANIFEST}
+    whole = hashlib.sha256("".join(f"{rel}\0{sha}\n" for rel, sha in sorted(files.items()))
+                           .encode()).hexdigest()
+    return whole, files
+
+
+def digest(home: Path, released: Path) -> None:
+    """One JSON line per released package: rrev, package id, prev, content digest, file digests."""
+    for row in released.read_text().splitlines():
+        name = row.split("\t")[0].strip()
+        if not name:
+            continue
+        listed = json.loads(conan(home, "list", f"{name}/*#*:*#*", "--format=json"))["Local Cache"]
+        found = [(ref, rrev, package_id, prev)
+                 for ref, body in listed.items()
+                 for rrev, recipe in body.get("revisions", {}).items()
+                 for package_id, package in recipe.get("packages", {}).items()
+                 for prev in package.get("revisions", {})]
+        if len(found) != 1:
+            sys.exit(f"package_twin: {home} must hold exactly one binary of {name}, holds "
+                     f"{len(found)}: {found}")
+        ref, rrev, package_id, prev = found[0]
+        folder = Path(conan(home, "cache", "path", f"{ref}#{rrev}:{package_id}#{prev}").strip())
+        whole, files = _folder_digest(folder)
+        print(json.dumps({"name": name, "ref": ref, "rrev": rrev, "package_id": package_id,
+                          "prev": prev, "content": whole, "files": files}, sort_keys=True))
+
+
+def compare(first: Path, second: Path) -> int:
+    """Exit 0 when every package is identical in both digests, 1 otherwise, naming the diffs."""
+    left = {row["name"]: row for row in map(json.loads, first.read_text().splitlines())}
+    right = {row["name"]: row for row in map(json.loads, second.read_text().splitlines())}
+    if left.keys() != right.keys():
+        print(f"package_twin: the two digests name different packages: "
+              f"{sorted(left.keys() ^ right.keys())}")
+        return 1
+    differ = []
+    for name in left:
+        one, two = left[name], right[name]
+        axes = [axis for axis in ("rrev", "package_id", "prev", "content") if one[axis] != two[axis]]
+        if axes:
+            files = sorted(rel for rel in one["files"].keys() | two["files"].keys()
+                           if one["files"].get(rel) != two["files"].get(rel))
+            differ.append(name)
+            print(f"  DIFFER {name}: {', '.join(axes)}; files: {', '.join(files) or 'none'}")
+    print(f"package_twin: {len(left) - len(differ)} of {len(left)} released package(s) identical "
+          f"across the two homes")
+    return 1 if differ else 0
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) >= 4 and argv[0] == "seed":
+        seed(Path(argv[1]), tuple(argv[2].split()), [Path(target) for target in argv[3:]])
+        return 0
+    if len(argv) == 3 and argv[0] == "digest":
+        digest(Path(argv[1]), Path(argv[2]))
+        return 0
+    if len(argv) == 3 and argv[0] == "compare":
+        return compare(Path(argv[1]), Path(argv[2]))
+    print(__doc__, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

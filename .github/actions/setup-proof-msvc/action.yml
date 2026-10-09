@@ -135,3 +135,8 @@ runs:
         if ($env:GLOBAL_CONF -eq 'true' -and -not (Test-Path "$env:HOME_DIR/global.conf")) {
           Copy-Item "$env:MALF_DIR/global.conf" "$env:HOME_DIR/global.conf"
         }
+        # global.conf names the path-map fragment inside the home (ROADMAP N366): a home that has
+        # the one must have the other, whichever run staged global.conf.
+        if ($env:GLOBAL_CONF -eq 'true') {
+          Copy-Item "$env:MALF_DIR/cmake/malf-path-map.cmake" "$env:HOME_DIR/malf-path-map.cmake"
+        }

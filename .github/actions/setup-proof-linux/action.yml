@@ -163,3 +163,8 @@ runs:
         if [ "$GLOBAL_CONF" = "true" ] && [ ! -f "$HOME_DIR/global.conf" ]; then
           cp "$MALF_DIR/global.conf" "$HOME_DIR/global.conf"
         fi
+        # global.conf names the path-map fragment inside the home (ROADMAP N366): a home that has
+        # the one must have the other, whichever run staged global.conf.
+        if [ "$GLOBAL_CONF" = "true" ]; then
+          cp "$MALF_DIR/cmake/malf-path-map.cmake" "$HOME_DIR/malf-path-map.cmake"
+        fi
