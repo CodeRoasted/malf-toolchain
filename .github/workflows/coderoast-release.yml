@@ -92,15 +92,15 @@ jobs:
           ref: ${{ steps.tag.outputs.tag }}   # always build the requested tag (manual re-runs are release replays)
 
       - name: Provision the pinned gcc toolchain (published asset; never the PPA)
-        uses: CodeRoasted/malf-toolchain/.github/actions/setup-gcc@9744a6181f7c1a08484e8e8161601ca2384497ba
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-gcc@43ae7d93548b90f4de369c54a498b3a331b881b4
 
       - name: Setup build env (apt + CMake 4.3.x + Conan + dep cache + canonical profile)
-        uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-env@9744a6181f7c1a08484e8e8161601ca2384497ba
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-env@43ae7d93548b90f4de369c54a498b3a331b881b4
         with:
           profile: ${{ inputs.profile }}
 
       - name: Vendor cross-repo Conan deps
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-vendor@9744a6181f7c1a08484e8e8161601ca2384497ba
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-vendor@43ae7d93548b90f4de369c54a498b3a331b881b4
         with:
           vendor: ${{ inputs.vendor }}
           # A release consumes the upstream waves already cut, never their main.
@@ -110,7 +110,7 @@ jobs:
 
       - name: Measure benchmark fresh (optional; gates the release — runs before it is created)
         if: ${{ inputs.benchmark != '' }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/measure-benchmark@9744a6181f7c1a08484e8e8161601ca2384497ba
+        uses: CodeRoasted/malf-toolchain/.github/actions/measure-benchmark@43ae7d93548b90f4de369c54a498b3a331b881b4
         with:
           outputs: ${{ inputs.benchmark }}
           subdir: ${{ inputs.benchmark-subdir }}
