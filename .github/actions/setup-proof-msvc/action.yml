@@ -45,11 +45,6 @@ inputs:
     required: false
     default: '2.29.0'
 
-outputs:
-  cache-hit:
-    description: "'true' when the exact key was restored."
-    value: ${{ steps.restore.outputs.cache-hit }}
-
 runs:
   using: composite
   steps:
@@ -93,14 +88,31 @@ runs:
         "$dir" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
         & "$dir/zstd.exe" --version
 
+    - name: May this job touch an Actions cache? (never on the coderoast-release group)
+      id: guard
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: bash "$GITHUB_ACTION_PATH/../setup-build-env/actions-cache-allowed.sh"
+
     - name: Restore the leg's conan cache
       id: restore
+      if: steps.guard.outputs.allowed == 'true'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ inputs.conan-home }}
         key: ${{ inputs.cache-key }}
         restore-keys: |
           ${{ inputs.cache-restore-key }}
+
+    - name: Record the restore for conan-cache-save
+      shell: bash
+      env:
+        CONAN_HOME_DIR: ${{ inputs.conan-home }}
+        CACHE_KEY: ${{ inputs.cache-key }}
+        CACHE_HIT: ${{ steps.restore.outputs.cache-hit }}
+        ALLOWED: ${{ steps.guard.outputs.allowed }}
+      run: bash "$GITHUB_ACTION_PATH/../setup-build-env/conan-cache-state.sh" write "$CONAN_HOME_DIR" "$CACHE_KEY" "${CACHE_HIT:-false}" "$ALLOWED"
 
     - name: Stage the conan profile (+ global.conf on request)
       shell: pwsh

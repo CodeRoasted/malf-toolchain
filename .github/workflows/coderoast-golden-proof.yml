@@ -91,6 +91,9 @@ on:
 
 permissions:
   contents: read
+  # The runner group a conan cache restore reads (`actions-cache-allowed.sh`): unread, a
+  # self-hosted job restores and saves no Actions cache.
+  actions: read
 
 jobs:
   subjects:
@@ -229,10 +232,6 @@ jobs:
 
       - name: Save the leg's conan cache (third-party only)
         uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@6dfd8ce845b5f4fe8cd4816320c2fefabb922ecd
-        with:
-          conan-home: ${{ env.CONAN_HOME }}
-          cache-key: ${{ steps.key.outputs.key }}
-          cache-hit: ${{ steps.setup.outputs.cache-hit }}
 
   proof-msvc:
     needs: [subjects, guards]
@@ -289,7 +288,3 @@ jobs:
 
       - name: Save the leg's conan cache (third-party only)
         uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@6dfd8ce845b5f4fe8cd4816320c2fefabb922ecd
-        with:
-          conan-home: ${{ env.CONAN_HOME }}
-          cache-key: ${{ steps.key.outputs.key }}
-          cache-hit: ${{ steps.setup.outputs.cache-hit }}

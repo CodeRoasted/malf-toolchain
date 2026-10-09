@@ -3529,9 +3529,69 @@ check "persistent=true on a HOSTED runner refuses: nothing there outlives the jo
 ch_out="$(ch_run true self-hosted '../escape')"; ch_rc=$?
 check "a runner name that is not one path segment refuses rather than escaping the home's base" \
       "rc=1" "rc=$ch_rc"
-check "setup-build-env derives CONAN_HOME through this script, and skips actions/cache for a persistent home" \
-      "1 1" "$(grep -c 'bash "$ACTION_PATH/conan-home.sh"' "$MALF_ROOT/.github/actions/setup-build-env/action.yml") $(grep -c "if: \${{ inputs.persistent-conan-home != 'true' }}" "$MALF_ROOT/.github/actions/setup-build-env/action.yml")"
+check "setup-build-env derives CONAN_HOME through this script, and asks for no Actions cache for a persistent home" \
+      "1 2" "$(grep -c 'bash "$ACTION_PATH/conan-home.sh"' "$MALF_ROOT/.github/actions/setup-build-env/action.yml") $(grep -c "if: \${{ inputs.persistent-conan-home != 'true' }}" "$MALF_ROOT/.github/actions/setup-build-env/action.yml")"
 rm -rf "$ch_tmp"
+echo
+
+echo "[7q7b] no job on the coderoast-release runner group restores or saves an Actions cache (DN-142.D6, ROADMAP N367)"
+
+# note: insight-eidos Release run 37725404832 (v1.10.6) restored three `conan-golden-*` Actions
+# caches on that group, each saved by a `main` run on another runner.
+ac_script="$MALF_ROOT/.github/actions/setup-build-env/actions-cache-allowed.sh"
+ac_tmp="$(realpath "$(mktemp -d)")"
+ch_fixture "$ac_tmp"
+ac_run() {   # <runner environment> <runner name> <group of its in-progress job> [gh-fail]: "<allowed> rc=<rc>"
+    : > "$ac_tmp/out"
+    PATH="$ac_tmp/bin:$PATH" CH_JOBS="$(ch_jobs "$2" "$3")" CH_GH_FAIL="${4:-}" \
+    GITHUB_REPOSITORY=CodeRoasted/insight-eidos GITHUB_RUN_ID=37725404832 GITHUB_RUN_ATTEMPT=1 \
+    GITHUB_OUTPUT="$ac_tmp/out" RUNNER_ENVIRONMENT="$1" RUNNER_NAME="$2" \
+        bash "$ac_script" > /dev/null 2>&1
+    local rc=$?
+    printf '%s rc=%s' "$(sed -n 's/^allowed=//p' "$ac_tmp/out")" "$rc"
+}
+check "a job on the coderoast-release group may not touch an Actions cache" \
+      "false rc=0" "$(ac_run self-hosted malf-release coderoast-release)"
+check "the group is read case-blind, as conan-home.sh reads it" \
+      "false rc=0" "$(ac_run self-hosted malf-release Coderoast-Release)"
+check "a self-hosted job in the default group may" "true rc=0" "$(ac_run self-hosted malf-runner Default)"
+check "a hosted job may, and needs no read of the jobs API" \
+      "true rc=0" "$(ac_run github-hosted 'GitHub Actions 7' coderoast-release)"
+check "an unreadable jobs listing (no actions: read) answers false, never true" \
+      "false rc=0" "$(ac_run self-hosted malf-runner Default fail)"
+mkdir -p "$ac_tmp/nogh"; ln -s "$(command -v grep)" "$ac_tmp/nogh/grep"
+: > "$ac_tmp/out"
+PATH="$ac_tmp/nogh" GITHUB_OUTPUT="$ac_tmp/out" RUNNER_ENVIRONMENT=self-hosted RUNNER_NAME=malf-runner \
+GITHUB_REPOSITORY=o/r GITHUB_RUN_ID=1 "$BASH" "$ac_script" > /dev/null 2>&1
+check "no gh on a self-hosted runner answers false" "false" "$(sed -n 's/^allowed=//p' "$ac_tmp/out")"
+
+# The hand-off to the save: what `read` answers for each record `write` can leave.
+cs_script="$MALF_ROOT/.github/actions/setup-build-env/conan-cache-state.sh"
+cs_read() {   # [home key hit allowed]: the save verdict, home and key read back
+    rm -rf "$ac_tmp/rt"; mkdir -p "$ac_tmp/rt"; : > "$ac_tmp/cs"
+    (($# == 0)) || RUNNER_TEMP="$ac_tmp/rt" bash "$cs_script" write "$@"
+    RUNNER_TEMP="$ac_tmp/rt" GITHUB_OUTPUT="$ac_tmp/cs" bash "$cs_script" read > /dev/null 2>&1
+    local rc=$?
+    printf '%s rc=%s' "$(tr '\n' ' ' < "$ac_tmp/cs")" "$rc"
+}
+check "a restore that was allowed and missed is saved, under its home and key" \
+      "save=true home=/h key=k1  rc=0" "$(cs_read /h k1 false true)"
+check "an exact-key hit saves nothing" "save=false  rc=0" "$(cs_read /h k1 true true)"
+check "a job that may not touch an Actions cache saves nothing" "save=false  rc=0" "$(cs_read /h k1 false false)"
+check "no restore in the job saves nothing" "save=false  rc=0" "$(cs_read)"
+
+# The wiring: every Actions cache restore in this repository sits behind the verdict, and nothing
+# uses the combined `actions/cache` (its post step saves the whole home, first-party included).
+ac_restores="$(grep -rl 'uses: actions/cache/restore@' "$MALF_ROOT/.github" | sort | tr '\n' ' ')"
+ac_guarded="$(for f in $ac_restores; do \
+              awk '/^    - name:/{guard=0} /if: .*steps\.guard\.outputs\.allowed == .true./{guard=1} /uses: actions\/cache\/restore@/{print (guard ? "guarded" : "UNGUARDED " FILENAME)}' "$f"; done | sort -u | tr '\n' ' ')"
+check "every actions/cache/restore in malf is behind actions-cache-allowed.sh's verdict" \
+      "guarded " "$ac_guarded"
+check "no malf action or workflow uses the combined actions/cache (a post-step save of the whole home)" \
+      "" "$(grep -rln 'uses: actions/cache@' "$MALF_ROOT/.github" | tr '\n' ' ')"
+check "every restore records itself for conan-cache-save" \
+      "3" "$(grep -rl 'conan-cache-state.sh" write' "$MALF_ROOT/.github/actions" | wc -l | tr -d ' ')"
+rm -rf "$ac_tmp"
 echo
 
 echo "[7q8] at job end every conan home drops its build and temp folders and its superseded versions, and reports its own size"

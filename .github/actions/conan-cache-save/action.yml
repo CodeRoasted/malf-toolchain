@@ -9,20 +9,14 @@ description: |
   compile it exists to prove — a release would publish, or a determinism leg would compare, bytes
   an earlier run built. Third-party binaries carry no such claim; they are what the cache is for.
 
-  An exact-key hit saves nothing (the entry is immutable), and a failed job saves nothing (a
-  `success()` default the caller keeps by not overriding `if:`).
+  WHAT IT SAVES, AND WHETHER, IS THE RESTORE'S RECORD. The restore (`setup-build-env`,
+  `setup-proof-linux`, `setup-proof-msvc`) writes its home, key, hit and verdict through
+  `setup-build-env/conan-cache-state.sh`, and this action reads them back: an exact-key hit saves
+  nothing (the entry is immutable), a job on the `coderoast-release` runner group saves nothing
+  (`actions-cache-allowed.sh`), and a failed job saves nothing (a `success()` default the caller
+  keeps by not overriding `if:`).
 
 inputs:
-  conan-home:
-    description: 'The CONAN_HOME the restore filled.'
-    required: true
-  cache-key:
-    description: 'The exact key the restore was given.'
-    required: true
-  cache-hit:
-    description: "The restore's `cache-hit` output; 'true' skips the save."
-    required: false
-    default: 'false'
   drop:
     description: 'Newline-separated extra conan reference patterns to remove before the save.'
     required: false
@@ -31,11 +25,16 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Read the restore's record
+      id: state
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/../setup-build-env/conan-cache-state.sh" read
+
     - name: Drop every first-party package from the cache (Linux)
-      if: inputs.cache-hit != 'true' && runner.os != 'Windows'
+      if: steps.state.outputs.save == 'true' && runner.os != 'Windows'
       shell: bash
       env:
-        CONAN_HOME: ${{ inputs.conan-home }}
+        CONAN_HOME: ${{ steps.state.outputs.home }}
         DROP: ${{ inputs.drop }}
       run: |
         set -euo pipefail
@@ -49,10 +48,10 @@ runs:
         conan list "*" --format=compact
 
     - name: Drop every first-party package from the cache (Windows)
-      if: inputs.cache-hit != 'true' && runner.os == 'Windows'
+      if: steps.state.outputs.save == 'true' && runner.os == 'Windows'
       shell: pwsh
       env:
-        CONAN_HOME: ${{ inputs.conan-home }}
+        CONAN_HOME: ${{ steps.state.outputs.home }}
         DROP: ${{ inputs.drop }}
       run: |
         $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true
@@ -61,8 +60,8 @@ runs:
         conan list "*" --format=compact
 
     - name: Save the cache
-      if: inputs.cache-hit != 'true'
+      if: steps.state.outputs.save == 'true'
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: ${{ inputs.conan-home }}
-        key: ${{ inputs.cache-key }}
+        path: ${{ steps.state.outputs.home }}
+        key: ${{ steps.state.outputs.key }}

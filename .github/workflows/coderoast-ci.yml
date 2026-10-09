@@ -125,6 +125,9 @@ jobs:
           package-dir: ${{ inputs.sbom-package-dir }}
           sbom-path: ${{ inputs.sbom-path }}
 
+      - name: Save the conan cache (third-party only; never on the coderoast-release group)
+        uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@6dfd8ce845b5f4fe8cd4816320c2fefabb922ecd
+
       - name: Sift dogfood (advisory; never fails the build)
         if: ${{ always() && inputs.sift-mode != 'off' }}
         continue-on-error: true    # the advisory guarantee lives here, at the job-step boundary

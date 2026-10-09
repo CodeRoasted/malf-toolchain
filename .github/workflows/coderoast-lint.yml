@@ -148,6 +148,9 @@ on:
 
 permissions:
   contents: read
+  # The runner group a conan cache restore reads (`actions-cache-allowed.sh`): unread, a
+  # self-hosted job restores and saves no Actions cache.
+  actions: read
 
 concurrency:
   group: coderoast-lint-${{ github.workflow }}-${{ github.ref }}
@@ -303,3 +306,7 @@ jobs:
           DEAD_SYMBOL: ${{ inputs.dead-symbol-check }}
         run: |
           echo "::warning title=clang-tidy did not run::${{ github.repository }} passed lint with malf lint DISABLED (lint: false in its caller). This run says nothing about clang-tidy conformance; the C++ gates it did run: module-conformance=${MODULES}, format-check=${FORMAT}, dead-symbol-check=${DEAD_SYMBOL}."
+
+      - name: Save the conan cache clang-tidy's build env restored (third-party only)
+        if: ${{ inputs.lint }}
+        uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@6dfd8ce845b5f4fe8cd4816320c2fefabb922ecd

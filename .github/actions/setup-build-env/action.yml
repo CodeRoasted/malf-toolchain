@@ -11,7 +11,8 @@ description: |
 
   Owns `CONAN_HOME` (exported to `$GITHUB_ENV`) so consumers no longer declare it at job level;
   later steps (conan-module, etc.) read it as `$CONAN_HOME`. It is <workspace>/.conan2, which
-  `actions/cache` restores and saves, unless the caller asks for `persistent-conan-home`: one home
+  `actions/cache/restore` fills and `conan-cache-save` (the caller's last step) saves without its
+  first-party packages, on any runner group but `coderoast-release` (`actions-cache-allowed.sh`), unless the caller asks for `persistent-conan-home`: one home
   per self-hosted runner, outside the checkout, that outlives the job (`conan-home.sh` says why and
   where). A caller that asks for it also runs `clean-conan-homes.sh` at its job's end.
 
@@ -35,11 +36,11 @@ inputs:
   persistent-conan-home:
     description: >-
       'true': CONAN_HOME is this self-hosted runner's own home under the runner user's HOME,
-      outside the checkout, and it outlives the job, so the actions/cache step does not run. It is
+      outside the checkout, and it outlives the job, so no Actions cache is restored or saved. It is
       handed out only on a runner in the `coderoast-release` group whose user runs no other runner
       and owns every entry of the home; anything else refuses (conan-home.sh says why), so the
       caller grants `actions: read` and runs clean-conan-homes.sh at job end. 'false': the
-      checkout's .conan2, restored and saved by actions/cache.
+      checkout's .conan2, restored by actions/cache/restore and saved by conan-cache-save.
     required: false
     default: 'false'
 
@@ -180,16 +181,38 @@ runs:
         # the pinned conan (the from-source gcc legs) must validate on a FRESH hosted cache too.
         cp "$ACTION_PATH/../../../settings_user.yml" "$GITHUB_WORKSPACE/.malf-toolchain/settings_user.yml"
 
-    - name: Cache conan dep binaries (keyed on the dep set + the gcc-16.2 profile)
+    - name: May this job touch an Actions cache? (never on the coderoast-release group)
+      id: guard
       # A persistent home is its own cache: restoring over it would re-download what it holds, and
       # saving it would upload it again (DN-119.D2 measured both at about 510 s a run).
       if: ${{ inputs.persistent-conan-home != 'true' }}
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: bash "$ACTION_PATH/actions-cache-allowed.sh"
+
+    - name: Restore the conan dep binaries (keyed on the dep set + the gcc-16.2 profile)
+      id: restore
+      if: ${{ steps.guard.outputs.allowed == 'true' }}
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ env.CONAN_HOME }}
         key: conan-gcc162-${{ runner.os }}-${{ hashFiles('**/conanfile.py', '.malf-toolchain/*') }}
         restore-keys: |
           conan-gcc162-${{ runner.os }}-
+
+    - name: Record the restore for conan-cache-save
+      # RESTORE-ONLY: the job saves with `conan-cache-save` as its LAST step, which drops every
+      # first-party package first (ROADMAP N367): a post-step save would carry them.
+      if: ${{ inputs.persistent-conan-home != 'true' }}
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        CACHE_KEY: conan-gcc162-${{ runner.os }}-${{ hashFiles('**/conanfile.py', '.malf-toolchain/*') }}
+        CACHE_HIT: ${{ steps.restore.outputs.cache-hit }}
+        ALLOWED: ${{ steps.guard.outputs.allowed }}
+      run: bash "$ACTION_PATH/conan-cache-state.sh" write "$CONAN_HOME" "$CACHE_KEY" "${CACHE_HIT:-false}" "$ALLOWED"
 
     - name: Drop every editable registry the cache just restored — the base home's and each keyed one's
       shell: bash
