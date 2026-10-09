@@ -19,9 +19,18 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
     artefact_store.py toolchain <compiler root> <out.json>
         the measured toolchain member, written once per run (hashing the compiler tree is the
         expensive part of a key)
+    artefact_store.py verdict-step <store> <predicate> <malf dir> <clang-format> <repository>...
+        the verdict record of one source predicate (`format`: `malf format --check`) over each
+        repository's tracked tree, judged in an export of that tree beside an export of malf's
+        (DN-142.D7): stored when the key is new, compared when it is not; exit 0 when every
+        verdict is a pass and agrees with its record, 1 on a fail or a mismatch, 2 when the
+        predicate ran but judged nothing
+
+MALF_STORE_DEFINITION, when set, is `<name>=<directory> ...`: each named directory's tracked tree
+joins the key's `definition` beside malf's, for a step another tool drives (Pharos at step 0).
 
 The store is a directory: `objects/<sha256>` immutable blobs, `records/<key>.json` one per key,
-`mismatches/<key>.<content>.json` one per differing rebuild. It stands in for the remote store
+`mismatches/<key>.<digest>.json` one per differing rebuild or re-judgement. It stands in for the remote store
 until its transport and its writer credential are ruled (DN-142.D6, R1 to R5).
 """
 
@@ -30,6 +39,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import socket
 import stat
 import subprocess
@@ -138,6 +148,28 @@ def worktree_tree_id(repository: Path) -> str:
         return _run(["git", "-C", str(repository), "write-tree"], env).strip()
 
 
+def directory_tree_id(directory: Path) -> str:
+    """The git tree id of the TRACKED files under `directory`, as they are on disk: its work
+    tree's (`worktree_tree_id`), narrowed to the directory's prefix when it is not the top."""
+    tree = worktree_tree_id(directory)
+    prefix = _run(["git", "-C", str(directory), "rev-parse", "--show-prefix"]).strip().rstrip("/")
+    return _run(["git", "-C", str(directory), "rev-parse", f"{tree}:{prefix}"]).strip() if prefix else tree
+
+
+def definition_member(malf_dir: Path) -> dict[str, str]:
+    """DN-142.D2's `definition` member: malf's tracked tree, and the tracked tree of every
+    directory `MALF_STORE_DEFINITION` names (`<name>=<directory> ...`), so the code that drives a
+    step is part of its key whichever tool drives it.
+    pre: each name is distinct from `malf` and from the others, and each directory is inside a git work tree."""
+    definition = {"malf": worktree_tree_id(malf_dir)}
+    for member in os.environ.get("MALF_STORE_DEFINITION", "").split():
+        name, _, directory = member.partition("=")
+        if not name or not directory or name in definition:
+            raise KeyError_(f"MALF_STORE_DEFINITION: `{member}` is not a new `<name>=<directory>`")
+        definition[name] = directory_tree_id(Path(directory))
+    return definition
+
+
 def measure_toolchain(compiler_root: Path) -> dict[str, object]:
     """DN-142.D2's `toolchain` member, measured in the job: the compiler tree's digest, and
     cmake, ninja and conan by version and by the digest of the executable that runs."""
@@ -224,7 +256,7 @@ def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile:
         sys.exit(f"artefact_store: the graph {graph_json} holds no host node named {package}")
     document = {
         "step": {"kind": "conan-create", "package": package, "profile": profile},
-        "definition": {"malf": worktree_tree_id(malf_dir)},
+        "definition": definition_member(malf_dir),
         "sources": sources,
         "upstream": upstream,
         "third_party": third_party,
@@ -236,7 +268,7 @@ def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile:
     content, entries = tree_digest(folder)
     return LocalStore(store).commit(document, {"package": {"alias": binary, "content": content,
                                                            "entries": entries}},
-                                    lambda: _transport(home, binary))
+                                    {"package": ("transport", lambda: _transport(home, binary))})
 
 
 def _transport(home: Path, binary: str) -> Path:
@@ -253,6 +285,97 @@ def _transport(home: Path, binary: str) -> Path:
     _run(["conan", "cache", "save", f"--list={pkglist}", f"--file={archive}"],
          {**os.environ, "CONAN_HOME": str(home), "TMPDIR": str(scratch)})
     return archive
+
+
+# A source predicate's verb in malf, and the lines that say it JUDGED: `malf format --check` prints
+# one SUMMARY for clang-format and one CCC SUMMARY for the comment grammar. A run missing either, or
+# whose clang-format summary checked nothing or failed with zero violations counted, judged nothing.
+PREDICATES = {"format": ["format", "--check"]}
+FORMAT_SUMMARY = re.compile(r"^malf format: SUMMARY · mode=check-\S+ · dir=\S+ · selected \d+, "
+                            r"checked (\d+), (\d+) misformatted, \d+ skipped · rc=(\d+)$")
+CCC_SUMMARY = re.compile(r"^malf format: CCC SUMMARY · .* · rc=\d+$")
+FINDING = re.compile(r": (error|warning): | CCC (?!SUMMARY)")
+JUDGED_ROOT = "<judged>"
+
+
+def _export(repository: Path, tree: str, into: Path) -> None:
+    """Write git tree `tree` of `repository` into `into`: the judged bytes, never the disk's."""
+    into.mkdir(parents=True)
+    archive = subprocess.run(["git", "-C", str(repository), "archive", "--format=tar", tree],
+                             capture_output=True, check=False)
+    if archive.returncode != 0:
+        sys.exit(f"artefact_store: `git archive {tree}` in {repository} failed:\n"
+                 f"{archive.stderr.decode(errors='replace').strip()}")
+    subprocess.run(["tar", "-x", "-C", str(into)], input=archive.stdout, check=True)
+
+
+def _executable_member(executable: Path) -> dict[str, str]:
+    return {"version": _run([str(executable), "--version"]).splitlines()[0].strip(),
+            "executable": file_sha256(executable.resolve())}
+
+
+def verdict_step(store: Path, predicate: str, malf_dir: Path, clang_format: Path,
+                 repositories: list[Path]) -> int:
+    """DN-142.D7's verdict record of `predicate` over each repository's tracked tree.
+
+    The predicate runs in an export: the repository's tree beside malf's, under a scratch root with
+    every MALF_* variable cleared, so what was judged is exactly the keyed trees and a repository's
+    `.clang-format` link into `../malf/config/` resolves to the keyed malf. Its findings are the
+    finding lines sorted, each path relative to the repository and the scratch root replaced by a
+    token: the export's walk order is the filesystem's, so the log's line order is not an output.
+    post: exit 0 when every repository passed and agreed with its record, 1 on a fail or a
+    mismatch, 2 when a run judged nothing (no record is written for it)."""
+    if predicate not in PREDICATES:
+        sys.exit(f"artefact_store: no verdict predicate `{predicate}` (known: {' '.join(sorted(PREDICATES))})")
+    definition = definition_member(malf_dir)
+    toolchain = {"clang-format": _executable_member(clang_format),
+                 "python3": _executable_member(Path(sys.executable))}
+    system = system_member()
+    environment = {name: value for name, value in os.environ.items() if not name.startswith("MALF_")}
+    local = LocalStore(store)
+    worst = 0
+    for repository in repositories:
+        name = repository.resolve().name
+        tree = worktree_tree_id(repository)
+        with tempfile.TemporaryDirectory(prefix="artefact_store.") as scratch:
+            root = Path(scratch) / "workspace"
+            _export(malf_dir, definition["malf"], root / "malf")
+            _export(repository, tree, root / name)
+            judged = subprocess.run(["bash", str(root / "malf" / "malf"), *PREDICATES[predicate]],
+                                    cwd=root / name, env=environment, capture_output=True, text=True,
+                                    check=False)
+            lines = ((judged.stdout + judged.stderr).replace(f"{root / name}/", "")
+                     .replace(str(root), JUDGED_ROOT).splitlines())
+            log = Path(scratch) / "verdict.log"
+            log.write_text("\n".join(lines) + "\n")
+            summary = next((match for line in lines if (match := FORMAT_SUMMARY.match(line))), None)
+            if (summary is None or not any(CCC_SUMMARY.match(line) for line in lines)
+                    or int(summary.group(1)) == 0
+                    or (summary.group(3) != "0" and summary.group(2) == "0")):
+                print(f"artefact_store: UNJUDGED {name} {predicate}: `malf {' '.join(PREDICATES[predicate])}` "
+                      f"exited {judged.returncode} without a verdict — {lines[-1] if lines else 'no output'}")
+                worst = max(worst, 2)
+                continue
+            findings = sorted(line for line in lines if FINDING.search(line))
+            verdict = "pass" if judged.returncode == 0 else "fail"
+            document = {
+                "step": {"kind": "verdict", "subject": name,
+                         "predicate": {"id": f"malf {' '.join(PREDICATES[predicate])}",
+                                       "version": definition["malf"]}},
+                "definition": definition,
+                "judged": {name: tree},
+                "toolchain": toolchain,
+                "system": system,
+            }
+            output = {"verdict": verdict, "findings": key_of(findings),
+                      "entries": [[finding] for finding in findings]}
+            rc = local.commit(document, {"verdict": output}, {"verdict": ("log", lambda: log)})
+            if verdict == "fail":
+                print(f"artefact_store: FAIL {name} {predicate}: {len(findings)} finding(s); first "
+                      f"{findings[0] if findings else lines[-1]}")
+                rc = 1
+            worst = max(worst, rc)
+    return worst
 
 
 class LocalStore:
@@ -287,53 +410,73 @@ class LocalStore:
         path = self.root / "records" / f"{key}.json"
         return json.loads(path.read_text()) if path.exists() else None
 
-    def commit(self, document: dict, outputs: dict, transport) -> int:
+    def commit(self, document: dict, outputs: dict, objects: dict) -> int:
         """Store `outputs` under the document's key, or compare them with the stored ones.
 
-        post: exit 0 when the key was new (stored) or every output's content and alias equal the
+        `objects` maps an output's name to `(field, produce)`: on a new key `produce()` returns the
+        file stored as that output's object, its digest kept under `field` and never compared.
+        post: exit 0 when the key was new (stored) or every output's compared axes equal the
         record's; 1 when one differs, a mismatch event naming both digests written beside."""
         key = key_of(document)
+        subject = document["step"].get("package") or document["step"]["subject"]
         stored = self.record(key)
         if stored is None:
-            for output in outputs.values():
-                output["transport"] = self.put_object(transport())
+            for name, (field, produce) in objects.items():
+                outputs[name][field] = self.put_object(produce())
             body = {"key": key, "inputs": document, "outputs": outputs,
                     "produced_by": {"seat": socket.gethostname(),
                                     "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}}
             if self._create(self.root / "records" / f"{key}.json",
                             json.dumps(body, sort_keys=True, indent=1).encode()):
                 for name, output in outputs.items():
-                    print(f"artefact_store: STORED {document['step']['package']} {name} key {key} "
-                          f"content {output['content']} ({output['alias']})")
+                    print(f"artefact_store: STORED {subject} {name} key {key} {_described(output)}")
                 return 0
             stored = self.record(key)
+        uncompared = {"entries"} | {field for field, _ in objects.values()}
         differ = []
         for name, output in outputs.items():
             before = stored["outputs"].get(name)
             if before is None:
                 differ.append((name, ["absent from the record"]))
                 continue
-            axes = [axis for axis in ("content", "alias") if before[axis] != output[axis]]
+            axes = sorted(axis for axis in (before.keys() | output.keys()) - uncompared
+                          if before.get(axis) != output.get(axis))
             if axes:
                 old = {entry[0]: entry[1:] for entry in before["entries"]}
                 new = {entry[0]: entry[1:] for entry in output["entries"]}
-                files = sorted(path for path in old.keys() | new.keys() if old.get(path) != new.get(path))
-                differ.append((name, axes + [f"{len(files)} file(s): " + ", ".join(files[:NAMED_FILES])
-                                             + (", ..." if len(files) > NAMED_FILES else "")]))
-                event = {"key": key, "output": name, "stored": {"content": before["content"],
-                                                                 "alias": before["alias"]},
-                         "rebuilt": {"content": output["content"], "alias": output["alias"]},
-                         "files": files}
-                self._create(self.root / "mismatches" / f"{key}.{output['content']}.json",
+                units = sorted(path for path in old.keys() | new.keys() if old.get(path) != new.get(path))
+                differ.append((name, axes + [f"{len(units)} {_unit(output)}: " + ", ".join(units[:NAMED_FILES])
+                                             + (", ..." if len(units) > NAMED_FILES else "")]))
+                event = {"key": key, "output": name,
+                         "stored": {axis: before.get(axis) for axis in axes},
+                         "rebuilt": {axis: output.get(axis) for axis in axes},
+                         "differing": units}
+                self._create(self.root / "mismatches" / f"{key}.{_identity(output)}.json",
                              json.dumps(event, sort_keys=True, indent=1).encode())
             else:
-                print(f"artefact_store: MATCH {document['step']['package']} {name} key {key} "
-                      f"content {output['content']} ({output['alias']})")
+                print(f"artefact_store: MATCH {subject} {name} key {key} {_described(output)}")
         for name, reasons in differ:
-            print(f"artefact_store: MISMATCH {document['step']['package']} {name} at an equal key "
-                  f"{key}: stored {stored['outputs'].get(name, {}).get('content')} rebuilt "
-                  f"{outputs[name]['content']}; {'; '.join(reasons)}")
+            print(f"artefact_store: MISMATCH {subject} {name} at an equal key {key}: stored "
+                  f"{_described(stored['outputs'].get(name, {}))} rebuilt {_described(outputs[name])}; "
+                  f"{'; '.join(reasons)}")
         return 1 if differ else 0
+
+
+def _identity(output: dict) -> str:
+    """The digest an output is identified by: a package's content, a verdict's findings."""
+    return output.get("content") or output["findings"]
+
+
+def _unit(output: dict) -> str:
+    return "file(s)" if "content" in output else "finding(s)"
+
+
+def _described(output: dict) -> str:
+    if "content" in output:
+        return f"content {output['content']} ({output['alias']})"
+    if "verdict" in output:
+        return f"verdict {output['verdict']} findings {output['findings']}"
+    return "nothing"
 
 
 def main(argv: list[str]) -> int:
@@ -346,6 +489,9 @@ def main(argv: list[str]) -> int:
     if len(argv) == 3 and argv[0] == "toolchain":
         Path(argv[2]).write_text(json.dumps(measure_toolchain(Path(argv[1])), sort_keys=True))
         return 0
+    if len(argv) >= 6 and argv[0] == "verdict-step":
+        return verdict_step(Path(argv[1]), argv[2], Path(argv[3]), Path(argv[4]),
+                            [Path(repository) for repository in argv[5:]])
     if len(argv) == 9 and argv[0] == "conan-step":
         return conan_step(Path(argv[1]), Path(argv[2]), Path(argv[3]), argv[4], argv[5],
                           Path(argv[6]), Path(argv[7]), tuple(argv[8].split()))

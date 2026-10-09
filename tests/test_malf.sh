@@ -3927,6 +3927,61 @@ check "a changed exported source moves the key: a second record is STORED" \
 rm -rf "$as_tmp"
 echo
 
+echo "[7q7h] a verdict is a keyed record binding the trees it judged; a fail is stored, a flip at an equal key fails, and a run that judged nothing writes no record (DN-142.D7; ROADMAP N358)"
+# The predicate is `malf format --check`, judged in an export of the fixture's TRACKED tree beside
+# an export of this malf's, so an untracked file is never judged. The definition a driving tool adds
+# (MALF_STORE_DEFINITION) is part of the key, and a malformed one is refused rather than ignored.
+sv_tmp="$(realpath "$(mktemp -d)")"
+sv_repo="$sv_tmp/fixture-repo"; mkdir -p "$sv_repo/src"
+git -C "$sv_repo" init -q && git -C "$sv_repo" config user.email t@t && git -C "$sv_repo" config user.name t
+printf 'int main() { return 0; }\n' > "$sv_repo/src/main.cpp"
+(cd "$sv_repo" && bash "$MALF_BIN" format > /dev/null 2>&1)   # the clean fixture is malf's own style
+git -C "$sv_repo" add -A && git -C "$sv_repo" commit -qm clean
+sv_step() {   # [env assignments...] — the verdict lines and the exit, keys and digests elided
+    local out rc
+    out="$(env "$@" MALF_STORE_DIR="$sv_tmp/store" bash "$MALF_BIN" store-verdict format "$sv_repo" 2>&1)"; rc=$?
+    printf 'rc=%s %s' "$rc" "$(grep -oE 'artefact_store: (STORED|MATCH|MISMATCH|FAIL|UNJUDGED) fixture-repo (verdict|format)|verdict (pass|fail) findings|first src/[a-z]+\.cpp|refused — MALF_STORE_DEFINITION' <<< "$out" | sed 's/artefact_store: //' | tr '\n' ' ')"
+}
+sv_records() { ls "$sv_tmp/store/records" 2>/dev/null | wc -l | tr -d ' '; }
+check "a clean tracked tree is judged: its pass is STORED under a new key" \
+      "rc=0 STORED fixture-repo verdict verdict pass findings |1" "$(sv_step)|$(sv_records)"
+printf 'int   bad(  ) {return 1;}\n' > "$sv_repo/src/untracked.cpp"
+check "an untracked file is never judged: the same key, and the pass MATCHES" \
+      "rc=0 MATCH fixture-repo verdict verdict pass findings |1" "$(sv_step)|$(sv_records)"
+rm "$sv_repo/src/untracked.cpp"
+check "a driving tool's tree joins the definition and moves the key" \
+      "rc=0 STORED fixture-repo verdict verdict pass findings |2" "$(sv_step MALF_STORE_DEFINITION="driver=$MALF_ROOT")|$(sv_records)"
+mkdir -p "$sv_tmp/driver/sub" && git -C "$sv_tmp/driver" init -q
+printf 'a\n' > "$sv_tmp/driver/sub/code.py"; printf 'b\n' > "$sv_tmp/driver/outside.md"
+git -C "$sv_tmp/driver" add -A && git -C "$sv_tmp/driver" -c user.email=t@t -c user.name=t commit -qm driver
+sv_dir() { python3 -c "import sys; sys.path.insert(0, '$MALF_ROOT'); import artefact_store as s; from pathlib import Path; print(s.directory_tree_id(Path('$sv_tmp/driver/sub')))"; }
+sv_sub="$(git -C "$sv_tmp/driver" rev-parse HEAD:sub)"
+check "a driver directory's definition is its own tracked subtree, as on disk: a file outside it leaves it, a tracked edit inside it moves it" \
+      "$sv_sub $sv_sub moved" \
+      "$(sv_dir) $(printf 'c\n' > "$sv_tmp/driver/outside.md"; sv_dir) $(printf 'd\n' > "$sv_tmp/driver/sub/code.py"; [[ "$(sv_dir)" != "$sv_sub" ]] && echo moved)"
+check "a malformed definition is refused, never ignored" \
+      "rc=1 refused — MALF_STORE_DEFINITION |2" "$(sv_step MALF_STORE_DEFINITION="malf=$MALF_ROOT")|$(sv_records)"
+printf 'int   bad(  ) {return 1;}\n' > "$sv_repo/src/bad.cpp"
+git -C "$sv_repo" add -A && git -C "$sv_repo" commit -qm misformatted
+check "a misformatted tracked file is a FAIL, stored under its own key, exit 1, naming the file" \
+      "rc=1 STORED fixture-repo verdict verdict fail findings FAIL fixture-repo format first src/bad.cpp |3" \
+      "$(sv_step)|$(sv_records)"
+sv_fail="$(grep -l '"verdict": "fail"' "$sv_tmp"/store/records/*.json)"
+python3 - "$sv_fail" <<'PYF'
+import json, sys
+record = json.load(open(sys.argv[1]))
+record["outputs"]["verdict"]["verdict"] = "pass"
+json.dump(record, open(sys.argv[1], "w"))
+PYF
+check "a verdict that flips at an equal key is a MISMATCH, exit 1, and an event is written beside" \
+      "rc=1 MISMATCH fixture-repo verdict verdict pass findings verdict fail findings FAIL fixture-repo format first src/bad.cpp |1" \
+      "$(sv_step)|$(ls "$sv_tmp/store/mismatches" | wc -l | tr -d ' ')"
+git -C "$sv_repo" rm -rq src && printf 'no C++ here\n' > "$sv_repo/README" && git -C "$sv_repo" add README && git -C "$sv_repo" commit -qm empty
+check "a tree with no C++ is UNJUDGED, exit 2, and writes no record" \
+      "rc=2 UNJUDGED fixture-repo format |3" "$(sv_step)|$(sv_records)"
+rm -rf "$sv_tmp"
+echo
+
 echo "[7q8] at job end every conan home drops its build and temp folders and its superseded versions, and reports its own size"
 
 # The script runs from a toolchain tree and reads that tree's conan.lock, three levels up, so the

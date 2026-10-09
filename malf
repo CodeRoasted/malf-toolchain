@@ -2988,6 +2988,26 @@ _malf_format_summary() {
     fi
 }
 
+# The clang-format `malf format` runs, and `malf store-verdict format` keys: the one from the SAME
+# install as the build compiler (clang-21). clang-format is a pure formatter — a version skew can't
+# error like clang-tidy's BMI mismatch — but different clang-format versions reflow code differently
+# (churn), so match the toolchain. Derive from clang-21; fall back to PATH.
+_malf_clang_format_bin() {
+    local clang_bin clang_format_bin="" install_fmt=""
+    clang_bin="$(command -v clang-21 || command -v clang || true)"
+    if [[ -n "$clang_bin" ]]; then
+        install_fmt="$(dirname "$(readlink -f "$clang_bin")")/clang-format"
+        [[ -x "$install_fmt" ]] && clang_format_bin="$install_fmt"
+    fi
+    if [[ -z "$clang_format_bin" ]]; then
+        clang_format_bin="$(command -v clang-format-21 || command -v clang-format || true)"
+        [[ -n "$install_fmt" && -n "$clang_format_bin" ]] && \
+            echo "malf format: note: $install_fmt missing; using $clang_format_bin (clang-21 is the build compiler). 'sudo apt install clang-format-21' for version-matched formatting." >&2
+    fi
+    [[ -n "$clang_format_bin" ]] || { echo "malf format: error: clang-format not found" >&2; return 1; }
+    echo "$clang_format_bin"
+}
+
 cmd_format() {
     local check=false
     # PATHSPEC (Founder, 2026-08-08): `malf format [--check] [PATH...]`. A lane formats what it
@@ -3029,22 +3049,8 @@ cmd_format() {
     if $check; then fmt_mode=check; else fmt_mode=write; fi
     if $explicit_paths; then fmt_mode="$fmt_mode-paths"; else fmt_mode="$fmt_mode-sweep"; fi
 
-    # Use the clang-format from the SAME install as the build compiler (clang-21) for
-    # consistency. clang-format is a pure formatter — a version skew can't error like
-    # clang-tidy's BMI mismatch — but different clang-format versions reflow code
-    # differently (churn), so match the toolchain. Derive from clang-21; fall back to PATH.
-    local clang_bin clang_format_bin="" install_fmt=""
-    clang_bin="$(command -v clang-21 || command -v clang || true)"
-    if [[ -n "$clang_bin" ]]; then
-        install_fmt="$(dirname "$(readlink -f "$clang_bin")")/clang-format"
-        [[ -x "$install_fmt" ]] && clang_format_bin="$install_fmt"
-    fi
-    if [[ -z "$clang_format_bin" ]]; then
-        clang_format_bin="$(command -v clang-format-21 || command -v clang-format || true)"
-        [[ -n "$install_fmt" && -n "$clang_format_bin" ]] && \
-            echo "malf format: note: $install_fmt missing; using $clang_format_bin (clang-21 is the build compiler). 'sudo apt install clang-format-21' for version-matched formatting." >&2
-    fi
-    [[ -n "$clang_format_bin" ]] || { echo "malf format: error: clang-format not found" >&2; exit 1; }
+    local clang_format_bin
+    clang_format_bin="$(_malf_clang_format_bin)" || exit 1
 
     # ── Style resolution: explicit, and NEVER a silent fallback ──────────────
     # A bare `-style=file` makes clang-format search upward from each FILE and, finding
@@ -4667,11 +4673,16 @@ Commands:
                                    declaring exports_sources exported from this checkout and a fresh
                                    clone of its commit; exit 0 only when every pair of recipe
                                    revisions is equal. No compile; seconds
-    store-create <pkg>...          ROADMAP N358's step over a local store (DN-142.D2/D3/D6): each
-                                   named released package and its first-party upstream created from
+    store-create [<pkg>...]        ROADMAP N358's step over a local store (DN-142.D2/D3/D6): each
+                                   named released package (none: all) and its first-party upstream created from
                                    its export, keyed by its inputs and identified by its bytes; a new
                                    key is stored, a stored one rebuilt and compared — exit 1 on a
                                    differing output at an equal key
+    store-verdict format <repo>... DN-142.D7's verdict record over the same local store: `malf format
+                                   --check` over each repository's tracked tree in an export beside
+                                   malf's, keyed by both trees and the tools that ran; a new key is
+                                   stored, a stored one re-judged and compared — exit 1 on a fail or
+                                   on a differing verdict at an equal key, 2 when nothing was judged
     inventory [subdir] [--profile <name>]
                                    the build-inventory gate (ADR-3.D10) over the repo that owns subdir
     lock    [--update]             regenerate malf/conan.lock by accumulating EVERY workspace
@@ -5058,10 +5069,35 @@ cmd_exports_verify() {
 }
 
 
-# malf store-create <package>... — ROADMAP N358's step, phase 1, over a local store (DN-142.D6):
-# each named released package, with its first-party upstream, created from its export in ONE conan
-# home, keyed (DN-142.D2) and identified by its bytes (DN-142.D3); malf/artefact_store.py owns both
-# and the store. A new key is STORED; a stored key is still REBUILT and its output COMPARED, and a
+# malf store-verdict <predicate> <repository>... — DN-142.D7's verdict record over a local store:
+# the predicate (`format`: `malf format --check`) judges each repository's TRACKED tree in an export
+# beside an export of malf's own tracked tree, and the verdict is keyed by those trees, the
+# clang-format and python3 that ran and the host's package list. A new key is STORED; a stored key
+# is still re-judged and COMPARED (phase 1, ROADMAP N358), and a differing verdict or finding set
+# at an equal key is a defect of the gate (exit 1). A failing verdict is stored too, and exits 1.
+#
+# Usage: malf store-verdict format <repository>...   (MALF_STORE_DIR: the store, as store-create)
+cmd_store_verdict() {
+    [[ $# -ge 2 ]] || { echo "malf store-verdict: name a predicate (format) and at least one repository" >&2; return 2; }
+    local arg
+    for arg in "$@"; do [[ "$arg" != -* ]] || _malf_refuse_option store-verdict "$arg"; done
+    local predicate="$1"; shift
+    for arg in "$@"; do
+        git -C "$arg" rev-parse --show-toplevel > /dev/null 2>&1 \
+            || { echo "malf store-verdict: $arg is not a git repository" >&2; return 2; }
+    done
+    local store="${MALF_STORE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/coderoast-artefact-store}"
+    local clang_format_bin
+    clang_format_bin="$(_malf_clang_format_bin)" || return 1
+    python3 "$MALF_DIR/artefact_store.py" verdict-step "$store" "$predicate" "$MALF_DIR" "$clang_format_bin" "$@"
+}
+
+# malf store-create [<package>...] — ROADMAP N358's step, phase 1, over a local store (DN-142.D6):
+# each named released package (none named: every released package, as cut-verify sweeps), with its
+# first-party upstream, created from its export in ONE conan home, keyed (DN-142.D2) and identified
+# by its bytes (DN-142.D3); malf/artefact_store.py owns both and the store. MALF_STORE_DEFINITION
+# (`<name>=<directory> ...`) joins each named directory's tracked tree to the key's `definition`
+# beside malf's own: the driver of a step is part of its key (Pharos at step 0). A new key is STORED; a stored key is still REBUILT and its output COMPARED, and a
 # differing output at an equal key fails (exit 1), naming both digests and the differing files.
 #
 # THE HOME starts with no first-party package (cut-verify's purge); a home this run creates is
@@ -5070,11 +5106,10 @@ cmd_exports_verify() {
 # THE STORE is a directory standing in for the remote one until its transport and its writer
 # credential are ruled; nothing here publishes anywhere.
 #
-# Usage: malf store-create <package>...   (MALF_STORE_DIR: the store, default
+# Usage: malf store-create [<package>...]   (MALF_STORE_DIR: the store, default
 #        ~/.cache/coderoast-artefact-store; MALF_STORE_CONAN_HOME: the home, default a fresh
 #        /tmp dir; MALF_TWIN_SEED_HOME: the third-party seed, default cut-verify's)
 cmd_store_create() {
-    [[ $# -gt 0 ]] || { echo "malf store-create: name at least one released package" >&2; return 2; }
     local arg
     for arg in "$@"; do [[ "$arg" != -* ]] || _malf_refuse_option store-create "$arg"; done
     _malf_apply_profile "${MALF_CUT_VERIFY_PROFILE:-linux-gcc16-release}"
@@ -5103,7 +5138,7 @@ deps = {row[0]: [dep for dep in (row[2] if len(row) > 2 else "").split(",") if d
 unknown = [name for name in sys.argv[2:] if name not in deps]
 if unknown:
     sys.exit(f"malf store-create: not released packages: {' '.join(unknown)}")
-closure, stack = set(), list(sys.argv[2:])
+closure, stack = set(), list(sys.argv[2:] or deps)
 while stack:
     name = stack.pop()
     if name not in closure:
@@ -5818,6 +5853,7 @@ case "$COMMAND" in
     twin-verify)      cmd_twin_verify "$@" ;;
     exports-verify)   cmd_exports_verify "$@" ;;
     store-create)     cmd_store_create "$@" ;;
+    store-verdict)    cmd_store_verdict "$@" ;;
     relocate-verify)  cmd_relocate_verify "$@" ;;
     lock)             cmd_lock "$@" ;;
     slot)             cmd_slot "$@" ;;
