@@ -1,0 +1,108 @@
+name: CodeRoast Sift Showcase
+
+# CLIENT-FACING TRANSPARENCY, as one reusable job: install the PUBLIC, sha256-verified `sift` engine
+# through the caller's `install.sh` (the exact binary a user gets), run it over the PUBLIC CI-log
+# samples fetched from coderoast-hub with the caller's `scripts/samples_showcase.sh`, and publish the
+# render — the run summary, an Actions artifact and, when a tag is named, a Release asset. It tells the
+# two-part story, silent-on-green and regression-catch. NOT a gate: it is evidence a prospective user
+# can inspect.
+#
+# The PLAIN structural diff, never `--explain`: narration in CI is a private dogfood, and a public
+# showcase shows the engine's structural verdict, not an LLM narrative.
+#
+# PUBLIC and anonymous end to end — the engine asset and coderoast-hub are public, no secret is read
+# to install or fetch. HOSTED, with no runner input: its one caller (sift-action) is public, and a
+# self-hosted runner a fork can reach is a remote code execution. No `permissions:` here: a called
+# workflow can only downgrade its caller's grant, and attaching to a Release needs the caller's
+# `contents: write`.
+
+on:
+  workflow_call:
+    inputs:
+      sift-version:
+        # NO DEFAULT, deliberately. A literal default once read '1.7.5' while the shipped pin was
+        # 1.9.6, so every run that named no version rendered the public showcase on an engine two
+        # releases old. Empty resolves to the pin, which follows bump.sh instead of rotting beside it.
+        description: 'Published engine version to install (X.Y.Z). Empty: an engine-v<X> release-tag wins, else the pin in the caller''s src/sift-version.ts.'
+        type: string
+        required: false
+        default: ''
+      samples-ref:
+        description: 'The coderoast-hub ref holding the samples.'
+        type: string
+        required: false
+        default: 'main'
+      release-tag:
+        description: 'A Release tag of the caller: the showcase bundle is attached to it, and an engine-v<X> tag names the engine to install. Empty: no attachment.'
+        type: string
+        required: false
+        default: ''
+
+jobs:
+  showcase:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Fetch the PUBLIC samples from coderoast-hub (public, anonymous)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CodeRoasted/coderoast-hub
+          path: hub
+          ref: ${{ inputs.samples-ref }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install the public sift engine (download + sha256-verify — the honest client path)
+        env:
+          SIFT_VERSION_INPUT: ${{ inputs.sift-version }}
+          RELEASE_TAG: ${{ inputs.release-tag }}
+        run: |
+          set -euo pipefail
+          # An explicit version wins; else an engine-v<X> release installs THAT engine; else the PIN,
+          # read from src/sift-version.ts (written ONLY by bump.sh, which pins a PUBLISHED engine), so
+          # this arm cannot name a version that does not exist and cannot fall behind the pin.
+          VER="$SIFT_VERSION_INPUT"
+          if [ -z "$VER" ]; then
+            case "$RELEASE_TAG" in
+              engine-v*) VER="${RELEASE_TAG#engine-v}" ;;
+              *) VER="$(grep -oE "SIFT_VERSION[[:space:]]*=[[:space:]]*['\"][^'\"]+['\"]" src/sift-version.ts \
+                        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sed -n 1p || true)" ;;
+            esac
+          fi
+          # An unparseable pin is a broken instrument, never a reason to install something else.
+          [ -n "$VER" ] || { echo "::error::could not resolve a sift engine version — no input, no engine-v* release tag, and src/sift-version.ts did not parse. Refusing to render a showcase on a guessed engine."; exit 1; }
+          echo "sift engine version: $VER"
+          # install.sh falls back to ~/.local/bin unless SIFT_INSTALL_DIR already EXISTS and is
+          # writable, so it is created first; install.sh proves liveness itself, fatally.
+          mkdir -p "$PWD/bin"
+          SIFT_INSTALL_DIR="$PWD/bin" sh install.sh "$VER"
+          echo "SIFT=$PWD/bin/sift" >> "$GITHUB_ENV"
+
+      - name: Render the Sift showcase
+        run: bash scripts/samples_showcase.sh "$SIFT" hub/samples showcase
+
+      - name: Bundle + step summary
+        run: |
+          set -euo pipefail
+          tar --sort=name --mtime='2026-01-01 00:00:00Z' --owner=0 --group=0 --numeric-owner \
+              -C showcase -czf sift-samples-showcase.tar.gz .
+          {
+            echo "## Sift over our public CI-log samples"
+            echo
+            cat showcase/README.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sift-samples-showcase
+          path: showcase
+          if-no-files-found: error
+
+      - name: Attach the showcase bundle to the Release
+        if: inputs.release-tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.release-tag }}
+        run: gh release upload "$TAG" sift-samples-showcase.tar.gz --clobber

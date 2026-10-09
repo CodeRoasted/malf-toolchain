@@ -1,0 +1,85 @@
+name: CodeRoast Sift Windows Install
+
+# THE PUBLICLY DOCUMENTED WINDOWS INSTALL PATH, EXECUTED (`OPS-7.S112` cell 1). sift-action's README
+# tells a Windows user to run `irm .../install.ps1 | iex`, and resolve-sift.ts prints the same advice
+# when the Action meets a non-Linux runner. The script downloads a published asset, sha256-verifies it
+# fatally and installs it; this job runs it at the caller's checkout the way a user does, then asserts
+# the PRODUCT ACT on what it installed.
+#
+# THE RUNNER SWITCH. A Windows leg in a malf reusable workflow reads its runner from an input (the
+# Founder, 2026-10-08: hosted by default, our own runners selectable), so a private caller can pass
+# `vars.WINDOWS_RUNNER`. A PUBLIC caller MUST omit it: hosted minutes are free there, and both
+# self-hosted runner groups refuse public repositories because a fork's pull request reaching our box
+# is a remote code execution. sift-action is public and omits it (the Founder's ruling: a public
+# repository's Windows leg stays on a hosted image).
+#
+# THE NEGATIVE ARM IS FIRST, deliberately: a green installer proves nothing unless the job can go red.
+# `0.0.0` is unpublishable by construction (bump.sh derives every pin from the released set), so the
+# control cannot rot into a true positive the way a real-but-old version would.
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: 'The Windows runner. Default hosted windows-latest. PUBLIC callers MUST omit it; a PRIVATE caller passes its WINDOWS_RUNNER switch.'
+        type: string
+        required: false
+        default: 'windows-latest'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-install:
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Arm the installer (it MUST refuse an engine that cannot exist)
+        shell: pwsh
+        run: |
+          # TWO refusal shapes, and catching only one would make this control a coin flip.
+          # install.ps1 sets `$ErrorActionPreference = 'Stop'` in its own scope, so its `Fail`
+          # helper's `Write-Error` THROWS before ever reaching the `exit 1` beside it — the
+          # script normally leaves by exception, not by exit code. Both are a refusal here.
+          $ErrorActionPreference = 'Continue'
+          $global:LASTEXITCODE = 0
+          $refused = $false
+          try { & ./install.ps1 -Version 0.0.0 *> $null; if ($LASTEXITCODE -ne 0) { $refused = $true } }
+          catch { $refused = $true }
+          if (-not $refused) {
+            Write-Host "::error::install.ps1 returned SUCCESS for engine-v0.0.0, which is not published and never can be (bump.sh derives every pin from the released set). The installer cannot fail, so its green below would mean nothing."
+            exit 1
+          }
+          Write-Host "armed: install.ps1 refused engine-v0.0.0"
+          # The pwsh shell GitHub generates appends `exit $LASTEXITCODE`. A refusal that took the
+          # `exit 1` branch would therefore red THIS step — the arm passing would read as the arm
+          # failing. Clear it now that the verdict is recorded.
+          $global:LASTEXITCODE = 0
+
+      - name: Install the published Windows engine the way a user does (GATING)
+        shell: pwsh
+        env:
+          # An explicit dir, not the default per-user Programs path: the assertion below has to open
+          # the file the installer wrote, and the default would be a path this job restates rather
+          # than reads. No -Version — the baked pin IS the thing under test.
+          SIFT_INSTALL_DIR: ${{ github.workspace }}\sift-bin
+        run: ./install.ps1
+
+      - name: The installed binary must BE sift and must DIFF
+        # Not `Test-Path` (a zero-byte file passes it) and not a meta-flag probe (sift has NO version
+        # flag; a `--version` probe reds a good binary): the PRODUCT ACT — two logs in, a report out,
+        # exit 0. `--fail-on none` is explicit so a future default change cannot turn a significant
+        # diff into a red here; this step reds on a broken engine only.
+        shell: pwsh
+        env:
+          SIFT_EXE: ${{ github.workspace }}\sift-bin\sift.exe
+        run: |
+          $exe = $env:SIFT_EXE
+          if (-not (Test-Path $exe)) { Write-Host "::error::install.ps1 reported success but wrote no $exe"; exit 1 }
+          Set-Content -Path baseline.log -Value @('build start', 'compiling a.cpp', 'ok', 'build ok')
+          Set-Content -Path changed.log  -Value @('build start', 'compiling a.cpp', 'error: a.cpp:3 undefined symbol', 'build failed')
+          $out = & $exe baseline.log changed.log --format md --fail-on none 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::the installed sift.exe exits $LASTEXITCODE on a plain two-log diff"; Write-Host $out; exit 1 }
+          if ([string]::IsNullOrWhiteSpace($out)) { Write-Host "::error::the installed sift.exe produced an EMPTY report on a two-log diff"; exit 1 }
+          Write-Host "the installed engine diffed two logs and wrote $($out.Length) chars of report"

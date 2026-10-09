@@ -1,0 +1,35 @@
+name: CodeRoast Sift Manifest Load
+
+# The Sift Action's manifest, LOADED the way a consumer's runner loads it: the caller's own checkout
+# runs `uses: ./` on a one-line smoke log. actionlint lints WORKFLOWS, never `action.yml`, so a broken
+# manifest (an expression using a context invalid in action metadata, `needs` or `github.event`)
+# ships silently and fails EVERY consumer at `uses:`, which the TypeScript suite cannot catch; only
+# GitHub loading the manifest proves it loads.
+#
+# WHAT IT EXERCISES IS MORE THAN THE LOAD, and the description once said otherwise at the cost of a
+# red (2026-08-10): with a stored baseline the action downloads the pinned engine and runs a REAL
+# comparison, which is the job that caught `--transport none`. A comment stating STATE rots when the
+# SYSTEM moves, so this one states the mechanism: whatever main.ts does on a smoke log, end to end.
+#
+# THE PAIR. The caller's `preflight` (the argument vector its build produces, run on the engine it
+# pins) fails fast and runs at the desk too; this job is the backstop for what preflight cannot
+# reach — manifest validity, input plumbing, the `--explain` pair — and is post-push by nature.
+#
+# HOSTED, with no runner input: its one caller (sift-action) is PUBLIC, and a self-hosted runner a
+# fork's pull request can reach is a remote code execution on our box. No `permissions:` here: a
+# called workflow can only downgrade its caller's grant, and the caller grants `contents: read`.
+
+on:
+  workflow_call:
+
+jobs:
+  manifest-load:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: A real file for the required `log` input
+        run: echo "manifest-load smoke" > smoke.log
+      - name: Load and run the action at the caller's checkout
+        uses: ./
+        with:
+          log: smoke.log

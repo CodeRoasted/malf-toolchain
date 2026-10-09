@@ -1,0 +1,126 @@
+name: CodeRoast Sift Wall Time
+
+# Sift wall time on a GitHub-HOSTED runner — the measurement behind any public speed claim. A study
+# instrument, not a gate: the caller dispatches it when someone asks.
+#
+# HOSTED, with no runner input, for two reasons that do not depend on each other: its one caller
+# (sift-action) is PUBLIC, so a fork must never reach our box; and the number a claim about "your CI"
+# may quote is the one a stranger's CI produces, which our fleet's hardware is not.
+#
+# The engine under test is the PUBLISHED pin (the caller's scripts/engine_pin.sh, then the release
+# asset), never a build from source: a claim about what users get is measured on what users get.
+#
+# `wall-time.json` is uploaded as an Actions artifact of the CALLING repository, so whatever the
+# ladder puts in it is published with the caller's visibility. The runner coordinate it carries is
+# hardware and image only — the caller's `tools/wall_time_ladder.py` does not collect `RUNNER_NAME`,
+# an identifier rather than a coordinate. Anything added to that payload is subject to the same
+# reading.
+#
+# The two inputs reach the shell through `env:`, never spliced into the script: a dispatch input is
+# text the dispatcher chose, and an expression expanded inside `run:` is code.
+
+on:
+  workflow_call:
+    inputs:
+      rungs:
+        description: 'Replication factors for the size ladder (comma-separated).'
+        type: string
+        required: true
+      reps:
+        description: 'Timed repetitions per rung; the MINIMUM is reported.'
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  wall-time:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Runner coordinate (a wall time without its hardware is unfalsifiable)
+        run: |
+          set -euo pipefail
+          echo "=== runner image ==="
+          echo "ImageOS=${ImageOS:-unset}  ImageVersion=${ImageVersion:-unset}"
+          echo "RUNNER_OS=${RUNNER_OS:-unset}  RUNNER_ARCH=${RUNNER_ARCH:-unset}"
+          echo "=== cpu ==="
+          nproc
+          grep -m1 '^model name' /proc/cpuinfo || true
+          grep -c '^processor' /proc/cpuinfo
+          echo "=== memory ==="
+          grep -E '^(MemTotal|MemAvailable)' /proc/meminfo
+          echo "=== disk (the ladder writes ~95 MB of replicated logs) ==="
+          df -h /tmp "$RUNNER_TEMP"
+
+      - name: Download the PUBLISHED engine pin (timed — this cost is part of a user's run)
+        run: |
+          set -euo pipefail
+          # The caller's one parse of the pin, so the binary measured here cannot drift from the
+          # binary its "engine pin is PUBLISHED" gate probes.
+          ver="$(scripts/engine_pin.sh)"
+          echo "engine pin: $ver"
+          base="https://github.com/CodeRoasted/sift-action/releases/download/engine-v$ver"
+          mkdir -p "$RUNNER_TEMP/engine"
+
+          # Timed separately from the diff: the marginal cost a user pays per CI run is the STEP,
+          # and the engine download is a fixed part of it no engine speed removes.
+          t0=$(date +%s.%N)
+          curl -fsSL "$base/sift-linux-x64" -o "$RUNNER_TEMP/engine/sift"
+          t1=$(date +%s.%N)
+          curl -fsSL "$base/sift-linux-x64.sha256" -o "$RUNNER_TEMP/engine/sift.sha256"
+          t2=$(date +%s.%N)
+
+          bytes=$(stat -c%s "$RUNNER_TEMP/engine/sift")
+          echo "binary bytes      : $bytes"
+          echo "binary download s : $(echo "$t1 - $t0" | bc)"
+          echo "sha256 download s : $(echo "$t2 - $t1" | bc)"
+          echo "download MB/s     : $(echo "scale=2; ($bytes/1048576) / ($t1 - $t0)" | bc)"
+
+          # Never time an unverified binary: a proxy's error page would measure as a very fast
+          # engine. The same supply-chain rule src/resolve-sift.ts enforces at runtime.
+          ( cd "$RUNNER_TEMP/engine" && awk '{print $1"  sift"}' sift.sha256 | sha256sum -c - )
+          chmod +x "$RUNNER_TEMP/engine/sift"
+          "$RUNNER_TEMP/engine/sift" --version
+
+          # Cold-cache re-download: "is this cached between runs?" answered by a measurement.
+          # resolve-sift.ts uses no tool-cache, so every consumer run pays this again.
+          t3=$(date +%s.%N)
+          curl -fsSL "$base/sift-linux-x64" -o /dev/null
+          t4=$(date +%s.%N)
+          echo "second download s : $(echo "$t4 - $t3" | bc)  (no tool-cache: every run pays it)"
+
+      - name: Fetch the public showcase logs (the same pair the desk ladder used)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/logs"
+          base="https://raw.githubusercontent.com/CodeRoasted/coderoast-hub/main/showcase/sift/logs"
+          for f in logcraft__ci-build__green-a.log logcraft__ci-build__green-b.log logcraft__ci-build__red.log; do
+            curl -fsSL "$base/$f" -o "$RUNNER_TEMP/logs/$f"
+          done
+          # Sizes printed against the desk's: a silently different input makes the hosted/desk
+          # ratio meaningless.
+          ( cd "$RUNNER_TEMP/logs" && sha256sum ./*.log && wc -c ./*.log )
+
+      - name: Size ladder — best-of-N, with the change counts asserted at every rung
+        env:
+          RUNGS: ${{ inputs.rungs }}
+          REPS: ${{ inputs.reps }}
+        run: |
+          set -euo pipefail
+          python3 tools/wall_time_ladder.py \
+            --engine "$RUNNER_TEMP/engine/sift" \
+            --logs "$RUNNER_TEMP/logs" \
+            --rungs "$RUNGS" \
+            --reps "$REPS" \
+            --json-out "$RUNNER_TEMP/wall-time.json"
+
+      - name: Publish the result set
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sift-wall-time
+          path: ${{ runner.temp }}/wall-time.json
+          if-no-files-found: warn

@@ -288,7 +288,18 @@ jobs:
       # skip is zero coverage wearing a green badge, which is the mechanism that let "silently
       # unlinted" stand for five weeks before this gate existed. So the absence announces itself in
       # the log, at the coordinate where the coverage is missing.
+      #
+      # It fires only for a caller that asked for at least one C++ gate, because only there is the
+      # absence a hole: a caller with every C++ gate off (sift-action, a TypeScript repository that
+      # calls this workflow for actionlint alone) has no C++ for clang-tidy to judge, and a warning
+      # on its every run would be a false statement that trains readers to skip the true ones. The
+      # message names the C++ gates that DID run, read from the inputs, so it is true for every
+      # combination a caller can pass.
       - name: Announce that clang-tidy did NOT run
-        if: ${{ !cancelled() && !inputs.lint }}
+        if: ${{ !cancelled() && !inputs.lint && (inputs.module-conformance || inputs.format-check || inputs.dead-symbol-check) }}
+        env:
+          MODULES: ${{ inputs.module-conformance }}
+          FORMAT: ${{ inputs.format-check }}
+          DEAD_SYMBOL: ${{ inputs.dead-symbol-check }}
         run: |
-          echo "::warning title=clang-tidy did not run::${{ github.repository }} passed lint with malf lint DISABLED (lint: false in its lint.yml). This run says nothing about clang-tidy conformance — its C++ sources were checked for formatting and module conformance only."
+          echo "::warning title=clang-tidy did not run::${{ github.repository }} passed lint with malf lint DISABLED (lint: false in its caller). This run says nothing about clang-tidy conformance; the C++ gates it did run: module-conformance=${MODULES}, format-check=${FORMAT}, dead-symbol-check=${DEAD_SYMBOL}."
