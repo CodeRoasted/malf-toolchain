@@ -9,7 +9,8 @@ the hash of the export's manifest, so two equal revisions mean byte-equal export
     package_exports.py recipes <workspace root>
         every first-party recipe: each tracked `conanfile.py` of each repository the workspace
         declares, test_package recipes excluded, as `<repository>/<path>\t<absolute directory>`
-        lines. The population is the tracked recipe set and never a spelling of how a recipe
+        lines; a repository the clone manifests declare and absent from the disk refuses, exit 3,
+        named. The population is the tracked recipe set and never a spelling of how a recipe
         exports: a recipe exports through `exports_sources`, `exports`, an `export_sources()` or
         `export()` method, or through nothing but its conanfile, and the gate judges each alike.
         Measured 2026-10-09: a population of the recipes ASSIGNING `exports_sources` judged 28
@@ -112,14 +113,31 @@ def verify(home: Path, released: Path, scratch: Path) -> int:
 
 def recipes(workspace: Path) -> int:
     """Print every first-party recipe, whatever the spelling of its exports; the repositories are
-    the workspace's DECLARED ones (scripts/workspace_layout.py), never whatever sits on the disk."""
+    the workspace's DECLARED ones (scripts/workspace_layout.py), never whatever sits on the disk.
+
+    A repository the CLONE MANIFESTS declare (`required_repos`: repos.txt plus the toolchain's
+    postCreate clone, every one of them checked out by step 0) and absent from the disk refuses
+    the population, naming it: skipping it would read green over recipes never judged. A
+    repository the root `.gitignore` alone declares (`coderoast-corpora`, `coderoast-gitlab-ci`:
+    no recipe, and step 0 does not clone the second) is judged when present and named as not
+    swept when absent."""
     workspace = workspace.resolve()
     sys.path.insert(0, str(workspace / "scripts"))
     import workspace_layout
+    required = set(workspace_layout.required_repos(workspace))
+    declared = sorted(required.union(workspace_layout.declared_repos(workspace)))
+    absent = [name for name in declared if not (workspace / name / ".git").exists()]
+    missing = sorted(required.intersection(absent))
+    if missing:
+        raise HelperFailed(f"{len(missing)} repository(ies) the clone manifests declare are not "
+                           f"on disk, so their recipes cannot be judged: {', '.join(missing)}")
+    if absent:
+        print(f"package_exports: not swept, declared by the root .gitignore alone and absent: "
+              f"{', '.join(sorted(absent))}", file=sys.stderr)
     found = 0
-    for name in workspace_layout.declared_repos(workspace):
+    for name in declared:
         repo = workspace / name
-        if not (repo / ".git").exists():
+        if name in absent:
             continue
         listed = _run(["git", "-C", str(repo), "ls-files", "-z", "--", "*conanfile.py"])
         for relative in sorted(path for path in listed.split("\0") if path):

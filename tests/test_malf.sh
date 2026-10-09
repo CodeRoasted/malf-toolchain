@@ -4109,7 +4109,8 @@ check "exports-verify: malf failing to derive the recipe list exits 3, naming th
 # the method, nothing — beside a test_package recipe, a file merely ending in conanfile.py and an
 # untracked recipe, none of which is a first-party recipe of the repository.
 ex_ws="$ex_tmp/pop-ws"; mkdir -p "$ex_ws/scripts" "$ex_ws/r"
-printf 'def declared_repos(root):\n    return ["r"]\n' > "$ex_ws/scripts/workspace_layout.py"
+printf 'def declared_repos(root):\n    return ["opt", "r", "s"]\n\n\ndef required_repos(root):\n    return ["r", "s"]\n' \
+    > "$ex_ws/scripts/workspace_layout.py"
 ex_pop() {   # <folder> <class body line> — a fixture recipe under the fixture repository
     mkdir -p "$ex_ws/r/$1"
     printf 'from conan import ConanFile\n\n\nclass Probe(ConanFile):\n    name = "pop"\n    version = "0.0.1"\n%s\n' "$2" > "$ex_ws/r/$1/conanfile.py"
@@ -4125,10 +4126,27 @@ printf 'from conan import ConanFile\n' > "$ex_ws/r/method/legacy_conanfile.py"
 git -C "$ex_ws/r" init -q && git -C "$ex_ws/r" add -A \
     && git -C "$ex_ws/r" -c user.name=t -c user.email=t@t commit -q -m fixture
 ex_pop untracked '    exports_sources = "src/*"'
+mkdir -p "$ex_ws/s"; printf 'from conan import ConanFile\n' > "$ex_ws/s/conanfile.py"
+git -C "$ex_ws/s" init -q && git -C "$ex_ws/s" add -A \
+    && git -C "$ex_ws/s" -c user.name=t -c user.email=t@t commit -q -m fixture
 check "exports-verify's population is every tracked first-party recipe, whatever the spelling of its exports: the attribute, the annotated attribute, \`exports\`, the export_sources() method and a recipe exporting nothing — never a test_package, a *_conanfile.py or an untracked recipe" \
-      "rc=0 r/ann r/attr r/bare r/exp r/method " \
-      "$(out="$(python3 "$MALF_ROOT/package_exports.py" recipes "$ex_ws" 2>&1)"; rc=$?
+      "rc=0 r/ann r/attr r/bare r/exp r/method s " \
+      "$(out="$(python3 "$MALF_ROOT/package_exports.py" recipes "$ex_ws" 2>"$ex_tmp/pop.err")"; rc=$?
          printf 'rc=%s %s' "$rc" "$(cut -f1 <<< "$out" | tr '\n' ' ')")"
+
+# A declared repository ABSENT from the disk was skipped in silence, so the gate read green over
+# recipes it never saw. A repository the CLONE MANIFESTS declare (`required_repos`: repos.txt and
+# the toolchain's postCreate clone, all checked out by step 0) refuses, exit 3, named; one the root
+# .gitignore alone declares (`opt` here; coderoast-corpora, coderoast-gitlab-ci on the desk) is
+# named as not swept and the run goes on. `s` stays on disk, so the old skip reads exit 0 over it.
+check "exports-verify: a declared repository that is not a clone-manifest one and is absent is named as not swept, never silently" \
+      "1" "$(grep -c '^package_exports: not swept, declared by the root .gitignore alone and absent: opt$' "$ex_tmp/pop.err")"
+mv "$ex_ws/r" "$ex_ws/r.away"
+check "exports-verify: a clone-manifest repository absent from the disk REFUSES the population, exit 3, naming it — never a green over recipes never judged" \
+      "rc=3 1 0" \
+      "$(out="$(python3 "$MALF_ROOT/package_exports.py" recipes "$ex_ws" 2>"$ex_tmp/pop.err")"; rc=$?
+         printf 'rc=%s %s %s' "$rc" "$(grep -c '^package_exports: FAILED — 1 repository(ies) the clone manifests declare are not on disk, so their recipes cannot be judged: r$' "$ex_tmp/pop.err")" "$(grep -c . <<< "$out")")"
+mv "$ex_ws/r.away" "$ex_ws/r"
 rm -rf "$ex_tmp"
 echo
 
