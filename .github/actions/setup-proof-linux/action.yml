@@ -38,7 +38,7 @@ inputs:
     required: false
     default: ''
   global-conf:
-    description: "'true' stages `<malf-dir>/global.conf` into CONAN_HOME when the home has none."
+    description: "'true' stages `<malf-dir>/global.conf` into CONAN_HOME, over any copy a restored home carries."
     required: false
     default: 'false'
   malf-dir:
@@ -160,11 +160,16 @@ runs:
         # settings_user.yml rides with the profiles: the gcc16 profile pins compiler.version=16.2,
         # which the built-in settings.yml does not know.
         cp "$MALF_DIR/settings_user.yml" "$HOME_DIR/settings_user.yml"
-        if [ "$GLOBAL_CONF" = "true" ] && [ ! -f "$HOME_DIR/global.conf" ]; then
+        # OVERWRITTEN, never kept: a restored home's older global.conf would shadow a policy change
+        # (and lack the conf naming the recipe-exports helper, failing every export) — the reason
+        # malf's conf sync and setup-build-env overwrite theirs.
+        if [ "$GLOBAL_CONF" = "true" ]; then
           cp "$MALF_DIR/global.conf" "$HOME_DIR/global.conf"
         fi
-        # global.conf names the path-map fragment inside the home (ROADMAP N366): a home that has
-        # the one must have the other, whichever run staged global.conf.
+        # global.conf names the path-map fragment (ROADMAP N366) and the recipe-exports helper
+        # (DN-142.D4 (b)) inside the home: a home that has the one must have the others, whichever
+        # run staged global.conf.
         if [ "$GLOBAL_CONF" = "true" ]; then
           cp "$MALF_DIR/cmake/malf-path-map.cmake" "$HOME_DIR/malf-path-map.cmake"
+          cp "$MALF_DIR/malf_recipe_exports.py" "$HOME_DIR/malf_recipe_exports.py"
         fi

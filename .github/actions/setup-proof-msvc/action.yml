@@ -33,7 +33,7 @@ inputs:
     required: false
     default: 'windows-msvc-release'
   global-conf:
-    description: "'true' stages `<malf-dir>/global.conf` into CONAN_HOME when the home has none."
+    description: "'true' stages `<malf-dir>/global.conf` into CONAN_HOME, over any copy a restored home carries."
     required: false
     default: 'false'
   malf-dir:
@@ -132,11 +132,16 @@ runs:
         $ErrorActionPreference = 'Stop'
         New-Item -ItemType Directory -Force -Path "$env:HOME_DIR/profiles" | Out-Null
         Copy-Item "$env:MALF_DIR/profiles/$env:PROFILE_NAME" "$env:HOME_DIR/profiles/$env:PROFILE_NAME"
-        if ($env:GLOBAL_CONF -eq 'true' -and -not (Test-Path "$env:HOME_DIR/global.conf")) {
-          Copy-Item "$env:MALF_DIR/global.conf" "$env:HOME_DIR/global.conf"
+        # OVERWRITTEN, never kept: a restored home's older global.conf would shadow a policy change
+        # (and lack the conf naming the recipe-exports helper, failing every export) — the reason
+        # malf's conf sync and setup-build-env overwrite theirs.
+        if ($env:GLOBAL_CONF -eq 'true') {
+          Copy-Item "$env:MALF_DIR/global.conf" "$env:HOME_DIR/global.conf" -Force
         }
-        # global.conf names the path-map fragment inside the home (ROADMAP N366): a home that has
-        # the one must have the other, whichever run staged global.conf.
+        # global.conf names the path-map fragment (ROADMAP N366) and the recipe-exports helper
+        # (DN-142.D4 (b)) inside the home: a home that has the one must have the others, whichever
+        # run staged global.conf.
         if ($env:GLOBAL_CONF -eq 'true') {
           Copy-Item "$env:MALF_DIR/cmake/malf-path-map.cmake" "$env:HOME_DIR/malf-path-map.cmake"
+          Copy-Item "$env:MALF_DIR/malf_recipe_exports.py" "$env:HOME_DIR/malf_recipe_exports.py"
         }

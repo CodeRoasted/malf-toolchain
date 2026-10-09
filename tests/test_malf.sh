@@ -3721,6 +3721,83 @@ check "package_relocate's scan names each producer path, and nothing a variable,
 rm -rf "$rs_tmp"
 echo
 
+echo "[7q7e] a recipe exports its git-TRACKED files: the helper narrows the export, the gate compares desk and fresh clone (DN-142.D4 (b))"
+# A git repository with one package: tracked sources under the declared root and one outside it, an
+# ignored build tree and an untracked draft under the root — the two kinds of file insight-eidos's
+# globs swept from the desk on 2026-10-08. The home is staged by malf's own conf sync, so the arms
+# read the helper and global.conf exactly as a desk export does. Real conan, no network.
+ex_tmp="$(realpath "$(mktemp -d)")"
+ex_home="$ex_tmp/home"; ex_repo="$ex_tmp/repo"; ex_pkg="$ex_repo/pkg"
+CONAN_HOME="$ex_home" bash "$MALF_BIN" profiles > /dev/null 2>&1
+mkdir -p "$ex_pkg/src/sub" "$ex_pkg/docs"
+ex_recipe() {   # <with helper: yes|no> — the fixture recipe, the helper call spelled as every first-party recipe spells it
+    printf 'import runpy\nfrom conan import ConanFile\n\n\nclass Probe(ConanFile):\n    name = "ex_probe"\n    version = "0.0.1"\n    exports_sources = "CMakeLists.txt", "src/*"\n'
+    [[ "$1" == yes ]] && printf '\n    def export_sources(self):\n        runpy.run_path(self.conf.get("user.malf:recipe_exports"))["narrow_to_tracked"](self)\n'
+}
+ex_recipe yes > "$ex_pkg/conanfile.py"
+printf 'cmake_minimum_required(VERSION 3.20)\n' > "$ex_pkg/CMakeLists.txt"
+printf 'int a();\n' > "$ex_pkg/src/a.cpp"; printf 'int b();\n' > "$ex_pkg/src/sub/b.cpp"
+printf 'outside the root\n' > "$ex_pkg/docs/x.md"; printf 'build-*/\n' > "$ex_pkg/.gitignore"
+git -C "$ex_repo" init -q && git -C "$ex_repo" add -A \
+    && git -C "$ex_repo" -c user.name=t -c user.email=t@t commit -q -m fixture
+mkdir -p "$ex_pkg/src/build-x"; printf 'object\n' > "$ex_pkg/src/build-x/junk.o"; printf 'int draft();\n' > "$ex_pkg/src/draft.cpp"
+ex_export() {   # <folder> — `conan export` into the fixture home; prints rc, the exported file list, the log
+    local out rc ref
+    out="$(CONAN_HOME="$ex_home" conan export "$1" --format=json 2>"$ex_tmp/log")"; rc=$?
+    ref="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["reference"])' "$out" 2>/dev/null)"
+    echo "rc=$rc"
+    [[ -n "$ref" ]] && (cd "$(CONAN_HOME="$ex_home" conan cache path "$ref" --folder export_source)" \
+        && find . \( -type f -o -type l \) | sed 's|^\./||' | sort | tr '\n' ' ')
+}
+check "conan is on PATH: every arm below runs a real export (never a skip)" \
+      "yes" "$(command -v conan >/dev/null && echo yes || echo "no conan on PATH")"
+check "malf stages the helper beside global.conf in the home, byte for byte, and global.conf names it there" \
+      "synced 1" "$(cmp -s "$MALF_ROOT/malf_recipe_exports.py" "$ex_home/malf_recipe_exports.py" && echo synced) $(grep -c "^user.malf:recipe_exports={{ os.path.join(conan_home_folder, 'malf_recipe_exports.py')" "$ex_home/global.conf")"
+check "every CI action that stages global.conf stages the helper beside it, and overwrites a restored home's global.conf" \
+      "3 0" "$(grep -l 'malf_recipe_exports.py' "$MALF_ROOT"/.github/actions/setup-{build-env,proof-linux,proof-msvc}/action.yml | wc -l | tr -d ' ') $(grep -c -E 'global.conf.*(has none|Test-Path)|! -f "\$HOME_DIR/global.conf"' "$MALF_ROOT"/.github/actions/setup-proof-{linux,msvc}/action.yml | awk -F: '{n+=$2} END{print n+0}')"
+check "the helper narrows the export to the tracked files under the declared roots: no ignored build file, no untracked draft, nothing outside the roots" \
+      "rc=0
+CMakeLists.txt src/a.cpp src/sub/b.cpp |1" \
+      "$(ex_export "$ex_pkg")|$(grep -c 'exports narrowed to the tracked files — 3 kept, 2 untracked or ignored dropped' "$ex_tmp/log")"
+check "the build tree the removal emptied is gone from the export, not left as an empty directory" \
+      "0" "$(ex_src="$(CONAN_HOME="$ex_home" conan cache path ex_probe/0.0.1 --folder export_source 2>&1)" \
+             && find "$ex_src" -type d -empty | wc -l | tr -d ' ' || echo "no export: $ex_src")"
+ex_recipe no > "$ex_tmp/plain.py"; cp "$ex_pkg/conanfile.py" "$ex_tmp/helper.py"; cp "$ex_tmp/plain.py" "$ex_pkg/conanfile.py"
+check "WITHOUT the helper the same recipe sweeps the desk: the ignored build file and the draft are exported (the defect, reproduced)" \
+      "rc=0
+CMakeLists.txt src/a.cpp src/build-x/junk.o src/draft.cpp src/sub/b.cpp " "$(ex_export "$ex_pkg")"
+cp "$ex_tmp/helper.py" "$ex_pkg/conanfile.py"
+mkdir -p "$ex_tmp/archive"; cp -r "$ex_pkg" "$ex_tmp/archive/pkg"
+check "outside a git checkout the export keeps the declared globs as found on disk, and says so in a warning" \
+      "rc=0
+CMakeLists.txt src/a.cpp src/build-x/junk.o src/draft.cpp src/sub/b.cpp |1" \
+      "$(ex_export "$ex_tmp/archive/pkg")|$(grep -c 'WARN: malf: .* is not in a git checkout' "$ex_tmp/log")"
+mv "$ex_home/malf_recipe_exports.py" "$ex_tmp/helper.bak"
+check "a home that lacks the helper FAILS the export, naming the file — it never exports the disk silently" \
+      "rc=1|1" "$(ex_export "$ex_pkg")|$(grep -c "No such file or directory: '$ex_home/malf_recipe_exports.py'" "$ex_tmp/log")"
+mv "$ex_tmp/helper.bak" "$ex_home/malf_recipe_exports.py"
+
+# The gate: desk against a fresh clone of the commit. Equal with the helper; the helper-less recipe,
+# committed, reds naming the swept files; a modified tracked file is not judged.
+printf 'ex_probe\t%s\t\n' "$ex_pkg" > "$ex_tmp/released.tsv"
+ex_gate() {   # <scratch name> — package_exports verify over the fixture
+    local out rc
+    out="$(CONAN_HOME="$ex_home" python3 "$MALF_ROOT/package_exports.py" verify "$ex_home" "$ex_tmp/released.tsv" "$ex_tmp/$1" 2>&1)"; rc=$?
+    printf 'rc=%s %s|%s' "$rc" "$(grep -o '[0-9]* of [0-9]* released[^;]*; [0-9]* differ, [0-9]* not judged' <<< "$out")" "$(grep -E 'DIFFER|UNJUDGED' <<< "$out" | sed 's/ desk [0-9a-f]* != clone [0-9a-f]*//')"
+}
+check "exports-verify: the helper's recipe exports the same revision from the desk and from a fresh clone, exit 0" \
+      "rc=0 1 of 1 released package(s) export the same recipe revision from the desk and from a fresh clone; 0 differ, 0 not judged|" "$(ex_gate g1)"
+cp "$ex_tmp/plain.py" "$ex_pkg/conanfile.py"; git -C "$ex_repo" -c user.name=t -c user.email=t@t commit -q -am plain
+check "exports-verify: a recipe that sweeps the desk is red, naming the files only the desk exports" \
+      "rc=1 0 of 1 released package(s) export the same recipe revision from the desk and from a fresh clone; 1 differ, 0 not judged|  DIFFER ex_probe:; 2 file(s) differ, 2 exported by the desk alone: export_source/src/build-x/junk.o, export_source/src/draft.cpp" \
+      "$(ex_gate g2)"
+cp "$ex_tmp/helper.py" "$ex_pkg/conanfile.py"
+check "exports-verify: a package whose tracked files are modified on the desk is not judged, exit 2" \
+      "rc=2 0 of 1 released package(s) export the same recipe revision from the desk and from a fresh clone; 0 differ, 1 not judged|  UNJUDGED ex_probe: tracked files modified on the desk —" \
+      "$(ex_gate g3)"
+rm -rf "$ex_tmp"
+echo
+
 echo "[7q8] at job end every conan home drops its build and temp folders and its superseded versions, and reports its own size"
 
 # The script runs from a toolchain tree and reads that tree's conan.lock, three levels up, so the

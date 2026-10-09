@@ -11,8 +11,8 @@ name: Selftest
 # it writes; getting those wrong is silent, not loud). See tests/test_malf.sh for why each
 # check earns its place.
 #
-# Hosted `ubuntu-latest`: this repo is PUBLIC, and the job needs no secret, no toolchain,
-# no network and no build — it is bash + python3 -m py_compile, and runs in seconds.
+# Hosted `ubuntu-latest`: this repo is PUBLIC, and the job needs no secret and no build — bash,
+# python3 and a hash-locked conan (the one network fetch), and runs in about a minute.
 
 on:
   push:
@@ -37,6 +37,20 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Conan from setup-build-env's hash lock, into a job-scoped venv
+        # The recipe-exports arms (tests/test_malf.sh [7q7e], DN-142.D4 (b)) run real `conan export`s.
+        # The same lock and the same refusals as setup-build-env: every file one of its digests, no
+        # build from source.
+        run: |
+          set -euo pipefail
+          version="$(awk '/^  conan-version:/{f=1} f && /default:/{gsub(/[^0-9.]/, "", $2); print $2; exit}' .github/actions/setup-build-env/action.yml)"
+          python3 -m venv "$RUNNER_TEMP/conan-venv"
+          "$RUNNER_TEMP/conan-venv/bin/python" -m pip install --disable-pip-version-check --no-input \
+            --require-hashes --only-binary=:all: -r ".github/actions/setup-build-env/conan-$version.txt"
+          mkdir -p "$RUNNER_TEMP/conan-bin"
+          ln -s "$RUNNER_TEMP/conan-venv/bin/conan" "$RUNNER_TEMP/conan-bin/conan"
+          echo "$RUNNER_TEMP/conan-bin" >> "$GITHUB_PATH"
 
       - name: malf selftest (syntax + dispatch integrity + profile/build keys)
         run: bash tests/test_malf.sh

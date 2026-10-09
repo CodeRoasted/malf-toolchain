@@ -452,10 +452,11 @@ _malf_default_build_root() {
 # run; these must too — a PERSISTENT conan home (the self-hosted runner) that was seeded once would
 # otherwise SHADOW a policy change forever (a `package_id` mode change silently never applied →
 # stale-binary ABI skew, 2026-07-10). cmp -s keeps it a no-op when already in sync. The path-map
-# fragment rides with global.conf, which names it inside the home (ROADMAP N366).
+# fragment (ROADMAP N366) and the recipe-exports helper (DN-142.D4 (b)) ride with global.conf,
+# which names each inside the home.
 _malf_sync_conan_conf() {
     local conf_file source
-    for conf_file in global.conf settings_user.yml malf-path-map.cmake; do
+    for conf_file in global.conf settings_user.yml malf-path-map.cmake malf_recipe_exports.py; do
         source="$MALF_DIR/$conf_file"
         [[ "$conf_file" == *.cmake ]] && source="$MALF_DIR/cmake/$conf_file"
         [[ -f "$source" ]] || continue
@@ -4661,6 +4662,10 @@ Commands:
                                    with the cut-verify home's third-party packages; exit 0 only
                                    when every released package's recipe revision, package id,
                                    package revision and file bytes are equal in both
+    exports-verify                 the released recipes' exports (DN-142.D4 (b)): every
+                                   released recipe exported from this checkout and from a fresh
+                                   clone of its commit; exit 0 only when every pair of recipe
+                                   revisions is equal. No compile; seconds
     inventory [subdir] [--profile <name>]
                                    the build-inventory gate (ADR-3.D10) over the repo that owns subdir
     lock    [--update]             regenerate malf/conan.lock by accumulating EVERY workspace
@@ -5011,6 +5016,24 @@ PY
     python3 "$MALF_DIR/package_twin.py" digest "$first" "$root/released.tsv" > "$root/a.jsonl" || return 1
     python3 "$MALF_DIR/package_twin.py" digest "$second" "$root/released.tsv" > "$root/b.jsonl" || return 1
     python3 "$MALF_DIR/package_twin.py" compare "$root/a.jsonl" "$root/b.jsonl"
+}
+
+# malf exports-verify — DN-142.D4 (b)'s gate: every released recipe exported from THIS checkout
+# and from a fresh clone of its commit, into one scratch conan home staged as malf stages any home,
+# and the two recipe revisions compared (malf/package_exports.py owns the comparison). No compiler
+# runs: an export copies files and hashes them, so the gate costs seconds, not a build.
+#
+# Usage: malf exports-verify
+cmd_exports_verify() {
+    [[ $# -eq 0 ]] || _malf_refuse_option exports-verify "$1"
+    local scratch rc=0
+    scratch="$(mktemp -d /tmp/malf-exports.XXXXXX)"
+    python3 "$MALF_WORKSPACE_ROOT/scripts/version_line.py" released "$MALF_WORKSPACE_ROOT" > "$scratch/released.tsv" \
+        || { echo "malf exports-verify: failed to resolve the released-package list" >&2; rm -rf "$scratch"; return 1; }
+    ( export CONAN_HOME="$scratch/conan-home"; _malf_sync_conan_conf
+      python3 "$MALF_DIR/package_exports.py" verify "$CONAN_HOME" "$scratch/released.tsv" "$scratch" ) || rc=$?
+    rm -rf "$scratch"
+    return "$rc"
 }
 
 # malf inventory [dir] — the ADR-3.D9 gate, standalone. Lints the WHOLE workspace (an orphan
@@ -5682,6 +5705,7 @@ case "$COMMAND" in
     inventory)        cmd_inventory "$@" ;;
     cut-verify)       cmd_cut_verify "$@" ;;
     twin-verify)      cmd_twin_verify "$@" ;;
+    exports-verify)   cmd_exports_verify "$@" ;;
     relocate-verify)  cmd_relocate_verify "$@" ;;
     lock)             cmd_lock "$@" ;;
     slot)             cmd_slot "$@" ;;
