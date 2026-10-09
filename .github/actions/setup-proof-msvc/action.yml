@@ -144,4 +144,5 @@ runs:
         if ($env:GLOBAL_CONF -eq 'true') {
           Copy-Item "$env:MALF_DIR/cmake/malf-path-map.cmake" "$env:HOME_DIR/malf-path-map.cmake"
           Copy-Item "$env:MALF_DIR/malf_recipe_exports.py" "$env:HOME_DIR/malf_recipe_exports.py"
+          Copy-Item "$env:MALF_DIR/malf_recipe_tests.py" "$env:HOME_DIR/malf_recipe_tests.py"
         }

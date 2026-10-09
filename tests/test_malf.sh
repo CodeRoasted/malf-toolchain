@@ -2684,57 +2684,142 @@ check "no member is announced twice (the runaway's signature)" \
 rm -rf "$ip_tmp"
 echo
 
-echo "[9] a test run that selects NOTHING is a named failure, never a green"
+echo "[9] the ONE test selection is malf_recipe_tests.py's: \`malf test\` reads it, a create runs it, and a run that selects NOTHING is a named failure (DN-142.D5)"
 
 # ctest over a tree registering zero tests prints "No tests were found!!!" and exits 0, and
 # `malf test` passed that exit through — measured on insight-eidos's root tree after a dependency
 # configure left its tests unregistered. The guard reds an OWED run that selects nothing and names
 # the tree's configure role; `--corpus` alone and a --filter inside a sweep member owe nothing.
-tp_tmp="$(mktemp -d)"
-mkdir -p "$tp_tmp/empty" "$tp_tmp/one" "$tp_tmp/never" "$tp_tmp/demoted"
+# DN-142.D5 (5) moved the selection into the helper every create runs from `build()`: one
+# definition, two callers. The desk arms drive `_malf_test_run` with a stub ctest that records its
+# argv; the expected argv are the ones the inline selection of malf 8fbc11ef passed, byte for byte.
+tp_tmp="$(realpath "$(mktemp -d)")"
+mkdir -p "$tp_tmp/bin" "$tp_tmp/empty" "$tp_tmp/one" "$tp_tmp/never" "$tp_tmp/demoted"
 : > "$tp_tmp/empty/CTestTestfile.cmake"
 printf 'add_test(TheOneCase.Passes true)\n' > "$tp_tmp/one/CTestTestfile.cmake"
 : > "$tp_tmp/demoted/CTestTestfile.cmake"
 printf 'PKG_BUILD_TESTS:BOOL=OFF\n' > "$tp_tmp/demoted/CMakeCache.txt"
+cat > "$tp_tmp/bin/ctest" <<'STUB'
+#!/usr/bin/env bash
+printf 'ARGV:' >> "$TP_LOG"; printf '[%s]' "$@" >> "$TP_LOG"; printf '\n' >> "$TP_LOG"
+for argument in "$@"; do [[ "$argument" == -N ]] && echo "Total Tests: ${TP_TOTAL:-1}"; done
+exit 0
+STUB
+chmod +x "$tp_tmp/bin/ctest"
 
 check "premise — ctest itself exits 0 over a tree that registers no test (the guard's reason)" \
       "0" "$(ctest --test-dir "$tp_tmp/empty" -LE corpus >/dev/null 2>&1; echo $?)"
 
-# <sweep flag or ""> <build_dir> <corpus_only> <regex> -> the verdict's exit status
-tp_owed() {
-    bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e
-             [[ -n "$2" ]] && export MALF_SWEEP=1
-             _malf_test_population_is_owed "$3" "$4" "$5"; echo $?' _ "$MALF_BIN" "$@"
+# <malf> <build_dir> <verbose> <regex> <corpus_only> <sweep or ""> -> the argv the stub recorded, then rc=<status>
+tp_run() {
+    local log="$tp_tmp/argv.log"; rm -f "$log"
+    PATH="$tp_tmp/bin:$PATH" TP_LOG="$log" TP_TOTAL="${TP_TOTAL:-1}" bash -c '
+        MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e
+        [[ -n "$6" ]] && export MALF_SWEEP=1
+        ( _malf_test_run "$2" "$3" "$4" "$5" ) 2>"$7"; echo "rc=$?"' _ "$@" "$tp_tmp/run.err" >> "$log"
+    cat "$log"
 }
-check "owed — the default population of a tree that has a CTestTestfile" \
-      "0" "$(tp_owed "" "$tp_tmp/empty" false "")"
-check "not owed — the default population of a tree that never enabled testing" \
-      "1" "$(tp_owed "" "$tp_tmp/never" false "")"
-check "not owed — --corpus alone, which most packages legitimately answer with nothing" \
-      "1" "$(tp_owed "" "$tp_tmp/empty" true "")"
-check "owed — a --filter outside a sweep, even with --corpus and no CTestTestfile" \
-      "0" "$(tp_owed "" "$tp_tmp/never" true 'Suite\..*')"
-check "not owed — a --filter inside a sweep member (the declared bound)" \
-      "1" "$(tp_owed sweep "$tp_tmp/never" false 'Suite\..*')"
+tp_argv() { printf 'ARGV:'; printf '[%s]' "$@"; printf '\n'; }
+E="$tp_tmp/empty"; N="$tp_tmp/never"
+check "the default population: guarded by -N, then run with --no-tests=error" \
+      "$(tp_argv --test-dir "$E" --output-on-failure -LE corpus -N; tp_argv --test-dir "$E" --output-on-failure -LE corpus --no-tests=error; echo rc=0)" \
+      "$(tp_run "$MALF_BIN" "$E" false "" false "")"
+check "--verbose rides after --output-on-failure" \
+      "$(tp_argv --test-dir "$E" --output-on-failure --verbose -LE corpus -N; tp_argv --test-dir "$E" --output-on-failure --verbose -LE corpus --no-tests=error; echo rc=0)" \
+      "$(tp_run "$MALF_BIN" "$E" true "" false "")"
+check "a --filter is -R before the label, and is owed outside a sweep" \
+      "$(tp_argv --test-dir "$E" --output-on-failure -R 'Suite\..*' -LE corpus -N; tp_argv --test-dir "$E" --output-on-failure -R 'Suite\..*' -LE corpus --no-tests=error; echo rc=0)" \
+      "$(tp_run "$MALF_BIN" "$E" false 'Suite\..*' false "")"
+check "--corpus alone selects the label and owes nothing: no guard, no --no-tests=error" \
+      "$(tp_argv --test-dir "$E" --output-on-failure -L corpus; echo rc=0)" \
+      "$(tp_run "$MALF_BIN" "$E" false "" true "")"
+check "a tree that never enabled testing owes nothing" \
+      "$(tp_argv --test-dir "$N" --output-on-failure -LE corpus; echo rc=0)" \
+      "$(tp_run "$MALF_BIN" "$N" false "" false "")"
+check "a --filter inside a sweep member owes nothing (the declared bound)" \
+      "$(tp_argv --test-dir "$N" --output-on-failure -R 'A.b' -LE corpus; echo rc=0)" \
+      "$(tp_run "$MALF_BIN" "$N" false 'A.b' false sweep)"
+check "a --filter with --corpus outside a sweep is owed even with no CTestTestfile, and an argument with a space stays one argument" \
+      "$(tp_argv --test-dir "$N" --output-on-failure --verbose -R 'X y' -L corpus -N; tp_argv --test-dir "$N" --output-on-failure --verbose -R 'X y' -L corpus --no-tests=error; echo rc=0)" \
+      "$(tp_run "$MALF_BIN" "$N" true 'X y' true "")"
+check "an owed selection of zero tests reds before ctest runs, stating the count and the selection" \
+      "$(tp_argv --test-dir "$E" --output-on-failure -LE corpus -N; echo rc=1)|malf test: 0 test(s) selected in $E by: --test-dir $E --output-on-failure -LE corpus" \
+      "$(TP_TOTAL=0 tp_run "$MALF_BIN" "$E" false "" false "")|$(head -1 "$tp_tmp/run.err")"
+check "a demoted tree's red names the DEPENDENCY configure and its variable" \
+      "rc=1 1" "$(TP_TOTAL=0 tp_run "$MALF_BIN" "$tp_tmp/demoted" false "" false "" | tail -1) $(grep -c 'DEPENDENCY (PKG_BUILD_TESTS OFF)' "$tp_tmp/run.err")"
+check "with the real ctest: one registered test passes the guard, a regex matching no name reds" \
+      "0 1" "$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import malf_recipe_tests as t; d = sys.argv[2]
+a, e = t.guarded(d, t.selection(d), owed=True); b, f = t.guarded(d, t.selection(d, regex="Nothing\\.Here"), owed=True)
+print(0 if e is None and a[-1] == "--no-tests=error" else a, 1 if f is not None else b)' "$MALF_ROOT" "$tp_tmp/one")"
+# The selection is READ from the helper, never restated in malf: a copy of malf beside a helper whose
+# label is mutated passes the mutated label, so a second spelling in malf would leave this arm red.
+mkdir -p "$tp_tmp/mutant"; cp "$MALF_BIN" "$MALF_ROOT/malf_recipe_tests.py" "$tp_tmp/mutant/"
+sed -i 's/^CORPUS_LABEL = "corpus"$/CORPUS_LABEL = "kitchen"/' "$tp_tmp/mutant/malf_recipe_tests.py"
+check "malf test reads the selection from the helper: a mutated label in the helper is the label ctest gets" \
+      "$(tp_argv --test-dir "$N" --output-on-failure -LE kitchen; echo rc=0)" \
+      "$(tp_run "$tp_tmp/mutant/malf" "$N" false "" false "")"
+check "malf spells no ctest label of its own" \
+      "0" "$(grep -cE '(-L|-LE) corpus' "$MALF_BIN")"
 
-# <stderr file> <build_dir> <ctest selection args...> -> the guard's exit status
-tp_guard() {
-    bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e
-             err="$2"; shift 2
-             _malf_test_population_guard "$@" 2>"$err"; echo $?' _ "$MALF_BIN" "$@"
+# Inside a create. A fixture recipe exports a CTestTestfile.cmake, which conan copies into its build folder (no compiler), and
+# calls the helper as every first-party recipe does; the home is staged by malf's own conf sync.
+rt_home="$tp_tmp/home"; rt_pkg="$tp_tmp/rt_probe"; mkdir -p "$rt_pkg"
+CONAN_HOME="$rt_home" bash "$MALF_BIN" profiles > /dev/null 2>&1
+printf '[settings]\nos=Linux\narch=x86_64\nbuild_type=Release\n' > "$rt_home/profiles/fixture"
+cat > "$rt_pkg/conanfile.py" <<'PYR'
+import runpy
+
+from conan import ConanFile
+
+
+class RtProbe(ConanFile):
+    name = "rt_probe"
+    version = "0.0.1"
+    exports_sources = "CTestTestfile.cmake"
+
+    def build(self):
+        runpy.run_path(self.conf.get("user.malf:recipe_tests"))["run_tests"](self)
+PYR
+rt_true="$(type -P true)"; rt_false="$(type -P false)"
+rt_tests() {   # <test lines...> — each `name:command[:corpus]`
+    local spec name command label
+    : > "$rt_pkg/CTestTestfile.cmake"
+    for spec in "$@"; do
+        IFS=: read -r name command label <<< "$spec"
+        printf 'add_test([=[%s]=] "%s")\n' "$name" "$command" >> "$rt_pkg/CTestTestfile.cmake"
+        [[ -n "$label" ]] && printf 'set_tests_properties([=[%s]=] PROPERTIES LABELS %s)\n' "$name" "$label" >> "$rt_pkg/CTestTestfile.cmake"
+    done
 }
-tp_err="$tp_tmp/guard.err"
-check "guard — a selection of zero tests reds" \
-      "1" "$(tp_guard "$tp_err" "$tp_tmp/empty" --test-dir "$tp_tmp/empty" -LE corpus)"
-check "guard — its red states the count and the selection" \
-      "1" "$(grep -c '0 test(s) selected in' "$tp_err")"
-check "guard — one registered test passes" \
-      "0" "$(tp_guard "$tp_err" "$tp_tmp/one" --test-dir "$tp_tmp/one" -LE corpus)"
-check "guard — a regex matching no registered name reds" \
-      "1" "$(tp_guard "$tp_err" "$tp_tmp/one" --test-dir "$tp_tmp/one" -R 'Nothing\.Here' -LE corpus)"
-check "guard — a demoted tree's red names the DEPENDENCY configure and its variable" \
-      "1" "$(tp_guard "$tp_err" "$tp_tmp/demoted" --test-dir "$tp_tmp/demoted" -LE corpus >/dev/null
-             grep -c 'DEPENDENCY (PKG_BUILD_TESTS OFF)' "$tp_err")"
+rt_create() {   # [conan -c args...] -> rc=<status>; the log in $tp_tmp/rt.log
+    CONAN_HOME="$rt_home" conan create "$rt_pkg" -pr:a fixture --build="rt_probe/*" "$@" > "$tp_tmp/rt.log" 2>&1
+    echo "rc=$?"
+}
+rt_junit="$rt_home/malf-test-results/rt_probe.xml"
+check "global.conf names the helper and the results directory inside the home, and malf stages the helper there byte for byte" \
+      "synced 1 1" "$(cmp -s "$MALF_ROOT/malf_recipe_tests.py" "$rt_home/malf_recipe_tests.py" && echo synced) $(grep -c "^user.malf:recipe_tests={{ os.path.join(conan_home_folder, 'malf_recipe_tests.py')" "$rt_home/global.conf") $(grep -c "^user.malf:test_results={{ os.path.join(conan_home_folder, 'malf-test-results')" "$rt_home/global.conf")"
+check "every CI action that stages global.conf stages the test helper beside it" \
+      "3" "$(grep -l 'malf_recipe_tests.py' "$MALF_ROOT"/.github/actions/setup-{build-env,proof-linux,proof-msvc}/action.yml | wc -l | tr -d ' ')"
+rt_tests "RtProbe.Passes:$rt_true" "RtProbe.CorpusFails:$rt_false:corpus"
+check "a create runs the selection: the default population passes, the corpus test is built and never run, and the JUnit file names exactly the test that ran" \
+      "rc=0 1 0" "$(rt_create) $(grep -c 'name="RtProbe.Passes"' "$rt_junit" 2>/dev/null) $(grep -c 'RtProbe.CorpusFails' "$rt_junit" 2>/dev/null)"
+check "the create's ctest argv is the desk selection plus the guard and --output-junit, nothing else" \
+      "1" "$(grep -cE "^\S* ?.*ctest --test-dir \S+ --output-on-failure -LE corpus --no-tests=error --output-junit $rt_junit\$" "$tp_tmp/rt.log")"
+rt_tests "RtProbe.Passes:$rt_true" "RtProbe.Fails:$rt_false"
+check "a red test FAILS the create, and the log names it" \
+      "rc=1 1" "$(rt_create) $(grep -cE '[0-9]+ - RtProbe.Fails \(Failed\)' "$tp_tmp/rt.log")"
+rm -f "$rt_junit"
+check "under tools.build:skip_test the same red recipe passes, says so, and writes no result" \
+      "rc=0 1 absent" "$(rt_create -c tools.build:skip_test=True) $(grep -c 'tools.build:skip_test is set, so no test runs' "$tp_tmp/rt.log") $([[ -e "$rt_junit" ]] && echo present || echo absent)"
+rt_tests "RtProbe.CorpusFails:$rt_false:corpus"
+check "a create whose tree enabled testing and selects zero tests FAILS, never passes vacuously" \
+      "rc=1 1" "$(rt_create) $(grep -c '0 test(s) selected in .* — a create that enabled testing must run at least one test' "$tp_tmp/rt.log")"
+rt_tests "RtProbe.Passes:$rt_true"
+check "the results directory is the conf's: a create given another one writes there" \
+      "rc=0 1" "$(rt_create -c "user.malf:test_results=$tp_tmp/elsewhere") $(grep -c 'name="RtProbe.Passes"' "$tp_tmp/elsewhere/rt_probe.xml" 2>/dev/null)"
+mv "$rt_home/malf_recipe_tests.py" "$tp_tmp/helper.bak"
+check "a home that lacks the helper FAILS the build, naming the file — it never skips the tests silently" \
+      "rc=1 1" "$(rt_create) $(grep -c "No such file or directory: '$rt_home/malf_recipe_tests.py'" "$tp_tmp/rt.log")"
+mv "$tp_tmp/helper.bak" "$rt_home/malf_recipe_tests.py"
 rm -rf "$tp_tmp"
 echo
 

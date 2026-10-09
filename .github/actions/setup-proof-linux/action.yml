@@ -172,4 +172,5 @@ runs:
         if [ "$GLOBAL_CONF" = "true" ]; then
           cp "$MALF_DIR/cmake/malf-path-map.cmake" "$HOME_DIR/malf-path-map.cmake"
           cp "$MALF_DIR/malf_recipe_exports.py" "$HOME_DIR/malf_recipe_exports.py"
+          cp "$MALF_DIR/malf_recipe_tests.py" "$HOME_DIR/malf_recipe_tests.py"
         fi
