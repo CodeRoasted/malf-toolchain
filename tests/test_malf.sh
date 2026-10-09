@@ -4101,6 +4101,34 @@ check "exports-verify: the helper raising (a recipes row with no folder) exits 3
 check "exports-verify: malf failing to derive the recipe list exits 3, naming the failure" \
       "rc=3 1" "$(out="$(MALF_WORKSPACE_ROOT="$ex_tmp/empty-ws" bash "$MALF_BIN" exports-verify 2>&1)"; rc=$?
                   printf 'rc=%s %s' "$rc" "$(grep -c '^malf exports-verify: FAILED — could not derive the first-party recipe list' <<< "$out")")"
+
+# The POPULATION is the tracked recipe set, never a spelling. Selecting the recipes that assign
+# `exports_sources` judged 28 of the workspace's 30 on 2026-10-09 and read green over the two that
+# export through an `export_sources()` method alone (insight_canon_proof, insight_scenarios). The
+# fixture spells every way a recipe exports — the attribute, the annotated attribute, `exports`,
+# the method, nothing — beside a test_package recipe, a file merely ending in conanfile.py and an
+# untracked recipe, none of which is a first-party recipe of the repository.
+ex_ws="$ex_tmp/pop-ws"; mkdir -p "$ex_ws/scripts" "$ex_ws/r"
+printf 'def declared_repos(root):\n    return ["r"]\n' > "$ex_ws/scripts/workspace_layout.py"
+ex_pop() {   # <folder> <class body line> — a fixture recipe under the fixture repository
+    mkdir -p "$ex_ws/r/$1"
+    printf 'from conan import ConanFile\n\n\nclass Probe(ConanFile):\n    name = "pop"\n    version = "0.0.1"\n%s\n' "$2" > "$ex_ws/r/$1/conanfile.py"
+}
+ex_pop attr   '    exports_sources = "src/*"'
+ex_pop ann    '    exports_sources: tuple = ("src/*",)'
+ex_pop exp    '    exports = "data.txt"'
+ex_pop method '    def export_sources(self):
+        pass'
+ex_pop bare   ''
+ex_pop attr/test_package '    exports_sources = "src/*"'
+printf 'from conan import ConanFile\n' > "$ex_ws/r/method/legacy_conanfile.py"
+git -C "$ex_ws/r" init -q && git -C "$ex_ws/r" add -A \
+    && git -C "$ex_ws/r" -c user.name=t -c user.email=t@t commit -q -m fixture
+ex_pop untracked '    exports_sources = "src/*"'
+check "exports-verify's population is every tracked first-party recipe, whatever the spelling of its exports: the attribute, the annotated attribute, \`exports\`, the export_sources() method and a recipe exporting nothing — never a test_package, a *_conanfile.py or an untracked recipe" \
+      "rc=0 r/ann r/attr r/bare r/exp r/method " \
+      "$(out="$(python3 "$MALF_ROOT/package_exports.py" recipes "$ex_ws" 2>&1)"; rc=$?
+         printf 'rc=%s %s' "$rc" "$(cut -f1 <<< "$out" | tr '\n' ' ')")"
 rm -rf "$ex_tmp"
 echo
 

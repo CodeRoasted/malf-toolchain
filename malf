@@ -4649,9 +4649,9 @@ Commands:
                                    any build when that seed lacks one the graphs need; exit 0 only
                                    when every released package's recipe revision, package id,
                                    package revision and file bytes are equal in both
-    exports-verify                 first-party recipes' exports (DN-142.D4 (b)): every recipe
-                                   declaring exports_sources exported from this checkout and a fresh
-                                   clone of its commit; exit 0 only when every pair of recipe
+    exports-verify                 first-party recipes' exports (DN-142.D4 (b)): every tracked
+                                   recipe, whatever spells its exports, exported from this checkout
+                                   and a fresh clone of its commit; exit 0 only when every pair of recipe
                                    revisions is equal, 1 when one differs, 2 when a package is
                                    not judged, 3 when the verb failed. No compile; seconds
     store-create [<pkg>...]        ROADMAP N358's step over a local store (DN-142.D2/D3/D6): each
@@ -5034,7 +5034,7 @@ PY
     python3 "$MALF_DIR/package_twin.py" compare "$root/a.jsonl" "$root/b.jsonl"
 }
 
-# malf exports-verify — DN-142.D4 (b)'s gate: every first-party recipe declaring exports_sources
+# malf exports-verify — DN-142.D4 (b)'s gate: every first-party recipe, whatever spells its exports
 # (released or not; malf/package_exports.py `recipes` derives them) exported from THIS checkout
 # and from a fresh clone of its commit, into one scratch conan home staged as malf stages any home,
 # and the two recipe revisions compared (malf/package_exports.py owns the comparison). No compiler

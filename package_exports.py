@@ -7,9 +7,14 @@ from a fresh clone of the same commit, and compare the two recipe revisions. A r
 the hash of the export's manifest, so two equal revisions mean byte-equal exports.
 
     package_exports.py recipes <workspace root>
-        every first-party recipe that declares `exports_sources`: each tracked `conanfile.py` of
-        each repository the workspace declares, test_package recipes excluded, as
-        `<repository>/<path>\t<absolute directory>` lines
+        every first-party recipe: each tracked `conanfile.py` of each repository the workspace
+        declares, test_package recipes excluded, as `<repository>/<path>\t<absolute directory>`
+        lines. The population is the tracked recipe set and never a spelling of how a recipe
+        exports: a recipe exports through `exports_sources`, `exports`, an `export_sources()` or
+        `export()` method, or through nothing but its conanfile, and the gate judges each alike.
+        Measured 2026-10-09: a population of the recipes ASSIGNING `exports_sources` judged 28
+        of the 30 and read green over insight_canon_proof and insight_scenarios, which export
+        through `export_sources()` alone.
     package_exports.py verify <conan home> <recipes tsv> <scratch dir>
 
 The home must be staged as malf stages one (global.conf naming `malf_recipe_exports.py` beside
@@ -27,7 +32,6 @@ means a differing recipe and nothing else; step 0's B2 reads the code, never the
 
 from __future__ import annotations
 
-import ast
 import json
 import os
 import subprocess
@@ -106,17 +110,9 @@ def verify(home: Path, released: Path, scratch: Path) -> int:
     return EXIT_UNJUDGED if unjudged or not rows else EXIT_EQUAL
 
 
-def _declares_exports(conanfile: Path) -> bool:
-    """Whether the recipe's class assigns `exports_sources` — the class this gate judges."""
-    tree = ast.parse(conanfile.read_text(encoding="utf-8"), filename=str(conanfile))
-    return any(isinstance(node, ast.Assign)
-               and any(getattr(target, "id", "") == "exports_sources" for target in node.targets)
-               for item in tree.body if isinstance(item, ast.ClassDef) for node in item.body)
-
-
 def recipes(workspace: Path) -> int:
-    """Print every first-party recipe declaring `exports_sources`; the repositories are the
-    workspace's DECLARED ones (scripts/workspace_layout.py), never whatever sits on the disk."""
+    """Print every first-party recipe, whatever the spelling of its exports; the repositories are
+    the workspace's DECLARED ones (scripts/workspace_layout.py), never whatever sits on the disk."""
     workspace = workspace.resolve()
     sys.path.insert(0, str(workspace / "scripts"))
     import workspace_layout
@@ -130,12 +126,11 @@ def recipes(workspace: Path) -> int:
             recipe = repo / relative
             if "test_package" in Path(relative).parts or recipe.name != "conanfile.py":
                 continue
-            if _declares_exports(recipe):
-                folder = Path(relative).parent.as_posix()
-                print(f"{name if folder == '.' else f'{name}/{folder}'}\t{recipe.parent}")
-                found += 1
+            folder = Path(relative).parent.as_posix()
+            print(f"{name if folder == '.' else f'{name}/{folder}'}\t{recipe.parent}")
+            found += 1
     if not found:
-        raise HelperFailed(f"no recipe declaring exports_sources under {workspace}")
+        raise HelperFailed(f"no first-party recipe under {workspace}")
     return EXIT_EQUAL
 
 
