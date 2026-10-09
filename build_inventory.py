@@ -31,10 +31,12 @@ false green for the fourteen days before it. The repair belongs to the build sys
               canonical cell; under `malf test` only (`--run-tests`), the tests the project
               itself registers then run in that same cell (ADR-3.D9).
 
-`proof/` is NOT made a conan package, deliberately: a package carries one profile and one
+`proof/`'s CELL is NOT a conan package, deliberately: a package carries one profile and one
 build, which is exactly what would flatten its 8-cell determinism matrix. Being in the
 inventory and being a package are two different things, and conflating them is what
-produced the orphan in the first place.
+produced the orphan in the first place. The proof's ship-leg STEP is a package of its own
+(`insight_canon_proof`, proof/conanfile.py, DN-142.D5 (4)) that links the packages it
+resolves instead of recompiling them, so the cell and the matrix keep their own build.
 
 ── THE DECLARED BOUNDARY (ADR-3.D9), written here so nobody expects the wrong thing ─────
 

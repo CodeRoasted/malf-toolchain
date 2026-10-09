@@ -17,6 +17,13 @@ disk silently.
 Outside a git checkout (a source archive) there is no tracked set to narrow to: the export keeps
 the declared globs as found on disk and says so in a warning, because its revision is then the
 disk's.
+
+A test whose input lives OUTSIDE the recipe folder (`DN-142.D5` (4), `DN-142.D13` (3), (4): the
+infra packages' shared `../tests_support/`, the canon proof recipe's `../scripts/`) has it exported
+by `export_tracked(self, source, destination)`, called after `narrow_to_tracked`: the files git
+tracks under `source`, a path relative to the recipe folder that may leave it, are copied into the
+export at `destination`. A `source` holding no tracked file fails the export: an input the tests
+read cannot be exported empty.
 """
 
 from __future__ import annotations
@@ -74,3 +81,38 @@ def narrow_to_tracked(conanfile) -> None:
             here.rmdir()
     conanfile.output.info(f"malf: exports narrowed to the tracked files — {kept} kept, "
                           f"{dropped} untracked or ignored dropped")
+
+
+def export_tracked(conanfile, source: str, destination: str) -> None:
+    """Copy into the export, at `destination`, every file git tracks under `source`.
+
+    pre: called from `export_sources()`, after `narrow_to_tracked`; `source` is a file or a
+        directory, relative to the recipe folder, and may leave it (`../tests_support`)
+    post: `<export>/<destination>` holds exactly the tracked files under `source`, or the export
+        failed
+    """
+    origin = (Path(conanfile.recipe_folder) / source).resolve()
+    target = Path(conanfile.export_sources_folder) / destination
+    if origin.is_file():
+        folder, names = origin.parent, [origin.name]
+    elif origin.is_dir():
+        folder, names = origin, None
+    else:
+        raise ConanException(f"malf: {conanfile.name}: the export names {source}, and "
+                             f"{origin} does not exist")
+    tracked = _tracked(str(folder))
+    if tracked is None:
+        conanfile.output.warning(
+            f"malf: {folder} is not in a git checkout (or git is not installed): {source} is "
+            "exported as found on disk, so the recipe revision depends on the disk (DN-142.D4)")
+        tracked = {path.relative_to(folder).as_posix() for path in folder.rglob("*") if path.is_file()}
+    chosen = sorted(tracked if names is None else tracked & set(names))
+    if not chosen:
+        raise ConanException(f"malf: {conanfile.name}: the export names {source}, and git tracks "
+                             f"no file there")
+    for relative in chosen:
+        copied = (target / relative) if names is None else target
+        copied.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(folder / relative, copied)
+    conanfile.output.info(f"malf: {len(chosen)} tracked file(s) under {source} exported "
+                          f"to {destination}")

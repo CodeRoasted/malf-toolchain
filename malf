@@ -4659,6 +4659,10 @@ Commands:
                                    its export, keyed by its inputs and identified by its bytes; a new
                                    key is stored, a stored one rebuilt and compared — exit 1 on a
                                    differing output at an equal key
+    store-build <pkg>...           DN-142.D14's step of a `stored: false` package: a `conan build`
+                                   of its tracked tree at MALF_STORE_BUILD_REV (default HEAD) in the
+                                   store's home, writer confs, --build=never, tests run in build();
+                                   no package of it is ever left in the cache
     store-verdict format <repo>... DN-142.D7's verdict record over the same local store: `malf format
                                    --check` over each repository's tracked tree in an export beside
                                    malf's, keyed by both trees and the tools that ran; a new key is
@@ -5081,6 +5085,18 @@ cmd_store_verdict() {
     python3 "$MALF_DIR/artefact_store.py" verdict-step "$store" "$predicate" "$MALF_DIR" "$clang_format_bin" "$@"
 }
 
+# THE WRITER'S CONF SET (DN-142.D13 (1)) is malf_recipe_tests.py's, defined there once beside the
+# consumer's: today it sets no skip conf, so a writer's create builds and runs every test and every
+# test_package. Read, never spelled here, so a writer conf added there reaches both writers.
+# post: _MALF_WRITER_ARGS holds the set, or the function failed naming the helper
+_malf_writer_create_args() {
+    _MALF_WRITER_ARGS=()
+    local listed
+    listed="$(python3 "$MALF_DIR/malf_recipe_tests.py" create-args writer)" \
+        || { echo "malf: the writer's conf set could not be read from malf_recipe_tests.py" >&2; return 1; }
+    [[ -z "$listed" ]] || mapfile -t _MALF_WRITER_ARGS <<< "$listed"
+}
+
 # malf store-create [<package>...] — ROADMAP N358's step, phase 1, over a local store (DN-142.D6):
 # each named released package (none named: every released package, as cut-verify sweeps), with its
 # first-party upstream, created from its export in ONE conan home, keyed (DN-142.D2) and identified
@@ -5108,6 +5124,16 @@ cmd_store_create() {
     local released prefixes
     released="$(python3 "$MALF_WORKSPACE_ROOT/scripts/version_line.py" released "$MALF_WORKSPACE_ROOT")" \
         || { echo "malf store-create: failed to resolve the released-package list" >&2; return 1; }
+    # A `stored: false` package is never created (DN-142.D14): its step is `malf store-build`.
+    local unstored named
+    unstored="$(python3 "$MALF_WORKSPACE_ROOT/scripts/version_line.py" unstored "$MALF_WORKSPACE_ROOT")" \
+        || { echo "malf store-create: failed to resolve the stored: false packages" >&2; return 1; }
+    for named in "$@"; do
+        if grep -q "^$named"$'\t' <<< "$unstored"; then
+            echo "malf store-create: $named declares \`stored: false\`: its step is \`malf store-build $named\`, a conan build that stores no package, never a create (DN-142.D14)" >&2
+            return 2
+        fi
+    done
     prefixes="$(python3 - "$MALF_WORKSPACE_ROOT" <<'PY'
 import pathlib, sys
 
@@ -5158,11 +5184,12 @@ PY
     echo "=== malf store-create: $(wc -l <<< "$wanted") package(s), home $CONAN_HOME, store $store ==="
     python3 "$MALF_DIR/artefact_store.py" toolchain "$(dirname "$(dirname "$compiler")")" "$scratch/toolchain.json" || return 1
 
+    _malf_writer_create_args || return 1
     local name path rc=0
     while IFS=$'\t' read -r name path; do
         echo "--- store-create: conan create $name ($path) ---"
         conan create "$path" --profile:host="$MALF_PROFILE" --profile:build="$MALF_BUILD_PROFILE" \
-            -s build_type="$MALF_CONFIG" --build=missing --build="$name/*" --format=json \
+            -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" --build=missing --build="$name/*" --format=json \
             > "$scratch/$name.graph.json" 2> "$scratch/$name.log" \
             || { echo "malf store-create: conan create $name failed — $scratch/$name.log" >&2; return 1; }
         python3 "$MALF_DIR/artefact_store.py" conan-step "$store" "$CONAN_HOME" "$scratch/$name.graph.json" \
@@ -5171,6 +5198,65 @@ PY
     [[ $rc -eq 0 ]] && rm -rf "$scratch"
     return "$rc"
 }
+# malf store-build <package>... — DN-142.D14: the ship-leg step of a package whose packages.yml
+# entry declares `stored: false` (today insight_twin alone). It is a `conan build`, never a create:
+# conan build installs the graph, runs generate() and build() and never calls package(), and the
+# root is a consumer folder, never exported into the cache, so no package of it exists afterwards —
+# the refusal its package() carries (ADR-1.D7) is never reached. The source is the package's TRACKED
+# tree at the judged commit (MALF_STORE_BUILD_REV, default HEAD), materialised from git into a
+# scratch folder, never the disk. It runs in the store's home (MALF_STORE_CONAN_HOME, which must
+# already hold the stored upstreams) with the writer's conf set and `--build=never`: every upstream
+# is read from the cache and none is built here. The recipe's build() runs malf's test selection,
+# so the result file lands in the home's results directory like a create's.
+# Exit 0 green, 1 the build or a test failed or a package was left in the cache, 2 refused.
+# Usage: malf store-build <package>...
+cmd_store_build() {
+    [[ $# -ge 1 ]] || { echo "malf store-build: name at least one stored: false package" >&2; return 2; }
+    local arg
+    for arg in "$@"; do [[ "$arg" != -* ]] || _malf_refuse_option store-build "$arg"; done
+    _malf_apply_profile "${MALF_CUT_VERIFY_PROFILE:-linux-gcc16-release}"
+    local unstored rev="${MALF_STORE_BUILD_REV:-HEAD}"
+    unstored="$(python3 "$MALF_WORKSPACE_ROOT/scripts/version_line.py" unstored "$MALF_WORKSPACE_ROOT")" \
+        || { echo "malf store-build: failed to resolve the stored: false packages" >&2; return 2; }
+    local name path
+    for name in "$@"; do
+        grep -q "^$name"$'\t' <<< "$unstored" || {
+            echo "malf store-build: $name declares no \`stored: false\` in its packages.yml — a stored package's step is \`malf store-create\` (DN-142.D14)" >&2
+            return 2; }
+    done
+    export CONAN_HOME="${MALF_STORE_CONAN_HOME:-}"
+    [[ -n "$CONAN_HOME" && -f "$CONAN_HOME/settings.yml" ]] \
+        || { echo "malf store-build: MALF_STORE_CONAN_HOME must name the store's conan home, which holds the stored upstreams" >&2; return 2; }
+    _malf_sync_conan_conf
+    _malf_apply_profile "$MALF_PROFILE_NAME"
+    rm -f "$CONAN_HOME/editable_packages.json"
+    unset MALF_EDITABLE_BUILD_DIR
+    _malf_writer_create_args || return 2
+    local scratch rc=0 repo prefix left
+    scratch="$(mktemp -d /tmp/malf-store-build.XXXXXX)"
+    for name in "$@"; do
+        path="$(awk -F'\t' -v n="$name" '$1 == n {print $2}' <<< "$unstored")"
+        repo="$(git -C "$path" rev-parse --show-toplevel)" && prefix="$(git -C "$path" rev-parse --show-prefix)" \
+            || { echo "malf store-build: $path is not in a git checkout" >&2; rc=2; break; }
+        mkdir -p "$scratch/$name"
+        git -C "$repo" archive "$rev" -- "$prefix" | tar -x -C "$scratch/$name" \
+            || { echo "malf store-build: git archive $rev -- $prefix failed in $repo" >&2; rc=2; break; }
+        echo "--- store-build: conan build $name ($repo at $(git -C "$repo" rev-parse --short=12 "$rev"):$prefix) ---"
+        if ! conan build "$scratch/$name/$prefix" --profile:host="$MALF_PROFILE" --profile:build="$MALF_BUILD_PROFILE" \
+                -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" --build=never > "$scratch/$name.log" 2>&1; then
+            echo "malf store-build: conan build $name failed — $scratch/$name.log" >&2; rc=1; continue
+        fi
+        left="$(conan list "$name/*" --format=json | python3 -c 'import json, sys; print(sum(len(v) for v in json.load(sys.stdin).get("Local Cache", {}).values()))')"
+        if [[ "$left" != "0" ]]; then
+            echo "malf store-build: $name left $left revision(s) in $CONAN_HOME — a stored: false step stores no package (DN-142.D14)" >&2
+            rc=1; continue
+        fi
+        echo "malf store-build: $name built and tested from its tracked tree; no package of it in the cache"
+    done
+    [[ $rc -eq 0 ]] && rm -rf "$scratch"
+    return "$rc"
+}
+
 # malf inventory [dir] — the ADR-3.D9 gate, standalone. Lints the WHOLE workspace (an orphan
 # anywhere is a defect, and the predicate is workspace-wide by nature), then configures and
 # builds every inventory entry of the resolved repo to a LINKED artifact in ONE canonical cell.
@@ -5309,6 +5395,8 @@ cmd_cut_verify() {
         # profile does not declare.
         -s build_type="$MALF_CONFIG"
     )
+    _malf_writer_create_args || return 1
+    profile_args+=("${_MALF_WRITER_ARGS[@]}")
 
     local name path deps total=0 ok=0
     local -a failed=() skipped=()
@@ -5842,6 +5930,7 @@ case "$COMMAND" in
     twin-verify)      cmd_twin_verify "$@" ;;
     exports-verify)   cmd_exports_verify "$@" ;;
     store-create)     cmd_store_create "$@" ;;
+    store-build)      cmd_store_build "$@" ;;
     store-verdict)    cmd_store_verdict "$@" ;;
     relocate-verify)  cmd_relocate_verify "$@" ;;
     lock)             cmd_lock "$@" ;;

@@ -2823,6 +2823,208 @@ mv "$tp_tmp/helper.bak" "$rt_home/malf_recipe_tests.py"
 rm -rf "$tp_tmp"
 echo
 
+echo "[9b] a create's two conf sets, its test_package population and the test-locator refusal are malf_recipe_tests.py's, each defined once (DN-142.D13)"
+
+# DN-142.D13 (1): the consumer path runs no test and builds no test_package on conan's DEFAULT graph,
+# so it computes the writer's package id; `tools.graph:skip_test` prunes the test requirements and
+# gave metalog, eidos and sift another id. (2): a test_package runs in the writer's create through
+# the same helper and writes a second result file. (3): a test locates its inputs by a compile
+# definition, never by the translation unit's own name, which a create's path map makes an
+# identifier. Each is driven through a real `conan create` of a fixture recipe whose build folder
+# receives a CTestTestfile.cmake (no compiler), in a home staged by malf's own conf sync.
+cs_tmp="$(realpath "$(mktemp -d)")"
+check "the consumer conf set is skip_test plus an empty test folder, one argument per line" \
+      "-c|tools.build:skip_test=True|--test-folder=" \
+      "$(python3 "$MALF_ROOT/malf_recipe_tests.py" create-args consumer | paste -sd'|')"
+check "the writer conf set is empty, and an unknown set is a usage error (exit 2)" \
+      "rc=0 0 rc=2" \
+      "$(out="$(python3 "$MALF_ROOT/malf_recipe_tests.py" create-args writer)"; echo "rc=$? ${#out}") $(python3 "$MALF_ROOT/malf_recipe_tests.py" create-args vendor 2>/dev/null; echo "rc=$?")"
+check "no tracked malf file sets tools.graph:skip_test" \
+      "0" "$(git -C "$MALF_ROOT" grep -cE 'tools\.graph:skip_test=' -- . ':!tests/test_malf.sh' | awk -F: '{n += $2} END {print n + 0}')"
+check "the vendor create reads the consumer set from the helper and spells no skip conf or test folder of its own" \
+      "1 0" "$(grep -c 'malf_recipe_tests.py" create-args consumer' "$MALF_ROOT/.github/actions/coderoast-vendor/ci_build_conan_package.sh") $(grep -vE '^\s*#' "$MALF_ROOT/.github/actions/coderoast-vendor/ci_build_conan_package.sh" | grep -cE 'skip_test|--test-folder')"
+
+# The writers read their set from the helper, never spell it: a copy of malf beside a helper whose
+# writer set is mutated hands the mutated set to its caller, and both writers splice what it read.
+mkdir -p "$cs_tmp/mutant"; cp "$MALF_BIN" "$MALF_ROOT/malf_recipe_tests.py" "$cs_tmp/mutant/"
+sed -i 's/^    "writer": (),$/    "writer": ("-c", "user.probe:writer=1"),/' "$cs_tmp/mutant/malf_recipe_tests.py"
+check "the writers' conf set is READ from the helper: a mutated set in the helper is the set malf hands its creates" \
+      "-c|user.probe:writer=1" \
+      "$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; _malf_writer_create_args && printf "%s\n" "${_MALF_WRITER_ARGS[@]}"' _ "$cs_tmp/mutant/malf" | paste -sd'|')"
+check "cut-verify and store-create each splice the set read, and malf spells no skip conf of its own" \
+      "1 1 0" \
+      "$(grep -c 'profile_args+=("${_MALF_WRITER_ARGS\[@\]}")' "$MALF_BIN") $(grep -c -- '-s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS\[@\]}" --build=missing' "$MALF_BIN") $(grep -vE '^\s*#' "$MALF_BIN" | grep -cE 'skip_test=|--test-folder')"
+
+cs_home="$cs_tmp/home"; cs_pkg="$cs_tmp/cs_probe"; mkdir -p "$cs_pkg/test_package" "$cs_pkg/tests"
+CONAN_HOME="$cs_home" bash "$MALF_BIN" profiles > /dev/null 2>&1
+printf '[settings]\nos=Linux\narch=x86_64\nbuild_type=Release\n' > "$cs_home/profiles/fixture"
+cat > "$cs_pkg/conanfile.py" <<'PYR'
+import runpy
+
+from conan import ConanFile
+
+
+class CsProbe(ConanFile):
+    name = "cs_probe"
+    version = "0.0.1"
+    exports_sources = "CTestTestfile.cmake", "tests/*"
+
+    def build(self):
+        runpy.run_path(self.conf.get("user.malf:recipe_tests"))["run_tests"](self)
+PYR
+cat > "$cs_pkg/test_package/conanfile.py" <<'PYR'
+import runpy
+
+from conan import ConanFile
+
+
+class CsProbeTestPackage(ConanFile):
+    test_type = "explicit"
+
+    def requirements(self):
+        self.requires(self.tested_reference_str)
+
+    def test(self):
+        runpy.run_path(self.conf.get("user.malf:recipe_tests"))["run_test_package"](self)
+PYR
+cs_true="$(type -P true)"; cs_false="$(type -P false)"
+cs_ctest() {   # <file> <name:command>... — a CTestTestfile registering each test
+    local file="$1" spec name command; shift
+    : > "$file"
+    for spec in "$@"; do
+        IFS=: read -r name command <<< "$spec"
+        printf 'add_test([=[%s]=] "%s")\n' "$name" "$command" >> "$file"
+    done
+}
+cs_create() {   # [conan args...] -> rc=<status>; the log in $cs_tmp/cs.log
+    rm -rf "$cs_home/malf-test-results"
+    CONAN_HOME="$cs_home" conan create "$cs_pkg" -pr:a fixture --build="cs_probe/*" "$@" > "$cs_tmp/cs.log" 2>&1
+    echo "rc=$?"
+}
+cs_results() {   # -> which result files the create left, by name
+    local found
+    found="$(ls "$cs_home/malf-test-results" 2>/dev/null | paste -sd,)"
+    echo "${found:-none}"
+}
+cs_ctest "$cs_pkg/CTestTestfile.cmake" "CsProbe.Passes:$cs_true"
+cs_ctest "$cs_pkg/test_package/CTestTestfile.cmake" "CsProbeTp.Passes:$cs_true" "CsProbeTp.AlsoPasses:$cs_true"
+check "the writer's create (no conf) runs the tests and the test_package, and leaves two result files, the second naming the test_package's tests" \
+      "rc=0 cs_probe.test_package.xml,cs_probe.xml 2" \
+      "$(cs_create) $(cs_results) $(grep -cE 'name="CsProbeTp\.(Passes|AlsoPasses)"' "$cs_home/malf-test-results/cs_probe.test_package.xml" 2>/dev/null)"
+mapfile -t cs_consumer < <(python3 "$MALF_ROOT/malf_recipe_tests.py" create-args consumer)
+cs_ctest "$cs_pkg/CTestTestfile.cmake" "CsProbe.Fails:$cs_false"
+cs_ctest "$cs_pkg/test_package/CTestTestfile.cmake" "CsProbeTp.Fails:$cs_false"
+check "the consumer's create passes a red recipe and a red test_package: no test runs, no test_package is built, no result is written" \
+      "rc=0 1 0 none" \
+      "$(cs_create "${cs_consumer[@]}") $(grep -c 'tools.build:skip_test is set, so no test runs in this build' "$cs_tmp/cs.log") $(grep -c 'cs_probe/0.0.1 (test package)' "$cs_tmp/cs.log") $(cs_results)"
+cs_ctest "$cs_pkg/CTestTestfile.cmake" "CsProbe.Passes:$cs_true"
+check "a red test_package test FAILS the writer's create, after the package's own result was written" \
+      "rc=1 1 cs_probe.test_package.xml,cs_probe.xml" \
+      "$(cs_create) $(grep -cE '[0-9]+ - CsProbeTp.Fails \(Failed\)' "$cs_tmp/cs.log") $(cs_results)"
+check "under tools.build:skip_test alone the test_package is built and its red test does not run, saying so, and nothing is written" \
+      "rc=0 1 none" \
+      "$(cs_create -c tools.build:skip_test=True) $(grep -c 'tools.build:skip_test is set, so no test_package test runs' "$cs_tmp/cs.log") $(cs_results)"
+cs_ctest "$cs_pkg/test_package/CTestTestfile.cmake"
+check "a test_package that registers no test FAILS the writer's create, never passes vacuously" \
+      "rc=1 1" "$(cs_create) $(grep -c 'a test_package must run at least one test' "$cs_tmp/cs.log")"
+cs_ctest "$cs_pkg/test_package/CTestTestfile.cmake" "CsProbeTp.Passes:$cs_true"
+
+# DN-142.D13 (3). The three spellings of a translation unit's own name, each a red in a test source,
+# none in a comment or a library source, and the compile-definition form green.
+cs_tree="$cs_tmp/locators"; mkdir -p "$cs_tree/tests/deep" "$cs_tree/src" "$cs_tree/tests_support" "$cs_tree/test_package" "$cs_tree/build-x/tests"
+printf 'const auto here = std::filesystem::path{__FILE__};\n' > "$cs_tree/tests/a.cpp"
+printf 'int x;\nconst char* here = __builtin_FILE ();\n' > "$cs_tree/tests/deep/b.hpp"
+printf '#include <source_location>\nauto f = std::source_location::current().file_name();\n' > "$cs_tree/tests_support/c.cpp"
+printf 'auto g = __FILE__;\n' > "$cs_tree/test_package/d.cpp"
+printf '// note: located through a compile definition, never __FILE__\n/* nor __builtin_FILE() */\nconst auto dir = std::filesystem::path{CS_PROBE_DATA_DIR};\n' > "$cs_tree/tests/e.cpp"
+printf '#define LOG(x) log((x), __FILE__, __LINE__)\n' > "$cs_tree/src/log.hpp"
+printf 'auto name = entry.file_name();\n' > "$cs_tree/tests/f.cpp"
+printf 'auto h = __FILE__;\n' > "$cs_tree/build-x/tests/g.cpp"
+printf 'auto h = __FILE__;\n' > "$cs_tree/tests/notes.txt"
+check "locators: each spelling in a tests/, tests_support/ or test_package/ C++ source is one finding with its line; a comment, a library source, a file_name() in a file that never names source_location, a build tree and a non-C++ file are none" \
+      "rc=1 $cs_tree/test_package/d.cpp:1: __FILE__|$cs_tree/tests/a.cpp:1: __FILE__|$cs_tree/tests/deep/b.hpp:2: __builtin_FILE()|$cs_tree/tests_support/c.cpp:2: std::source_location::file_name()" \
+      "$(out="$(python3 "$MALF_ROOT/malf_recipe_tests.py" locators "$cs_tree" 2>/dev/null)"; echo "rc=$? $(paste -sd'|' <<< "$out")")"
+check "locators: a tree with none exits 0, a path that is no directory exits 2" \
+      "rc=0 rc=2" "$(python3 "$MALF_ROOT/malf_recipe_tests.py" locators "$cs_tree/src" > /dev/null 2>&1; echo "rc=$?") $(python3 "$MALF_ROOT/malf_recipe_tests.py" locators "$cs_tree/nowhere" > /dev/null 2>&1; echo "rc=$?")"
+printf 'const auto here = std::filesystem::path{__FILE__}.parent_path();\n' > "$cs_pkg/tests/probe.cpp"
+check "a writer's create whose exported test source spells __FILE__ FAILS before any test runs, naming the site" \
+      "rc=1 1 1 none" \
+      "$(cs_create) $(grep -c "tests/probe.cpp:1: __FILE__" "$cs_tmp/cs.log") $(grep -c 'locate a file through the translation unit' "$cs_tmp/cs.log") $(cs_results)"
+check "the consumer's create of the same recipe passes: the check guards a run of the tests, and no test runs there" \
+      "rc=0" "$(cs_create "${cs_consumer[@]}")"
+printf 'const auto here = std::filesystem::path{CS_PROBE_DATA_DIR};\n' > "$cs_pkg/tests/probe.cpp"
+printf 'auto g = __FILE__;\n' > "$cs_pkg/test_package/probe.cpp"
+check "a test_package source spelling __FILE__ FAILS the writer's create, whatever directory it sits in" \
+      "rc=1 1" "$(cs_create) $(grep -c "probe.cpp:1: __FILE__" "$cs_tmp/cs.log")"
+rm -f "$cs_pkg/test_package/probe.cpp"
+check "with every spelling gone the writer's create passes again" "rc=0" "$(cs_create)"
+
+# DN-142.D14: a `stored: false` package is never created — its step is `malf store-build`, a conan
+# build that stores no package — and store-build takes nothing else. Driven over a fixture workspace
+# whose version_line answers the two lists and a conan stub that records every call it gets.
+sf_ws="$cs_tmp/sfws"; mkdir -p "$sf_ws/scripts" "$cs_tmp/sfbin"
+cat > "$sf_ws/scripts/version_line.py" <<'PYV'
+import sys
+print({"released": "rel_pkg\t/nowhere\t", "unstored": "leaf_pkg\t/nowhere/leaf"}[sys.argv[1]])
+PYV
+printf '#!/usr/bin/env bash\necho "$*" >> %s/sf-conan.log\nexit 0\n' "$cs_tmp" > "$cs_tmp/sfbin/conan"; chmod +x "$cs_tmp/sfbin/conan"
+sf_malf() {   # <verb> <package> -> rc=<status> and the refusal's DN-142.D14 line count
+    local out rc
+    out="$(cd "$cs_tmp" && PATH="$cs_tmp/sfbin:$PATH" MALF_WORKSPACE_ROOT="$sf_ws" CONAN_HOME="$cs_tmp/sfhome" bash "$MALF_BIN" "$1" "$2" 2>&1)"; rc=$?
+    printf 'rc=%s %s' "$rc" "$(grep -c 'DN-142.D14' <<< "$out")"
+}
+check "store-create REFUSES a stored: false package, naming store-build, before conan is ever called" \
+      "rc=2 1 none" "$(sf_malf store-create leaf_pkg) $([[ -s "$cs_tmp/sf-conan.log" ]] && echo called || echo none)"
+check "store-build REFUSES a package that is stored, naming store-create, before conan is ever called" \
+      "rc=2 1 none" "$(sf_malf store-build rel_pkg) $([[ -s "$cs_tmp/sf-conan.log" ]] && echo called || echo none)"
+
+# DN-142.D5 (4): a test input outside the recipe folder is exported by the helper, tracked files only.
+ex_repo="$cs_tmp/exrepo"; mkdir -p "$ex_repo/pkg" "$ex_repo/support/sub" "$ex_repo/scripts"
+git -C "$ex_repo" init -q
+printf 'tracked\n' > "$ex_repo/support/sub/kept.hpp"; printf 'stray\n' > "$ex_repo/support/stray.hpp"
+printf '#!/bin/sh\n' > "$ex_repo/scripts/driver.sh"; chmod +x "$ex_repo/scripts/driver.sh"
+printf 'other\n' > "$ex_repo/scripts/other.sh"
+mkdir -p "$ex_repo/empty"; printf 'untracked\n' > "$ex_repo/empty/only.txt"
+cat > "$ex_repo/pkg/conanfile.py" <<'PYR'
+import os
+import runpy
+
+from conan import ConanFile
+
+
+class ExProbe(ConanFile):
+    name = "ex_probe"
+    version = "0.0.1"
+    exports_sources = "conanfile.py"
+
+    def export_sources(self):
+        helper = runpy.run_path(self.conf.get("user.malf:recipe_exports"))
+        helper["narrow_to_tracked"](self)
+        helper["export_tracked"](self, os.environ["EX_SOURCE"], os.environ["EX_DEST"])
+PYR
+git -C "$ex_repo" add pkg/conanfile.py support/sub/kept.hpp scripts/driver.sh scripts/other.sh
+git -C "$ex_repo" -c user.name=t -c user.email=t@invalid commit -qm fixture
+ex_export() {   # <source> <destination> -> rc=<status> then the exported files under the destination
+    local out rc folder
+    out="$(EX_SOURCE="$1" EX_DEST="$2" CONAN_HOME="$cs_home" conan export "$ex_repo/pkg" 2>&1)"; rc=$?
+    folder="$(CONAN_HOME="$cs_home" conan cache path ex_probe/0.0.1 --folder export_source 2>/dev/null)"
+    printf 'rc=%s %s' "$rc" "$( (cd "$folder/$2" 2>/dev/null && find . -type f | sort | paste -sd,) )"
+    [[ $rc -eq 0 ]] || grep -m1 -oE "git tracks no file there|does not exist" <<< "$out" | sed 's/^/ /'
+}
+check "export_tracked copies the TRACKED files under a directory outside the recipe folder, never an untracked one" \
+      "rc=0 ./sub/kept.hpp" "$(ex_export ../support support)"
+check "export_tracked copies one tracked file to the path named, keeping its executable bit, and nothing beside it" \
+      "rc=0 ./scripts/driver.sh x" \
+      "$(out="$(EX_SOURCE=../scripts/driver.sh EX_DEST=scripts/driver.sh CONAN_HOME="$cs_home" conan export "$ex_repo/pkg" 2>&1)"; rc=$?
+         folder="$(CONAN_HOME="$cs_home" conan cache path ex_probe/0.0.1 --folder export_source)"
+         printf 'rc=%s %s' "$rc" "$( (cd "$folder" && find . -type f -path './scripts/*' | sort | paste -sd,) )"
+         [[ -x "$folder/scripts/driver.sh" ]] && printf ' x')"
+check "export_tracked FAILS the export on a source holding no tracked file, and on a source that does not exist" \
+      "rc=1  git tracks no file there|rc=1  does not exist" \
+      "$(ex_export ../empty empty)|$(ex_export ../absent absent)"
+rm -rf "$cs_tmp"
+echo
+
 echo "[7q3] a build SWEEP settles every member in target role and recomposes the repo database"
 
 # note: a member's dependency bootstrap re-configures an earlier member with tests OFF, and a root
