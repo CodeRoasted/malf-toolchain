@@ -113,6 +113,41 @@ VIOLATION_CLASSES = (
 CONTRACT_TAGS = ("pre", "post", "invariant", "assert")
 FORM_CLASSES = TAGS + ("continuation", "law", "tool")
 
+# THE ONE FIX TEXT PER CLASS, beside the classifier that names the class (DN-138.D10, rule 4). Three
+# readers print it: this checker, on the `  fix:` line after each violation; the superproject's
+# `cpp_format` check module, which reads that line and puts it first in a finding's DO; and
+# `./pharos judge-comments`, which imports this table from this file. Until 2026-10-09 the edit-time
+# guard carried a 14-row copy of its own, so an agent could be told one remedy at the edit and
+# another at the commit. The selftest holds the keys equal to `VIOLATION_CLASSES`.
+REMEDY: dict[str, str] = {
+    "bare": "begin the line with exactly one tag (pre: post: invariant: assert: note: refs:), or "
+            "delete the comment — deletion is the default disposition",
+    "tag-mid-line": "a tag sits mid-line, where clang-format's reflow joined two // lines: put each "
+                    "tagged claim on its own line, short enough not to reflow",
+    "slash3": "/// is not a form: use // with a tag, or delete the line",
+    "spacer": "delete the empty // line",
+    "ruler": "delete the ruler line",
+    "trailing": "a comment after code on its line is not a form: move it onto its own line above, "
+                "tagged, or delete it",
+    "trailing-nolint": "move the suppression onto its own line above the code as "
+                       "NOLINTNEXTLINE(<check>), under a // note: giving the why",
+    "nolint-unscoped": "name the check tight against the token: NOLINTNEXTLINE(<check>), "
+                       "NOLINTBEGIN(<check>) or NOLINTEND(<check>)",
+    "suppression-without-why": "put a // note: (or // refs:) line directly above the NOLINTNEXTLINE "
+                               "or NOLINTBEGIN line",
+    "empty-claim": "write the claim after the tag, or delete the line",
+    "refs-prose": "a refs: carries registry addresses only (ADR-n.Dm, DN-n.Dm, MEM:slug, ...), "
+                  "comma-separated, with no prose",
+    "note-run": "a note: is one line: merge the two notes into one, or delete one",
+    "block-prose": "/* */ prose is not a form: use tagged // lines (the one multi-line comment is a "
+                   "framed D-LSRC-n law block)",
+    "law-malformed": "frame a law block as /* plus 20 or more stars, a `D-LSRC-n — title` line, the "
+                     "body, then 20 or more stars plus */, each on its own line",
+}
+# The line printed after every violation: two spaces, then `fix: ` and the class's REMEDY. Readers
+# match it at the start of the line, as they match the violation line above it.
+FIX_PREFIX = "  fix: "
+
 # ── the scanner ───────────────────────────────────────────────────────────────────────────────
 # A `//` inside a string literal is not a comment, and this corpus has them: measured on
 # logcraft/core, 25 ordinary literals and 2 raw strings carry `//` (URLs, YAML in R"()"). So
@@ -332,14 +367,25 @@ def classify(comments: list[Comment]) -> list[Finding]:
 
 
 # ── reading a file, pre- or post-format ───────────────────────────────────────────────────────
-def read_formatted(path: Path, clang_format: str, style: str, mem_limit_kb: int | None) -> tuple[str | None, str]:
+# The text arrives on stdin and `--assume-filename` names where it sits, so clang-format's `-style=file`
+# search runs upward from that path whether or not a file exists there. Measured 2026-10-09 over the
+# 1 151 tracked C++ files of the eight armed repositories, clang-format 21.1.8: the output equals
+# formatting the file by its path, byte for byte, 1 151 of 1 151 (DN-138.D10). That is what lets
+# `./pharos judge-comments` judge a candidate that is not on disk yet through this same code path.
+def read_formatted(data: bytes, assume_filename: str, clang_format: str, style: str,
+                   mem_limit_kb: int | None) -> tuple[str | None, str]:
     def limit() -> None:
         if mem_limit_kb:
             cap = mem_limit_kb * 1024
             resource.setrlimit(resource.RLIMIT_AS, (cap, cap))
 
-    proc = subprocess.run([clang_format, f"-style={style}", str(path)], capture_output=True,
-                          preexec_fn=limit if mem_limit_kb else None)
+    # A formatter that cannot even start under the address-space cap (exec fails before main) is
+    # lost coverage like any other failed run, never a crash of the whole phase.
+    try:
+        proc = subprocess.run([clang_format, f"-style={style}", f"--assume-filename={assume_filename}"],
+                              input=data, capture_output=True, preexec_fn=limit if mem_limit_kb else None)
+    except OSError as error:
+        return None, f"clang-format could not start: {error}"
     if proc.returncode != 0:
         first = proc.stderr.decode("utf-8", "replace").strip().splitlines()
         return None, f"clang-format rc={proc.returncode}: {first[0] if first else 'no stderr'}"
@@ -355,22 +401,34 @@ class FileResult:
     comment_lines: int = 0
 
 
+def judge_text(data: bytes, assume_filename: Path, format_via: str | None, style: str,
+               mem_limit_kb: int | None) -> FileResult:
+    """The grammar's verdict on one text, as if it sat at `assume_filename` — the ONLY judging path:
+    `check_files` loops over it, and `./pharos judge-comments` calls it for a base and a candidate
+    (DN-138.D10, rule 5). With `format_via`, the post-format text is judged; without, the bytes."""
+    result = FileResult(assume_filename)
+    if format_via:
+        text, why = read_formatted(data, str(assume_filename), format_via, style, mem_limit_kb)
+        if text is None:
+            result.not_checked = why
+            return result
+    else:
+        text = data.decode("utf-8", "replace")
+    comments = scan_comments(text)
+    result.comment_lines = sum(len(c.lines) for c in comments)
+    result.findings = classify(comments)
+    return result
+
+
 def check_files(paths: list[Path], format_via: str | None, style: str, mem_limit_kb: int | None) -> list[FileResult]:
     results: list[FileResult] = []
     for path in paths:
-        result = FileResult(path)
-        if format_via:
-            text, why = read_formatted(path, format_via, style, mem_limit_kb)
-            if text is None:
-                result.not_checked = why
-                results.append(result)
-                continue
-        else:
-            text = path.read_bytes().decode("utf-8", "replace")
-        comments = scan_comments(text)
-        result.comment_lines = sum(len(c.lines) for c in comments)
-        result.findings = classify(comments)
-        results.append(result)
+        try:
+            data = path.read_bytes()
+        except OSError as error:
+            results.append(FileResult(path, not_checked=f"unreadable: {error}"))
+            continue
+        results.append(judge_text(data, path, format_via, style, mem_limit_kb))
     return results
 
 
@@ -391,6 +449,7 @@ def summarize(results: list[FileResult], mode: str, out=sys.stdout) -> int:
                 continue
             viol[finding.klass] += 1
             print(f"{result.path}:{finding.line}:{finding.col}: CCC {finding.klass}: {finding.text}", file=out)
+            print(f"{FIX_PREFIX}{REMEDY[finding.klass]}", file=out)
 
     def counts(counter: collections.Counter, keys) -> str:
         return " ".join(f"{k}={counter[k]}" for k in keys if counter[k]) or "none"
@@ -545,7 +604,25 @@ def selftest(format_via: str | None) -> int:
             got = sorted({f.klass for f in res.findings if f.is_violation})
             check(f"violation class fires: {label}", [klass], got)
 
+        check("REMEDY holds one fix text for every violation class and for nothing else",
+              sorted(VIOLATION_CLASSES), sorted(REMEDY))
         import io
+        every = []
+        for label, source in VIOLATION_FIXTURES.items():
+            fixture = repo / "src" / f"fix_{len(label)}_{label.split(' ')[0]}.cpp"
+            fixture.write_text(source)
+            every.append(fixture)
+        buf = io.StringIO()
+        summarize(check_files(every, None, "", None), "check-sweep", out=buf)
+        printed = buf.getvalue().splitlines()
+        unpaired = [(row, printed[index + 1] if index + 1 < len(printed) else "(end of output)")
+                    for index, row in enumerate(printed)
+                    if (hit := re.match(r"^.+?:\d+:\d+: CCC ([\w-]+): ", row))
+                    and (index + 1 >= len(printed)
+                         or printed[index + 1] != f"{FIX_PREFIX}{REMEDY.get(hit.group(1))}")]
+        violation_rows = sum(1 for row in printed if " CCC " in row and "SUMMARY" not in row)
+        check(f"every violation line is followed by its class's fix line ({violation_rows} violation lines)",
+              [], unpaired)
         bare = repo / "src" / "bare.cpp"
         bare.write_text(VIOLATION_FIXTURES["bare"])
         buf = io.StringIO()
@@ -576,6 +653,21 @@ def selftest(format_via: str | None) -> int:
             [res] = check_files([clean], format_via, f"file:{style_file}", None)
             check("clean fixture stays clean THROUGH clang-format (the law frame and every tag survive the reflow)",
                   [], [(f.klass, f.text) for f in res.findings if f.is_violation] if not res.not_checked else [res.not_checked])
+            # A text judged where no file exists: `-style=file` searches upward from the assumed path,
+            # so a narrow style in `narrow/` reflows the clean fixture's contract lines there and not
+            # one directory up, where the root's 100 columns apply.
+            narrow = root / "narrow"
+            narrow.mkdir()
+            (narrow / ".clang-format").write_text("BasedOnStyle: LLVM\nColumnLimit: 40\nReflowComments: true\n")
+            text = b"int open(int p);\n// pre: the path names an existing workspace, validated.\n// post: state unchanged.\nint x;\n"
+            there = judge_text(text, narrow / "absent.cpp", format_via, "file", None)
+            above = judge_text(text, root / "absent.cpp", format_via, "file", None)
+            starved = judge_text(b"int x;\n", root / "absent.cpp", format_via, "LLVM", 1)
+            check("a formatter that cannot start under a 1 KB address-space cap is NOT CHECKED, never a crash",
+                  (True, []), (starved.not_checked.startswith("clang-format could not start"), starved.findings))
+            check("judge_text formats at the ASSUMED path: the nested 40-column style reflows the pre: into the post:, the root's does not",
+                  (True, []), (any(f.klass == "tag-mid-line" for f in there.findings),
+                               [f.klass for f in above.findings if f.is_violation]))
         else:
             print("  SKIP the post-format leg: no --format-via given (pass the clang-format binary to run it)")
 
