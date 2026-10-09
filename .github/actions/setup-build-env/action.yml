@@ -181,6 +181,14 @@ runs:
         # the pinned conan (the from-source gcc legs) must validate on a FRESH hosted cache too.
         cp "$ACTION_PATH/../../../settings_user.yml" "$GITHUB_WORKSPACE/.malf-toolchain/settings_user.yml"
 
+    - name: The cache key, computed ONCE, before the restore
+      id: key
+      # The restored home lands in the checkout and carries conanfile.py files of its own, so
+      # `**/conanfile.py` hashed after the restore names another key than the one restored.
+      if: ${{ inputs.persistent-conan-home != 'true' }}
+      shell: bash
+      run: echo "key=conan-gcc162-${{ runner.os }}-${{ hashFiles('**/conanfile.py', '.malf-toolchain/*') }}" >> "$GITHUB_OUTPUT"
+
     - name: May this job touch an Actions cache? (never on the coderoast-release group)
       id: guard
       # A persistent home is its own cache: restoring over it would re-download what it holds, and
@@ -198,9 +206,16 @@ runs:
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ env.CONAN_HOME }}
-        key: conan-gcc162-${{ runner.os }}-${{ hashFiles('**/conanfile.py', '.malf-toolchain/*') }}
+        key: ${{ steps.key.outputs.key }}
         restore-keys: |
           conan-gcc162-${{ runner.os }}-
+
+    - name: Drop every first-party package the restore brought (ROADMAP N367)
+      if: ${{ steps.restore.outputs.cache-matched-key != '' }}
+      shell: bash
+      env:
+        HOME_DIR: ${{ env.CONAN_HOME }}
+      run: bash "$GITHUB_ACTION_PATH/drop-first-party.sh" "$HOME_DIR"
 
     - name: Record the restore for conan-cache-save
       # RESTORE-ONLY: the job saves with `conan-cache-save` as its LAST step, which drops every
@@ -209,7 +224,7 @@ runs:
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
-        CACHE_KEY: conan-gcc162-${{ runner.os }}-${{ hashFiles('**/conanfile.py', '.malf-toolchain/*') }}
+        CACHE_KEY: ${{ steps.key.outputs.key }}
         CACHE_HIT: ${{ steps.restore.outputs.cache-hit }}
         ALLOWED: ${{ steps.guard.outputs.allowed }}
       run: bash "$ACTION_PATH/conan-cache-state.sh" write "$CONAN_HOME" "$CACHE_KEY" "${CACHE_HIT:-false}" "$ALLOWED"

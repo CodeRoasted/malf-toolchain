@@ -3530,7 +3530,7 @@ ch_out="$(ch_run true self-hosted '../escape')"; ch_rc=$?
 check "a runner name that is not one path segment refuses rather than escaping the home's base" \
       "rc=1" "rc=$ch_rc"
 check "setup-build-env derives CONAN_HOME through this script, and asks for no Actions cache for a persistent home" \
-      "1 2" "$(grep -c 'bash "$ACTION_PATH/conan-home.sh"' "$MALF_ROOT/.github/actions/setup-build-env/action.yml") $(grep -c "if: \${{ inputs.persistent-conan-home != 'true' }}" "$MALF_ROOT/.github/actions/setup-build-env/action.yml")"
+      "1 3" "$(grep -c 'bash "$ACTION_PATH/conan-home.sh"' "$MALF_ROOT/.github/actions/setup-build-env/action.yml") $(grep -c "if: \${{ inputs.persistent-conan-home != 'true' }}" "$MALF_ROOT/.github/actions/setup-build-env/action.yml")"
 rm -rf "$ch_tmp"
 echo
 
@@ -3591,6 +3591,16 @@ check "no malf action or workflow uses the combined actions/cache (a post-step s
       "" "$(grep -rln 'uses: actions/cache@' "$MALF_ROOT/.github" | tr '\n' ' ')"
 check "every restore records itself for conan-cache-save" \
       "3" "$(grep -rl 'conan-cache-state.sh" write' "$MALF_ROOT/.github/actions" | wc -l | tr -d ' ')"
+# Both ends drop the first-party packages through one script: what it removes, extras included.
+mkdir -p "$ac_tmp/conanbin"
+printf '#!/usr/bin/env bash\necho "$CONAN_HOME $*" >> "%s/conan.log"\n' "$ac_tmp" > "$ac_tmp/conanbin/conan"
+chmod +x "$ac_tmp/conanbin/conan"
+PATH="$ac_tmp/conanbin:$PATH" bash "$MALF_ROOT/.github/actions/setup-build-env/drop-first-party.sh" /h $'extra_*\n' > /dev/null 2>&1
+check "drop-first-party.sh removes insight_*, coderoast_*, logcraft_* and the extras, in the home it is given" \
+      "/h remove insight_* --confirm|/h remove coderoast_* --confirm|/h remove logcraft_* --confirm|/h remove extra_* --confirm|/h list * --format=compact|" \
+      "$(tr '\n' '|' < "$ac_tmp/conan.log")"
+check "every restore drops the first-party packages it brought, and the save drops them too" \
+      "4" "$(grep -rl --include=action.yml 'drop-first-party.sh' "$MALF_ROOT/.github/actions" | wc -l | tr -d ' ')"
 rm -rf "$ac_tmp"
 echo
 

@@ -1,6 +1,7 @@
 name: 'Save a conan cache, third-party only'
 description: |
-  The save half of the keyed conan cache `setup-proof-linux` and `setup-proof-msvc` restore. Run it
+  The save half of the keyed conan cache `setup-build-env`, `setup-proof-linux` and `setup-proof-msvc`
+  restore. Run it
   as the job's LAST step: it removes every first-party package (`insight_*`, `coderoast_*`,
   `logcraft_*` and the caller's extra patterns) from CONAN_HOME, then saves the home under the key.
 
@@ -30,34 +31,13 @@ runs:
       shell: bash
       run: bash "$GITHUB_ACTION_PATH/../setup-build-env/conan-cache-state.sh" read
 
-    - name: Drop every first-party package from the cache (Linux)
-      if: steps.state.outputs.save == 'true' && runner.os != 'Windows'
+    - name: Drop every first-party package from the cache
+      if: steps.state.outputs.save == 'true'
       shell: bash
       env:
-        CONAN_HOME: ${{ steps.state.outputs.home }}
+        HOME_DIR: ${{ steps.state.outputs.home }}
         DROP: ${{ inputs.drop }}
-      run: |
-        set -euo pipefail
-        patterns=("insight_*" "coderoast_*" "logcraft_*")
-        while IFS= read -r pattern; do
-          [ -n "$pattern" ] && patterns+=("$pattern")
-        done <<< "$DROP"
-        for pattern in "${patterns[@]}"; do
-          conan remove "$pattern" --confirm
-        done
-        conan list "*" --format=compact
-
-    - name: Drop every first-party package from the cache (Windows)
-      if: steps.state.outputs.save == 'true' && runner.os == 'Windows'
-      shell: pwsh
-      env:
-        CONAN_HOME: ${{ steps.state.outputs.home }}
-        DROP: ${{ inputs.drop }}
-      run: |
-        $ErrorActionPreference = 'Stop'; $PSNativeCommandUseErrorActionPreference = $true
-        $patterns = @('insight_*', 'coderoast_*', 'logcraft_*') + @($env:DROP -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-        foreach ($pattern in $patterns) { conan remove "$pattern" --confirm }
-        conan list "*" --format=compact
+      run: bash "$GITHUB_ACTION_PATH/../setup-build-env/drop-first-party.sh" "$HOME_DIR" "$DROP"
 
     - name: Save the cache
       if: steps.state.outputs.save == 'true'

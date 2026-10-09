@@ -105,6 +105,13 @@ runs:
         restore-keys: |
           ${{ inputs.cache-restore-key }}
 
+    - name: Drop every first-party package the restore brought (ROADMAP N367)
+      if: ${{ steps.restore.outputs.cache-matched-key != '' }}
+      shell: bash
+      env:
+        HOME_DIR: ${{ inputs.conan-home }}
+      run: bash "$GITHUB_ACTION_PATH/../setup-build-env/drop-first-party.sh" "$HOME_DIR"
+
     - name: Record the restore for conan-cache-save
       shell: bash
       env:
