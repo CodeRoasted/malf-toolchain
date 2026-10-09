@@ -16,6 +16,12 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
                                  <malf dir> <toolchain.json>
         the record of one `conan create` step, from the graph its `--format=json` printed: stored
         when the key is new (exit 0), compared when it is not (exit 0 on a match, 1 on a mismatch)
+    artefact_store.py build-id <store> <build-id>
+        every package record whose `build_ids` holds that GNU build-id (40 hex), one line each:
+        `<key> <package alias> <path>`; exit 0 when one or more answer, 1 when none (DN-142.D15)
+    artefact_store.py build-ids <folder>
+        the `build_ids` index of a file tree, as JSON, exit 1 naming each linked ELF file that
+        carries no build-id note
     artefact_store.py toolchain <compiler root> <out.json>
         the measured toolchain member, written once per run (hashing the compiler tree is the
         expensive part of a key)
@@ -25,6 +31,14 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
         (DN-142.D7): stored when the key is new, compared when it is not; exit 0 when every
         verdict is a pass and agrees with its record, 1 on a fail or a mismatch, 2 when the
         predicate ran but judged nothing
+
+A package record's output carries `build_ids` (DN-142.D15): for every linked ELF file of the
+package tree (an executable or a shared object) its GNU build-id, the NT_GNU_BUILD_ID note the
+linker writes over the file's own bytes. It is READ FROM THE STORED TRANSPORT archive, never taken
+from the create's folder, so it indexes exactly the bytes the store keeps; it is derived from bytes
+the content digest covers, so it is an index, never compared and never a key member. A first-party
+package one of whose linked ELF files carries no note is refused before anything is stored: the
+index is total over what ships, or a build answering with an id would find no record.
 
 MALF_STORE_DEFINITION, when set, is `<name>=<directory> ...`: each named directory's tracked tree
 joins the key's `definition` beside malf's, for a step another tool drives (Pharos at step 0).
@@ -42,8 +56,10 @@ import os
 import re
 import socket
 import stat
+import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -224,6 +240,100 @@ def _export_digest(home: Path, recipe: str) -> str:
     return key_of(parts)
 
 
+ELF_MAGIC = b"\x7fELF"
+ELF_LINKED_TYPES = {2, 3}
+PT_NOTE = 4
+NT_GNU_BUILD_ID = 3
+GNU_NOTE_NAME = b"GNU\x00"
+BUILD_ID_BYTES = 20
+
+
+class NoBuildId(ValueError):
+    """A linked ELF file whose notes hold no GNU build-id."""
+
+
+def elf_build_id(data: bytes) -> str | None:
+    """The GNU build-id of an ELF file's bytes, lowercase hex; None for a file that is not a LINKED
+    ELF file (not ELF, or a relocatable object or core).
+
+    post: a linked ELF file with no NT_GNU_BUILD_ID in any PT_NOTE segment raises NoBuildId
+    note: the notes are read through the program headers, the loader's view, which `strip` keeps
+    """
+    if not data.startswith(ELF_MAGIC) or len(data) < 64:
+        return None
+    wide, little = data[4] == 2, data[5] == 1
+    order = "<" if little else ">"
+    e_type = struct.unpack_from(order + "H", data, 16)[0]
+    if e_type not in ELF_LINKED_TYPES:
+        return None
+    if wide:
+        phoff = struct.unpack_from(order + "Q", data, 32)[0]
+        phentsize, phnum = struct.unpack_from(order + "HH", data, 54)
+    else:
+        phoff = struct.unpack_from(order + "I", data, 28)[0]
+        phentsize, phnum = struct.unpack_from(order + "HH", data, 42)
+    for index in range(phnum):
+        base = phoff + index * phentsize
+        p_type = struct.unpack_from(order + "I", data, base)[0]
+        if p_type != PT_NOTE:
+            continue
+        if wide:
+            offset, filesz = struct.unpack_from(order + "Q", data, base + 8)[0], \
+                struct.unpack_from(order + "Q", data, base + 32)[0]
+        else:
+            offset, filesz = struct.unpack_from(order + "I", data, base + 4)[0], \
+                struct.unpack_from(order + "I", data, base + 16)[0]
+        cursor, end = offset, offset + filesz
+        while cursor + 12 <= end:
+            namesz, descsz, n_type = struct.unpack_from(order + "III", data, cursor)
+            name_at = cursor + 12
+            desc_at = name_at + ((namesz + 3) & ~3)
+            if n_type == NT_GNU_BUILD_ID and data[name_at:name_at + namesz] == GNU_NOTE_NAME:
+                return data[desc_at:desc_at + descsz].hex()
+            cursor = desc_at + ((descsz + 3) & ~3)
+    raise NoBuildId("no NT_GNU_BUILD_ID note in any PT_NOTE segment")
+
+
+def build_ids_of(files: dict[str, bytes]) -> tuple[dict[str, str], list[str]]:
+    """(`{path: build-id}` over the linked ELF files among `files`, the paths of those lacking one)."""
+    ids, missing = {}, []
+    for path in sorted(files):
+        try:
+            found = elf_build_id(files[path])
+        except NoBuildId:
+            missing.append(path)
+            continue
+        if found is not None:
+            ids[path] = found
+    return ids, missing
+
+
+def tree_files(folder: Path) -> dict[str, bytes]:
+    """Every regular file under `folder`, by its path relative to it."""
+    return {path.relative_to(folder).as_posix(): path.read_bytes()
+            for path in sorted(folder.rglob("*")) if path.is_file() and not path.is_symlink()}
+
+
+def transport_files(archive: Path) -> dict[str, bytes]:
+    """Every regular file of a package's transport archive, by its path inside the package folder.
+
+    note: `conan cache save` lays a binary out as `b/<storage folder>/p/...` beside its
+    `b/<storage folder>/d/metadata/`; the three leading components are dropped, so the paths are
+    the package tree's
+    """
+    files: dict[str, bytes] = {}
+    with tarfile.open(archive) as bundle:
+        for member in bundle.getmembers():
+            parts = member.name.split("/")
+            if not member.isfile() or len(parts) < 4 or parts[0] != "b" or parts[2] != "p":
+                continue
+            relative = "/".join(parts[3:])
+            extracted = bundle.extractfile(member)
+            if relative and extracted is not None:
+                files[relative] = extracted.read()
+    return files
+
+
 def graph_nodes(graph_json: Path) -> list[dict]:
     """The nodes of a `conan create --format=json` graph, the consumer root (node 0) excluded."""
     nodes = json.loads(graph_json.read_text())["graph"]["nodes"]
@@ -266,9 +376,37 @@ def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile:
     }
     binary, folder = target
     content, entries = tree_digest(folder)
+    _ids, missing = build_ids_of(tree_files(folder))
+    if missing:
+        print(f"artefact_store: REFUSED {package}: {len(missing)} linked ELF file(s) carry no GNU "
+              f"build-id, so the store's index would not be total over what ships (DN-142.D15): "
+              + ", ".join(missing), file=sys.stderr)
+        return 1
     return LocalStore(store).commit(document, {"package": {"alias": binary, "content": content,
                                                            "entries": entries}},
-                                    {"package": ("transport", lambda: _transport(home, binary))})
+                                    {"package": ("transport", lambda: _transport(home, binary))},
+                                    derived={"package": _transport_build_ids})
+
+
+def _transport_build_ids(transport: Path) -> dict[str, dict]:
+    """The `build_ids` field of a package output, read from its stored transport archive."""
+    ids, missing = build_ids_of(transport_files(transport))
+    if missing:
+        sys.exit(f"artefact_store: the transport {transport} holds linked ELF file(s) with no "
+                 f"build-id that the package folder did not: {', '.join(missing)}")
+    return {"build_ids": ids}
+
+
+def lookup_build_id(store: Path, build_id: str) -> list[tuple[str, str, str]]:
+    """Every (record key, package alias, path) whose `build_ids` holds `build_id`, sorted."""
+    found = []
+    for record in sorted((store / "records").glob("*.json")):
+        body = json.loads(record.read_text())
+        for output in body["outputs"].values():
+            for path, value in (output.get("build_ids") or {}).items():
+                if value == build_id:
+                    found.append((body["key"], output.get("alias", ""), path))
+    return found
 
 
 def _transport(home: Path, binary: str) -> Path:
@@ -410,11 +548,14 @@ class LocalStore:
         path = self.root / "records" / f"{key}.json"
         return json.loads(path.read_text()) if path.exists() else None
 
-    def commit(self, document: dict, outputs: dict, objects: dict) -> int:
+    def commit(self, document: dict, outputs: dict, objects: dict,
+               derived: dict | None = None) -> int:
         """Store `outputs` under the document's key, or compare them with the stored ones.
 
         `objects` maps an output's name to `(field, produce)`: on a new key `produce()` returns the
         file stored as that output's object, its digest kept under `field` and never compared.
+        `derived` maps an output's name to a function of that STORED object returning fields the
+        record keeps beside it, an index read from the stored bytes and never compared.
         post: exit 0 when the key was new (stored) or every output's compared axes equal the
         record's; 1 when one differs, a mismatch event naming both digests written beside."""
         key = key_of(document)
@@ -423,6 +564,8 @@ class LocalStore:
         if stored is None:
             for name, (field, produce) in objects.items():
                 outputs[name][field] = self.put_object(produce())
+                if derived and name in derived:
+                    outputs[name].update(derived[name](self.root / "objects" / outputs[name][field]))
             body = {"key": key, "inputs": document, "outputs": outputs,
                     "produced_by": {"seat": socket.gethostname(),
                                     "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}}
@@ -432,7 +575,7 @@ class LocalStore:
                     print(f"artefact_store: STORED {subject} {name} key {key} {_described(output)}")
                 return 0
             stored = self.record(key)
-        uncompared = {"entries"} | {field for field, _ in objects.values()}
+        uncompared = {"entries", "build_ids"} | {field for field, _ in objects.values()}
         differ = []
         for name, output in outputs.items():
             before = stored["outputs"].get(name)
@@ -486,6 +629,17 @@ def main(argv: list[str]) -> int:
     if len(argv) == 2 and argv[0] == "tree":
         print(tree_digest(Path(argv[1]))[0])
         return 0
+    if len(argv) == 3 and argv[0] == "build-id":
+        found = lookup_build_id(Path(argv[1]), argv[2].lower())
+        for key, alias, path in found:
+            print(f"{key} {alias} {path}")
+        return 0 if found else 1
+    if len(argv) == 2 and argv[0] == "build-ids":
+        ids, missing = build_ids_of(tree_files(Path(argv[1])))
+        print(json.dumps(ids, sort_keys=True, indent=1))
+        for path in missing:
+            print(f"artefact_store: no GNU build-id: {path}", file=sys.stderr)
+        return 1 if missing else 0
     if len(argv) == 3 and argv[0] == "toolchain":
         Path(argv[2]).write_text(json.dumps(measure_toolchain(Path(argv[1])), sort_keys=True))
         return 0

@@ -3025,6 +3025,115 @@ check "export_tracked FAILS the export on a source holding no tracked file, and 
 rm -rf "$cs_tmp"
 echo
 
+echo "[9c] every linked ELF file a first-party package installs names itself by a GNU build-id, and the store indexes it from the stored bytes (DN-142.D15)"
+
+# A binary carries no git state, path or time: it names itself by the NT_GNU_BUILD_ID note the
+# linker writes over its own bytes (malf-path-map.cmake links every executable and shared object
+# with --build-id=sha1), and the store's record indexes every linked ELF file of a package by it,
+# READ FROM THE STORED TRANSPORT. Driven with no compiler: the fixture package installs a copy of
+# the host's `true` (which carries a note) or the same copy with its note's type zeroed.
+bi_tmp="$(realpath "$(mktemp -d)")"
+check "malf's toolchain fragment links every executable, shared object and module with --build-id=sha1, as linker flags" \
+      "EXE SHARED MODULE|-Wl,--build-id=sha1" \
+      "$(sed -n 's/^foreach(kind IN ITEMS \(.*\))$/\1/p' "$MALF_ROOT/cmake/malf-path-map.cmake")|$(grep -o -- '-Wl,--build-id=sha1' "$MALF_ROOT/cmake/malf-path-map.cmake" | head -1)"
+bi_true="$(type -P true)"
+bi_py() { python3 -c "import sys; sys.path.insert(0, '$MALF_ROOT'); import artefact_store as a; $1"; }
+bi_expected="$(readelf -n "$bi_true" | sed -n 's/^ *Build ID: //p')"
+check "premise — the host's true carries a build-id readelf reads, 40 hex" \
+      "40" "$(printf '%s' "$bi_expected" | wc -c | tr -d ' ')"
+check "the reader parses the note through the program headers and agrees with readelf (a second producer)" \
+      "$bi_expected" "$(bi_py "print(a.elf_build_id(open('$bi_true', 'rb').read()))")"
+python3 - "$bi_true" "$bi_tmp/true-no-note" <<'PYZ'
+import struct, sys
+data = bytearray(open(sys.argv[1], "rb").read())
+order = "<" if data[5] == 1 else ">"
+phoff = struct.unpack_from(order + "Q", data, 32)[0]
+phentsize, phnum = struct.unpack_from(order + "HH", data, 54)
+for index in range(phnum):
+    base = phoff + index * phentsize
+    if struct.unpack_from(order + "I", data, base)[0] != 4:
+        continue
+    offset, size = struct.unpack_from(order + "Q", data, base + 8)[0], struct.unpack_from(order + "Q", data, base + 32)[0]
+    cursor = offset
+    while cursor + 12 <= offset + size:
+        namesz, descsz, kind = struct.unpack_from(order + "III", data, cursor)
+        if kind == 3:
+            struct.pack_into(order + "I", data, cursor + 8, 0)
+        cursor += 12 + ((namesz + 3) & ~3) + ((descsz + 3) & ~3)
+open(sys.argv[2], "wb").write(data)
+PYZ
+chmod +x "$bi_tmp/true-no-note"
+check "a linked ELF file whose note is gone is NoBuildId; a non-ELF file is not linked ELF at all" \
+      "NoBuildId None" \
+      "$(bi_py "
+try:
+    a.elf_build_id(open('$bi_tmp/true-no-note', 'rb').read()); print('found', end=' ')
+except a.NoBuildId:
+    print('NoBuildId', end=' ')
+print(a.elf_build_id(b'#!/bin/sh\n'))")"
+
+# A fixture first-party package (prefix bi_) installing one of the two copies, created in a home
+# malf's conf sync staged, then its record written by conan-step into a fixture store.
+bi_home="$bi_tmp/home"; bi_pkg="$bi_tmp/bi_tool"; mkdir -p "$bi_pkg"
+CONAN_HOME="$bi_home" bash "$MALF_BIN" profiles > /dev/null 2>&1
+printf '[settings]\nos=Linux\narch=x86_64\nbuild_type=Release\n' > "$bi_home/profiles/fixture"
+cat > "$bi_pkg/conanfile.py" <<'PYR'
+import os
+import shutil
+
+from conan import ConanFile
+
+
+class BiTool(ConanFile):
+    name = "bi_tool"
+    version = "0.0.1"
+    exports_sources = "tool", "notes.txt"
+
+    def package(self):
+        os.makedirs(os.path.join(self.package_folder, "bin"))
+        shutil.copy2(os.path.join(self.source_folder, "tool"), os.path.join(self.package_folder, "bin", "tool"))
+        shutil.copy2(os.path.join(self.source_folder, "notes.txt"), self.package_folder)
+PYR
+printf 'not an ELF file\n' > "$bi_pkg/notes.txt"
+printf '{}' > "$bi_tmp/toolchain.json"
+bi_step() {   # <tool file> <store> [profile] -> rc=<status>; the step's output in $bi_tmp/step.log
+    cp "$1" "$bi_pkg/tool"
+    CONAN_HOME="$bi_home" conan create "$bi_pkg" -pr:a fixture --build="bi_tool/*" --format=json > "$bi_tmp/graph.json" 2> "$bi_tmp/create.log" || { echo "rc=create-failed"; return; }
+    CONAN_HOME="$bi_home" python3 "$MALF_ROOT/artefact_store.py" conan-step "$2" "$bi_home" "$bi_tmp/graph.json" bi_tool "${3:-fixture}" "$MALF_ROOT" "$bi_tmp/toolchain.json" "bi_" > "$bi_tmp/step.log" 2>&1
+    echo "rc=$?"
+}
+check "a package whose linked ELF file carries no build-id is REFUSED by the step, naming the file, and nothing is stored" \
+      "rc=1 1 0" "$(bi_step "$bi_tmp/true-no-note" "$bi_tmp/store") $(grep -c 'REFUSED bi_tool: 1 linked ELF file(s) carry no GNU build-id.*bin/tool' "$bi_tmp/step.log") $(ls "$bi_tmp/store/records" 2>/dev/null | wc -l | tr -d ' ')"
+check "a package whose linked ELF files all carry one is STORED, its record's build_ids naming each, and only those" \
+      "rc=0 {\"bin/tool\": \"$bi_expected\"}" \
+      "$(bi_step "$bi_true" "$bi_tmp/store") $(python3 -c "import json, glob; print(json.dumps(json.load(open(glob.glob('$bi_tmp/store/records/*.json')[0]))['outputs']['package']['build_ids']))")"
+check "the record's build_ids are the stored transport's, read from the object the record names" \
+      "same" \
+      "$(bi_py "
+import json, glob
+from pathlib import Path
+body = json.load(open(glob.glob('$bi_tmp/store/records/*.json')[0]))['outputs']['package']
+ids, missing = a.build_ids_of(a.transport_files(Path('$bi_tmp/store/objects') / body['transport']))
+print('same' if ids == body['build_ids'] and not missing else (ids, body['build_ids']))")"
+check "a build_ids value handed in with the outputs is never kept: the record holds what the stored object says" \
+      "derived" \
+      "$(bi_py "
+import json
+from pathlib import Path
+store = a.LocalStore(Path('$bi_tmp/store2'))
+probe = Path('$bi_tmp/probe.bin'); probe.write_bytes(b'probe')
+store.commit({'step': {'package': 'bi_probe'}, 'n': 1},
+             {'package': {'alias': 'x', 'content': 'c', 'entries': [], 'build_ids': {'bin/forged': 'f' * 40}}},
+             {'package': ('transport', lambda: probe)}, derived={'package': lambda obj: {'build_ids': {'from': obj.name}}})
+body = json.load(open(next(Path('$bi_tmp/store2/records').glob('*.json'))))
+print('derived' if body['outputs']['package']['build_ids'] == {'from': body['outputs']['package']['transport']} else body)" 2>&1 | tail -1)"
+cp "$bi_home/profiles/fixture" "$bi_home/profiles/fixture-b"
+check "two records holding the same bytes under two keys both answer the build-id lookup, and an unknown id answers nothing (exit 1)" \
+      "rc=0 2 rc=1" \
+      "$(bi_step "$bi_true" "$bi_tmp/store" fixture-b | tr -d '\n') $(python3 "$MALF_ROOT/artefact_store.py" build-id "$bi_tmp/store" "$bi_expected" | grep -c ' bi_tool/0.0.1.* bin/tool$') $(python3 "$MALF_ROOT/artefact_store.py" build-id "$bi_tmp/store" "$(printf '0%.0s' {1..40})" > /dev/null; echo "rc=$?")"
+rm -rf "$bi_tmp"
+echo
+
 echo "[7q3] a build SWEEP settles every member in target role and recomposes the repo database"
 
 # note: a member's dependency bootstrap re-configures an earlier member with tests OFF, and a root
