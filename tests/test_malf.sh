@@ -3833,6 +3833,100 @@ check "no line of malf still claims a missing third-party binary is built in eac
       "0" "$(grep -c 'built in each home alike' "$MALF_BIN")"
 echo
 
+echo "[7q7g] a step's key is its inputs' canonical bytes, an output's identity its decoded tree, and an equal key with differing bytes fails (DN-142.D2, DN-142.D3; ROADMAP N358)"
+# The key: two spellings of one document give one key, and a value that is not an input (a float,
+# an absolute path) is refused rather than keyed. The identity: the same tree at two absolute paths
+# gives one digest; the root conanmanifest.txt is the ONE excluded file, and every other byte, mode
+# or link target moves it. The store: a new key is stored, an equal output matches, a differing one
+# at the same key fails and names the file, and the record is never rewritten.
+as_tmp="$(realpath "$(mktemp -d)")"
+as_py() { python3 -c "import sys; sys.path.insert(0, '$MALF_ROOT'); import artefact_store as s; $1" 2>&1 || true; }
+check "two spellings of one document give the same key bytes, and the key is SHA-256 of the canonical form" \
+      "same canonical" \
+      "$(as_py 'import hashlib, json; a = s.key_of(json.loads("{\"b\": 1, \"a\": [true, null, \"x\"]}")); b = s.key_of({"a": [True, None, "x"], "b": 1}); print("same" if a == b else f"{a} != {b}", "canonical" if a == hashlib.sha256(b"{\"a\":[true,null,\"x\"],\"b\":1}").hexdigest() else "not-canonical")')"
+check "a float is refused, never keyed" \
+      "refused" "$(as_py 's.key_of({"step": {"width": 1.5}})' | grep -q 'a float is not a key input' && echo refused)"
+check "an absolute path is refused, never keyed, wherever it sits" \
+      "refused refused" "$(as_py 's.key_of({"sources": ["/home/a/x"]})' | grep -q 'an absolute path is never a key input' && printf refused) $(as_py 's.key_of({"profile": "C:/x"})' | grep -q 'an absolute path is never a key input' && printf refused)"
+mkdir -p "$as_tmp/one/lib/sub" "$as_tmp/a-much-longer-second-path/lib/sub"
+for as_dir in "$as_tmp/one" "$as_tmp/a-much-longer-second-path"; do
+    printf 'manifest 1\n' > "$as_dir/conanmanifest.txt"; printf 'info\n' > "$as_dir/conaninfo.txt"
+    printf 'lib\n' > "$as_dir/lib/libx.a"; printf 'nested\n' > "$as_dir/lib/sub/conanmanifest.txt"
+    ln -s libx.a "$as_dir/lib/libx.so"
+done
+as_digest() { python3 "$MALF_ROOT/artefact_store.py" tree "$1"; }
+as_base="$(as_digest "$as_tmp/one")"
+check "one tree at two absolute paths has one digest" "$as_base" "$(as_digest "$as_tmp/a-much-longer-second-path")"
+as_moves() {   # <label> <mutation> — the digest after the mutation, compared with the base; then undone
+    local after; eval "$2"; after="$(as_digest "$as_tmp/one")"
+    rm -rf "$as_tmp/one"; cp -a "$as_tmp/a-much-longer-second-path" "$as_tmp/one"
+    [[ "$after" == "$as_base" ]] && echo "unmoved" || echo "moved"
+}
+check "the root conanmanifest.txt is excluded: rewriting it leaves the digest" \
+      "unmoved" "$(as_moves root-manifest 'printf "manifest 2\n" > "$as_tmp/one/conanmanifest.txt"')"
+check "an empty directory is not part of the tree" \
+      "unmoved" "$(as_moves empty-dir 'mkdir "$as_tmp/one/empty"')"
+check "every other byte moves it: conaninfo.txt, a library, a NESTED conanmanifest.txt" \
+      "moved moved moved" \
+      "$(as_moves info 'printf "infO\n" > "$as_tmp/one/conaninfo.txt"') $(as_moves lib 'printf "liB\n" > "$as_tmp/one/lib/libx.a"') $(as_moves nested 'printf "nesteD\n" > "$as_tmp/one/lib/sub/conanmanifest.txt"')"
+check "a mode, a link target, a rename and a new file move it" \
+      "moved moved moved moved" \
+      "$(as_moves mode 'chmod +x "$as_tmp/one/lib/libx.a"') $(as_moves link 'ln -sfn conaninfo.txt "$as_tmp/one/lib/libx.so"') $(as_moves rename 'mv "$as_tmp/one/lib/libx.a" "$as_tmp/one/lib/liby.a"') $(as_moves new 'printf "x" > "$as_tmp/one/new"')"
+
+# The store over two real creates: a third-party package and a first-party one requiring it,
+# created in two conan homes at two absolute paths — one key, a stored record and a match; a
+# changed export moves the key; a tampered output at an equal key is a mismatch naming the file.
+mkdir -p "$as_tmp/tpdep" "$as_tmp/ex_top/include"
+printf 'from conan import ConanFile\n\n\nclass TpDep(ConanFile):\n    name = "tpdep"\n    version = "0.1"\n    package_type = "header-library"\n' > "$as_tmp/tpdep/conanfile.py"
+cat > "$as_tmp/ex_top/conanfile.py" <<'PYR'
+from conan import ConanFile
+from conan.tools.files import copy
+
+
+class ExTop(ConanFile):
+    name = "ex_top"
+    version = "0.1"
+    package_type = "header-library"
+    requires = "tpdep/0.1"
+    exports_sources = "include/*"
+
+    def package(self):
+        copy(self, "*.h", self.source_folder, self.package_folder)
+PYR
+printf '#pragma once\n' > "$as_tmp/ex_top/include/top.h"
+printf '{"compiler": "fixture"}' > "$as_tmp/toolchain.json"
+as_create() {   # <home name> — the graph of a create of ex_top in that home
+    local home="$as_tmp/$1"
+    CONAN_HOME="$home" bash "$MALF_BIN" profiles > /dev/null 2>&1
+    printf '[settings]\nos=Linux\narch=x86_64\nbuild_type=Release\n' > "$home/profiles/fixture"
+    CONAN_HOME="$home" conan create "$as_tmp/tpdep" -pr:a fixture > "$as_tmp/$1.tp.log" 2>&1
+    CONAN_HOME="$home" conan create "$as_tmp/ex_top" -pr:a fixture --format=json > "$as_tmp/$1.graph.json" 2> "$as_tmp/$1.log"
+}
+as_step() {   # <home name> — the step's verdict line and exit, the key and digests elided
+    local out rc
+    out="$(python3 "$MALF_ROOT/artefact_store.py" conan-step "$as_tmp/store" "$as_tmp/$1" "$as_tmp/$1.graph.json" ex_top fixture "$MALF_ROOT" "$as_tmp/toolchain.json" "ex_" 2>&1)"; rc=$?
+    printf 'rc=%s %s' "$rc" "$(grep -oE 'artefact_store: [A-Z]+ ex_top package|[0-9]+ file\(s\): .*' <<< "$out" | sed 's/artefact_store: //' | tr '\n' ' ')"
+}
+as_key() { python3 -c 'import json, sys; print(*sorted(r.removesuffix(".json") for r in sys.argv[1:]))' $(ls "$as_tmp/store/records"); }
+as_create home-a; as_create home-b-at-a-longer-path
+check "the first create of a key is STORED" "rc=0 STORED ex_top package " "$(as_step home-a)"
+as_first="$(as_key)"
+check "the same step in a second home at another path has the same key, and its output MATCHES" \
+      "rc=0 MATCH ex_top package |$as_first" "$(as_step home-b-at-a-longer-path)|$(as_key)"
+as_folder="$(CONAN_HOME="$as_tmp/home-b-at-a-longer-path" conan cache path "$(python3 -c 'import json, sys; n = [v for k, v in json.load(open(sys.argv[1]))["graph"]["nodes"].items() if v["name"] == "ex_top"][0]; print(n["ref"].split("#")[0] + "#" + n["rrev"] + ":" + n["package_id"] + "#" + n["prev"])' "$as_tmp/home-b-at-a-longer-path.graph.json")")"
+as_record="$(sha256sum "$as_tmp/store/records/$as_first.json")"
+printf '#pragma once // tampered\n' > "$as_folder/include/top.h"
+check "a differing output at an equal key is a MISMATCH, exit 1, naming the file" \
+      "rc=1 MISMATCH ex_top package 1 file(s): include/top.h " "$(as_step home-b-at-a-longer-path)"
+check "the mismatch is an event beside the record, and the record is not rewritten" \
+      "1 $as_record" "$(ls "$as_tmp/store/mismatches" | wc -l | tr -d ' ') $(sha256sum "$as_tmp/store/records/$as_first.json")"
+printf '#pragma once\n#define TOP 1\n' > "$as_tmp/ex_top/include/top.h"
+as_create home-a
+check "a changed exported source moves the key: a second record is STORED" \
+      "rc=0 STORED ex_top package |2" "$(as_step home-a)|$(ls "$as_tmp/store/records" | wc -l | tr -d ' ')"
+rm -rf "$as_tmp"
+echo
+
 echo "[7q8] at job end every conan home drops its build and temp folders and its superseded versions, and reports its own size"
 
 # The script runs from a toolchain tree and reads that tree's conan.lock, three levels up, so the

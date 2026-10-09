@@ -4667,6 +4667,11 @@ Commands:
                                    declaring exports_sources exported from this checkout and a fresh
                                    clone of its commit; exit 0 only when every pair of recipe
                                    revisions is equal. No compile; seconds
+    store-create <pkg>...          ROADMAP N358's step over a local store (DN-142.D2/D3/D6): each
+                                   named released package and its first-party upstream created from
+                                   its export, keyed by its inputs and identified by its bytes; a new
+                                   key is stored, a stored one rebuilt and compared — exit 1 on a
+                                   differing output at an equal key
     inventory [subdir] [--profile <name>]
                                    the build-inventory gate (ADR-3.D10) over the repo that owns subdir
     lock    [--update]             regenerate malf/conan.lock by accumulating EVERY workspace
@@ -5052,6 +5057,96 @@ cmd_exports_verify() {
     return "$rc"
 }
 
+
+# malf store-create <package>... — ROADMAP N358's step, phase 1, over a local store (DN-142.D6):
+# each named released package, with its first-party upstream, created from its export in ONE conan
+# home, keyed (DN-142.D2) and identified by its bytes (DN-142.D3); malf/artefact_store.py owns both
+# and the store. A new key is STORED; a stored key is still REBUILT and its output COMPARED, and a
+# differing output at an equal key fails (exit 1), naming both digests and the differing files.
+#
+# THE HOME starts with no first-party package (cut-verify's purge); a home this run creates is
+# seeded with the cut-verify home's third-party packages, a reused one keeps its own. Either way
+# every step rebuilds first-party code from its export.
+# THE STORE is a directory standing in for the remote one until its transport and its writer
+# credential are ruled; nothing here publishes anywhere.
+#
+# Usage: malf store-create <package>...   (MALF_STORE_DIR: the store, default
+#        ~/.cache/coderoast-artefact-store; MALF_STORE_CONAN_HOME: the home, default a fresh
+#        /tmp dir; MALF_TWIN_SEED_HOME: the third-party seed, default cut-verify's)
+cmd_store_create() {
+    [[ $# -gt 0 ]] || { echo "malf store-create: name at least one released package" >&2; return 2; }
+    local arg
+    for arg in "$@"; do [[ "$arg" != -* ]] || _malf_refuse_option store-create "$arg"; done
+    _malf_apply_profile "${MALF_CUT_VERIFY_PROFILE:-linux-gcc16-release}"
+    local store="${MALF_STORE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/coderoast-artefact-store}"
+    local seed_home="${MALF_TWIN_SEED_HOME:-$MALF_CONAN_HOME_BASE/cut-verify}"
+    local scratch; scratch="$(mktemp -d /tmp/malf-store.XXXXXX)"
+    local released prefixes
+    released="$(python3 "$MALF_WORKSPACE_ROOT/scripts/version_line.py" released "$MALF_WORKSPACE_ROOT")" \
+        || { echo "malf store-create: failed to resolve the released-package list" >&2; return 1; }
+    prefixes="$(python3 - "$MALF_WORKSPACE_ROOT" <<'PY'
+import pathlib, sys
+
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "scripts"))
+import workspace_layout
+
+print(" ".join(workspace_layout.owned_package_prefixes()))
+PY
+)" && [[ -n "$prefixes" ]] \
+        || { echo "malf store-create: the owned package namespaces of $MALF_WORKSPACE_ROOT could not be derived" >&2; return 1; }
+    local wanted
+    wanted="$(python3 - "$released" "$@" <<'PY'
+import sys
+
+rows = [row.split("\t") for row in sys.argv[1].splitlines() if row.strip()]
+deps = {row[0]: [dep for dep in (row[2] if len(row) > 2 else "").split(",") if dep] for row in rows}
+unknown = [name for name in sys.argv[2:] if name not in deps]
+if unknown:
+    sys.exit(f"malf store-create: not released packages: {' '.join(unknown)}")
+closure, stack = set(), list(sys.argv[2:])
+while stack:
+    name = stack.pop()
+    if name not in closure:
+        closure.add(name)
+        stack.extend(deps[name])
+print("\n".join(f"{row[0]}\t{row[1]}" for row in rows if row[0] in closure))
+PY
+)" || return 2
+
+    export CONAN_HOME="${MALF_STORE_CONAN_HOME:-$scratch/conan-home}"
+    local fresh=true
+    [[ -d "$CONAN_HOME" ]] && fresh=false
+    mkdir -p "$CONAN_HOME/profiles"
+    _malf_sync_conan_conf
+    _malf_apply_profile "$MALF_PROFILE_NAME"
+    rm -f "$CONAN_HOME/editable_packages.json"
+    unset MALF_EDITABLE_BUILD_DIR
+    _malf_cut_verify_purge || return 1
+    if $fresh; then
+        [[ -f "$seed_home/settings.yml" ]] \
+            || { echo "malf store-create: $seed_home is not a conan home — run 'malf cut-verify' first, or set MALF_TWIN_SEED_HOME" >&2; return 1; }
+        python3 "$MALF_DIR/package_twin.py" seed "$seed_home" "$prefixes" "$CONAN_HOME" || return 1
+    fi
+
+    local compiler
+    compiler="$(sed -n 's/^CXX=//p' "$MALF_PROFILE")"
+    [[ -x "$compiler" ]] || { echo "malf store-create: the profile $MALF_PROFILE_NAME names no executable CXX" >&2; return 1; }
+    echo "=== malf store-create: $(wc -l <<< "$wanted") package(s), home $CONAN_HOME, store $store ==="
+    python3 "$MALF_DIR/artefact_store.py" toolchain "$(dirname "$(dirname "$compiler")")" "$scratch/toolchain.json" || return 1
+
+    local name path rc=0
+    while IFS=$'\t' read -r name path; do
+        echo "--- store-create: conan create $name ($path) ---"
+        conan create "$path" --profile:host="$MALF_PROFILE" --profile:build="$MALF_BUILD_PROFILE" \
+            -s build_type="$MALF_CONFIG" --build=missing --build="$name/*" --format=json \
+            > "$scratch/$name.graph.json" 2> "$scratch/$name.log" \
+            || { echo "malf store-create: conan create $name failed — $scratch/$name.log" >&2; return 1; }
+        python3 "$MALF_DIR/artefact_store.py" conan-step "$store" "$CONAN_HOME" "$scratch/$name.graph.json" \
+            "$name" "$MALF_PROFILE_NAME" "$MALF_DIR" "$scratch/toolchain.json" "$prefixes" || rc=1
+    done <<< "$wanted"
+    [[ $rc -eq 0 ]] && rm -rf "$scratch"
+    return "$rc"
+}
 # malf inventory [dir] — the ADR-3.D9 gate, standalone. Lints the WHOLE workspace (an orphan
 # anywhere is a defect, and the predicate is workspace-wide by nature), then configures and
 # builds every inventory entry of the resolved repo to a LINKED artifact in ONE canonical cell.
@@ -5722,6 +5817,7 @@ case "$COMMAND" in
     cut-verify)       cmd_cut_verify "$@" ;;
     twin-verify)      cmd_twin_verify "$@" ;;
     exports-verify)   cmd_exports_verify "$@" ;;
+    store-create)     cmd_store_create "$@" ;;
     relocate-verify)  cmd_relocate_verify "$@" ;;
     lock)             cmd_lock "$@" ;;
     slot)             cmd_slot "$@" ;;

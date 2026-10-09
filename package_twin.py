@@ -27,15 +27,14 @@ that folder through the headers it includes (measured 2026-10-09: libpqxx rebuil
 `conan-home/p/b/libpq<hash>/p/include/pqxx/params.hxx` into coderoast_infra_postgres, 18 of 20
 identical). So `missing` runs before either create, and twin-verify refuses on its finding.
 
-The content digest is SHA-256 over the sorted `(relative path, SHA-256 of bytes)` of the package
-folder, `conanmanifest.txt` excluded: its first line is a creation timestamp, so it differs between
-any two creates whatever the bytes. The package revision is compared beside it, because it is what
+The content digest is DN-142.D3's, computed by malf/artefact_store.py over the package folder,
+the root `conanmanifest.txt` excluded: its first line is a creation timestamp, so it differs
+between any two creates whatever the bytes. The package revision is compared beside it, because it is what
 a consumer pins and what N358's compare reads.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import subprocess
@@ -43,7 +42,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-MANIFEST = "conanmanifest.txt"
+import artefact_store
 
 
 def conan(home: Path, *argv: str, tmpdir: Path | None = None) -> str:
@@ -95,11 +94,9 @@ def missing(home: Path, released: Path, prefixes: tuple[str, ...], host: str, bu
 
 
 def _folder_digest(folder: Path) -> tuple[str, dict[str, str]]:
-    files = {path.relative_to(folder).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
-             for path in sorted(folder.rglob("*")) if path.is_file() and path.name != MANIFEST}
-    whole = hashlib.sha256("".join(f"{rel}\0{sha}\n" for rel, sha in sorted(files.items()))
-                           .encode()).hexdigest()
-    return whole, files
+    """DN-142.D3's content digest (artefact_store owns it), and each file's mode and digest."""
+    whole, entries = artefact_store.tree_digest(folder)
+    return whole, {path: f"{mode}:{sha}" for path, mode, sha in entries}
 
 
 def digest(home: Path, released: Path) -> None:
