@@ -1,0 +1,87 @@
+name: 'Setup clang-21 tools'
+description: |
+  Provisions clang-21 (through `setup-clang21-libcxx`) and the clang tools a caller names —
+  clang-tidy, clang-format, or both — and ASSERTS each one sits in clang-21's OWN install directory
+  at the requested major. Provisioning only: it runs no gate. The one home of this provisioning for
+  `coderoast-lint-tidy`, `coderoast-format-check` and the superproject's step 0 (`pharos-build.yml`).
+
+  WHY THE TOOLS ARE NOT IN `setup-clang21-libcxx`. `llvm.sh 21` installs clang, lldb, lld and clangd
+  only; clang-tidy and clang-format ship in their own debs. That action opens with an idempotent
+  skip over a FIXED end-state set (clang++-21, libc++-21, the modules.json bridge, the
+  alternatives), so on a persistent self-hosted runner it returns before any install: a tool folded
+  in there would be provisioned on hosted runners and silently absent on self-hosted ones. Here
+  every requested tool is probed on its own, whatever that action skipped.
+
+  LOCATION IS THE ASSERTION, not only the version. malf resolves both tools from clang-21's
+  resolved install directory first. For clang-tidy a miss is the dangerous one: `malf lint` falls
+  back to a PATH clang-tidy, which cannot read this build's module BMIs, and then SKIPS every
+  `.cppm` and every importing TU with a note and exit 0 — a green over almost nothing. For
+  clang-format a PATH fallback of another major reflows differently. So the end state is asserted:
+  the tool exists in that directory and reports the requested major.
+
+  ONE `apt-get update` BEFORE ANY INSTALL, whichever tool is missing: an install that rides
+  another tool's update branch reads a persistent runner's stale package lists whenever that other
+  tool is already present (step 0's clang-format install did exactly that until this action).
+
+inputs:
+  clang-tidy-major:
+    description: 'clang-tidy major to provision and assert; empty (the default) provisions no clang-tidy. Must match the build clang: a different major reads different BMIs and reports different checks.'
+    required: false
+    default: ''
+  clang-format-major:
+    description: 'clang-format major to provision and assert; empty (the default) provisions no clang-format. A different major reflows differently, so its check fails on churn rather than on defects.'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Provision clang-21 + libc++ (idempotent on a persistent runner)
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-clang21-libcxx@bb2f29950572dd950d6c2056721c7f4bd7a64d9c
+
+    - name: Provision the requested clang-21 tools and assert each is clang-21's OWN
+      shell: bash
+      env:
+        TIDY_MAJOR: ${{ inputs.clang-tidy-major }}
+        FORMAT_MAJOR: ${{ inputs.clang-format-major }}
+      run: |
+        set -euo pipefail
+        declare -A want=()
+        [ -z "$TIDY_MAJOR" ] || want[clang-tidy]="$TIDY_MAJOR"
+        [ -z "$FORMAT_MAJOR" ] || want[clang-format]="$FORMAT_MAJOR"
+        if [ "${#want[@]}" -eq 0 ]; then
+          echo "::error::setup-clang21-tools was asked for no tool: pass clang-tidy-major, clang-format-major, or both. A call that provisions nothing would let a caller's assertion go unmade."
+          exit 1
+        fi
+        for tool in "${!want[@]}"; do
+          if [[ ! "${want[$tool]}" =~ ^[0-9]+$ ]]; then
+            echo "::error::$tool major '${want[$tool]}' is not a number."
+            exit 1
+          fi
+        done
+        want_dir="$(dirname "$(readlink -f "$(command -v clang-21 || command -v clang)")")"
+        # Each probe CAPTURED, then matched from a here-string: `--version | grep -q` under pipefail
+        # can read a present tool as absent when grep's early exit sends the writer SIGPIPE.
+        missing=()
+        for tool in $(printf '%s\n' "${!want[@]}" | sort); do
+          have_version="$("$want_dir/$tool" --version 2>/dev/null || true)"
+          if ! grep -qE "version ${want[$tool]}\." <<<"$have_version"; then
+            missing+=("$tool-${want[$tool]}")
+          fi
+        done
+        if [ "${#missing[@]}" -gt 0 ]; then
+          sudo apt-get update
+          sudo apt-get install -y "${missing[@]}"
+        fi
+        for tool in $(printf '%s\n' "${!want[@]}" | sort); do
+          if [ ! -x "$want_dir/$tool" ]; then
+            echo "::error::$tool is not in clang-21's own install dir ($want_dir). malf would fall back to a PATH $tool of another build — for clang-tidy one that cannot read this build's module BMIs, so \`malf lint\` would SKIP every .cppm and every importing TU and pass while inspecting almost nothing. Fix the provisioning; do not let the run proceed."
+            exit 1
+          fi
+          got="$("$want_dir/$tool" --version | grep -oE 'version [0-9]+' | grep -oE '[0-9]+')"
+          if [ "$got" != "${want[$tool]}" ]; then
+            echo "::error::$tool major $got at $want_dir/$tool, expected ${want[$tool]}. A different major checks or reflows differently, so the gate would fail on churn rather than on defects."
+            exit 1
+          fi
+          echo "$tool $got — $want_dir/$tool (clang-21's own install)"
+        done

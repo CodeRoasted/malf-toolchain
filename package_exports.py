@@ -18,7 +18,11 @@ its desk checkout has checked out. A package whose TRACKED files are modified on
 judged: its desk export differs from its commit's by right.
 
 Exit 0 when every recipe's two revisions are equal, 1 when one differs (named with the
-files whose bytes differ, or that one side alone exports), 2 when a package could not be judged.
+files whose bytes differ, or that one side alone exports), 2 when a package could not be judged,
+3 when the helper itself failed before a verdict — a command it runs exits non-zero, the
+workspace declares no such recipe, the arguments are malformed, or it raises. Exit 1 is the one
+code an uncaught Python exception also produces, so `main` maps every failure onto 3 and exit 1
+means a differing recipe and nothing else; step 0's B2 reads the code, never the text.
 """
 
 from __future__ import annotations
@@ -28,10 +32,16 @@ import json
 import os
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 
 MANIFEST = "conanmanifest.txt"
 NAMED_FILES = 8
+EXIT_EQUAL, EXIT_DIFFER, EXIT_UNJUDGED, EXIT_FAILED = 0, 1, 2, 3
+
+
+class HelperFailed(Exception):
+    """The helper could not reach a verdict; `main` reports it and exits `EXIT_FAILED`."""
 
 
 def _run(argv: list[str], home: Path | None = None) -> str:
@@ -39,7 +49,7 @@ def _run(argv: list[str], home: Path | None = None) -> str:
     env = {**os.environ, "CONAN_HOME": str(home)} if home else None
     done = subprocess.run(argv, capture_output=True, text=True, env=env, check=False)
     if done.returncode != 0:
-        sys.exit(f"package_exports: `{' '.join(argv)}` failed:\n{done.stderr.strip()}")
+        raise HelperFailed(f"`{' '.join(argv)}` failed:\n{done.stderr.strip()}")
     return done.stdout
 
 
@@ -92,8 +102,8 @@ def verify(home: Path, released: Path, scratch: Path) -> int:
           f"revision from the desk and from a fresh clone; {len(differ)} differ, "
           f"{len(unjudged)} not judged")
     if differ:
-        return 1
-    return 2 if unjudged or not rows else 0
+        return EXIT_DIFFER
+    return EXIT_UNJUDGED if unjudged or not rows else EXIT_EQUAL
 
 
 def _declares_exports(conanfile: Path) -> bool:
@@ -125,17 +135,26 @@ def recipes(workspace: Path) -> int:
                 print(f"{name if folder == '.' else f'{name}/{folder}'}\t{recipe.parent}")
                 found += 1
     if not found:
-        sys.exit(f"package_exports: no recipe declaring exports_sources under {workspace}")
-    return 0
+        raise HelperFailed(f"no recipe declaring exports_sources under {workspace}")
+    return EXIT_EQUAL
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) == 2 and argv[0] == "recipes":
-        return recipes(Path(argv[1]))
-    if len(argv) == 4 and argv[0] == "verify":
-        return verify(Path(argv[1]), Path(argv[2]), Path(argv[3]))
-    print(__doc__, file=sys.stderr)
-    return 2
+    """The verb; every way it fails before a verdict exits `EXIT_FAILED`, never 1 or 2."""
+    try:
+        if len(argv) == 2 and argv[0] == "recipes":
+            return recipes(Path(argv[1]))
+        if len(argv) == 4 and argv[0] == "verify":
+            return verify(Path(argv[1]), Path(argv[2]), Path(argv[3]))
+        print(__doc__, file=sys.stderr)
+        return EXIT_FAILED
+    except HelperFailed as failure:
+        print(f"package_exports: FAILED — {failure}", file=sys.stderr)
+        return EXIT_FAILED
+    except Exception:
+        traceback.print_exc()
+        print("package_exports: FAILED — the helper raised before a verdict", file=sys.stderr)
+        return EXIT_FAILED
 
 
 if __name__ == "__main__":

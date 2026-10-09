@@ -3880,6 +3880,25 @@ cp "$ex_tmp/helper.py" "$ex_pkg/conanfile.py"
 check "exports-verify: a package whose tracked files are modified on the desk is not judged, exit 2" \
       "rc=2 0 of 1 recipe(s) export the same recipe revision from the desk and from a fresh clone; 0 differ, 1 not judged|  UNJUDGED ex_probe: tracked files modified on the desk —" \
       "$(ex_gate g3)"
+
+# The verb FAILING is its own exit, 3, and never 1: step 0's B2 reads exit 1 as a recipe that
+# differs. Three failures before any verdict — a command the helper runs exits non-zero (the folder
+# is no git checkout), the helper raises (a malformed recipes row), and malf cannot derive the
+# recipe list (a workspace root with no scripts/workspace_layout.py) — each exits 3 and says FAILED.
+ex_failed() {   # <tsv body> <scratch name> — package_exports verify over a doctored recipes list
+    local out rc
+    printf '%b' "$1" > "$ex_tmp/doctored.tsv"
+    out="$(CONAN_HOME="$ex_home" python3 "$MALF_ROOT/package_exports.py" verify "$ex_home" "$ex_tmp/doctored.tsv" "$ex_tmp/$2" 2>&1)"; rc=$?
+    printf 'rc=%s %s' "$rc" "$(grep -c '^package_exports: FAILED — ' <<< "$out")"
+}
+mkdir -p "$ex_tmp/not-a-repo" "$ex_tmp/empty-ws"
+check "exports-verify: a command the helper runs that fails (the folder is no git checkout) exits 3, never the differ code 1" \
+      "rc=3 1" "$(ex_failed "ex_probe\t$ex_tmp/not-a-repo\t\n" g4)"
+check "exports-verify: the helper raising (a recipes row with no folder) exits 3, never Python's own 1" \
+      "rc=3 1" "$(ex_failed "ex_probe\n" g5)"
+check "exports-verify: malf failing to derive the recipe list exits 3, naming the failure" \
+      "rc=3 1" "$(out="$(MALF_WORKSPACE_ROOT="$ex_tmp/empty-ws" bash "$MALF_BIN" exports-verify 2>&1)"; rc=$?
+                  printf 'rc=%s %s' "$rc" "$(grep -c '^malf exports-verify: FAILED — could not derive the first-party recipe list' <<< "$out")")"
 rm -rf "$ex_tmp"
 echo
 

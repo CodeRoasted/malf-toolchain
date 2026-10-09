@@ -4652,7 +4652,8 @@ Commands:
     exports-verify                 first-party recipes' exports (DN-142.D4 (b)): every recipe
                                    declaring exports_sources exported from this checkout and a fresh
                                    clone of its commit; exit 0 only when every pair of recipe
-                                   revisions is equal. No compile; seconds
+                                   revisions is equal, 1 when one differs, 2 when a package is
+                                   not judged, 3 when the verb failed. No compile; seconds
     store-create [<pkg>...]        ROADMAP N358's step over a local store (DN-142.D2/D3/D6): each
                                    named released package (none: all) and its first-party upstream created from
                                    its export, keyed by its inputs and identified by its bytes; a new
@@ -5035,14 +5036,22 @@ PY
 # and the two recipe revisions compared (malf/package_exports.py owns the comparison). No compiler
 # runs: an export copies files and hashes them, so the gate costs seconds, not a build.
 #
+# Exit 0 every recipe equal, 1 a recipe differs, 2 a package not judged, 3 the verb failed before a
+# verdict (package_exports.py's own codes; its docstring says why a failure may never exit 1).
+#
 # Usage: malf exports-verify
 cmd_exports_verify() {
     [[ $# -eq 0 ]] || _malf_refuse_option exports-verify "$1"
-    local scratch rc=0
-    scratch="$(mktemp -d /tmp/malf-exports.XXXXXX)"
+    local scratch rc=0 failed=3
+    scratch="$(mktemp -d /tmp/malf-exports.XXXXXX)" \
+        || { echo "malf exports-verify: FAILED — no scratch directory" >&2; return "$failed"; }
     python3 "$MALF_DIR/package_exports.py" recipes "$MALF_WORKSPACE_ROOT" > "$scratch/recipes.tsv" \
-        || { echo "malf exports-verify: failed to derive the first-party recipe list" >&2; rm -rf "$scratch"; return 1; }
-    ( export CONAN_HOME="$scratch/conan-home"; _malf_sync_conan_conf
+        || { echo "malf exports-verify: FAILED — could not derive the first-party recipe list" >&2; rm -rf "$scratch"; return "$failed"; }
+    ( export CONAN_HOME="$scratch/conan-home"
+      # A subshell of its own: the sync `exit 1`s on a failed install, which would end THIS subshell
+      # with the code that means a differing recipe.
+      ( _malf_sync_conan_conf ) \
+          || { echo "malf exports-verify: FAILED — could not stage the scratch conan home" >&2; exit "$failed"; }
       python3 "$MALF_DIR/package_exports.py" verify "$CONAN_HOME" "$scratch/recipes.tsv" "$scratch" ) || rc=$?
     rm -rf "$scratch"
     return "$rc"
