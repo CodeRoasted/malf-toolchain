@@ -3604,6 +3604,54 @@ check "every restore drops the first-party packages it brought, and the save dro
 rm -rf "$ac_tmp"
 echo
 
+echo "[7q7c] the vendor fetch restores the recipe revision the tag carries, never a cached package by version alone (ROADMAP N367)"
+
+# Stubs: `gh release download` copies a prepared tarball; `conan` keeps the cached recipe
+# revisions of the one ref in a state file (one per line), logging every call.
+vf_tmp="$(realpath "$(mktemp -d)")"
+mkdir -p "$vf_tmp/bin" "$vf_tmp/one" "$vf_tmp/two"
+printf '{"pkg/1.0": {"revisions": {"tagrev": {}}}}' > "$vf_tmp/one/pkglist.json"
+printf '{"pkg/1.0": {"revisions": {"tagrev": {}, "otherrev": {}}}}' > "$vf_tmp/two/pkglist.json"
+tar -czf "$vf_tmp/one.tgz" -C "$vf_tmp/one" pkglist.json
+tar -czf "$vf_tmp/two.tgz" -C "$vf_tmp/two" pkglist.json
+cat > "$vf_tmp/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+echo "gh $*" >> "$VF_LOG"
+while [ "$#" -gt 0 ]; do [ "$1" = --dir ] && cp "$VF_TARBALL" "$2/pkg-1.0.tgz"; shift; done
+STUB
+cat > "$vf_tmp/bin/conan" <<'STUB'
+#!/usr/bin/env bash
+echo "conan $*" >> "$VF_LOG"
+case "$1 $2" in
+  "list pkg/1.0#*")
+    python3 -I -c 'import json,sys; r=[l for l in open(sys.argv[1]).read().split() if l]; print(json.dumps({"Local Cache": {"pkg/1.0": {"revisions": {x: {} for x in r}}} if r else {}}))' "$VF_STATE" ;;
+  "list pkg/1.0") [ -s "$VF_STATE" ] && printf 'Local Cache\n  pkg/1.0\n' ;;
+  "remove pkg/1.0#"*) rev="${2#pkg/1.0#}"; grep -vx "$rev" "$VF_STATE" > "$VF_STATE.new" || true; mv "$VF_STATE.new" "$VF_STATE" ;;
+  "cache restore") [ -n "${VF_RESTORE_NOOP:-}" ] || { grep -qx tagrev "$VF_STATE" || echo tagrev >> "$VF_STATE"; } ;;
+esac
+STUB
+chmod +x "$vf_tmp/bin/gh" "$vf_tmp/bin/conan"
+vf_run() {  # <cached revisions, space-separated> <tarball> [restore-noop]
+    : > "$vf_tmp/state"; : > "$vf_tmp/log"
+    for rev in $1; do echo "$rev" >> "$vf_tmp/state"; done
+    VF_LOG="$vf_tmp/log" VF_STATE="$vf_tmp/state" VF_TARBALL="$vf_tmp/$2" VF_RESTORE_NOOP="${3:-}" \
+        PATH="$vf_tmp/bin:$PATH" bash "$MALF_ROOT/.github/actions/coderoast-vendor/ci_fetch_conan_package.sh" \
+        pkg 1.0 Owner/repo > /dev/null 2>&1
+    echo "rc=$? cache=$(tr '\n' ' ' < "$vf_tmp/state" | sed 's/ $//') removed=$(grep -c '^conan remove' "$vf_tmp/log") downloads=$(grep -c '^gh release download' "$vf_tmp/log")"
+}
+check "a cached revision other than the tag's is removed and the tag's restored — the version alone is never trusted" \
+      "rc=0 cache=tagrev removed=1 downloads=1" "$(vf_run staleold one.tgz)"
+check "the tag's revision already cached is still checked against a download, and nothing is removed" \
+      "rc=0 cache=tagrev removed=0 downloads=1" "$(vf_run tagrev one.tgz)"
+check "an empty cache downloads and restores the tag's revision" \
+      "rc=0 cache=tagrev removed=0 downloads=1" "$(vf_run '' one.tgz)"
+check "a tarball carrying two recipe revisions of the ref is refused before the cache is touched" \
+      "rc=1 cache=staleold removed=0 downloads=1" "$(vf_run staleold two.tgz)"
+check "a restore that does not leave exactly the tag's revision fails the fetch" \
+      "rc=1 cache= removed=1 downloads=1" "$(vf_run staleold one.tgz noop)"
+rm -rf "$vf_tmp"
+echo
+
 echo "[7q8] at job end every conan home drops its build and temp folders and its superseded versions, and reports its own size"
 
 # The script runs from a toolchain tree and reads that tree's conan.lock, three levels up, so the
