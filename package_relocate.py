@@ -16,7 +16,9 @@ arms, because each sees what the other cannot:
   * CONSUME — every released package is restored into a FRESH conan home at another absolute path,
     the producer's home is made unreadable, and a synthetic consumer links every target the
     package's config imports, so CMake builds every C++ module the package ships, as an outside
-    consumer does. It sees a reference the scan's pattern cannot spell.
+    consumer does. It sees a reference the scan's pattern cannot spell. An APPLICATION ships no
+    config to link: its consumer runs it, so every executable it ships must resolve its shared
+    libraries through the loader from the fresh home.
 
     package_relocate.py run <source home> <fresh home> <released tsv> <profile name> <lockfile> [package]
 
@@ -75,6 +77,27 @@ def run(argv: list[str], *, home: Path | None = None, cwd: Path | None = None,
     return subprocess.run(argv, capture_output=True, text=True, cwd=cwd, env=env)
 
 
+def binary_of(home: Path, name: str) -> tuple[str, Path]:
+    """(ref, package folder) of the one binary of `name` that `home` holds."""
+    done = run(["conan", "list", f"{name}/*#*:*#*", "--format=json"], home=home)
+    if done.returncode != 0:
+        sys.exit(f"package_relocate: `conan list {name}` failed in {home}: {done.stderr.strip()}")
+    found = [(ref, f"{ref}#{rrev}:{package_id}#{prev}")
+             for ref, body in json.loads(done.stdout)["Local Cache"].items()
+             for rrev, recipe in body.get("revisions", {}).items()
+             for package_id, package in recipe.get("packages", {}).items()
+             for prev in package.get("revisions", {})]
+    if len(found) != 1:
+        print(f"package_relocate: {home} must hold exactly one binary of {name}, holds "
+              f"{len(found)} — nothing is judged", file=sys.stderr)
+        sys.exit(2)
+    ref, full = found[0]
+    folder = run(["conan", "cache", "path", full], home=home)
+    if folder.returncode != 0:
+        sys.exit(f"package_relocate: `conan cache path {full}` failed: {folder.stderr.strip()}")
+    return ref, Path(folder.stdout.strip())
+
+
 def released_refs(home: Path, released: Path, only: str) -> list[tuple[str, str, Path]]:
     """(name, ref, package folder) for every released package in `home`; exactly one each."""
     rows = []
@@ -83,23 +106,7 @@ def released_refs(home: Path, released: Path, only: str) -> list[tuple[str, str,
         name = fields[0].strip()
         if not name or (only and only not in (name, Path(fields[1]).name if len(fields) > 1 else "")):
             continue
-        done = run(["conan", "list", f"{name}/*#*:*#*", "--format=json"], home=home)
-        if done.returncode != 0:
-            sys.exit(f"package_relocate: `conan list {name}` failed in {home}: {done.stderr.strip()}")
-        found = [(ref, f"{ref}#{rrev}:{package_id}#{prev}")
-                 for ref, body in json.loads(done.stdout)["Local Cache"].items()
-                 for rrev, recipe in body.get("revisions", {}).items()
-                 for package_id, package in recipe.get("packages", {}).items()
-                 for prev in package.get("revisions", {})]
-        if len(found) != 1:
-            print(f"package_relocate: {home} must hold exactly one binary of {name}, holds "
-                  f"{len(found)} — nothing is judged", file=sys.stderr)
-            sys.exit(2)
-        ref, full = found[0]
-        folder = run(["conan", "cache", "path", full], home=home)
-        if folder.returncode != 0:
-            sys.exit(f"package_relocate: `conan cache path {full}` failed: {folder.stderr.strip()}")
-        rows.append((name, ref, Path(folder.stdout.strip())))
+        rows.append((name, *binary_of(home, name)))
     if not rows:
         print(f"package_relocate: no released package matched '{only}' in {home}", file=sys.stderr)
         sys.exit(2)
@@ -146,9 +153,10 @@ def subject_locks(source: Path, lockfile: Path, rows: list[tuple[str, str, Path]
 
 
 def seed(source: Path, fresh: Path, profile: str, rows: list[tuple[str, str, Path]],
-         locks: dict[str, Path]) -> None:
+         locks: dict[str, Path]) -> dict[str, str]:
     """The fresh home: the source home's conf and profiles, and the host closure of every released
-    package, by save and restore — the route a release asset takes to a consumer."""
+    package, by save and restore — the route a release asset takes to a consumer. Returns each
+    package's `package_type`, read off its own graph, keyed by name."""
     (fresh / "profiles").mkdir(parents=True, exist_ok=True)
     for name in HOME_FILES:
         if (source / name).is_file():
@@ -170,13 +178,22 @@ def seed(source: Path, fresh: Path, profile: str, rows: list[tuple[str, str, Pat
 
         # ONE GRAPH PER PACKAGE, the graph its consumer resolves: the released set resolved as
         # one graph has version-range conflicts no single consumer meets (lz4 through libpq).
-        lists = []
+        # EVERY RECIPE OF THE GRAPH, and the binaries the cache holds: a consumer's install
+        # expands the whole graph, so it needs the recipe of a requirement whose binary it SKIPS.
+        # `--graph-binaries` alone lists a recipe only beside a listed binary, and the static
+        # library an application links is skipped — insight_sift_tools (the `sift` CLI) failed
+        # "insight_sift/1.10.7 not resolved" in the fresh home at the 1.10.7 step 0.
+        lists, types = [], {}
         for index, (name, ref, _folder) in enumerate(rows):
             graph, pkglist = folder / f"graph{index}.json", folder / f"pkglist{index}.json"
             conan_to(["conan", "graph", "info", f"--requires={ref}", *profiles,
                       f"--lockfile={locks[name]}", "--format=json"], source, graph)
-            conan_to(["conan", "list", f"--graph={graph}", "--graph-binaries=Cache",
-                      "--format=json"], source, pkglist)
+            types[name] = next(node["package_type"]
+                               for node in json.loads(graph.read_text())["graph"]["nodes"].values()
+                               if node.get("ref", "").split("#")[0] == ref
+                               and node.get("context") == "host")
+            conan_to(["conan", "list", f"--graph={graph}", "--graph-recipes=*",
+                      "--graph-binaries=Cache", "--format=json"], source, pkglist)
             lists += ["-l", str(pkglist)]
         merged, archive = folder / "pkglist.json", folder / "closure.tgz"
         conan_to(["conan", "pkglist", "merge", *lists, "--format=json"], source, merged)
@@ -184,6 +201,7 @@ def seed(source: Path, fresh: Path, profile: str, rows: list[tuple[str, str, Pat
         conan_to(["conan", "cache", "restore", str(archive)], fresh)
     print(f"package_relocate: {fresh} holds the host closure of {len(rows)} released package(s) "
           f"from {source}")
+    return types
 
 
 def import_std_gate(released: Path) -> str:
@@ -209,8 +227,10 @@ def build_environment(folder: Path) -> dict[str, str]:
 
 
 def consume(fresh: Path, profile: str, name: str, ref: str, lock: Path, scratch: Path,
-            import_std: str) -> str | None:
-    """Install `ref` alone into a synthetic consumer and compile every module it ships.
+            import_std: str, package_type: str) -> str | None:
+    """Install `ref` alone into a synthetic consumer and compile every module it ships — or, for
+    an application, which ships no CMake config and is consumed by being RUN, install it and
+    resolve every executable's shared libraries from the fresh home (`loads`).
 
     TWO BUILDS, because a consumer that imports nothing only SCANS a package's modules — ninja
     builds a BMI for an importer — and the BMI compile is the step that reads every include
@@ -235,6 +255,12 @@ def consume(fresh: Path, profile: str, name: str, ref: str, lock: Path, scratch:
                                         "-G", "Ninja", toolchain, "-DCMAKE_BUILD_TYPE=Release"]),
                 (f"{build} build", ["cmake", "--build", str(folder / build)])]
 
+    if package_type == "application":
+        done = run(install, home=fresh)
+        if done.returncode != 0:
+            tail = "\n      ".join((done.stdout + done.stderr).strip().splitlines()[-12:])
+            return f"{name}: the consumer's install failed (exit {done.returncode}):\n      {tail}"
+        return loads(name, binary_of(fresh, name)[1])
     environment: dict[str, str] = {}
     for step, argv in [("install", install), *tree("scan"), ("import", []), *tree("build")]:
         if step == "import":
@@ -249,6 +275,32 @@ def consume(fresh: Path, profile: str, name: str, ref: str, lock: Path, scratch:
             return f"{name}: the consumer's {step} failed (exit {done.returncode}):\n      {tail}"
         if step == "install":
             environment = build_environment(folder / "conan")
+    return None
+
+
+def loads(name: str, folder: Path) -> str | None:
+    """Every executable under `folder`/bin resolves its shared libraries through the dynamic
+    loader (`ldd`), in an environment the producer leaves nothing in: no LD_LIBRARY_PATH, and the
+    producer home unreadable while it runs. A RUNPATH into the producer's tree is what an
+    application leaks where a library leaks an include directory, and `ldd` names it "not found".
+    A static executable has nothing to resolve. A package that ships no executable is a finding:
+    an application with nothing to run has nothing a consumer could take."""
+    executables = sorted(path for path in (folder / "bin").glob("*")
+                         if path.is_file() and os.access(path, os.X_OK))
+    if not executables:
+        return f"{name}: an application package with no executable under {folder / 'bin'}"
+    environment = {key: value for key, value in os.environ.items() if key != "LD_LIBRARY_PATH"}
+    for executable in executables:
+        done = subprocess.run(["ldd", str(executable)], capture_output=True, text=True,
+                              env=environment)
+        output = (done.stdout + done.stderr).strip()
+        if "not a dynamic executable" in output:
+            continue
+        missing = [line.strip() for line in output.splitlines() if "not found" in line]
+        if done.returncode != 0 or missing:
+            return (f"{name}: {executable.relative_to(folder)} does not resolve its shared "
+                    f"libraries from the fresh home (ldd exit {done.returncode}):\n      "
+                    + "\n      ".join(missing or output.splitlines()[-12:]))
     return None
 
 
@@ -288,7 +340,7 @@ def main(argv: list[str]) -> int:
 
     (fresh / "malf-relocate-locks").mkdir(parents=True, exist_ok=True)
     locks = subject_locks(source, lockfile, rows, fresh / "malf-relocate-locks")
-    seed(source, fresh, profile, rows, locks)
+    types = seed(source, fresh, profile, rows, locks)
     mode = stat.S_IMODE(source.stat().st_mode)
     print(f"package_relocate: {source} is made unreadable for the consume arm; if this run dies "
           f"before restoring it: chmod {mode:o} {source}")
@@ -296,7 +348,8 @@ def main(argv: list[str]) -> int:
     try:
         with tempfile.TemporaryDirectory(prefix="malf-relocate-consumer.") as scratch:
             for name, ref, _folder in rows:
-                failure = consume(fresh, profile, name, ref, locks[name], Path(scratch), import_std)
+                failure = consume(fresh, profile, name, ref, locks[name], Path(scratch), import_std,
+                                  types[name])
                 print(f"  {'FAIL' if failure else 'ok  '} consume {ref}")
                 if failure:
                     findings.append(failure)

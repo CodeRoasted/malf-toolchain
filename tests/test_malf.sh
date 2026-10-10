@@ -3910,6 +3910,33 @@ pg_out="$(pg_run)"; pg_rc=$?
 check "a TU under if(UNIX) and absent from the database is fatal — the branch is evaluated, not assumed" \
       "rc=1 missing" \
       "rc=$pg_rc $(grep -qE '^  src/unix_only\.cpp$' <<< "$pg_out" && echo missing || echo "GOT: $pg_out")"
+rm -f "$pg_repo/src/unix_only.cpp"
+
+# note: measured 2026-10-10, DN-142.D16 moved the two sift *_win32.cpp files into sift-tools'
+# CMakeLists, which names the library's tree through a variable (`${SIFT_LIBRARY_TREE}/src/...`): the
+# gate skipped every `${`-token, so both were "no CMake file names it" and eidos's lint redded.
+mkdir -p "$pg_repo/tools"
+cat > "$pg_repo/tools/CMakeLists.txt" <<'CM'
+set(PG_TREE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+set(PG_TWICE ${CMAKE_CURRENT_SOURCE_DIR}/..)
+set(PG_TWICE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+if(WIN32)
+    set(PG_TOOL_SRC "${PG_TREE}/src/tool_win32.cpp")
+    set(PG_OTHER_SRC "${PG_TWICE}/src/twice_win32.cpp")
+endif()
+CM
+git -C "$pg_repo" add tools/CMakeLists.txt
+printf 'int tool() { return 0; }\n' > "$pg_repo/src/tool_win32.cpp"
+pg_out="$(pg_run)"; pg_rc=$?
+check "a TU named inside if(WIN32) through a variable set once, unconditionally, is REFUSED and named" \
+      "rc=0 checked 2, 0 finding(s), 0 not linted, 2 platform-refused named" \
+      "rc=$pg_rc $(pg_counts "$pg_out") $(grep -qE '^  src/tool_win32\.cpp — tools/CMakeLists\.txt:5 sits in if\(WIN32\)' <<< "$pg_out" && echo named || echo "GOT: $pg_out")"
+rm -f "$pg_repo/src/tool_win32.cpp"
+printf 'int twice() { return 0; }\n' > "$pg_repo/src/twice_win32.cpp"
+pg_out="$(pg_run)"; pg_rc=$?
+check "a TU named through a variable set TWICE stays a fatal hole — a variable with two values resolves to nothing" \
+      "rc=1 missing" \
+      "rc=$pg_rc $(grep -qE '^  src/twice_win32\.cpp$' <<< "$pg_out" && echo missing || echo "GOT: $pg_out")"
 rm -rf "$pg_tmp"
 echo
 
@@ -4666,6 +4693,40 @@ rows = r.released_refs(source, Path(sys.argv[5]), "")
 (fresh / "locks").mkdir(parents=True)
 r.seed(source, fresh, "fixture", rows, r.subject_locks(source, lock, rows, fresh / "locks"))' "$MALF_ROOT" "$ls_home" "$ls_tmp/fresh" "$ls_tmp/lock-a/conan.lock" "$ls_tmp/released.tsv" > /dev/null 2>&1
          CONAN_HOME="$ls_tmp/fresh" conan list 'tpdep/1.0#*' --format=json 2>/dev/null | python3 -c 'import json, sys; print(" ".join(r for v in json.load(sys.stdin)["Local Cache"].values() for r in v.get("revisions", {})) or "none")' | ls_name)"
+# relocate-verify over an APPLICATION: measured 2026-10-10, the 1.10.7 step 0 redded on
+# insight_sift_tools (the `sift` CLI), whose graph holds a static library its consumer SKIPS. The seed
+# saved no recipe beside a skipped binary, so the fresh home's install failed "insight_sift not
+# resolved"; and an application ships no CMake config, so linking a consumer imported no target.
+# The fixture: an application requiring a static library, a lock naming the library, and two
+# executables — /bin/true, and one whose RUNPATH names a producer directory made unreadable.
+mkdir -p "$ls_tmp/ls_lib" "$ls_tmp/ls_app" "$ls_tmp/lock-app" "$ls_tmp/producer" "$ls_tmp/empty/bin" "$ls_tmp/bad/bin"
+printf 'from conan import ConanFile\n\n\nclass LsLib(ConanFile):\n    name = "ls_lib"\n    version = "0.1"\n    package_type = "static-library"\n    settings = "os", "arch", "build_type"\n' \
+       > "$ls_tmp/ls_lib/conanfile.py"
+printf 'from conan import ConanFile\nfrom conan.tools.files import copy\n\n\nclass LsApp(ConanFile):\n    name = "ls_app"\n    version = "0.1"\n    package_type = "application"\n    settings = "os", "arch", "build_type"\n    requires = "ls_lib/0.1"\n    exports_sources = "ls_app"\n\n    def package(self):\n        copy(self, "ls_app", self.source_folder, self.package_folder + "/bin")\n' \
+       > "$ls_tmp/ls_app/conanfile.py"
+cp /bin/true "$ls_tmp/ls_app/ls_app"
+ls_conan create "$ls_tmp/ls_lib" -pr:a fixture
+ls_conan lock create "$ls_tmp/ls_app" -pr:a fixture --lockfile-out="$ls_tmp/lock-app/conan.lock"
+ls_conan create "$ls_tmp/ls_app" -pr:a fixture --lockfile="$ls_tmp/lock-app/conan.lock"
+printf 'ls_app\t%s\t\n' "$ls_tmp/ls_app" > "$ls_tmp/released-app.tsv"
+check "relocate-verify's fresh home of an application holds the recipe of the static library it skips, and its install resolves there" \
+      "{'ls_app': 'application'} ls_lib=1 install=0" \
+      "$(python3 -I -c 'import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import package_relocate as r
+source, fresh, lock = Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4])
+rows = r.released_refs(source, Path(sys.argv[5]), "")
+(fresh / "locks").mkdir(parents=True)
+locks = r.subject_locks(source, lock, rows, fresh / "locks")
+print(r.seed(source, fresh, "fixture", rows, locks))' "$MALF_ROOT" "$ls_home" "$ls_tmp/fresh-app" "$ls_tmp/lock-app/conan.lock" "$ls_tmp/released-app.tsv" 2>/dev/null | tail -1) ls_lib=$(CONAN_HOME="$ls_tmp/fresh-app" conan list 'ls_lib/0.1#*' --format=json 2>/dev/null | python3 -c 'import json, sys; print(sum(len(v.get("revisions", {})) for v in json.load(sys.stdin)["Local Cache"].values()))') install=$(CONAN_HOME="$ls_tmp/fresh-app" conan install --requires=ls_app/0.1 -pr:a fixture --lockfile="$ls_tmp/fresh-app/locks/ls_app.lock" --build=never -of "$ls_tmp/fresh-app/consumer" > /dev/null 2>&1; echo $?)"
+printf 'int gone(void) { return 0; }\n' > "$ls_tmp/gone.c"
+printf 'int gone(void);\nint main(void) { return gone(); }\n' > "$ls_tmp/main.c"
+cc -shared -fPIC -o "$ls_tmp/producer/libgone.so" "$ls_tmp/gone.c" \
+    && cc -o "$ls_tmp/bad/bin/app" "$ls_tmp/main.c" -L"$ls_tmp/producer" -lgone -Wl,-rpath,"$ls_tmp/producer"
+chmod 0 "$ls_tmp/producer"
+check "an application's executables resolve through the loader: /bin/true passes, a RUNPATH into an unreadable producer directory is named, a package with no executable is named" \
+      "None|ls_app: bin/app does not resolve its shared libraries from the fresh home|ls_app: an application package with no executable under $ls_tmp/empty/bin" \
+      "$(python3 -I -c 'import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import package_relocate as r
+print(r.loads("ls_app", r.binary_of(Path(sys.argv[2]), "ls_app")[1]), (r.loads("ls_app", Path(sys.argv[3])) or "").split(" (")[0], r.loads("ls_app", Path(sys.argv[4])), sep="|")' "$MALF_ROOT" "$ls_home" "$ls_tmp/bad" "$ls_tmp/empty" 2>&1)"
+chmod 755 "$ls_tmp/producer"
 # Every other resolution of the ship leg splices the same arguments, read from malf's source: the
 # store-build step, and the lockfile twin-verify's probe and relocate-verify
 # resolve against. Each verb takes it before its first conan call and refuses without it.

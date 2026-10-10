@@ -132,14 +132,36 @@ def _parse_args(text: str, pos: int, line: int) -> tuple[list[str], int, int]:
     return args, pos, line
 
 
+def expand(token: str, base: str, variables: dict[str, str | None]) -> str:
+    """`token` with the source-dir variables and every variable `variables` resolves substituted;
+    a variable it does not resolve is left as written, so the token is skipped."""
+    for var in SOURCE_DIR_VARS:
+        token = token.replace(var, base)
+    for name, value in variables.items():
+        if value is not None:
+            token = token.replace("${" + name + "}", value)
+    return token
+
+
 def mentions(cmakelists: str, targets: set[str]) -> list[tuple[str, int, list[Frame]]]:
-    """Every (target, line, enclosing if-frames) a non-conditional command of the file names."""
+    """Every (target, line, enclosing if-frames) a non-conditional command of the file names.
+
+    A path spelled through a variable resolves when the variable has ONE unconditional value in
+    the file: a `set(NAME value)` outside every if(), set once (sift-tools names the library's
+    tree `${SIFT_LIBRARY_TREE}`). From a second set on, and from a first set inside a branch, the
+    variable resolves to nothing, and a path through it is not a mention."""
     base = os.path.dirname(cmakelists)
     with open(cmakelists, encoding="utf-8", errors="replace") as handle:
         commands = parse_commands(handle.read())
     stack: list[Frame] = []
     found: list[tuple[str, int, list[Frame]]] = []
+    variables: dict[str, str | None] = {}
     for command in commands:
+        if command.name == "set" and command.args and IDENTIFIER.fullmatch(command.args[0]):
+            name = command.args[0]
+            single = len(command.args) == 2 and not stack and name not in variables
+            value = expand(command.args[1].strip('"'), base, variables) if single else None
+            variables[name] = value if value is not None and "${" not in value else None
         if command.name == "if":
             stack.append(Frame([command.args], 0, command.line))
         elif command.name == "elseif" and stack:
@@ -151,9 +173,7 @@ def mentions(cmakelists: str, targets: set[str]) -> list[tuple[str, int, list[Fr
             stack.pop()
         else:
             for arg in command.args:
-                token = arg.strip('"')
-                for var in SOURCE_DIR_VARS:
-                    token = token.replace(var, base)
+                token = expand(arg.strip('"'), base, variables)
                 if not token or "${" in token or "$<" in token:
                     continue
                 path = os.path.realpath(os.path.join(base, token))
