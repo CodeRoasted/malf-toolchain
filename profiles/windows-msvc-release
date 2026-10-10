@@ -25,6 +25,18 @@ compiler.runtime=dynamic
 compiler.runtime_type=Release
 os=Windows
 
+[options]
+# OPENSSL READS ITS CONFIG FROM AN ADMIN-ONLY DIRECTORY (CWE-427). libcrypto compiles
+# OPENSSLDIR in as a literal and loads `<OPENSSLDIR>\openssl.cnf` at initialisation, and a config file
+# can load any DLL as a provider or engine. conancenter's recipe defaults it, off Linux, to the BUILD
+# host's package folder: `engine-v1.10.6`'s sift-windows-x64.exe carries
+# `C:\actions-runner-release-win\_work\...\opensf35e3807db321\p\res`, a path any standard user of
+# the machine running sift can create. This is OpenSSL's own Windows default (%CommonProgramFiles%\SSL),
+# writable by administrators only. Third-party, so INV-25 (no option on a FIRST-party package) holds.
+# It changes openssl's package id on this profile alone, so openssl rebuilds once per Windows conan
+# home; insight-eidos's sift-windows.yml reds a release asset whose OPENSSLDIR is outside C:\Program Files.
+openssl/*:openssldir=C:\Program Files\Common Files\SSL
+
 [conf]
 # Ninja is mandatory for import std (CMake supports CXX_MODULE_STD only under Ninja, never the
 # Visual Studio generator — it can't build the std BMI for imported targets). Conan's
