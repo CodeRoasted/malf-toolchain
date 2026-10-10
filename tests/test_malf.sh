@@ -3033,9 +3033,8 @@ echo "[9c] every linked ELF file a first-party package installs names itself by 
 # READ FROM THE STORED TRANSPORT. Driven with no compiler: the fixture package installs a copy of
 # the host's `true` (which carries a note) or the same copy with its note's type zeroed.
 bi_tmp="$(realpath "$(mktemp -d)")"
-check "malf's toolchain fragment links every executable, shared object and module with --build-id=sha1, as linker flags" \
-      "EXE SHARED MODULE|-Wl,--build-id=sha1" \
-      "$(sed -n 's/^foreach(kind IN ITEMS \(.*\))$/\1/p' "$MALF_ROOT/cmake/malf-path-map.cmake")|$(grep -o -- '-Wl,--build-id=sha1' "$MALF_ROOT/cmake/malf-path-map.cmake" | head -1)"
+check "malf's toolchain fragment links every target with --build-id=sha1, as a directory link option (which reaches an existing tree)" \
+      "1" "$(grep -c '^add_link_options("LINKER:--build-id=sha1")$' "$MALF_ROOT/cmake/malf-path-map.cmake")"
 bi_true="$(type -P true)"
 bi_py() { python3 -c "import sys; sys.path.insert(0, '$MALF_ROOT'); import artefact_store as a; $1"; }
 bi_expected="$(readelf -n "$bi_true" | sed -n 's/^ *Build ID: //p')"

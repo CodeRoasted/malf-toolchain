@@ -49,7 +49,9 @@ endforeach()
 # ELF file a first-party package installs by it (artefact_store.py `build_ids`), and the server's
 # /ready reports its own. A binary carries no git state, path or time instead: those are the seat's,
 # never the bytes'. The workspace gcc-16.2 links no note by default (measured: none in the M1
-# binaries). Linker flags, never compile flags: they are not package_id inputs and not exported.
-foreach(kind IN ITEMS EXE SHARED MODULE)
-    string(APPEND CMAKE_${kind}_LINKER_FLAGS_INIT " -Wl,--build-id=sha1")
-endforeach()
+# binaries). A directory LINK option, never a *_LINKER_FLAGS_INIT: an INIT value seeds the cache
+# only on a tree's first configure, so every existing desk tree kept linking without the note
+# (measured 2026-10-10: the server's test executable, reconfigured, still carried none), while
+# add_link_options applies at every configure. Link options are no package_id input, and CMake
+# exports only INTERFACE_* properties, so no package config carries it.
+add_link_options("LINKER:--build-id=sha1")
