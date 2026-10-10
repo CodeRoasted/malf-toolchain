@@ -72,7 +72,7 @@ jobs:
           pattern: golden-digest-*
 
       - name: Compare + validate the golden (every leg must be byte-identical)
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-golden-compare@9d0b205f027646d83b93bd58f60cd401f513aba4
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-golden-compare@d01793cb131f09f4e106d7be8d2db6626593bf41
         with:
           digests-dir: digests
           min-legs: ${{ inputs.min-legs }}
