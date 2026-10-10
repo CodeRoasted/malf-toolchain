@@ -41,6 +41,12 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
     artefact_store.py content-manifest-rows <sha256sum file> <prefix>
         the same digest computed from a committed `sha256sum` manifest whose paths carry <prefix>,
         for a root that manifest was just verified equal to; nothing under the root is read
+    artefact_store.py verdict <store> <document.json> <outputs.json> [<name>=<file>...]
+        one generalized verdict record (DN-142.D19 (10)): the document {step: {kind: verdict, id,
+        subject, predicate: {id, version}, params}, definition, judged, data, toolchain, system,
+        context}, the outputs {verdict, findings (a list), entries, record}, each named file kept
+        as an object; stored when the key is new (exit 0), compared when it is not on the verdict,
+        the findings and the record, never an entry or an object (exit 0 a match, 1 a mismatch)
     artefact_store.py executables <package dir> <package>
         the `executables:` map the package declares in its repository's packages.yml at HEAD
         (DN-142.D22), as canonical JSON; `{}` when it declares none
@@ -904,6 +910,52 @@ def _executable_member(executable: Path) -> dict[str, str]:
             "executable": file_sha256(executable.resolve())}
 
 
+# THE GENERALIZED VERDICT KIND (DN-142.D19 (10)): every keyed step that is not a package's tests.
+# Its document names the step and its predicate with the predicate's parameters, the definition,
+# what it judged, the data it read (content digests), the toolchain and system, and `context`, only
+# what the predicate declares it reads (the date, V, the runner). Its outputs: the verdict, the
+# findings' digest and their entries, `record` (the exact fragment the step writes into the step-0
+# record, so a reused step reproduces it byte for byte) and named `objects`. A rebuild compares the
+# verdict, the findings and the record, NEVER an entry or an object: a timing verdict's numbers ride
+# its object, so equal verdicts over different numbers MATCH.
+VERDICT_DOCUMENT_MEMBERS = ("step", "definition", "judged", "data", "toolchain", "system", "context")
+VERDICT_STEP_MEMBERS = ("kind", "id", "subject", "predicate", "params")
+VERDICT_OUTPUTS = ("verdict", "findings", "entries", "record")
+
+
+def verdict_shape(document: dict, outputs: dict) -> list[str]:
+    """What keeps a document and its outputs from the generalized verdict kind's shape; empty when
+    nothing does."""
+    wrong = [f"document lacks `{member}`" for member in VERDICT_DOCUMENT_MEMBERS if member not in document]
+    step = document.get("step") or {}
+    wrong += [f"step lacks `{member}`" for member in VERDICT_STEP_MEMBERS if member not in step]
+    if step.get("kind") != "verdict":
+        wrong.append(f"step kind is {step.get('kind')!r}, not 'verdict'")
+    if not {"id", "version"} <= set(step.get("predicate") or {}):
+        wrong.append("predicate lacks `id` or `version`")
+    wrong += [f"outputs lack `{member}`" for member in VERDICT_OUTPUTS if member not in outputs]
+    if outputs.get("verdict") not in ("pass", "fail"):
+        wrong.append(f"verdict is {outputs.get('verdict')!r}, not pass or fail")
+    if not isinstance(outputs.get("findings"), list):
+        wrong.append("findings is not a list")
+    return wrong
+
+
+def judged_verdict(store: Path, document: dict, outputs: dict, objects: dict[str, Path]) -> int:
+    """Store or compare one generalized verdict: `outputs` holds the verdict, the findings as a list
+    (kept as their digest), the entries and the record fragment; `objects` names the files kept as
+    the record's objects. post: exit 0 stored or matching, 1 a mismatch; a shape that is not the
+    kind's exits the process naming every defect (a refused record is never written)."""
+    wrong = verdict_shape(document, outputs)
+    if wrong:
+        sys.exit(f"artefact_store: REFUSED verdict {document.get('step', {}).get('id')}: "
+                 + "; ".join(wrong))
+    output = {"verdict": outputs["verdict"], "findings": key_of(sorted(outputs["findings"])),
+              "entries": outputs["entries"], "record": outputs["record"]}
+    return LocalStore(store).commit(document, {"verdict": output},
+                                    {"verdict": ("objects", lambda: dict(objects))})
+
+
 def verdict_step(store: Path, predicate: str, malf_dir: Path, clang_format: Path,
                  repositories: list[Path]) -> int:
     """DN-142.D7's verdict record of `predicate` over each repository's tracked tree.
@@ -949,17 +1001,21 @@ def verdict_step(store: Path, predicate: str, malf_dir: Path, clang_format: Path
             findings = sorted(line for line in lines if FINDING.search(line))
             verdict = "pass" if judged.returncode == 0 else "fail"
             document = {
-                "step": {"kind": "verdict", "subject": name,
+                "step": {"kind": "verdict", "id": f"{predicate}/{name}", "subject": name,
                          "predicate": {"id": f"malf {' '.join(PREDICATES[predicate])}",
-                                       "version": definition["malf"]}},
+                                       "version": definition["malf"]},
+                         "params": {}},
                 "definition": definition,
                 "judged": {name: tree},
+                "data": {},
                 "toolchain": toolchain,
                 "system": system,
+                "context": {},
             }
-            output = {"verdict": verdict, "findings": key_of(findings),
-                      "entries": [[finding] for finding in findings]}
-            rc = local.commit(document, {"verdict": output}, {"verdict": ("log", lambda: log)})
+            rc = judged_verdict(local.root, document,
+                                {"verdict": verdict, "findings": findings,
+                                 "entries": [[finding] for finding in findings], "record": {}},
+                                {"log": log})
             if verdict == "fail":
                 print(f"artefact_store: FAIL {name} {predicate}: {len(findings)} finding(s); first "
                       f"{findings[0] if findings else lines[-1]}")
@@ -1005,7 +1061,8 @@ class LocalStore:
         """Store `outputs` under the document's key, or compare them with the stored ones.
 
         `objects` maps an output's name to `(field, produce)`: on a new key `produce()` returns the
-        file stored as that output's object, its digest kept under `field` and never compared.
+        file stored as that output's object, its digest kept under `field` and never compared — or
+        a `{name: file}` map, each stored, the field then holding `{name: digest}`.
         `derived` maps an output's name to a function of that STORED object returning fields the
         record keeps beside it, an index read from the stored bytes and never compared.
         post: exit 0 when the key was new (stored) or every output's compared axes equal the
@@ -1015,7 +1072,10 @@ class LocalStore:
         stored = self.record(key)
         if stored is None:
             for name, (field, produce) in objects.items():
-                outputs[name][field] = self.put_object(produce())
+                produced = produce()
+                outputs[name][field] = ({label: self.put_object(path)
+                                         for label, path in sorted(produced.items())}
+                                        if isinstance(produced, dict) else self.put_object(produced))
                 if derived and name in derived:
                     outputs[name].update(derived[name](self.root / "objects" / outputs[name][field]))
             body = {"key": key, "inputs": document, "outputs": outputs,
@@ -1104,6 +1164,16 @@ def main(argv: list[str]) -> int:
         for path in missing:
             print(f"artefact_store: no GNU build-id: {path}", file=sys.stderr)
         return 1 if missing else 0
+    if len(argv) >= 4 and argv[0] == "verdict":
+        objects = {}
+        for spec in argv[4:]:
+            label, separator, path = spec.partition("=")
+            if not separator or not label:
+                print(f"artefact_store: verdict: an object is `<name>=<file>`, not {spec!r}", file=sys.stderr)
+                return 2
+            objects[label] = Path(path)
+        return judged_verdict(Path(argv[1]), json.loads(Path(argv[2]).read_text()),
+                              json.loads(Path(argv[3]).read_text()), objects)
     if len(argv) == 3 and argv[0] == "executables":
         print(json.dumps(declared_executables(Path(argv[1]), argv[2]), sort_keys=True))
         return 0

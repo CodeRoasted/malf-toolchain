@@ -4779,6 +4779,34 @@ check "a tree with no C++ is UNJUDGED, exit 2, and writes no record" \
 rm -rf "$sv_tmp"
 echo
 
+echo "[7q7k] the GENERALIZED verdict kind (DN-142.D19 (10)): params, data and context in the key; a record fragment and named objects in the outputs; a rebuild compares the verdict, the findings and the record, never an object"
+gv_tmp="$(realpath "$(mktemp -d)")"
+gv_doc() {   # <params json> -> a generalized verdict document on stdout
+    printf '{"step": {"kind": "verdict", "id": "timing/fixture", "subject": "fixture", "predicate": {"id": "timing", "version": "1"}, "params": %s}, "definition": {"malf": "m"}, "judged": {"fixture": "t"}, "data": {"bench": "d"}, "toolchain": {}, "system": "s", "context": {"V": "9.9.9"}}' "$1"
+}
+gv_out() {   # <verdict> <record json> -> outputs on stdout
+    printf '{"verdict": "%s", "findings": [], "entries": [["median 12.5 ms"]], "record": %s}' "$1" "$2"
+}
+gv_step() {   # <document> <outputs> <timing content> -> rc=<status> and the store's verdict line
+    printf '%s' "$1" > "$gv_tmp/doc.json"; printf '%s' "$2" > "$gv_tmp/out.json"; printf '%s' "$3" > "$gv_tmp/timing.json"
+    local out; out="$(python3 "$MALF_ROOT/artefact_store.py" verdict "$gv_tmp/store" "$gv_tmp/doc.json" "$gv_tmp/out.json" "timing=$gv_tmp/timing.json" 2>&1)"
+    printf 'rc=%s %s' "$?" "$(grep -oE '(STORED|MATCH|MISMATCH) fixture verdict|REFUSED verdict [^:]*' <<< "$out" | head -1)"
+}
+check "a generalized verdict is STORED, its named object kept by digest beside the record fragment" \
+      "rc=0 STORED fixture verdict|timing|{\"gate\": \"pass\"}" \
+      "$(gv_step "$(gv_doc '{"runs": 5}')" "$(gv_out pass '{"gate": "pass"}')" '{"median_ms": 12.5}')|$(python3 -c "import json, glob; o = json.load(open(glob.glob('$gv_tmp/store/records/*.json')[0]))['outputs']['verdict']; print('|'.join([','.join(o['objects']), json.dumps(o['record'])]))")"
+check "a timing verdict whose numbers moved and whose verdict did not MATCHES: the object is never compared" \
+      "rc=0 MATCH fixture verdict" "$(gv_step "$(gv_doc '{"runs": 5}')" "$(gv_out pass '{"gate": "pass"}')" '{"median_ms": 19.75}')"
+check "a rebuild whose record fragment differs at an equal key is a MISMATCH, exit 1" \
+      "rc=1 MISMATCH fixture verdict" "$(gv_step "$(gv_doc '{"runs": 5}')" "$(gv_out pass '{"gate": "pass", "extra": 1}')" '{"median_ms": 12.5}')"
+check "a parameter enters the key: another params is another record, STORED" \
+      "rc=0 STORED fixture verdict" "$(gv_step "$(gv_doc '{"runs": 7}')" "$(gv_out pass '{"gate": "pass"}')" '{"median_ms": 12.5}')"
+check "a document lacking a member of the kind is REFUSED, naming it, and nothing is stored" \
+      "rc=1 REFUSED verdict timing/fixture|2" \
+      "$(gv_step "$(gv_doc '{"runs": 9}' | python3 -c 'import json, sys; d = json.load(sys.stdin); d.pop("context"); print(json.dumps(d))')" "$(gv_out pass '{}')" '{}')|$(ls "$gv_tmp/store/records" | wc -l | tr -d ' ')"
+rm -rf "$gv_tmp"
+echo
+
 echo "[7q7i] every ship-leg act resolves against malf/conan.lock, strictly: never the home's own revision, never a requirement the lock does not name (W486 G2)"
 # note: measured 2026-10-10, the first DN-142.D16 store-create resolved with no lockfile and took the
 # home's own boost recipe revision, cmake, hiredis and libpq where malf/conan.lock names others. The
