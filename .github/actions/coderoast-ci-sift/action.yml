@@ -157,7 +157,7 @@ runs:
 
     - name: Dogfood --explain via the courtesy endpoint (optional CodeRoast infra; comment mode)
       if: ${{ inputs.mode == 'comment' && always() && inputs.courtesy-endpoint != '' && github.event.pull_request.head.repo.fork != true }}
-      uses: CodeRoasted/malf-toolchain/.github/actions/sift-courtesy-dogfood@762cbe295052f11451932e0fa70e09f1ebc41471
+      uses: CodeRoasted/malf-toolchain/.github/actions/sift-courtesy-dogfood@cd95a3b57babf9e7d76ff020ff06cf165588ffbc
       with:
         endpoint: ${{ inputs.courtesy-endpoint }}
         token: ${{ inputs.courtesy-token }}
