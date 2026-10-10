@@ -121,7 +121,10 @@ jobs:
         # This `conan create` is a BARE run: block — it does NOT go through `conan_module.sh`, so it
         # inherits none of that script's exports. `MALF_TOOLCHAIN_DIR` (build-time codegen
         # reachability, DN-17.D31) therefore comes from `setup-build-env` above, which puts it in
-        # $GITHUB_ENV for the whole job. Do not re-declare it here.
+        # $GITHUB_ENV for the whole job. Do not re-declare it here. The create resolves strictly
+        # against that checkout's conan.lock, as `conan_module.sh` and the vendor create do: without
+        # it a published tarball's third-party closure is whatever this runner's conan home holds
+        # (measured 2026-10-10 on malf store-create, W486 G2: four packages off the lock).
         env:
           PACKAGES: ${{ inputs.packages }}
           VERSION: ${{ steps.tag.outputs.version }}
@@ -145,6 +148,7 @@ jobs:
             fi
             conan create "$dir" \
               --profile:host="$PROFILE_PATH" --profile:build="$PROFILE_PATH" \
+              --lockfile="$MALF_TOOLCHAIN_DIR/conan.lock" \
               --build=missing --build-test=missing
             # conan cache save captures the recipe + all cached binaries for the ref; the consumer
             # restores it byte-for-byte with conan cache restore.

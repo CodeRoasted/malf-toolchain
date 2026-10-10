@@ -18,7 +18,11 @@ arms, because each sees what the other cannot:
     package's config imports, so CMake builds every C++ module the package ships, as an outside
     consumer does. It sees a reference the scan's pattern cannot spell.
 
-    package_relocate.py run <source home> <fresh home> <released tsv> <profile name> [package]
+    package_relocate.py run <source home> <fresh home> <released tsv> <profile name> <lockfile> [package]
+
+Both arms resolve each package's graph strictly against <lockfile> (malf/conan.lock) plus the package
+itself, the one requirement a lock need not name: a released leaf is a walk root, and `malf lock`
+records no root. Without it the closure would be whatever revision the producer home holds last.
 
 Exit 0 when both arms pass for every package, 1 on a finding, 2 when nothing could be judged. The
 producer home's mode is restored on every exit path but SIGKILL; if it was not, `chmod u+rwx
@@ -126,7 +130,23 @@ def scan(rows: list[tuple[str, str, Path]]) -> list[str]:
     return findings
 
 
-def seed(source: Path, fresh: Path, profile: str, rows: list[tuple[str, str, Path]]) -> None:
+def subject_locks(source: Path, lockfile: Path, rows: list[tuple[str, str, Path]],
+                  folder: Path) -> dict[str, Path]:
+    """One lockfile per released package: <lockfile> with the package's own reference added,
+    written under `folder` (inside the fresh home, which the run disposes of), keyed by name."""
+    locks = {}
+    for name, ref, _folder in rows:
+        locks[name] = folder / f"{name}.lock"
+        done = run(["conan", "lock", "add", f"--lockfile={lockfile}", f"--requires={ref}",
+                    f"--lockfile-out={locks[name]}"], home=source)
+        if done.returncode != 0:
+            sys.exit(f"package_relocate: `conan lock add --requires={ref}` over {lockfile} failed: "
+                     f"{done.stderr.strip()}")
+    return locks
+
+
+def seed(source: Path, fresh: Path, profile: str, rows: list[tuple[str, str, Path]],
+         locks: dict[str, Path]) -> None:
     """The fresh home: the source home's conf and profiles, and the host closure of every released
     package, by save and restore — the route a release asset takes to a consumer."""
     (fresh / "profiles").mkdir(parents=True, exist_ok=True)
@@ -151,10 +171,10 @@ def seed(source: Path, fresh: Path, profile: str, rows: list[tuple[str, str, Pat
         # ONE GRAPH PER PACKAGE, the graph its consumer resolves: the released set resolved as
         # one graph has version-range conflicts no single consumer meets (lz4 through libpq).
         lists = []
-        for index, (_name, ref, _folder) in enumerate(rows):
+        for index, (name, ref, _folder) in enumerate(rows):
             graph, pkglist = folder / f"graph{index}.json", folder / f"pkglist{index}.json"
-            conan_to(["conan", "graph", "info", f"--requires={ref}", *profiles, "--format=json"],
-                     source, graph)
+            conan_to(["conan", "graph", "info", f"--requires={ref}", *profiles,
+                      f"--lockfile={locks[name]}", "--format=json"], source, graph)
             conan_to(["conan", "list", f"--graph={graph}", "--graph-binaries=Cache",
                       "--format=json"], source, pkglist)
             lists += ["-l", str(pkglist)]
@@ -188,7 +208,7 @@ def build_environment(folder: Path) -> dict[str, str]:
     return dict(item.split("=", 1) for item in done.stdout.split("\0") if "=" in item)
 
 
-def consume(fresh: Path, profile: str, name: str, ref: str, scratch: Path,
+def consume(fresh: Path, profile: str, name: str, ref: str, lock: Path, scratch: Path,
             import_std: str) -> str | None:
     """Install `ref` alone into a synthetic consumer and compile every module it ships.
 
@@ -204,7 +224,8 @@ def consume(fresh: Path, profile: str, name: str, ref: str, scratch: Path,
                                                                   import_std=import_std))
     profile_path = fresh / "profiles" / profile
     install = ["conan", "install", f"--requires={ref}", f"--profile:host={profile_path}",
-               f"--profile:build={profile_path}", "--build=never", "-g", "CMakeToolchain", "-g",
+               f"--profile:build={profile_path}", f"--lockfile={lock}", "--build=never", "-g",
+               "CMakeToolchain", "-g",
                "CMakeDeps", "-c", "tools.cmake.cmaketoolchain:generator=Ninja", "-of",
                str(folder / "conan")]
     toolchain = f"-DCMAKE_TOOLCHAIN_FILE={folder / 'conan' / 'conan_toolchain.cmake'}"
@@ -246,11 +267,15 @@ def importer(build: Path, folder: Path) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) not in (5, 6) or argv[0] != "run":
+    if len(argv) not in (6, 7) or argv[0] != "run":
         print(__doc__, file=sys.stderr)
         return 2
     source, fresh, released, profile = Path(argv[1]), Path(argv[2]), Path(argv[3]), argv[4]
-    only = argv[5] if len(argv) == 6 else ""
+    lockfile = Path(argv[5])
+    only = argv[6] if len(argv) == 7 else ""
+    if not lockfile.is_file():
+        print(f"package_relocate: no lockfile at {lockfile} — nothing resolves unlocked", file=sys.stderr)
+        return 2
     if fresh.resolve() == source.resolve() or fresh.resolve().is_relative_to(source.resolve()):
         print(f"package_relocate: the fresh home {fresh} must lie outside {source}", file=sys.stderr)
         return 2
@@ -261,7 +286,9 @@ def main(argv: list[str]) -> int:
     print(f"package_relocate: SCAN — {len(findings)} absolute path(s) in the cmake files of "
           f"{len(rows)} released package(s)")
 
-    seed(source, fresh, profile, rows)
+    (fresh / "malf-relocate-locks").mkdir(parents=True, exist_ok=True)
+    locks = subject_locks(source, lockfile, rows, fresh / "malf-relocate-locks")
+    seed(source, fresh, profile, rows, locks)
     mode = stat.S_IMODE(source.stat().st_mode)
     print(f"package_relocate: {source} is made unreadable for the consume arm; if this run dies "
           f"before restoring it: chmod {mode:o} {source}")
@@ -269,7 +296,7 @@ def main(argv: list[str]) -> int:
     try:
         with tempfile.TemporaryDirectory(prefix="malf-relocate-consumer.") as scratch:
             for name, ref, _folder in rows:
-                failure = consume(fresh, profile, name, ref, Path(scratch), import_std)
+                failure = consume(fresh, profile, name, ref, locks[name], Path(scratch), import_std)
                 print(f"  {'FAIL' if failure else 'ok  '} consume {ref}")
                 if failure:
                     findings.append(failure)

@@ -10,9 +10,9 @@ ONE home share every path but the per-create folder hash, so they prove less.
         every package of <source home> OUTSIDE the owned namespaces (third-party, recipes and
         binaries) restored into each <target home>, so a create there rebuilds first-party code
         only; a third-party binary the source lacks is built in each target alike
-    package_twin.py missing <home> <released tsv> <owned prefixes> <host profile> <build profile>
+    package_twin.py missing <home> <released tsv> <owned prefixes> <host profile> <build profile> <lockfile>
         every released recipe exported into <home> (a seeded home, before any create), then its graph resolved
-        there: exit 0 when the home holds every third-party binary the graphs need, 3 naming each
+        there strictly against <lockfile>, as the creates resolve it: exit 0 when the home holds every third-party binary the graphs need, 3 naming each
         one it lacks (1 is a failed conan command, as for every subcommand)
     package_twin.py digest <home> <released tsv>
         one JSON object per released package: its recipe revision, package id, package revision
@@ -74,7 +74,8 @@ def seed(source: Path, prefixes: tuple[str, ...], targets: list[Path]) -> None:
                   f"{target}")
 
 
-def missing(home: Path, released: Path, prefixes: tuple[str, ...], host: str, build: str) -> int:
+def missing(home: Path, released: Path, prefixes: tuple[str, ...], host: str, build: str,
+            lockfile: Path) -> int:
     """Name every third-party binary the released graphs need that `home` does not hold."""
     rows = [row.split("\t") for row in released.read_text().splitlines() if row.strip()]
     for _name, folder, *_rest in rows:
@@ -82,7 +83,8 @@ def missing(home: Path, released: Path, prefixes: tuple[str, ...], host: str, bu
     lacking: set[str] = set()
     for _name, folder, *_rest in rows:
         graph = json.loads(conan(home, "graph", "info", folder, f"--profile:host={host}",
-                                 f"--profile:build={build}", "--format=json"))["graph"]["nodes"]
+                                 f"--profile:build={build}", f"--lockfile={lockfile}",
+                                 "--format=json"))["graph"]["nodes"]
         lacking.update(f"{node['ref']}:{node['package_id']} ({node['context']})"
                        for node in graph.values()
                        if node.get("binary") == "Missing"
@@ -147,8 +149,9 @@ def main(argv: list[str]) -> int:
     if len(argv) >= 4 and argv[0] == "seed":
         seed(Path(argv[1]), tuple(argv[2].split()), [Path(target) for target in argv[3:]])
         return 0
-    if len(argv) == 6 and argv[0] == "missing":
-        return missing(Path(argv[1]), Path(argv[2]), tuple(argv[3].split()), argv[4], argv[5])
+    if len(argv) == 7 and argv[0] == "missing":
+        return missing(Path(argv[1]), Path(argv[2]), tuple(argv[3].split()), argv[4], argv[5],
+                       Path(argv[6]))
     if len(argv) == 3 and argv[0] == "digest":
         digest(Path(argv[1]), Path(argv[2]))
         return 0

@@ -2992,7 +2992,7 @@ check "named packages select their closure in walk order; a name that is no step
       "$(printf 'a_core\t/w/a\t\tcreate|b_lib\t/w/b\ta_core\tcreate|d_app\t/w/d\tb_lib\tcreate')|malf store-create: no step of malf's walk is named zz_none" \
       "$(sf_walk d_app)|$(sf_walk zz_none)"
 check "the act never conan-creates a step it marked build: the create branch is the only create, and a build step goes to store-build's one function" \
-      "1 1" "$(grep -c 'if \[\[ "$kind" == "build" \]\]; then' "$MALF_BIN") $(awk '/^cmd_store_create\(\)/,/^}/' "$MALF_BIN" | grep -c '^ *if ! conan create ')"
+      "1 1 0" "$(grep -c 'if \[\[ "$kind" == "build" \]\]; then' "$MALF_BIN") $(awk '/^cmd_store_create\(\)/,/^}/' "$MALF_BIN" | grep -c '^ *if ! _malf_store_create_step ') $(awk '/^cmd_store_create\(\)/,/^}/' "$MALF_BIN" | grep -cE '^ *(if ! )?conan create ')"
 check "store-build REFUSES a package that is stored, naming store-create, before conan is ever called" \
       "rc=2 1 none" "$(sf_malf store-build rel_pkg) $([[ -s "$cs_tmp/sf-conan.log" ]] && echo called || echo none)"
 
@@ -4368,18 +4368,22 @@ printf 'from conan import ConanFile\n\n\nclass TpDep(ConanFile):\n    name = "tp
 printf 'from conan import ConanFile\n\n\nclass ExTop(ConanFile):\n    name = "ex_top"\n    version = "0.1"\n    package_type = "header-library"\n    requires = "tpdep/0.1"\n' > "$tm_tmp/ex_top/conanfile.py"
 printf '[settings]\nos=Linux\narch=x86_64\nbuild_type=Release\n' > "$tm_tmp/profile"
 CONAN_HOME="$tm_tmp/seed" conan create "$tm_tmp/tpdep" -pr:a "$tm_tmp/profile" > "$tm_tmp/create.log" 2>&1
+CONAN_HOME="$tm_tmp/seed" conan lock create "$tm_tmp/ex_top" -pr:a "$tm_tmp/profile" --lockfile-out="$tm_tmp/conan.lock" > /dev/null 2>&1
+printf '{"version": "0.5", "requires": [], "build_requires": [], "python_requires": [], "config_requires": []}\n' > "$tm_tmp/empty.lock"
 printf 'ex_top\t%s\t\n' "$tm_tmp/ex_top" > "$tm_tmp/released.tsv"
 python3 "$MALF_ROOT/package_twin.py" seed "$tm_tmp/seed" "ex_" "$tm_tmp/full" "$tm_tmp/lacking" > /dev/null
 CONAN_HOME="$tm_tmp/lacking" conan remove "tpdep/0.1:*" -c > /dev/null 2>&1
-tm_probe() {   # <home> — the probe's exit and its verdict lines
+tm_probe() {   # <home> [<lockfile>] — the probe's exit and its verdict lines
     local out rc
-    out="$(python3 "$MALF_ROOT/package_twin.py" missing "$tm_tmp/$1" "$tm_tmp/released.tsv" "ex_" "$tm_tmp/profile" "$tm_tmp/profile" 2>&1)"; rc=$?
+    out="$(python3 "$MALF_ROOT/package_twin.py" missing "$tm_tmp/$1" "$tm_tmp/released.tsv" "ex_" "$tm_tmp/profile" "$tm_tmp/profile" "${2:-$tm_tmp/conan.lock}" 2>&1)"; rc=$?
     printf 'rc=%s|%s' "$rc" "$(grep -E 'MISSING|lacks' <<< "$out" | sed -E 's/#[0-9a-f]+:[0-9a-f]+//; s|'"$tm_tmp"'/||' | tr '\n' '|')"
 }
 check "the probe passes a seed holding every third-party binary the graph needs, exit 0" \
       "rc=0|package_twin: full lacks 0 third-party binary(ies) the released graphs need|" "$(tm_probe full)"
 check "the probe names the third-party binary a seed lacks, exit 3" \
       "rc=3|  MISSING tpdep/0.1 (host)|package_twin: lacking lacks 1 third-party binary(ies) the released graphs need|" "$(tm_probe lacking)"
+check "the probe resolves strictly against the lockfile it is handed: one that names no tpdep fails the probe, exit 1, judging nothing" \
+      "rc=1|" "$(tm_probe full "$tm_tmp/empty.lock")"
 rm -rf "$tm_tmp"
 # The verb: the probe runs before the first create, and its finding is a refusal at exit 2 that
 # names the remedy; the sentence claiming a missing binary is "built in each home alike" is gone.
@@ -4589,6 +4593,93 @@ git -C "$sv_repo" rm -rq src && printf 'no C++ here\n' > "$sv_repo/README" && gi
 check "a tree with no C++ is UNJUDGED, exit 2, and writes no record" \
       "rc=2 UNJUDGED fixture-repo format |3" "$(sv_step)|$(sv_records)"
 rm -rf "$sv_tmp"
+echo
+
+echo "[7q7i] every ship-leg act resolves against malf/conan.lock, strictly: never the home's own revision, never a requirement the lock does not name (W486 G2)"
+# note: measured 2026-10-10, the first DN-142.D16 store-create resolved with no lockfile and took the
+# home's own boost recipe revision, cmake, hiredis and libpq where malf/conan.lock names others. The
+# fixture is that shape in miniature: a third-party package at two recipe revisions in one home, a
+# lock naming the OLDER one, a lock naming one the home no longer holds, a requirement no lock names,
+# and no remote, so nothing a run resolves can come from anywhere but the home and the lock.
+ls_tmp="$(realpath "$(mktemp -d)")"; ls_home="$ls_tmp/home"
+CONAN_HOME="$ls_home" bash "$MALF_BIN" profiles > /dev/null 2>&1
+CONAN_HOME="$ls_home" conan remote remove conancenter > /dev/null 2>&1
+printf '[settings]\nos=Linux\narch=x86_64\nbuild_type=Release\n' > "$ls_home/profiles/fixture"
+mkdir -p "$ls_tmp/tpdep" "$ls_tmp/tpextra" "$ls_tmp/ls_top" "$ls_tmp/ls_other" "$ls_tmp/lock-a" "$ls_tmp/lock-b" "$ls_tmp/no-lock"
+ls_recipe() {   # <dir> <class> <name> <version> <extra line> — a header-library fixture recipe
+    printf 'from conan import ConanFile\n\n\nclass %s(ConanFile):\n    name = "%s"\n    version = "%s"\n    package_type = "header-library"\n    %s\n' \
+           "$2" "$3" "$4" "$5" > "$ls_tmp/$1/conanfile.py"
+}
+ls_conan() { CONAN_HOME="$ls_home" conan "$@" > /dev/null 2>&1; }
+ls_recipe ls_top LsTop ls_top 0.1 'requires = "tpdep/[>=1.0 <2]"'
+ls_recipe ls_other LsOther ls_other 0.1 'requires = "tpdep/[>=1.0 <2]", "tpextra/1.0"'
+ls_recipe tpextra TpExtra tpextra 1.0 'description = "named by no lock"'
+ls_recipe tpdep TpDep tpdep 1.0 'description = "revision a"'
+ls_conan create "$ls_tmp/tpdep" -pr:a fixture
+ls_conan lock create "$ls_tmp/ls_top" -pr:a fixture --lockfile-out="$ls_tmp/lock-a/conan.lock"
+ls_recipe tpdep TpDep tpdep 1.0 'description = "revision b"'
+ls_conan create "$ls_tmp/tpdep" -pr:a fixture
+ls_conan lock create "$ls_tmp/ls_top" -pr:a fixture --lockfile-out="$ls_tmp/lock-b/conan.lock"
+ls_conan create "$ls_tmp/tpextra" -pr:a fixture
+for ls_dir in lock-a lock-b no-lock; do cp "$MALF_ROOT/malf_recipe_tests.py" "$ls_tmp/$ls_dir/"; done
+ls_rev() { grep -o 'tpdep/1.0#[0-9a-f]*' "$ls_tmp/$1/conan.lock" | cut -d'#' -f2; }
+ls_rev_a="$(ls_rev lock-a)"; ls_rev_b="$(ls_rev lock-b)"
+check "the fixture: two distinct tpdep revisions, each lock naming one, and the home's latest is the second" \
+      "distinct latest=b" \
+      "$([[ -n "$ls_rev_a" && -n "$ls_rev_b" && "$ls_rev_a" != "$ls_rev_b" ]] && printf distinct) latest=$(CONAN_HOME="$ls_home" conan list 'tpdep/1.0#latest' --format=json 2>/dev/null | python3 -c 'import json, sys; revs = [r for v in json.load(sys.stdin)["Local Cache"].values() for r in v["revisions"]]; print("b" if revs == [sys.argv[1]] else revs)' "$ls_rev_b")"
+# The act's own create, sourced from malf with the lockfile malf derives from MALF_DIR, as
+# cmd_store_create runs it. Prints the exit status and the tpdep revision the create's graph holds.
+ls_step() {   # <malf dir> <package>
+    rm -f "$ls_tmp/graph.json" "$ls_tmp/create.log"
+    CONAN_HOME="$ls_home" bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e
+        MALF_DIR="$2"; MALF_PROFILE="$3"; MALF_BUILD_PROFILE="$3"; MALF_CONFIG=Release
+        _malf_writer_create_args || exit 3
+        _malf_ship_lock_args || exit 2
+        _malf_store_create_step "$4" "$5" ls_ "$6/graph.json" "$6/create.log"' \
+        _ "$MALF_BIN" "$ls_tmp/$1" "$ls_home/profiles/fixture" "$2" "$ls_tmp/$2" "$ls_tmp" 2> "$ls_tmp/refusal.log"
+    local rc=$? revision
+    revision="$(python3 -c 'import json, sys; print(" ".join(n["rrev"] for n in json.load(open(sys.argv[1]))["graph"]["nodes"].values() if n["name"] == "tpdep") or "none")' "$ls_tmp/graph.json" 2>/dev/null)"
+    printf 'rc=%s tpdep=%s' "$rc" "${revision:-no-graph}"
+}
+ls_name() { sed "s/$ls_rev_a/a/g; s/$ls_rev_b/b/g"; }
+check "a home holding a NEWER revision than the lock: the act resolves the lock's revision, never the home's latest" \
+      "rc=0 tpdep=a" "$(ls_step lock-a ls_top | ls_name)"
+check "a requirement no lock names FAILS the act, naming it; --lockfile-partial would have resolved it from the home" \
+      "rc=1 1" "$(ls_step lock-b ls_other | cut -d' ' -f1) $(grep -c "Requirement 'tpextra/1.0' not in lockfile" "$ls_tmp/create.log")"
+ls_conan remove "tpdep/1.0#$ls_rev_b" -c
+check "a home holding only an OLDER revision than the lock: the act fails, naming the package, and never falls back to the home's" \
+      "rc=1 1" "$(ls_step lock-b ls_top | cut -d' ' -f1) $(grep -c "Package 'tpdep/1.0' not resolved" "$ls_tmp/create.log")"
+check "no malf/conan.lock: the act refuses at exit 2 naming the file, and no create runs" \
+      "rc=2 tpdep=no-graph 1" "$(ls_step no-lock ls_top) $(grep -c "resolves only against $ls_tmp/no-lock/conan.lock" "$ls_tmp/refusal.log")"
+# relocate-verify's closure is the graph the lock resolves, plus the package under judgement: the
+# producer home holds both tpdep revisions, and the fresh home receives the lock's alone.
+ls_conan remove "ls_top/*" -c
+ls_conan create "$ls_tmp/tpdep" -pr:a fixture
+ls_conan create "$ls_tmp/ls_top" -pr:a fixture --lockfile="$ls_tmp/lock-a/conan.lock"
+printf 'ls_top\t%s\t\n' "$ls_tmp/ls_top" > "$ls_tmp/released.tsv"
+check "relocate-verify's fresh home receives the locked tpdep revision, never the producer home's latest" \
+      "a" "$(python3 -I -c 'import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import package_relocate as r
+source, fresh, lock = Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4])
+rows = r.released_refs(source, Path(sys.argv[5]), "")
+(fresh / "locks").mkdir(parents=True)
+r.seed(source, fresh, "fixture", rows, r.subject_locks(source, lock, rows, fresh / "locks"))' "$MALF_ROOT" "$ls_home" "$ls_tmp/fresh" "$ls_tmp/lock-a/conan.lock" "$ls_tmp/released.tsv" > /dev/null 2>&1
+         CONAN_HOME="$ls_tmp/fresh" conan list 'tpdep/1.0#*' --format=json 2>/dev/null | python3 -c 'import json, sys; print(" ".join(r for v in json.load(sys.stdin)["Local Cache"].values() for r in v.get("revisions", {})) or "none")' | ls_name)"
+# Every other resolution of the ship leg splices the same arguments, read from malf's source: the
+# store-build step, cut-verify's creates, and the lockfile twin-verify's probe and relocate-verify
+# resolve against. Each verb takes it before its first conan call and refuses without it.
+ls_body() { awk "/^$1\\(\\)/,/^}/" "$MALF_BIN"; }
+check "store-create's create and store-build's build splice the ship lockfile, and malf passes --lockfile-partial nowhere on the ship leg" \
+      "1 1 0" \
+      "$(ls_body _malf_store_create_step | grep -c '"${_MALF_SHIP_LOCK\[@\]}"') $(ls_body _malf_store_build_one | grep -c '"${_MALF_SHIP_LOCK\[@\]}"') $(for fn in cmd_store_create _malf_store_create_step _malf_store_build_one cmd_store_build cmd_cut_verify cmd_twin_verify cmd_relocate_verify; do ls_body "$fn"; done | grep -c -- '--lockfile-partial')"
+check "cut-verify's creates carry the ship lockfile in the arguments every create splices" \
+      "1" "$(ls_body cmd_cut_verify | grep -c 'profile_args+=("${_MALF_SHIP_LOCK\[@\]}")')"
+check "store-create, store-build, cut-verify, twin-verify and relocate-verify each take the ship lockfile and refuse without it" \
+      "5" "$(for fn in cmd_store_create cmd_store_build cmd_cut_verify cmd_twin_verify cmd_relocate_verify; do ls_body "$fn" | grep -cE '_malf_ship_lock_args \|\| (return|exit)'; done | awk '{n += $1} END {print n}')"
+check "twin-verify's probe and relocate-verify resolve against the lockfile malf took" \
+      "1 1" "$(ls_body cmd_twin_verify | grep -c 'package_twin.py" missing .*"${_MALF_SHIP_LOCK\[0\]#--lockfile=}"') $(ls_body cmd_relocate_verify | grep -c '"${_MALF_SHIP_LOCK\[0\]#--lockfile=}"')"
+check "the reusable release workflow's create resolves strictly against the toolchain checkout's conan.lock" \
+      "1 0" "$(grep -c -- '--lockfile="$MALF_TOOLCHAIN_DIR/conan.lock"' "$MALF_ROOT/.github/workflows/coderoast-release.yml") $(grep -vE '^\s*#' "$MALF_ROOT/.github/workflows/coderoast-release.yml" | grep -c -- '--lockfile-partial')"
+rm -rf "$ls_tmp"
 echo
 
 echo "[7q8] at job end every conan home drops its build and temp folders and its superseded versions, and reports its own size"

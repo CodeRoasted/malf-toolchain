@@ -965,6 +965,27 @@ _malf_lockfile_args() {
     [[ -n "${MALF_LOCKFILE_STRICT:-}" ]] || echo "--lockfile-partial"
 }
 
+# The lockfile of an act on the SHIP leg (store-create, store-build, cut-verify, twin-verify,
+# relocate-verify): malf/conan.lock, STRICT, whatever MALF_LOCKFILE_STRICT says. Measured 2026-10-10
+# (W486 G2): the first DN-142.D16 store-create resolved with no lockfile and took the home's own
+# boost recipe revision, cmake 4.4.2, hiredis 1.3.0 and libpq 17.7 where the lock names others, so
+# libpqxx, redis-plus-plus and drogon changed package id. With a lockfile a requirement the lock
+# NAMES resolves to the lock's version and revision in both modes, fetched from a remote when the
+# home lacks it, and fails when none has it. `--lockfile-partial` decides only what happens to a
+# requirement the lock does NOT name: with it, that requirement resolves freely against the home,
+# which is the drift this act exists to exclude; without it, the create fails naming it. So the
+# ship leg never passes it, and an absent lockfile refuses rather than resolving unlocked.
+# post: _MALF_SHIP_LOCK holds `--lockfile=<malf>/conan.lock`, or the function failed naming the
+#       absent file and _MALF_SHIP_LOCK is empty.
+_malf_ship_lock_args() {
+    _MALF_SHIP_LOCK=()
+    local lock="$MALF_DIR/conan.lock"
+    [[ -f "$lock" ]] || {
+        echo "malf: the ship leg resolves only against $lock, and there is no such file — nothing resolves unlocked" >&2
+        return 1; }
+    _MALF_SHIP_LOCK=("--lockfile=$lock")
+}
+
 _malf_conan_install_args() {
     local build_type="${MALF_CONFIG:-Release}"
     # shellcheck disable=SC2046
@@ -4685,6 +4706,9 @@ Commands:
                                    Builds pass --lockfile automatically when the file exists;
                                    MALF_LOCKFILE_STRICT=1 drops --lockfile-partial so an
                                    unlocked dependency is a hard error (CI / release legs).
+                                   The ship-leg acts (store-create, store-build, cut-verify,
+                                   twin-verify, relocate-verify) always resolve strictly against
+                                   it and refuse when it is absent.
     slot    [status|acquire|release]
                                    the WORKSPACE build slot — one LANE builds at a time, across
                                    every repo and across the gaps between its runs (this is not
@@ -4948,12 +4972,13 @@ cmd_relocate_verify() {
     local source="${MALF_RELOCATE_SOURCE_HOME:-$MALF_CONAN_HOME_BASE/cut-verify}"
     [[ -f "$source/settings.yml" ]] \
         || { echo "malf relocate-verify: $source is not a conan home — run 'malf cut-verify' first, or set MALF_RELOCATE_SOURCE_HOME" >&2; return 1; }
+    _malf_ship_lock_args || return 1
     local scratch rc=0
     scratch="$(mktemp -d /tmp/malf-relocate.XXXXXX)"
     python3 "$MALF_WORKSPACE_ROOT/scripts/version_line.py" released "$MALF_WORKSPACE_ROOT" > "$scratch/released.tsv" \
         || { echo "malf relocate-verify: failed to resolve the released-package list" >&2; rm -rf "$scratch"; return 1; }
     python3 "$MALF_DIR/package_relocate.py" run "$source" "$scratch/conan-home" "$scratch/released.tsv" \
-        "${MALF_CUT_VERIFY_PROFILE:-linux-gcc16-release}" ${only:+"$only"} || rc=$?
+        "${MALF_CUT_VERIFY_PROFILE:-linux-gcc16-release}" "${_MALF_SHIP_LOCK[0]#--lockfile=}" ${only:+"$only"} || rc=$?
     rm -rf "$scratch"
     return "$rc"
 }
@@ -4992,6 +5017,7 @@ cmd_twin_verify() {
         || { echo "malf twin-verify: this host refuses an unprivileged user namespace — the second account cannot be made" >&2; return 1; }
     [[ -f "$seed_home/settings.yml" ]] \
         || { echo "malf twin-verify: $seed_home is not a conan home — run 'malf cut-verify' first, or set MALF_TWIN_SEED_HOME" >&2; return 1; }
+    _malf_ship_lock_args || return 1
     local prefixes
     prefixes="$(python3 - "$MALF_WORKSPACE_ROOT" <<'PY'
 import pathlib, sys
@@ -5011,7 +5037,7 @@ PY
         || { echo "malf twin-verify: failed to resolve the released-package list" >&2; return 1; }
     local probe_rc=0
     ( export CONAN_HOME="$first"; _malf_sync_conan_conf
-      python3 "$MALF_DIR/package_twin.py" missing "$first" "$root/released.tsv" "$prefixes" "$profile" "$profile" ) || probe_rc=$?
+      python3 "$MALF_DIR/package_twin.py" missing "$first" "$root/released.tsv" "$prefixes" "$profile" "$profile" "${_MALF_SHIP_LOCK[0]#--lockfile=}" ) || probe_rc=$?
     if [[ $probe_rc -eq 3 ]]; then
         echo "malf twin-verify: REFUSED, nothing built — the seed $seed_home lacks the third-party binaries above, and a home that builds one carries its per-home folder into its dependents' bytes. Refresh the seed with 'malf cut-verify', then run again" >&2
         return 2
@@ -5146,6 +5172,7 @@ cmd_store_create() {
         || { echo "malf store-create: the owned package namespaces of $MALF_WORKSPACE_ROOT could not be derived" >&2; return 2; }
     local wanted
     wanted="$(_malf_store_walk "$steps" "$unstored" "$@")" || return 2
+    _malf_ship_lock_args || return 2
 
     export CONAN_HOME="${MALF_STORE_CONAN_HOME:-$cut_home}"
     local fresh=true
@@ -5171,7 +5198,7 @@ cmd_store_create() {
     _malf_writer_create_args || return 2
 
     local name path deps kind dep blocked rc=0 total=0
-    local -a failed=() skipped=() build_args=()
+    local -a failed=() skipped=()
     local -A broke=()
     while IFS=$'\t' read -r name path deps kind; do
         total=$((total+1))
@@ -5190,10 +5217,7 @@ cmd_store_create() {
             continue
         fi
         echo "--- store-create [$total] conan create $name ($path) ---"
-        mapfile -t build_args < <(_malf_store_build_args "$name" "$prefixes")
-        if ! conan create "$path" --profile:host="$MALF_PROFILE" --profile:build="$MALF_BUILD_PROFILE" \
-                -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${build_args[@]}" --format=json \
-                > "$scratch/$name.graph.json" 2> "$scratch/$name.log"; then
+        if ! _malf_store_create_step "$name" "$path" "$prefixes" "$scratch/$name.graph.json" "$scratch/$name.log"; then
             echo "malf store-create: conan create $name failed — $scratch/$name.log" >&2
             failed+=("$name"); broke["$name"]=1; continue
         fi
@@ -5213,6 +5237,18 @@ cmd_store_create() {
     fi
     echo "malf store-create: all $total step(s) built, tested and recorded"
     rm -rf "$scratch"
+}
+
+# One stored step's create: the package from its export, its tests and its test_package run, the
+# graph printed as JSON for artefact_store.py.
+# pre: CONAN_HOME, the profile, _MALF_WRITER_ARGS and _MALF_SHIP_LOCK are set (cmd_store_create).
+# post: the create's graph is in <graph> and its log in <log>; the status is the create's.
+_malf_store_create_step() {   # <name> <path> <prefixes> <graph> <log>
+    local -a build_args
+    mapfile -t build_args < <(_malf_store_build_args "$1" "$3")
+    conan create "$2" --profile:host="$MALF_PROFILE" --profile:build="$MALF_BUILD_PROFILE" \
+        -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${build_args[@]}" "${_MALF_SHIP_LOCK[@]}" \
+        --format=json > "$4" 2> "$5"
 }
 
 # post: the owned package namespaces of the workspace, space-separated, or the function failed.
@@ -5279,7 +5315,8 @@ PY
 # One `stored: false` step (DN-142.D14): a `conan build` of the package's tracked tree at <rev>,
 # materialised from git into <scratch>, in $CONAN_HOME with the writer's conf set and
 # `--build=never`, then its verdict record; it fails if any revision of the package is left in the
-# cache. pre: CONAN_HOME, the profile and _MALF_WRITER_ARGS are set (store-create, store-build).
+# cache. pre: CONAN_HOME, the profile, _MALF_WRITER_ARGS and _MALF_SHIP_LOCK are set (store-create,
+# store-build).
 _malf_store_build_one() {   # <name> <path> <rev> <store> <scratch> <prefixes>
     local name="$1" path="$2" rev="$3" store="$4" scratch="$5" prefixes="$6" repo prefix tree left
     repo="$(git -C "$path" rev-parse --show-toplevel)" && prefix="$(git -C "$path" rev-parse --show-prefix)" \
@@ -5291,8 +5328,8 @@ _malf_store_build_one() {   # <name> <path> <rev> <store> <scratch> <prefixes>
         || { echo "malf store-build: git archive $rev -- $prefix failed in $repo" >&2; return 1; }
     echo "--- store-build: conan build $name ($repo at $(git -C "$repo" rev-parse --short=12 "$rev"):$prefix) ---"
     if ! conan build "$scratch/$name/$prefix" --profile:host="$MALF_PROFILE" --profile:build="$MALF_BUILD_PROFILE" \
-            -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" --build=never --format=json \
-            > "$scratch/$name.graph.json" 2> "$scratch/$name.log"; then
+            -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${_MALF_SHIP_LOCK[@]}" --build=never \
+            --format=json > "$scratch/$name.graph.json" 2> "$scratch/$name.log"; then
         echo "malf store-build: conan build $name failed — $scratch/$name.log" >&2; return 1
     fi
     left="$(conan list "$name/*" --format=json | python3 -c 'import json, sys; print(sum(len(v) for v in json.load(sys.stdin).get("Local Cache", {}).values()))')"
@@ -5333,6 +5370,7 @@ cmd_store_build() {
     rm -f "$CONAN_HOME/editable_packages.json"
     unset MALF_EDITABLE_BUILD_DIR
     _malf_writer_create_args || return 2
+    _malf_ship_lock_args || return 2
     local scratch prefixes compiler rc=0
     scratch="$(mktemp -d /tmp/malf-store-build.XXXXXX)"
     prefixes="$(_malf_owned_prefixes)" || { echo "malf store-build: the owned package namespaces could not be derived" >&2; return 2; }
@@ -5486,6 +5524,8 @@ cmd_cut_verify() {
     )
     _malf_writer_create_args || return 1
     profile_args+=("${_MALF_WRITER_ARGS[@]}")
+    _malf_ship_lock_args || return 1
+    profile_args+=("${_MALF_SHIP_LOCK[@]}")
 
     local name path deps total=0 ok=0
     local -a failed=() skipped=()
