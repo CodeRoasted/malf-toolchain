@@ -3035,6 +3035,18 @@ echo "[9c] every linked ELF file a first-party package installs names itself by 
 bi_tmp="$(realpath "$(mktemp -d)")"
 check "malf's toolchain fragment links every target with --build-id=sha1, as a directory link option (which reaches an existing tree)" \
       "1" "$(grep -c '^add_link_options("LINKER:--build-id=sha1")$' "$MALF_ROOT/cmake/malf-path-map.cmake")"
+# A build inside the conan home (a create) links with its install RPATH, so no install-time RUNPATH
+# rewrite zero-fills a home path the linker already hashed into the build-id; a tree outside it (the
+# desk's) keeps the build-tree RUNPATH. Driven by configuring a LANGUAGES NONE project through a copy
+# of the fragment staged in a fixture home, once with its build tree inside that home and once outside.
+bi_rpath() {   # <build dir> -> the CMAKE_BUILD_WITH_INSTALL_RPATH the fragment left
+    mkdir -p "$bi_tmp/proj" "$bi_tmp/fhome"
+    cp "$MALF_ROOT/cmake/malf-path-map.cmake" "$bi_tmp/fhome/malf-path-map.cmake"
+    printf 'cmake_minimum_required(VERSION 3.28)\nproject(p LANGUAGES NONE)\nmessage(STATUS "RPATH_MODE=[${CMAKE_BUILD_WITH_INSTALL_RPATH}]")\n' > "$bi_tmp/proj/CMakeLists.txt"
+    cmake -S "$bi_tmp/proj" -B "$1" -DCMAKE_TOOLCHAIN_FILE="$bi_tmp/fhome/malf-path-map.cmake" 2>&1 | sed -n 's/^-- RPATH_MODE=\[\(.*\)\]$/\1/p'
+}
+check "a build tree inside the conan home links with its install RPATH; one outside keeps the build-tree RUNPATH" \
+      "ON|" "$(bi_rpath "$bi_tmp/fhome/p/b/pkg/b")|$(bi_rpath "$bi_tmp/desk/build")"
 bi_true="$(type -P true)"
 bi_py() { python3 -c "import sys; sys.path.insert(0, '$MALF_ROOT'); import artefact_store as a; $1"; }
 bi_expected="$(readelf -n "$bi_true" | sed -n 's/^ *Build ID: //p')"
