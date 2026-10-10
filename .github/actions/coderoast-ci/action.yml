@@ -85,16 +85,16 @@ runs:
         fetch-depth: ${{ inputs.fetch-depth }}
 
     - name: Provision the pinned gcc toolchain (published asset; never the PPA)
-      uses: CodeRoasted/malf-toolchain/.github/actions/setup-gcc@e80441d45f1e6072e34419239af48cf1fe872998
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-gcc@6bb6b3bf37ceb093f20bd51bab5f40deb8cc9146
 
     - name: Setup build env (apt + CMake 4.3.x + Conan + dep cache + canonical profile)
-      uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-env@e80441d45f1e6072e34419239af48cf1fe872998
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-env@6bb6b3bf37ceb093f20bd51bab5f40deb8cc9146
       with:
         extra-apt: ${{ inputs.extra-apt }}
         profile: ${{ inputs.profile }}
 
     - name: Vendor cross-repo Conan deps
-      uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-vendor@e80441d45f1e6072e34419239af48cf1fe872998
+      uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-vendor@6bb6b3bf37ceb093f20bd51bab5f40deb8cc9146
       with:
         vendor: ${{ inputs.vendor }}
         deps: ${{ inputs.deps }}
