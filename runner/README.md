@@ -58,6 +58,40 @@ The build slot is shared with the desk through `/var/lib/coderoast-build` (the W
 it; `malf` resolves its slot there whenever it exists), because `/tmp` cannot hold a slot two
 accounts can both reclaim.
 
+## The desk's Docker: rootless, and the desk account outside the `docker` group
+
+The rootful daemon's socket is `root:docker 0660`, so membership of `docker` is root on the host
+(`docker run -v /:/host`): every process of the desk account, every agent lane included, could read
+the release runner account's store-writer credential whatever its home's mode (`DN-142.D6`, R1). The
+desk therefore runs a rootless dockerd of its own, as the runners do, and leaves the group (the
+Founder, 2026-10-10).
+
+`bash malf/runner/desk-rootless-docker.sh` (as the desk account, never sudo) prints the plan and
+the drift; `--apply` installs a USER unit, `coderoast-desk-docker.service` (rootlesskit + dockerd,
+socket `$XDG_RUNTIME_DIR/docker.sock`, kept up by lingering), sets `DOCKER_HOST` for every new shell
+(a marked block in `~/.bashrc`) and every user unit (`~/.config/environment.d`), and smoke-tests the
+fixtures' shape — a container published on `127.0.0.1` answering. `DOCKER_HOST`, never a `docker
+context`: with both set the CLI warns on stderr, and the infra test fixtures read stderr and stdout
+as one stream. The rootless image store starts empty; nothing under `/var/lib/docker` is migrated.
+
+The two steps that need root, in this order:
+
+1. `sudo gpasswd -d windows docker` — harmless to a live run: a process keeps the groups it started
+   with, so nothing loses the group before the next login.
+2. When no lane and no runner job is live: `sudo systemctl disable --now docker.socket docker.service`
+   (with the desk out of the group the rootful daemon serves nobody — each runner has its own), then
+   `wsl.exe --shutdown` from Windows. Lingering keeps the user manager, and every process under
+   it, alive with the OLD groups until the distro restarts; a new terminal is not enough.
+
+Then, from a fresh terminal, `bash malf/runner/desk-rootless-docker.sh --prove`: no `docker` group,
+the rootful socket refuses the account, the rootless daemon answers, and a container bind-mounting
+`/home/ghrelease` or `/` — unprivileged and `--privileged` — reads neither the writer's credential
+nor `/etc/shadow`, each refusal paired with a control read of the account's own file.
+
+**What this does not close, and the proof prints it as RESIDUAL:** WSL interop. `wsl.exe -u root`
+answers uid 0, with no password, to any process of the desk account (measured 2026-10-10), because
+the Windows user owns the distro. Leaving `docker` closes one root door of the desk, not the last.
+
 ## Runner groups: what one job leaves for the next
 
 Isolation keeps a job away from the DESK; it does not keep one job away from the NEXT. A runner runs
@@ -371,6 +405,76 @@ labels, so no `actionlint.yaml` names it.
 **What the proof cannot see:** who the group admits (read it back with the three commands above),
 and a directory ADDED to the machine PATH later: the probe tries the PATH as it is on the day it
 runs, and each runner's `.env` carries the PATH as it was when its script last ran.
+
+## The store access probe (`DN-142.D6`, R5)
+
+The reader's side of the artefact store's ghcr replica: a repository's `GITHUB_TOKEN` reads the
+store package it is granted, is refused on one it is not, and cannot write its own. The instrument is
+malf-toolchain's `.github/workflows/store-access-probe.yml`; three repositories call it, each a
+dispatch-only `store-access-probe.yml`, and the callers are crossed so every refusal is answered by
+another run reading the same package:
+
+| Caller | Granted (must read, byte-equal) | Not granted (must be refused) |
+|---|---|---|
+| `coderoast-ipc` (public) | `store-coderoast-ipc` | `store-insight-canon` |
+| `insight-canon` (public) | `store-insight-canon` | `store-coderoast-ipc` |
+| `coderoast` (private) | `store-coderoast` | `store-coderoast-ipc` |
+
+Each run also PUTs a manifest into its granted package with a `packages: write` token; the refusal
+must come at the manifest (a blob upload may be accepted first, as R4 measured, and is no object).
+
+**1. Seed each package, as the writer account** (the Founder's terminal; the token is read inside
+`ghrelease`'s process and reaches curl on stdin, never an argument vector):
+
+```bash
+seed() { sudo -u ghrelease -H bash -s -- "$1" <<'SEED'
+set -euo pipefail
+pkg=$1; api=https://ghcr.io/v2/coderoasted/$pkg; w=$(mktemp -d); trap 'rm -rf "$w"' EXIT
+printf 'coderoast store access probe\n' > "$w/layer"; printf '{}' > "$w/config"
+printf 'user = "coderoast-dev:%s"\n' "$(cat ~/.config/coderoast/STORE_WRITER_TOKEN)" \
+  | curl -fsS -K - -o "$w/t.json" "https://ghcr.io/token?service=ghcr.io&scope=repository:coderoasted/$pkg:pull,push"
+auth() { printf 'header = "Authorization: Bearer %s"\n' "$(jq -r .token "$w/t.json")"; }
+put_blob() { local d loc s; d=sha256:$(sha256sum "$1" | cut -d' ' -f1)
+  loc=$(auth | curl -fsS -K - -X POST -o /dev/null -D - "$api/blobs/uploads/" | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')
+  [[ $loc == http* ]] || loc=https://ghcr.io$loc; [[ $loc == *\?* ]] && s='&' || s='?'
+  auth | curl -fsS -K - -X PUT -H 'Content-Type: application/octet-stream' --data-binary "@$1" "$loc${s}digest=$d" -o /dev/null
+  echo "$d"; }
+l=$(put_blob "$w/layer"); c=$(put_blob "$w/config")
+jq -nc --arg l "$l" --arg c "$c" '{schemaVersion:2, mediaType:"application/vnd.oci.image.manifest.v1+json",
+  artifactType:"application/vnd.coderoast.access-probe.v1",
+  config:{mediaType:"application/vnd.oci.empty.v1+json",digest:$c,size:2},
+  layers:[{mediaType:"application/octet-stream",digest:$l,size:29}]}' > "$w/m.json"
+auth | curl -fsS -K - -X PUT -H 'Content-Type: application/vnd.oci.image.manifest.v1+json' \
+  --data-binary "@$w/m.json" "$api/manifests/access-probe" -o /dev/null -w "$pkg:access-probe HTTP %{http_code}\n"
+SEED
+}
+seed store-coderoast-ipc; seed store-insight-canon; seed store-coderoast
+```
+
+Each line must print `HTTP 201`; the layer's digest is `sha256:5e8e719d…f403`, which the probe
+checks byte-for-byte. The push mechanics were exercised against a local `registry:2` on
+2026-10-10 (manifest 201, layer read back at that digest); against ghcr they are first run here.
+
+**2. In each package's settings** (`https://github.com/orgs/CodeRoasted/packages/container/<package>/settings`):
+*Danger Zone → Change visibility → Private* (a new package came up `internal` in R4, readable by
+every organisation member); *Manage Actions access → Add repository →* the package's own caller from
+the table, role **Read**, and no other repository. The page must show no linked repository.
+
+**3. Dispatch, then read each run:**
+
+```bash
+gh workflow run store-access-probe.yml -R CodeRoasted/coderoast-ipc
+gh workflow run store-access-probe.yml -R CodeRoasted/insight-canon
+gh workflow run store-access-probe.yml -R CodeRoasted/coderoast
+gh run list -w store-access-probe.yml -L 1 -R CodeRoasted/<repository>   # then: gh run view <id> --log
+```
+
+**Expected:** each run green, with three `pass` lines — the granted read (`HTTP 200`, 29 bytes,
+content `sha256:5e8e719d…`), the other package's read refused (`401`/`403`/`404` at the manifest),
+the write refused at the manifest (`401`/`403`). A `LEAK` line is an access-control finding against
+R5: report it, do not re-run around it; a successful write leaves the tag `access-probe-write-<run
+id>`, deleted by hand. A `FAIL` on the granted read means the seed or the grant is wrong, and every
+refusal in that run is then meaningless. `UNCLEAR` is an answer the probe does not classify.
 
 ## Notes
 

@@ -1,0 +1,131 @@
+name: Store access probe
+
+# THE PROOF FOR DN-142.D6's R5: a repository's GITHUB_TOKEN READS the store package it is granted,
+# is REFUSED on a store package it is not granted, and CANNOT WRITE the one it is granted. The store
+# is ghcr private OCI packages `store-<repository>`, written only by the release runner account's
+# token (R1); each package grants Read to its own repository and nothing else. R4 (the writer's
+# side) was measured at the desk on 2026-10-10; this is the reader's side, which only a hosted job
+# can measure.
+#
+# THE PAIRING IS THE DESIGN. Each caller names the package it is granted and one it is not, and the
+# callers are crossed: coderoast-ipc is granted store-coderoast-ipc and refused store-insight-canon,
+# insight-canon the reverse. So every refusal is answered by another run READING the same package
+# with another repository's token: a refusal cannot be a missing package, a wrong tag or a broken
+# instrument. Within one run, the granted read is the control for the refused one.
+#
+# THE WRITE ATTEMPT CARRIES `packages: write` (the caller grants it), so a refusal is the PACKAGE's
+# access list answering, never a token that lacked the scope. The manifest PUT is the verdict: R4
+# measured blob uploads accepted for a token the manifest then refused, and a blob nothing
+# references is not an object. A manifest PUT that succeeds is a LEAK, and it leaves the tag
+# `access-probe-write-<run id>` behind as its evidence; delete it by hand.
+#
+# THE SEED, done once per package by the writer account before any run (the Founder's terminal,
+# never a job): a manifest tagged `access-probe` whose one layer is the 29 bytes
+# "coderoast store access probe\n" (sha256 5e8e719d…f403, checked byte-for-byte below). The
+# package must then be set PRIVATE and grant Read to its own repository only, in its settings page;
+# malf runner/README.md § "The store access probe" is the procedure.
+#
+# HOSTED, with no runner input: two callers are public repositories. No `permissions:` here: a
+# called workflow can only downgrade its caller's grant. NOTHING SECRET IS PRINTED: the registry
+# bearer is masked, and only status codes, digests and registry error JSON reach the log.
+
+on:
+  workflow_call:
+    inputs:
+      granted:
+        description: The store package the calling repository is granted Read on.
+        type: string
+        required: true
+      ungranted:
+        description: A store package the calling repository is NOT granted, granted to another one.
+        type: string
+        required: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Read the granted package, be refused on the other, fail to write the granted one
+        env:
+          GRANTED: ${{ inputs.granted }}
+          UNGRANTED: ${{ inputs.ungranted }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_PASSWORD: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          org=coderoasted
+          seed_digest=sha256:5e8e719d60c943419d659d58267d0114af1cecdd15a540c8ac6f9b3c0541f403
+          empty_digest=sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a
+          oci_manifest=application/vnd.oci.image.manifest.v1+json
+          work="$(mktemp -d)"
+          fail=0
+          verdict() { printf '%-9s %s\n' "$1" "$2"; [[ "$1" == pass ]] || fail=1; }
+
+          # Credentials go to curl on stdin (-K -), never on an argument vector.
+          bearer() {   # <package> <scope> -> the registry bearer on stdout, empty when refused
+            local code
+            code="$(printf 'user = "%s:%s"\n' "$REGISTRY_USER" "$REGISTRY_PASSWORD" \
+              | curl -sS -K - -o "$work/token.json" -w '%{http_code}' \
+                "https://ghcr.io/token?service=ghcr.io&scope=repository:$org/$1:$2")"
+            echo "  token endpoint ($1, $2): HTTP $code" >&2
+            local value; value="$(jq -r '.token // empty' "$work/token.json" 2>/dev/null)"
+            [[ -n "$value" ]] && echo "::add-mask::$value" >&2
+            printf '%s' "$value"
+          }
+          call() {     # <bearer> <out file> <curl args...> -> the HTTP status code on stdout
+            local bt="$1" out="$2"; shift 2
+            { [[ -n "$bt" ]] && printf 'header = "Authorization: Bearer %s"\n' "$bt"; } \
+              | curl -sS -K - -o "$out" -w '%{http_code}' "$@"
+          }
+          read_seed() {  # <package> -> 0 when the seed layer was read byte-equal
+            local pkg="$1" bt code layer got
+            bt="$(bearer "$pkg" pull)"
+            code="$(call "$bt" "$work/manifest.json" -H "Accept: $oci_manifest" \
+              "https://ghcr.io/v2/$org/$pkg/manifests/access-probe")"
+            echo "  manifest GET $pkg:access-probe: HTTP $code"
+            [[ "$code" == 200 ]] || { head -c 400 "$work/manifest.json"; echo; return 1; }
+            layer="$(jq -r '.layers[0].digest' "$work/manifest.json")"
+            code="$(call "$bt" "$work/layer" -L "https://ghcr.io/v2/$org/$pkg/blobs/$layer")"
+            got="sha256:$(sha256sum "$work/layer" | cut -d' ' -f1)"
+            echo "  layer GET $layer: HTTP $code, $(wc -c < "$work/layer") bytes, content $got"
+            [[ "$code" == 200 && "$layer" == "$seed_digest" && "$got" == "$seed_digest" ]]
+          }
+
+          echo "== 1. READ $GRANTED (granted to ${GITHUB_REPOSITORY}): must succeed, byte-equal"
+          if read_seed "$GRANTED"; then verdict pass "granted read of $GRANTED"
+          else verdict FAIL "granted read of $GRANTED — no refusal below means anything until this reads"; fi
+
+          echo "== 2. READ $UNGRANTED (not granted to ${GITHUB_REPOSITORY}): must be refused"
+          if read_seed "$UNGRANTED"; then verdict LEAK "${GITHUB_REPOSITORY} READ $UNGRANTED"
+          else verdict pass "read of $UNGRANTED refused"; fi
+
+          echo "== 3. WRITE $GRANTED with a packages:write token: the manifest PUT must be refused"
+          bt="$(bearer "$GRANTED" pull,push)"
+          code="$(call "$bt" "$work/upload.json" -X POST -D "$work/upload.headers" \
+            "https://ghcr.io/v2/$org/$GRANTED/blobs/uploads/")"
+          echo "  blob upload start: HTTP $code"
+          if [[ "$code" == 202 ]]; then
+            loc="$(tr -d '\r' < "$work/upload.headers" | sed -n 's/^[Ll]ocation: //p' | head -n1)"
+            [[ "$loc" == http* ]] || loc="https://ghcr.io$loc"
+            [[ "$loc" == *\?* ]] && sep='&' || sep='?'
+            printf '{}' > "$work/empty"
+            code="$(call "$bt" "$work/blob.json" -X PUT -H 'Content-Type: application/octet-stream' \
+              --data-binary "@$work/empty" "$loc${sep}digest=$empty_digest")"
+            echo "  blob upload finish: HTTP $code (a blob nothing references is not an object)"
+          fi
+          jq -nc --arg mt "$oci_manifest" --arg d "$empty_digest" '{schemaVersion: 2, mediaType: $mt,
+            artifactType: "application/vnd.coderoast.access-probe.v1",
+            config: {mediaType: "application/vnd.oci.empty.v1+json", digest: $d, size: 2},
+            layers: [{mediaType: "application/vnd.oci.empty.v1+json", digest: $d, size: 2}]}' > "$work/put.json"
+          code="$(call "$bt" "$work/put.out" -X PUT -H "Content-Type: $oci_manifest" \
+            --data-binary "@$work/put.json" "https://ghcr.io/v2/$org/$GRANTED/manifests/access-probe-write-$RUN_ID")"
+          echo "  manifest PUT $GRANTED:access-probe-write-$RUN_ID: HTTP $code $(head -c 400 "$work/put.out")"
+          case "$code" in
+            201) verdict LEAK "${GITHUB_REPOSITORY} WROTE $GRANTED (tag access-probe-write-$RUN_ID)" ;;
+            401|403) verdict pass "write to $GRANTED refused at the manifest" ;;
+            *) verdict UNCLEAR "manifest PUT answered HTTP $code: neither a write nor an authorization refusal" ;;
+          esac
+
+          rm -rf "$work"
+          exit "$fail"
