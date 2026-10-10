@@ -11,7 +11,6 @@
 #   malf clean   <build|conan|editables|stale|all>   (NO default; `all` is the nuclear form)
 #   malf bump    X.Y.Z
 #   malf inventory [dir]
-#   malf cut-verify [pkg] [--profile <name>] [--list]
 #   malf run     <exe-name>
 #   malf editables [list|sync]
 #   malf slot    [status|acquire|release]
@@ -61,7 +60,7 @@ MALF_WORKSPACE_ROOT="${MALF_WORKSPACE_ROOT:-$(cd "$MALF_DIR/.." && pwd)}"
 #
 # The sibling default holds for an EDITABLE build (source stays in the worktree) and breaks
 # for `conan create` (sources are exported to <cache>/p/<pkg>/es, so ../../malf resolves
-# inside the conan cache and does not exist). That is the whole released path: cut-verify and
+# inside the conan cache and does not exist). That is the whole released path: store-create and
 # every release-publish create. Exporting it here fixes every malf-driven create at once, and
 # malf is the one component that always knows where the toolchain is -- it IS the toolchain.
 # Respects a caller's value so an out-of-tree checkout can still point elsewhere.
@@ -401,7 +400,7 @@ _malf_apply_profile() {
     # benchmark: editable target + cached cross-repo deps, 2026-07-10). Keeping it un-exported
     # means conan never sees it → recipe LAYOUTS fall back to the profile's user.malf:editable_build_dir
     # conf (same value, every profile carries it) for the editable case, and cached deps get the clean
-    # lib/cmake path. Matches the cut-verify `unset MALF_EDITABLE_BUILD_DIR` discipline.
+    # lib/cmake path. Matches store-create's `unset MALF_EDITABLE_BUILD_DIR` discipline.
     MALF_EDITABLE_BUILD_DIR="build-$(_malf_build_key)"
 }
 
@@ -965,8 +964,7 @@ _malf_lockfile_args() {
     [[ -n "${MALF_LOCKFILE_STRICT:-}" ]] || echo "--lockfile-partial"
 }
 
-# The lockfile of an act on the SHIP leg (store-create, store-build, cut-verify, twin-verify,
-# relocate-verify): malf/conan.lock, STRICT, whatever MALF_LOCKFILE_STRICT says. Measured 2026-10-10
+# The lockfile of an act on the SHIP leg (store-create, store-build, twin-verify, relocate-verify): malf/conan.lock, STRICT, whatever MALF_LOCKFILE_STRICT says. Measured 2026-10-10
 # (W486 G2): the first DN-142.D16 store-create resolved with no lockfile and took the home's own
 # boost recipe revision, cmake 4.4.2, hiredis 1.3.0 and libpq 17.7 where the lock names others, so
 # libpqxx, redis-plus-plus and drogon changed package id. With a lockfile a requirement the lock
@@ -4215,11 +4213,16 @@ cmd_editables() {
     esac
 }
 
-# Regenerate malf/conan.lock by ACCUMULATING every workspace root into one lockfile
-# (`conan lock create` chained --lockfile in / --lockfile-out). One file serves every
-# profile: measured 2026-07-21, the clang-21 and gcc-15 lockfiles for coderoast_server are
-# byte-identical (44 requires / 12 build_requires), because `requires` is profile-independent
-# — so per-profile lockfiles would be 9 copies of one fact.
+# Regenerate malf/conan.lock by ACCUMULATING every workspace root, under every profile of the
+# registry malf/profiles/ plus the desk profile, into one lockfile (`conan lock create` chained
+# --lockfile in / --lockfile-out). One file serves every profile, and it serves one only because
+# every profile was accumulated into it: a strict resolve under a profile the lock never saw fails
+# on the first requirement that profile alone adds. Measured 2026-10-10 (conan 2.28.1, all 31
+# roots): the six Linux profiles add nothing to what the desk profile locks, and
+# windows-msvc-release adds four build requirements — nasm and strawberryperl (openssl's Windows
+# build) on every graph that reaches openssl, msys2 and winflexbison on the server's — so a lock
+# accumulated under the desk profile alone reds every strict Windows create with `Requirement
+# 'nasm/2.16.01' not in lockfile 'build_requires'`. Resolution needs no host of that OS.
 #
 # First-party editables land WITHOUT a recipe revision, i.e. they float and are resolved from
 # the editable registry. Only third-party is revision-pinned — which is the whole point.
@@ -4288,18 +4291,29 @@ cmd_lock() {
     out="$MALF_DIR/conan.lock"
     tmp="$(mktemp)"; rm -f "$tmp"
 
-    echo "=== malf lock: accumulating every root${update:+ (--update: resolving ranges from REMOTES)} ==="
+    # The profiles: the desk's first, then every file of the registry. Derived from the directory,
+    # never listed, so a profile added to the registry is locked by the next run.
+    local profile profiles=("$MALF_PROFILE")
+    for profile in "$MALF_DIR"/profiles/*; do
+        [[ -f "$profile" && "$(basename "$profile")" != "$(basename "$MALF_PROFILE")" ]] && profiles+=("$profile")
+    done
+
+    echo "=== malf lock: accumulating every root under ${#profiles[@]} profile(s)${update:+ (--update: resolving ranges from REMOTES)} ==="
     # Reuse the SAME enumeration `editables sync` uses — a second recipe-discovery path here
     # would drift from it the first time a package is added.
     while IFS= read -r root; do
-        local args=(--profile:all="$MALF_PROFILE" --lockfile-out="$tmp")
-        [[ -f "$tmp" ]] && args+=(--lockfile="$tmp")
-        [[ -n "$update" ]] && args+=("$update")
-        if conan lock create "$root" "${args[@]}" >/dev/null 2>&1; then
+        local root_fail=()
+        for profile in "${profiles[@]}"; do
+            local args=(--profile:all="$profile" --lockfile-out="$tmp")
+            [[ -f "$tmp" ]] && args+=(--lockfile="$tmp")
+            [[ -n "$update" ]] && args+=("$update")
+            conan lock create "$root" "${args[@]}" >/dev/null 2>&1 || root_fail+=("$(basename "$profile")")
+        done
+        if [[ ${#root_fail[@]} -eq 0 ]]; then
             ok=$((ok + 1)); printf '  ok    %s\n' "${root#"$MALF_WORKSPACE_ROOT"/}"
         else
-            fail=$((fail + 1)); failed+=("${root#"$MALF_WORKSPACE_ROOT"/}")
-            printf '  FAIL  %s\n' "${root#"$MALF_WORKSPACE_ROOT"/}"
+            fail=$((fail + 1)); failed+=("${root#"$MALF_WORKSPACE_ROOT"/} (${root_fail[*]})")
+            printf '  FAIL  %s (%s)\n' "${root#"$MALF_WORKSPACE_ROOT"/}" "${root_fail[*]}"
         fi
     done < <(_malf_workspace_packages | cut -f2)
 
@@ -4654,21 +4668,17 @@ Commands:
                                    re-pin, then the `pins` family last. Does NOT touch the Sift
                                    Action engine pin — that tracks the PUBLISHED engine and is
                                    sift-action/bump.sh's.
-    cut-verify [pkg] [--profile <name>] [--list]
-                                   pre-cut Release Gate: forced `conan create` for every
-                                   release:true package (packages.yml), dep order, clean export —
-                                   catches conan-create-only drift (test_package / sibling) before
-                                   the tag. --list prints the canonical released set and exits.
     relocate-verify [pkg]          the released set's relocatability (ROADMAP N366): every
-                                   released package of the cut-verify home is scanned for an
+                                   released package of store-create's home is scanned for an
                                    absolute path in the cmake files it ships, then restored into a
                                    FRESH home at another path and consumed — every module it ships
                                    compiled by a synthetic consumer — with the producer home
-                                   unreadable. Run after cut-verify; exit 0 only when both pass
+                                   unreadable. Run after store-create; exit 0 only when both pass
     twin-verify                    the released set's path independence (ROADMAP N366, DN-142.D4):
-                                   cut-verify into TWO fresh conan homes at two absolute paths,
-                                   the second under another user (a user namespace), both seeded
-                                   with the cut-verify home's third-party packages — exit 2 before
+                                   store-create of the released set into TWO fresh conan homes at
+                                   two absolute paths, the second under another user (a user
+                                   namespace), each with a store of its own, both seeded
+                                   with store-create's home's third-party packages — exit 2 before
                                    any build when that seed lacks one the graphs need; exit 0 only
                                    when every released package's recipe revision, package id,
                                    package revision and file bytes are equal in both
@@ -4680,8 +4690,8 @@ Commands:
     store-create [<pkg>...]        ROADMAP N358's one build act over a local store (DN-142.D2/D3/D5/
                                    D6): every step of malf's walk (named: their closure), each created
                                    from its export with its tests run (a stored: false one conan-built),
-                                   in cut-verify's purged home; package and test-verdict records keyed by
-                                   inputs; a failed step skips its dependents — exit 1 on a failed or
+                                   in the purged B2 home (`cut-verify`); package and test-verdict
+                                   records keyed by inputs; a failed step skips its dependents — exit 1 on a failed or
                                    skipped step or a differing output at an equal key
     store-build <pkg>...           DN-142.D14's step of a `stored: false` package: a `conan build`
                                    of its tracked tree at MALF_STORE_BUILD_REV (default HEAD) in the
@@ -4695,8 +4705,10 @@ Commands:
     inventory [subdir] [--profile <name>]
                                    the build-inventory gate (ADR-3.D10) over the repo that owns subdir
     lock    [--update]             regenerate malf/conan.lock by accumulating EVERY workspace
-                                   root into one lockfile (one file serves all profiles —
-                                   `requires` is profile-independent). Third-party is pinned by
+                                   root, under the desk profile and every profile of
+                                   malf/profiles/, into one lockfile (one file serves all
+                                   profiles because all were accumulated — Windows adds build
+                                   requirements no Linux profile has). Third-party is pinned by
                                    recipe revision, first-party editables float. Default locks
                                    what we CURRENTLY build, so it is behaviour-neutral; --update
                                    re-resolves ranges from the REMOTES (deliberate upstream
@@ -4706,8 +4718,8 @@ Commands:
                                    Builds pass --lockfile automatically when the file exists;
                                    MALF_LOCKFILE_STRICT=1 drops --lockfile-partial so an
                                    unlocked dependency is a hard error (CI / release legs).
-                                   The ship-leg acts (store-create, store-build, cut-verify,
-                                   twin-verify, relocate-verify) always resolve strictly against
+                                   The ship-leg acts (store-create, store-build, twin-verify,
+                                   relocate-verify) always resolve strictly against
                                    it and refuse when it is absent.
     slot    [status|acquire|release]
                                    the WORKSPACE build slot — one LANE builds at a time, across
@@ -4932,37 +4944,14 @@ cmd_bump() {
     # an engine cut publishes, then cut an Action release and re-point @v1.
 }
 
-# Pre-cut Release Gate: forced `conan create` for EVERY released package (the
-# `release: true` set in packages.yml), in dependency order, from a CLEAN EXPORT.
-# Catches the conan-create-only drift class — a rotted test_package, or a sibling
-# package the editable `malf test <repo>` never compiles — BEFORE the tag, not AT
-# it (the v1.6.2 eidos break). The released set is the ONE canonical source
-# (scripts/version_line.py released, from packages.yml), shared with the tag-time
-# Release Gate — no second hand-maintained list to drift out of step with it.
-#
-# Non-vacuity is the whole point of the gate:
-#   * --build="<pkg>/*" FORCES each package from source even when a cached binary
-#     exists; plain --build=missing CACHE-SKIPS it (0 compile steps → vacuous exit 0).
-#   * conan create (not the editable build) is the ONLY path that exports to the
-#     cache and compiles the test_package consumer smoke + a package's tests from a
-#     clean export — exactly what `malf test`/editables never build.
-#   * a DEDICATED, editable-FREE cache: first-party deps resolve from the cache
-#     packages THIS sweep builds in dep order, never from a working-tree editable
-#     (which would shadow the clean export the gate exists to exercise). The dev's
-#     editable registry is untouched. Override the cache with MALF_CUT_VERIFY_CONAN_HOME
-#     (CI points it at the warm dep cache so only first-party packages rebuild).
-#
-# Usage: malf cut-verify [pkg-name] [--profile <name>] [--list]
-#   pkg-name   scope the sweep to one released package (else: the whole set)
-#   --list     print the canonical released set (dep order) and exit — build nothing
-# malf relocate-verify — ROADMAP N366's first half: is every package `malf cut-verify` created
+# malf relocate-verify — ROADMAP N366's first half: is every package `malf store-create` created
 # consumable from ANOTHER home, by another account? malf/package_relocate.py owns both arms (the
 # scan of the cmake files every package ships, and the consumption from a fresh home with the
 # producer home unreadable) and says why each sees what the other cannot. The fresh home is
 # removed after the run, the producer home's mode restored.
 #
 # Usage: malf relocate-verify [pkg]   (MALF_RELOCATE_SOURCE_HOME: the producer home, default
-#                                      cut-verify's)
+#                                      store-create's, the B2 `cut-verify` home)
 cmd_relocate_verify() {
     local only=""
     if [[ $# -gt 0 ]]; then
@@ -4971,7 +4960,7 @@ cmd_relocate_verify() {
     fi
     local source="${MALF_RELOCATE_SOURCE_HOME:-$MALF_CONAN_HOME_BASE/cut-verify}"
     [[ -f "$source/settings.yml" ]] \
-        || { echo "malf relocate-verify: $source is not a conan home — run 'malf cut-verify' first, or set MALF_RELOCATE_SOURCE_HOME" >&2; return 1; }
+        || { echo "malf relocate-verify: $source is not a conan home — run 'malf store-create' first, or set MALF_RELOCATE_SOURCE_HOME" >&2; return 1; }
     _malf_ship_lock_args || return 1
     local scratch rc=0
     scratch="$(mktemp -d /tmp/malf-relocate.XXXXXX)"
@@ -4984,7 +4973,8 @@ cmd_relocate_verify() {
 }
 
 # malf twin-verify — DN-142.D4 (a)'s gate, run where its two homes can be made: two `malf
-# cut-verify` runs of ONE commit, each into a fresh conan home of its own, and every released
+# store-create` runs of ONE commit over the released set, each into a fresh conan home of its own
+# with a store of its own, and every released
 # package compared across them (malf/package_twin.py owns the comparison and its digest).
 #
 # WHAT VARIES BETWEEN THE TWO, AND WHY EACH. The conan home's absolute path (and its length), so a
@@ -4995,16 +4985,16 @@ cmd_relocate_verify() {
 # desk this verb was measured on has none.
 #
 # WHAT IS HELD EQUAL: the commit (both runs read this checkout), the compiler and the third-party
-# binaries — restored from the cut-verify home into both from ONE save, so a first-party difference
+# binaries — restored from store-create's home into both from ONE save, so a first-party difference
 # is first-party. A third-party binary the seed LACKS would not be held equal: each home would build
 # it in a folder whose name is drawn per home, and that folder reaches a dependent's bytes through
 # the headers it includes (malf/package_twin.py's header has the measurement). So before either
-# create the released graphs are resolved in the first home (cut-verify's purge then removes the
+# create the released graphs are resolved in the first home (store-create's purge then removes the
 # recipes the probe exported), and the verb REFUSES at
 # exit 2, naming every third-party binary the seed lacks: a green never rides a silent rebuild.
 #
 # Usage: malf twin-verify      (MALF_TWIN_DIR: where the homes go, default a fresh /tmp dir;
-#                               MALF_TWIN_SEED_HOME: the third-party source, default cut-verify's)
+#                               MALF_TWIN_SEED_HOME: the third-party source, default store-create's)
 cmd_twin_verify() {
     [[ $# -eq 0 ]] || _malf_refuse_option twin-verify "$1"
     command -v unshare >/dev/null \
@@ -5016,7 +5006,7 @@ cmd_twin_verify() {
     unshare --user --map-user="$second_uid" --map-group="$second_uid" true \
         || { echo "malf twin-verify: this host refuses an unprivileged user namespace — the second account cannot be made" >&2; return 1; }
     [[ -f "$seed_home/settings.yml" ]] \
-        || { echo "malf twin-verify: $seed_home is not a conan home — run 'malf cut-verify' first, or set MALF_TWIN_SEED_HOME" >&2; return 1; }
+        || { echo "malf twin-verify: $seed_home is not a conan home — run 'malf store-create' first, or set MALF_TWIN_SEED_HOME" >&2; return 1; }
     _malf_ship_lock_args || return 1
     local prefixes
     prefixes="$(python3 - "$MALF_WORKSPACE_ROOT" <<'PY'
@@ -5039,7 +5029,7 @@ PY
     ( export CONAN_HOME="$first"; _malf_sync_conan_conf
       python3 "$MALF_DIR/package_twin.py" missing "$first" "$root/released.tsv" "$prefixes" "$profile" "$profile" "${_MALF_SHIP_LOCK[0]#--lockfile=}" ) || probe_rc=$?
     if [[ $probe_rc -eq 3 ]]; then
-        echo "malf twin-verify: REFUSED, nothing built — the seed $seed_home lacks the third-party binaries above, and a home that builds one carries its per-home folder into its dependents' bytes. Refresh the seed with 'malf cut-verify', then run again" >&2
+        echo "malf twin-verify: REFUSED, nothing built — the seed $seed_home lacks the third-party binaries above, and a home that builds one carries its per-home folder into its dependents' bytes. Refresh the seed with 'malf store-create', then run again" >&2
         return 2
     fi
     [[ $probe_rc -eq 0 ]] || { echo "malf twin-verify: the seed probe failed (exit $probe_rc) — nothing was judged" >&2; return 2; }
@@ -5049,14 +5039,18 @@ PY
     # of one package write one tree. Measured 2026-10-09: run concurrently, the first home's
     # creates of infra_postgres, infra_redis and insight_canon died on "opening dependency file
     # ... No such file or directory" while the second home's passed.
-    echo "--- twin-verify: cut-verify into $first (log $root/a.log) ---"
-    MALF_CUT_VERIFY_CONAN_HOME="$first" "$MALF_DIR/malf" cut-verify > "$root/a.log" 2>&1 \
-        || { echo "malf twin-verify: the first home's cut-verify failed — $root/a.log" >&2; return 1; }
-    echo "--- twin-verify: cut-verify into $second as malf-twin (log $root/b.log) ---"
+    local -a released_names
+    mapfile -t released_names < <(cut -f1 "$root/released.tsv")
+    echo "--- twin-verify: store-create into $first (log $root/a.log) ---"
+    MALF_STORE_CONAN_HOME="$first" MALF_STORE_DIR="$root/store-a" \
+        "$MALF_DIR/malf" store-create "${released_names[@]}" > "$root/a.log" 2>&1 \
+        || { echo "malf twin-verify: the first home's store-create failed — $root/a.log" >&2; return 1; }
+    echo "--- twin-verify: store-create into $second as malf-twin (log $root/b.log) ---"
     unshare --user --map-user="$second_uid" --map-group="$second_uid" \
-        env HOME="$second_home" USER=malf-twin LOGNAME=malf-twin MALF_CUT_VERIFY_CONAN_HOME="$second" \
-        "$MALF_DIR/malf" cut-verify > "$root/b.log" 2>&1 \
-        || { echo "malf twin-verify: the second home's cut-verify failed — $root/b.log" >&2; return 1; }
+        env HOME="$second_home" USER=malf-twin LOGNAME=malf-twin MALF_STORE_CONAN_HOME="$second" \
+        MALF_STORE_DIR="$root/second-account/store-b" \
+        "$MALF_DIR/malf" store-create "${released_names[@]}" > "$root/b.log" 2>&1 \
+        || { echo "malf twin-verify: the second home's store-create failed — $root/b.log" >&2; return 1; }
 
     python3 "$MALF_DIR/package_twin.py" digest "$first" "$root/released.tsv" > "$root/a.jsonl" || return 1
     python3 "$MALF_DIR/package_twin.py" digest "$second" "$root/released.tsv" > "$root/b.jsonl" || return 1
@@ -5141,13 +5135,13 @@ _malf_writer_create_args() {
 #
 # Named packages select their closure in the walk (their first-party requirements, test ones
 # included); none named means every step. A step whose first-party requirement failed is SKIPPED,
-# never failed for a missing upstream (cut-verify's rule), and the walk goes on.
+# never failed for a missing upstream, and the walk goes on.
 #
-# THE HOME is cut-verify's (`MALF_CUT_VERIFY_CONAN_HOME`, default the keyed `cut-verify` home):
+# THE HOME is step 0's B2 home (`MALF_CUT_VERIFY_CONAN_HOME`, default the keyed `cut-verify` home):
 # purged of every first-party package and of the previous run's results first, so every step
 # rebuilds first-party code from its export, and the acts after this one (step 0's server smoke and
 # relocate-verify) consume what this act built. MALF_STORE_CONAN_HOME names another; one this run
-# creates is seeded with the cut-verify home's third-party packages.
+# creates is seeded with the B2 home's third-party packages (MALF_TWIN_SEED_HOME names another).
 # THE STORE is a directory standing in for the remote one until its transport and its writer
 # credential are ruled; nothing here publishes anywhere.
 #
@@ -5180,13 +5174,17 @@ cmd_store_create() {
     mkdir -p "$CONAN_HOME/profiles"
     _malf_sync_conan_conf
     _malf_apply_profile "$MALF_PROFILE_NAME"
+    # CLEAN-EXPORT invariant: no editables, and MALF_EDITABLE_BUILD_DIR unset. Recipes add the
+    # editable build tree to their cmake builddirs when it is set; a create has no such tree, so the
+    # bogus path lands in CMAKE_PREFIX_PATH and find_package fails. Real CI (conan-module,
+    # release-publish) runs with it unset; _malf_apply_profile exported it just above.
     rm -f "$CONAN_HOME/editable_packages.json"
     unset MALF_EDITABLE_BUILD_DIR
-    _malf_cut_verify_purge || return 2
+    _malf_purge_first_party || return 2
     rm -rf "$CONAN_HOME/malf-test-results"
     if $fresh && [[ "$CONAN_HOME" != "$seed_home" ]]; then
         [[ -f "$seed_home/settings.yml" ]] \
-            || { echo "malf store-create: $seed_home is not a conan home — run 'malf cut-verify' first, or set MALF_TWIN_SEED_HOME" >&2; return 2; }
+            || { echo "malf store-create: $seed_home is not a conan home — run 'malf store-create' first, or set MALF_TWIN_SEED_HOME" >&2; return 2; }
         python3 "$MALF_DIR/package_twin.py" seed "$seed_home" "$prefixes" "$CONAN_HOME" || return 2
     fi
 
@@ -5426,7 +5424,7 @@ cmd_inventory() {
 # a purge of the released set and were reused ("Already installed!"). A conan that cannot list or
 # remove, or a workspace whose namespaces cannot be derived, is a failure: an unproven purge would
 # read as a clean export.
-_malf_cut_verify_purge() {
+_malf_purge_first_party() {
     local prefixes listed owned name removed=()
     prefixes="$(python3 - "$MALF_WORKSPACE_ROOT" <<'PY'
 import pathlib, sys
@@ -5437,18 +5435,18 @@ import workspace_layout
 print("\n".join(workspace_layout.owned_package_prefixes()))
 PY
 )" && [[ -n "$prefixes" ]] \
-        || { echo "malf cut-verify: the owned package namespaces of $MALF_WORKSPACE_ROOT could not be derived — the purge cannot be proven" >&2; return 1; }
+        || { echo "malf: the owned package namespaces of $MALF_WORKSPACE_ROOT could not be derived — the purge cannot be proven" >&2; return 1; }
     listed="$(conan list '*' --format=json)" \
-        || { echo "malf cut-verify: 'conan list' failed in $CONAN_HOME — the purge cannot be proven" >&2; return 1; }
+        || { echo "malf: 'conan list' failed in $CONAN_HOME — the purge cannot be proven" >&2; return 1; }
     owned="$(python3 -c 'import json, sys
 prefixes = tuple(sys.argv[2].split())
 names = sorted({ref.split("/")[0] for ref in json.loads(sys.argv[1]).get("Local Cache", {})})
 print("\n".join(name for name in names if name.startswith(prefixes)))' "$listed" "$prefixes")" \
-        || { echo "malf cut-verify: 'conan list' in $CONAN_HOME printed no readable JSON" >&2; return 1; }
+        || { echo "malf: 'conan list' in $CONAN_HOME printed no readable JSON" >&2; return 1; }
     while IFS= read -r name; do
         [[ -n "$name" ]] || continue
         conan remove "$name/*" -c >/dev/null \
-            || { echo "malf cut-verify: could not remove $name from $CONAN_HOME" >&2; return 1; }
+            || { echo "malf: could not remove $name from $CONAN_HOME" >&2; return 1; }
         removed+=("$name")
     done <<< "$owned"
     if [[ ${#removed[@]} -gt 0 ]]; then
@@ -5458,127 +5456,6 @@ print("\n".join(name for name in names if name.startswith(prefixes)))' "$listed"
     fi
 }
 
-cmd_cut_verify() {
-    local only="" list_only=false
-    # A RELEASE gate builds the way the cut SHIPS: gcc-16 / libstdc++ — the canonical
-    # conan-create environment (release-publish + the conan-module action default), not
-    # the dev-default clang/libc++. Overridable with --profile (e.g. a clang-only box).
-    _malf_apply_profile "${MALF_CUT_VERIFY_PROFILE:-linux-gcc16-release}"
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --profile) shift; _malf_apply_profile "$1" ;;
-            --list)    list_only=true ;;
-            --only)    shift; only="$1" ;;
-            -*)        _malf_refuse_option cut-verify "$1" ;;
-            *)         only="$1" ;;   # positional scope filter: a package NAME
-        esac
-        shift
-    done
-
-    local axes="$MALF_WORKSPACE_ROOT/scripts/version_line.py"
-    [[ -f "$axes" ]] || { echo "malf cut-verify: $axes not found — run from a workspace checkout" >&2; return 1; }
-
-    # The canonical released-package list, topo-ordered (deps before dependents).
-    local released
-    released="$(python3 "$axes" released "$MALF_WORKSPACE_ROOT")" \
-        || { echo "malf cut-verify: failed to resolve the released-package list" >&2; return 1; }
-
-    if $list_only; then
-        echo "malf cut-verify: canonical released set (packages.yml release:true, dep order):"
-        printf '%s\n' "$released" | awk -F'\t' 'NF>=2 {printf "  %-30s %s\n", $1, $2}'
-        return 0
-    fi
-
-    # ── Dedicated, editable-free clean-export cache (see header) ──────────────
-    export CONAN_HOME="${MALF_CUT_VERIFY_CONAN_HOME:-$MALF_CONAN_HOME_BASE/cut-verify}"
-    mkdir -p "$CONAN_HOME/profiles"
-    _malf_sync_conan_conf
-    _malf_apply_profile "$MALF_PROFILE_NAME"      # re-resolve the profile INTO this cache
-    rm -f "$CONAN_HOME/editable_packages.json"    # CLEAN-EXPORT invariant: no editables
-    # CLEAN-EXPORT invariant #2: recipes branch their cmake builddirs on MALF_EDITABLE_BUILD_DIR
-    # (e.g. canon/eidos ship their OWN cmake config under lib/cmake/<pkg> with cmake_find_mode=none;
-    # when the var is set they ALSO list the editable build-tree dir). A clean conan create has no
-    # editable build tree, so that path is bogus and pollutes CMAKE_PREFIX_PATH → find_package fails.
-    # Real CI (conan-module / release-publish) runs with it UNSET; match that exactly. _malf_apply_profile
-    # exported it just above, so unset it here, after.
-    unset MALF_EDITABLE_BUILD_DIR
-
-    echo "=== malf cut-verify: forced conan create over the released set ($MALF_PROFILE_NAME) ==="
-    echo "    cache: $CONAN_HOME"
-    # CLEAN-EXPORT invariant #3 (DN-119.D2 invariant 2): this home holds no first-party package
-    # before the first create. `--build="$name/*"` forces the package being created, never one it
-    # only REQUIRES, so a first-party package an earlier run left here — a conan home that outlives
-    # the job keeps every package — would be consumed instead of the clean export. Purged by the
-    # cache's STATE, whatever each recipe's revision mode, and the purge says what it removed.
-    _malf_cut_verify_purge || return 1
-
-    local profile_args=(
-        --profile:host="$MALF_PROFILE"
-        --profile:build="$MALF_BUILD_PROFILE"
-        # The profile's own build_type, not a literal `Release`. The default cut-verify profile
-        # linux-gcc16-release declares Release, so this is byte-identical there; it stops being
-        # identical the moment someone passes `--profile` (the header offers exactly that for a
-        # clang-only box), where a hardcoded Release would configure a build type the named
-        # profile does not declare.
-        -s build_type="$MALF_CONFIG"
-    )
-    _malf_writer_create_args || return 1
-    profile_args+=("${_MALF_WRITER_ARGS[@]}")
-    _malf_ship_lock_args || return 1
-    profile_args+=("${_MALF_SHIP_LOCK[@]}")
-
-    local name path deps total=0 ok=0
-    local -a failed=() skipped=()
-    local -A broke=()   # name -> 1 once it failed or was skipped (blocks dependents)
-
-    while IFS=$'\t' read -r name path deps; do
-        [[ -n "$name" && -n "$path" ]] || continue
-        if [[ -n "$only" && "$name" != "$only" && "$(basename "$path")" != "$only" ]]; then
-            continue
-        fi
-        total=$((total+1))
-
-        # SKIP (don't FAIL) a package whose first-party dep already broke — its
-        # conan create would fail for a MISSING upstream, not a defect of its own.
-        # Reporting it as "blocked" keeps cascade noise out of the failure list.
-        local blocked="" dep
-        for dep in ${deps//,/ }; do
-            [[ -n "${broke[$dep]:-}" ]] && { blocked="$dep"; break; }
-        done
-        if [[ -n "$blocked" ]]; then
-            skipped+=("$name (dep $blocked failed)")
-            broke["$name"]=1
-            echo "--- cut-verify: SKIP $name — upstream $blocked failed ---" >&2
-            continue
-        fi
-
-        echo "::group::cut-verify [$total] conan create $name ($path)"
-        # --build=missing: third-party + not-yet-built first-party deps build if absent
-        #   (deps earlier in dep order are already in-cache from THIS sweep → current).
-        # --build="$name/*": FORCE this package from source (kills the cache-skip).
-        if conan create "$path" "${profile_args[@]}" --build=missing --build="$name/*"; then
-            ok=$((ok+1)); echo "::endgroup::"
-        else
-            echo "::endgroup::"
-            failed+=("$name"); broke["$name"]=1
-            echo "::error::cut-verify FAIL — conan create $name ($path) failed" >&2
-        fi
-    done <<< "$released"
-
-    echo
-    if [[ $total -eq 0 ]]; then
-        echo "malf cut-verify: no released package matched '$only'" >&2; return 1
-    fi
-    if [[ ${#failed[@]} -gt 0 ]]; then
-        echo "❌ malf cut-verify: ${#failed[@]} released package(s) FAILED forced conan create: ${failed[*]}" >&2
-        [[ ${#skipped[@]} -gt 0 ]] && echo "   blocked (upstream failed): ${skipped[*]}" >&2
-        echo "   A failure here is a conan-create-only break (rotted test_package / sibling package) that" >&2
-        echo "   'malf test' + editables never compile — fix at root BEFORE the cut." >&2
-        return 1
-    fi
-    echo "✅ malf cut-verify: all $ok released package(s) conan-create clean —"
-    echo "   forced from-source rebuild + test_package, dependency order, clean export ($MALF_PROFILE_NAME)."
-}
 
 # ─── The workspace build slot ────────────────────────────────────────────────
 #
@@ -6055,7 +5932,6 @@ case "$COMMAND" in
     profiles)         cmd_profiles "$@" ;;
     bump)             cmd_bump "$@" ;;
     inventory)        cmd_inventory "$@" ;;
-    cut-verify)       cmd_cut_verify "$@" ;;
     twin-verify)      cmd_twin_verify "$@" ;;
     exports-verify)   cmd_exports_verify "$@" ;;
     store-create)     cmd_store_create "$@" ;;

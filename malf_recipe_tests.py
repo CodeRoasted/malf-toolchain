@@ -20,7 +20,7 @@ runs the same selection through `run_test_package(self)` and writes a second res
 (`<results>/<name>/<package id>.xml`): the step's verdict has two populations (DN-142.D13 (2)).
 
 THE TWO CONF SETS OF A `conan create` are defined here and nowhere else (DN-142.D13 (1)). The
-WRITER (the store's one writer, `malf cut-verify`, `malf store-create`) sets no skip conf: it
+WRITER (the store's one writer, `malf store-create`) sets no skip conf: it
 builds and runs every test and every test_package. The CONSUMER and vendor path (a
 `--build=missing` rebuild, the vendor action, the third-party cache producer) sets
 `tools.build:skip_test=True` and `--test-folder=`: no test runs and no test_package is built, while

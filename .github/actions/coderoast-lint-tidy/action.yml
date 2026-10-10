@@ -219,9 +219,9 @@ runs:
         # at configure time in a job that had done nothing wrong.
         #
         # malf already declares the counter-invariant twice — `_malf_editables_clear`, and
-        # cut-verify's "CLEAN-EXPORT invariant: no editables", whose comment names this very
-        # consequence ("pollutes CMAKE_PREFIX_PATH -> find_package fails") and asserts that
-        # "Real CI (conan-module / release-publish) runs with it UNSET; match that exactly."
+        # store-create's clean-export invariant (no editables, MALF_EDITABLE_BUILD_DIR unset),
+        # whose comment names this very consequence (a bogus build-tree path in
+        # CMAKE_PREFIX_PATH -> find_package fails) and that real CI runs with it unset.
         # That assertion held until this action began writing the registry. This step makes it
         # true again; it does not change what lint itself resolves.
         #

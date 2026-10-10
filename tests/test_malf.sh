@@ -2853,9 +2853,9 @@ sed -i 's/^    "writer": (),$/    "writer": ("-c", "user.probe:writer=1"),/' "$c
 check "the writers' conf set is READ from the helper: a mutated set in the helper is the set malf hands its creates" \
       "-c|user.probe:writer=1" \
       "$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; _malf_writer_create_args && printf "%s\n" "${_MALF_WRITER_ARGS[@]}"' _ "$cs_tmp/mutant/malf" | paste -sd'|')"
-check "cut-verify and store-create each splice the set read, and malf spells no skip conf of its own" \
-      "1 1 0" \
-      "$(grep -c 'profile_args+=("${_MALF_WRITER_ARGS\[@\]}")' "$MALF_BIN") $(grep -c -- '-s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS\[@\]}" "${build_args\[@\]}"' "$MALF_BIN") $(grep -vE '^\s*#' "$MALF_BIN" | grep -cE 'skip_test=|--test-folder')"
+check "store-create splices the set read, and malf spells no skip conf of its own" \
+      "1 0" \
+      "$(grep -c -- '-s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS\[@\]}" "${build_args\[@\]}"' "$MALF_BIN") $(grep -vE '^\s*#' "$MALF_BIN" | grep -cE 'skip_test=|--test-folder')"
 
 cs_home="$cs_tmp/home"; cs_pkg="$cs_tmp/cs_probe"; mkdir -p "$cs_pkg/test_package" "$cs_pkg/tests"
 CONAN_HOME="$cs_home" bash "$MALF_BIN" profiles > /dev/null 2>&1
@@ -4388,9 +4388,11 @@ rm -rf "$tm_tmp"
 # The verb: the probe runs before the first create, and its finding is a refusal at exit 2 that
 # names the remedy; the sentence claiming a missing binary is "built in each home alike" is gone.
 tm_body="$(sed -n '/^cmd_twin_verify()/,/^}/p' "$MALF_BIN")"
-check "twin-verify probes the seed before its first cut-verify, refuses at exit 2 on its finding, and names 'malf cut-verify' as the remedy" \
+check "twin-verify probes the seed before its first store-create, refuses at exit 2 on its finding, and names 'malf store-create' as the remedy" \
       "probe-first refuse-2 remedy" \
-      "$( (( $(grep -n 'package_twin.py" missing' <<< "$tm_body" | cut -d: -f1 | head -1) < $(grep -n 'cut-verify > ' <<< "$tm_body" | cut -d: -f1 | head -1) )) && printf probe-first) $(grep -A3 'probe_rc -eq 3' <<< "$tm_body" | grep -q 'return 2' && printf refuse-2) $(grep -q "Refresh the seed with 'malf cut-verify'" <<< "$tm_body" && printf remedy)"
+      "$( (( $(grep -n 'package_twin.py" missing' <<< "$tm_body" | cut -d: -f1 | head -1) < $(grep -n 'malf" store-create "${released_names\[@\]}"' <<< "$tm_body" | cut -d: -f1 | head -1) )) && printf probe-first) $(grep -A3 'probe_rc -eq 3' <<< "$tm_body" | grep -q 'return 2' && printf refuse-2) $(grep -q "Refresh the seed with 'malf store-create'" <<< "$tm_body" && printf remedy)"
+check "twin-verify's two homes each run store-create over the released set, into a store of their own" \
+      "2 2" "$(grep -c 'store-create "${released_names\[@\]}"' <<< "$tm_body") $(grep -cE 'MALF_STORE_DIR="\$root/(store-a|second-account/store-b)"' <<< "$tm_body")"
 check "no line of malf still claims a missing third-party binary is built in each home alike" \
       "0" "$(grep -c 'built in each home alike' "$MALF_BIN")"
 echo
@@ -4665,21 +4667,57 @@ rows = r.released_refs(source, Path(sys.argv[5]), "")
 r.seed(source, fresh, "fixture", rows, r.subject_locks(source, lock, rows, fresh / "locks"))' "$MALF_ROOT" "$ls_home" "$ls_tmp/fresh" "$ls_tmp/lock-a/conan.lock" "$ls_tmp/released.tsv" > /dev/null 2>&1
          CONAN_HOME="$ls_tmp/fresh" conan list 'tpdep/1.0#*' --format=json 2>/dev/null | python3 -c 'import json, sys; print(" ".join(r for v in json.load(sys.stdin)["Local Cache"].values() for r in v.get("revisions", {})) or "none")' | ls_name)"
 # Every other resolution of the ship leg splices the same arguments, read from malf's source: the
-# store-build step, cut-verify's creates, and the lockfile twin-verify's probe and relocate-verify
+# store-build step, and the lockfile twin-verify's probe and relocate-verify
 # resolve against. Each verb takes it before its first conan call and refuses without it.
 ls_body() { awk "/^$1\\(\\)/,/^}/" "$MALF_BIN"; }
 check "store-create's create and store-build's build splice the ship lockfile, and malf passes --lockfile-partial nowhere on the ship leg" \
       "1 1 0" \
-      "$(ls_body _malf_store_create_step | grep -c '"${_MALF_SHIP_LOCK\[@\]}"') $(ls_body _malf_store_build_one | grep -c '"${_MALF_SHIP_LOCK\[@\]}"') $(for fn in cmd_store_create _malf_store_create_step _malf_store_build_one cmd_store_build cmd_cut_verify cmd_twin_verify cmd_relocate_verify; do ls_body "$fn"; done | grep -c -- '--lockfile-partial')"
-check "cut-verify's creates carry the ship lockfile in the arguments every create splices" \
-      "1" "$(ls_body cmd_cut_verify | grep -c 'profile_args+=("${_MALF_SHIP_LOCK\[@\]}")')"
-check "store-create, store-build, cut-verify, twin-verify and relocate-verify each take the ship lockfile and refuse without it" \
-      "5" "$(for fn in cmd_store_create cmd_store_build cmd_cut_verify cmd_twin_verify cmd_relocate_verify; do ls_body "$fn" | grep -cE '_malf_ship_lock_args \|\| (return|exit)'; done | awk '{n += $1} END {print n}')"
+      "$(ls_body _malf_store_create_step | grep -c '"${_MALF_SHIP_LOCK\[@\]}"') $(ls_body _malf_store_build_one | grep -c '"${_MALF_SHIP_LOCK\[@\]}"') $(for fn in cmd_store_create _malf_store_create_step _malf_store_build_one cmd_store_build cmd_twin_verify cmd_relocate_verify; do ls_body "$fn"; done | grep -c -- '--lockfile-partial')"
+check "store-create, store-build, twin-verify and relocate-verify each take the ship lockfile and refuse without it" \
+      "4" "$(for fn in cmd_store_create cmd_store_build cmd_twin_verify cmd_relocate_verify; do ls_body "$fn" | grep -cE '_malf_ship_lock_args \|\| (return|exit)'; done | awk '{n += $1} END {print n}')"
 check "twin-verify's probe and relocate-verify resolve against the lockfile malf took" \
       "1 1" "$(ls_body cmd_twin_verify | grep -c 'package_twin.py" missing .*"${_MALF_SHIP_LOCK\[0\]#--lockfile=}"') $(ls_body cmd_relocate_verify | grep -c '"${_MALF_SHIP_LOCK\[0\]#--lockfile=}"')"
 check "the reusable release workflow's create resolves strictly against the toolchain checkout's conan.lock" \
       "1 0" "$(grep -c -- '--lockfile="$MALF_TOOLCHAIN_DIR/conan.lock"' "$MALF_ROOT/.github/workflows/coderoast-release.yml") $(grep -vE '^\s*#' "$MALF_ROOT/.github/workflows/coderoast-release.yml" | grep -c -- '--lockfile-partial')"
 rm -rf "$ls_tmp"
+echo
+
+echo "[7q7j] malf lock accumulates every root under every profile of malf/profiles/, so a requirement one OS alone adds is in the lock a strict resolve on that OS reads (W486 G2)"
+# note: measured 2026-10-10, malf/conan.lock accumulated under the desk profile alone, and a strict
+# resolve of the Windows sift graph failed on `Requirement 'nasm/2.16.01' not in lockfile
+# 'build_requires'`: openssl's recipe adds nasm and strawberryperl on os=Windows only. The fixture is
+# that shape in miniature: one root whose tool requirement exists only under a Windows profile, a
+# registry holding a Linux and a Windows profile, and no remote.
+lk_tmp="$(realpath "$(mktemp -d)")"; lk_home="$lk_tmp/home"
+CONAN_HOME="$lk_home" bash "$MALF_BIN" profiles > /dev/null 2>&1
+CONAN_HOME="$lk_home" conan remote remove conancenter > /dev/null 2>&1
+mkdir -p "$lk_tmp/malf/profiles" "$lk_tmp/ws/lk_root" "$lk_tmp/wintool"
+printf '[settings]\nos=Linux\narch=x86_64\nbuild_type=Release\n' > "$lk_tmp/malf/profiles/lk-linux"
+printf '[settings]\nos=Windows\narch=x86_64\nbuild_type=Release\n' > "$lk_tmp/malf/profiles/lk-windows"
+printf 'from conan import ConanFile\n\n\nclass WinTool(ConanFile):\n    name = "wintool"\n    version = "1.0"\n    package_type = "application"\n' > "$lk_tmp/wintool/conanfile.py"
+printf 'from conan import ConanFile\n\n\nclass LkRoot(ConanFile):\n    name = "lk_root"\n    version = "0.1"\n    settings = "os"\n    package_type = "header-library"\n\n    def build_requirements(self):\n        if self.settings.os == "Windows":\n            self.tool_requires("wintool/1.0")\n' > "$lk_tmp/ws/lk_root/conanfile.py"
+CONAN_HOME="$lk_home" conan export "$lk_tmp/wintool" > /dev/null 2>&1
+# The verb as malf runs it, its root enumeration and its SBOM re-derivation replaced by the fixture's.
+lk_run() {
+    CONAN_HOME="$lk_home" bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e
+        MALF_DIR="$2"; MALF_WORKSPACE_ROOT="$3"; MALF_PROFILE="$2/profiles/lk-linux"
+        _malf_workspace_packages() { printf "lk_root\t%s\n" "$MALF_WORKSPACE_ROOT/lk_root"; }
+        cmd_sbom() { :; }
+        cmd_lock' _ "$MALF_BIN" "$lk_tmp/malf" "$lk_tmp/ws" > "$lk_tmp/lock.log" 2>&1
+    printf 'rc=%s' "$?"
+}
+lk_strict() {   # <profile>: a strict resolve of the root under that profile, against the lock
+    CONAN_HOME="$lk_home" conan graph info "$lk_tmp/ws/lk_root" -pr:a "$lk_tmp/malf/profiles/$1" \
+        --lockfile="$lk_tmp/malf/conan.lock" > "$lk_tmp/$1.log" 2>&1
+    printf 'rc=%s' "$?"
+}
+check "malf lock writes a lock naming the Windows-only tool requirement, and a strict Windows resolve passes against it" \
+      "rc=0 1 rc=0 rc=0" \
+      "$(lk_run) $(grep -c '"wintool/1.0#' "$lk_tmp/malf/conan.lock" 2>/dev/null) $(lk_strict lk-windows) $(lk_strict lk-linux)"
+check "the control: a lock accumulated under the Linux profile alone fails the strict Windows resolve, naming the requirement" \
+      "rc=0 rc=1 1" \
+      "$(CONAN_HOME="$lk_home" conan lock create "$lk_tmp/ws/lk_root" -pr:a "$lk_tmp/malf/profiles/lk-linux" --lockfile-out="$lk_tmp/malf/conan.lock" > /dev/null 2>&1; printf 'rc=%s' "$?") $(lk_strict lk-windows) $(grep -c "Requirement 'wintool/1.0' not in lockfile" "$lk_tmp/lk-windows.log")"
+rm -rf "$lk_tmp"
 echo
 
 echo "[7q8] at job end every conan home drops its build and temp folders and its superseded versions, and reports its own size"
@@ -4749,22 +4787,17 @@ check "no conan home at all is exit 0, saying so" \
 rm -rf "$cc_tmp"
 echo
 
-echo "[7q9] cut-verify purges every first-party package from its home BEFORE its first create (DN-119.D2)"
+echo "[7q9] store-create purges every first-party package from its home BEFORE its first create (DN-119.D2)"
 
 # note: with a conan home that outlives the job, B2's "clean export" must hold by the cache's state,
 # not by each recipe's revision mode: a first-party package a previous run created stays in the
-# cut-verify home. `--build=<name>/*` forces the package being created, never one it only requires.
+# home. `--build=<name>/*` forces the package being created, never one it only requires.
 cv_tmp="$(realpath "$(mktemp -d)")"
-cv_bin="$cv_tmp/bin"; cv_ws="$cv_tmp/ws"; cv_home="$cv_tmp/conan"; cv_log="$cv_tmp/conan.log"
-mkdir -p "$cv_bin" "$cv_ws/scripts" "$cv_ws/alpha" "$cv_ws/beta" "$cv_home/cut-verify/refs"
-cat > "$cv_ws/scripts/version_line.py" <<PY
-import sys
-print("cv_alpha\t$cv_ws/alpha\t")
-print("cv_beta\t$cv_ws/beta\tcv_alpha")
-PY
+cv_bin="$cv_tmp/bin"; cv_ws="$cv_tmp/ws"; cv_home="$cv_tmp/conan/cut-verify"; cv_log="$cv_tmp/conan.log"
+mkdir -p "$cv_bin" "$cv_ws/scripts" "$cv_home/refs"
 # The workspace's owned namespaces, as the real module derives them from its package declarations.
-# `cv_gamma` below is first-party but outside the RELEASED set (a package no cut ships): a copy an
-# earlier run left in the home is consumed all the same, so the purge is by namespace.
+# `cv_gamma` below is first-party but outside any released set: a copy an earlier run left in the
+# home is consumed all the same, so the purge is by namespace.
 cat > "$cv_ws/scripts/workspace_layout.py" <<'PY'
 def owned_package_prefixes():
     return ("cv_",)
@@ -4777,27 +4810,27 @@ echo "$*" >> "$CV_LOG"
 case "$1" in
     list)   python3 -c 'import json, os, sys; print(json.dumps({"Local Cache": {f"{n}/1.0": {} for n in sorted(os.listdir(sys.argv[1]))}}))' "$refs" ;;
     remove) rm -f "$refs/${2%%/*}" ;;
-    create) touch "$refs/$(basename "$2" | sed 's/^/cv_/')" ;;
 esac
 exit 0
 STUB
 chmod +x "$cv_bin/conan"
-touch "$cv_home/cut-verify/refs/cv_alpha" "$cv_home/cut-verify/refs/cv_beta" \
-      "$cv_home/cut-verify/refs/cv_gamma" "$cv_home/cut-verify/refs/zlib"
-cv_out="$(cd "$cv_ws" && PATH="$cv_bin:$PATH" CV_LOG="$cv_log" CONAN_HOME="$cv_home" \
-          MALF_WORKSPACE_ROOT="$cv_ws" bash "$MALF_BIN" cut-verify 2>&1)"; cv_rc=$?
-cv_first_create="$(grep -n '^create ' "$cv_log" | head -1 | cut -d: -f1)"
-check "cut-verify exits 0 over the stub" "rc=0" "rc=$cv_rc"
-check "both first-party packages are removed from the cut-verify home, before the first create" \
-      "yes yes" \
-      "$(awk -v f="${cv_first_create:-0}" 'NR<f && /^remove cv_alpha\/\*/ {a=1} NR<f && /^remove cv_beta\/\*/ {b=1} END {print (a?"yes":"no"), (b?"yes":"no")}' "$cv_log")"
-check "a first-party package outside the released set is removed too, before the first create" \
-      "yes" \
-      "$(awk -v f="${cv_first_create:-0}" 'NR<f && /^remove cv_gamma\/\*/ {g=1} END {print (g?"yes":"no")}' "$cv_log")"
+touch "$cv_home/refs/cv_alpha" "$cv_home/refs/cv_beta" "$cv_home/refs/cv_gamma" "$cv_home/refs/zlib"
+cv_out="$(PATH="$cv_bin:$PATH" CV_LOG="$cv_log" CONAN_HOME="$cv_home" MALF_WORKSPACE_ROOT="$cv_ws" \
+          bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; _malf_purge_first_party' _ "$MALF_BIN" 2>&1)"; cv_rc=$?
+check "the purge exits 0 over the stub" "rc=0" "rc=$cv_rc"
+check "every first-party package is removed from the home, whatever set it belongs to" \
+      "yes yes yes" \
+      "$(awk '/^remove cv_alpha\/\*/ {a=1} /^remove cv_beta\/\*/ {b=1} /^remove cv_gamma\/\*/ {g=1} END {print (a?"yes":"no"), (b?"yes":"no"), (g?"yes":"no")}' "$cv_log")"
 check "a third-party package is never removed: the purge is the owned namespaces, nothing wider" \
       "0" "$(grep -c '^remove zlib' "$cv_log" || true)"
-check "cut-verify says what it purged, naming the home" \
-      "said" "$(grep -q 'purged 3 first-party package(s) from' <<< "$cv_out" && echo said || echo "GOT: $(grep -i purge <<< "$cv_out")")"
+check "the purge says what it removed, naming the home" \
+      "said" "$(grep -q "purged 3 first-party package(s) from $cv_home" <<< "$cv_out" && echo said || echo "GOT: $(grep -i purge <<< "$cv_out")")"
+cv_body="$(sed -n '/^cmd_store_create()/,/^}/p' "$MALF_BIN")"
+check "store-create purges its home before its first create, and refuses when the purge fails" \
+      "before refuses" \
+      "$( (( $(grep -n '_malf_purge_first_party || return 2' <<< "$cv_body" | cut -d: -f1) < $(grep -n '_malf_store_create_step ' <<< "$cv_body" | cut -d: -f1 | head -1) )) && printf before) $(grep -q '_malf_purge_first_party || return 2' <<< "$cv_body" && printf refuses)"
+check "no verb named cut-verify is left: no dispatch arm, no function, no usage line" \
+      "0" "$(grep -cE 'cmd_cut_verify|^ *cut-verify\)|malf cut-verify \[' "$MALF_BIN")"
 rm -rf "$cv_tmp"
 echo
 
