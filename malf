@@ -4222,9 +4222,11 @@ cmd_editables() {
 # Every SBOM the workspace publishes, as "<package dir>|<sbom path>". These are DERIVED
 # artifacts (malf/sbom_gen.py projects the resolved conan graph) — the hand-maintained
 # predecessor drifted three minors before anyone noticed, and since sbom-cve.yml scans the
-# file, its accuracy is the ceiling on our CVE detection.
+# file, its accuracy is the ceiling on our CVE detection. The Sift binary's SBOM is projected
+# from insight_sift_tools, the package the binary is (DN-142.D16), and stays at the path the
+# release uploads and the CVE scan reads.
 _MALF_SBOM_TARGETS=(
-    "insight-eidos/sift|insight-eidos/sift/sbom.cdx.json"
+    "insight-eidos/sift-tools|insight-eidos/sift/sbom.cdx.json"
     "coderoast-server/server|coderoast-server/server/sbom.cdx.json"
 )
 
