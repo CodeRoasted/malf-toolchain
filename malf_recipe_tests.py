@@ -16,8 +16,8 @@ Inside a create the run is a no-op under `tools.build:skip_test`, writes its JUn
 directory the conf `user.malf:test_results` names (outside the build folder, which conan may move
 onto an existing package revision's), and fails the create on any red. A test_package's `test()`
 runs the same selection through `run_test_package(self)` and writes a second result file,
-`<tested name>.test_package.xml`, beside the first: the step's verdict has two populations
-(DN-142.D13 (2)).
+`<tested package id>.test_package.xml`, beside the first in the package's own directory
+(`<results>/<name>/<package id>.xml`): the step's verdict has two populations (DN-142.D13 (2)).
 
 THE TWO CONF SETS OF A `conan create` are defined here and nowhere else (DN-142.D13 (1)). The
 WRITER (the store's one writer, `malf cut-verify`, `malf store-create`) sets no skip conf: it
@@ -171,9 +171,16 @@ def _results_directory(conanfile) -> str:
     return results
 
 
-def _junit(results: str, file_name: str) -> str:
-    os.makedirs(results, exist_ok=True)
-    return os.path.join(results, file_name)
+def _junit(results: str, package: str, file_name: str) -> str:
+    """`<results>/<package>/<file name>`: one directory per package, one file per package id.
+
+    note: a create also builds the upstream binaries its graph lacks (`--build=missing`), each a
+    variant another create never stored, and each runs its own tests; keyed by package id, the
+    variant's result never overwrites the stored binary's
+    """
+    directory = os.path.join(results, package)
+    os.makedirs(directory, exist_ok=True)
+    return os.path.join(directory, file_name)
 
 
 def run_tests(conanfile) -> None:
@@ -181,8 +188,8 @@ def run_tests(conanfile) -> None:
 
     pre: called from `build()`, after `cmake.build()`
     post: under `tools.build:skip_test` nothing ran; otherwise no exported test source spells a
-        translation unit's own name, and the JUnit file `<user.malf:test_results>/<name>.xml`
-        holds the run, or the build failed
+        translation unit's own name, and the JUnit file
+        `<user.malf:test_results>/<name>/<package id>.xml` holds the run, or the build failed
     """
     from conan.errors import ConanException
     from conan.tools.build import cmd_args_to_string
@@ -202,7 +209,7 @@ def run_tests(conanfile) -> None:
     if not (Path(build_dir) / "CTestTestfile.cmake").is_file():
         conanfile.output.info(f"malf: {conanfile.name} enabled no testing, so no test runs")
         return
-    junit = _junit(results, f"{conanfile.name}.xml")
+    junit = _junit(results, conanfile.name, f"{conanfile.info.package_id()}.xml")
     conanfile.output.info(f"malf: running the test selection of {conanfile.name}, JUnit to {junit}")
     conanfile.run(cmd_args_to_string(["ctest", *arguments, "--output-junit", junit]),
                   env=["conanbuild", "conanrun"])
@@ -213,8 +220,9 @@ def run_test_package(conanfile) -> None:
 
     pre: called from a test_package recipe's `test()`
     post: under `tools.build:skip_test` nothing ran; otherwise no test_package source spells a
-        translation unit's own name, and `<user.malf:test_results>/<tested name>.test_package.xml`
-        holds a run of at least one test, or the create failed
+        translation unit's own name, and
+        `<user.malf:test_results>/<tested name>/<tested package id>.test_package.xml` holds a run
+        of at least one test, or the create failed
     """
     from conan.errors import ConanException
     from conan.tools.build import can_run, cmd_args_to_string
@@ -234,7 +242,8 @@ def run_test_package(conanfile) -> None:
     if empty is not None:
         raise ConanException(f"malf: the test_package of {tested}: {empty} — a test_package "
                              "must run at least one test")
-    junit = _junit(results, f"{tested}.test_package.xml")
+    junit = _junit(results, tested,
+                   f"{conanfile.dependencies[tested].pref.package_id}.test_package.xml")
     conanfile.output.info(f"malf: running the test_package selection of {tested}, JUnit to {junit}")
     conanfile.run(cmd_args_to_string(["ctest", *arguments, "--output-junit", junit]),
                   env=["conanbuild", "conanrun"])

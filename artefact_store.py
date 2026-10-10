@@ -13,15 +13,21 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
     artefact_store.py tree <folder>
         the content digest of a file tree, one line of 64 hex
     artefact_store.py conan-step <store> <conan home> <create graph.json> <package> <profile name>
-                                 <malf dir> <toolchain.json>
+                                 <malf dir> <toolchain.json> <prefixes> [<results dir>]
         the record of one `conan create` step, from the graph its `--format=json` printed: stored
-        when the key is new (exit 0), compared when it is not (exit 0 on a match, 1 on a mismatch)
+        when the key is new (exit 0), compared when it is not (exit 0 on a match, 1 on a mismatch);
+        with a results directory, the step's test verdict record beside it (DN-142.D5 (3))
     artefact_store.py build-id <store> <build-id>
         every package record whose `build_ids` holds that GNU build-id (40 hex), one line each:
         `<key> <package alias> <path>`; exit 0 when one or more answer, 1 when none (DN-142.D15)
     artefact_store.py build-ids <folder>
         the `build_ids` index of a file tree, as JSON, exit 1 naming each linked ELF file that
         carries no build-id note
+    artefact_store.py build-step <store> <conan home> <build graph.json> <package> <profile name>
+                                 <malf dir> <toolchain.json> <prefixes> <source tree id> <results dir>
+        the verdict record of one `conan build` step (a `stored: false` package, DN-142.D14): keyed
+        like a create's record by its inputs, the source being the package's git tree id; it stores
+        no package and judges the upstream packages the build linked
     artefact_store.py toolchain <compiler root> <out.json>
         the measured toolchain member, written once per run (hashing the compiler tree is the
         expensive part of a key)
@@ -39,6 +45,16 @@ from the create's folder, so it indexes exactly the bytes the store keeps; it is
 the content digest covers, so it is an index, never compared and never a key member. A first-party
 package one of whose linked ELF files carries no note is refused before anything is stored: the
 index is total over what ships, or a build answering with an id would find no record.
+
+A step's TEST VERDICT is a record of its own (DN-142.D5 (3), DN-142.D7), never a field of the
+package record: the consumer's create runs no test, so a package record holding results could never
+compare equal to the writer's. Its key is the build step's key plus the selection (the test helper's
+blob id and its label expression); its outputs are the verdict, the result set (each population,
+test name and outcome, sorted; the JUnit files of malf's helper, `<package>/<package id>.xml` for
+the build and `<package>/<package id>.test_package.xml` for the test_package), `judged` (the content digests the tests judged:
+the package's, or for a `stored: false` step the upstream packages it linked) and the logs as an
+object, never compared. A rebuild at an equal key compares the verdict, the result set and `judged`,
+never a timing.
 
 MALF_STORE_DEFINITION, when set, is `<name>=<directory> ...`: each named directory's tracked tree
 joins the key's `definition` beside malf's, for a step another tool drives (Pharos at step 0).
@@ -340,11 +356,15 @@ def graph_nodes(graph_json: Path) -> list[dict]:
     return [node for index, node in nodes.items() if index != "0"]
 
 
-def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile: str,
-               malf_dir: Path, toolchain: Path, prefixes: tuple[str, ...]) -> int:
+def _step_inputs(home: Path, graph_json: Path, package: str, prefixes: tuple[str, ...],
+                 with_root: bool) -> tuple[dict, dict, dict, tuple[str, Path] | None]:
+    """(sources, upstream, third_party, the target's (binary, folder)) of a step's graph."""
     nodes = graph_nodes(graph_json)
     sources, upstream, third_party = {}, {}, {}
     target = None
+    # note: a `build-scripts` package (a content recipe) is created in the build context alone
+    created = "host" if any(node["name"] == package and node["context"] == "host" for node in nodes) \
+        else "build"
     for node in nodes:
         name = node["name"]
         recipe = f"{node['ref'].split('#')[0]}#{node['rrev']}"
@@ -354,7 +374,7 @@ def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile:
         folder = _cache_path(home, binary)
         if _owned(name, prefixes):
             sources[f"{name}/{node['context']}"] = _export_digest(home, recipe)
-            if name == package and node["context"] == "host":
+            if name == package and node["context"] == created:
                 target = (binary, folder)
             else:
                 upstream[f"{name}/{node['context']}"] = tree_digest(folder)[0]
@@ -362,10 +382,15 @@ def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile:
             third_party[f"{name}/{node['context']}"] = {
                 "ref": recipe, "package_id": node["package_id"],
                 "content": tree_digest(folder)[0]}
-    if target is None:
-        sys.exit(f"artefact_store: the graph {graph_json} holds no host node named {package}")
-    document = {
-        "step": {"kind": "conan-create", "package": package, "profile": profile},
+    if with_root and target is None:
+        sys.exit(f"artefact_store: the graph {graph_json} holds no node named {package}")
+    return sources, upstream, third_party, target
+
+
+def _step_document(kind: str, package: str, profile: str, home: Path, malf_dir: Path,
+                   toolchain: Path, sources: dict, upstream: dict, third_party: dict) -> dict:
+    return {
+        "step": {"kind": kind, "package": package, "profile": profile},
         "definition": definition_member(malf_dir),
         "sources": sources,
         "upstream": upstream,
@@ -374,6 +399,14 @@ def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile:
         "profile": profile_member(home, profile, malf_dir),
         "system": system_member(),
     }
+
+
+def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile: str,
+               malf_dir: Path, toolchain: Path, prefixes: tuple[str, ...],
+               results: Path | None = None) -> int:
+    sources, upstream, third_party, target = _step_inputs(home, graph_json, package, prefixes, True)
+    document = _step_document("conan-create", package, profile, home, malf_dir, toolchain,
+                              sources, upstream, third_party)
     binary, folder = target
     content, entries = tree_digest(folder)
     _ids, missing = build_ids_of(tree_files(folder))
@@ -382,10 +415,106 @@ def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile:
               f"build-id, so the store's index would not be total over what ships (DN-142.D15): "
               + ", ".join(missing), file=sys.stderr)
         return 1
-    return LocalStore(store).commit(document, {"package": {"alias": binary, "content": content,
-                                                           "entries": entries}},
-                                    {"package": ("transport", lambda: _transport(home, binary))},
-                                    derived={"package": _transport_build_ids})
+    stored = LocalStore(store).commit(document, {"package": {"alias": binary, "content": content,
+                                                             "entries": entries}},
+                                      {"package": ("transport", lambda: _transport(home, binary))},
+                                      derived={"package": _transport_build_ids})
+    if results is None:
+        return stored
+    package_id = binary.split(":", 1)[1].split("#", 1)[0]
+    return max(stored, verdict_record(store, key_of(document), package, package_id, profile,
+                                      malf_dir, results, {package: content}))
+
+
+def build_step(store: Path, home: Path, graph_json: Path, package: str, profile: str,
+               malf_dir: Path, toolchain: Path, prefixes: tuple[str, ...], source_tree: str,
+               results: Path) -> int:
+    """The verdict record of a `stored: false` package's `conan build` step (DN-142.D14): no
+    package record, the source its git tree id, `judged` the upstream packages it linked."""
+    sources, upstream, third_party, _target = _step_inputs(home, graph_json, package, prefixes, False)
+    sources[f"{package}/host"] = source_tree
+    document = _step_document("conan-build", package, profile, home, malf_dir, toolchain,
+                              sources, upstream, third_party)
+    built = sorted((results / package).glob("*.xml")) if (results / package).is_dir() else []
+    package_ids = sorted({path.name.split(".", 1)[0] for path in built})
+    if len(package_ids) > 1:
+        sys.exit(f"artefact_store: {results / package} holds results of {len(package_ids)} package "
+                 f"ids, and a `conan build` step builds one: {', '.join(package_ids)}")
+    return verdict_record(store, key_of(document), package, package_ids[0] if package_ids else "-",
+                          profile, malf_dir, results,
+                          {name.split("/")[0]: digest for name, digest in upstream.items()})
+
+
+VERDICT_POPULATIONS = (("build", "{pid}.xml"), ("test_package", "{pid}.test_package.xml"))
+
+
+def junit_results(results: Path, package: str, package_id: str
+                  ) -> tuple[list[list[str]], list[Path]]:
+    """([population, test name, outcome] sorted, the JUnit files read) of one step's binary, from
+    malf's helper's result files `<results>/<package>/<package id>.*`; an outcome is `passed`,
+    `failed`, `skipped` or `disabled`."""
+    import xml.etree.ElementTree as ElementTree
+
+    rows, files = [], []
+    for population, pattern in VERDICT_POPULATIONS:
+        path = results / package / pattern.format(pid=package_id)
+        if not path.is_file():
+            continue
+        files.append(path)
+        for case in ElementTree.parse(path).getroot().iter("testcase"):
+            status = case.get("status")
+            if case.find("failure") is not None or case.find("error") is not None:
+                outcome = "failed"
+            elif status == "disabled":
+                outcome = "disabled"
+            elif case.find("skipped") is not None or status == "notrun":
+                outcome = "skipped"
+            else:
+                outcome = "passed"
+            rows.append([population, case.get("name") or "", outcome])
+    return sorted(rows), files
+
+
+def selection_member(malf_dir: Path) -> dict[str, object]:
+    """The test selection a verdict ran: the helper's git blob id and its label expression."""
+    helper = malf_dir / "malf_recipe_tests.py"
+    blob = _run(["git", "hash-object", str(helper)]).strip()
+    sys.path.insert(0, str(malf_dir))
+    import malf_recipe_tests
+
+    return {"helper": blob, "labels": ["-LE", malf_recipe_tests.CORPUS_LABEL]}
+
+
+def verdict_record(store: Path, build_key: str, package: str, package_id: str, profile: str,
+                   malf_dir: Path, results: Path, judged: dict[str, str]) -> int:
+    """Store or compare one step's test verdict (DN-142.D5 (3)); a step with no result file ran no
+    test and has no verdict to keep (exit 0, saying so). The step's own files are linked at
+    `<results>/steps/<package>.xml` and `.test_package.xml`, where a reader of the run finds the
+    population the step's binary ran, whatever variants of it the walk's later creates built."""
+    rows, files = junit_results(results, package, package_id)
+    steps = results / "steps"
+    steps.mkdir(parents=True, exist_ok=True)
+    for path in files:
+        alias = steps / (package + path.name.removeprefix(package_id))
+        alias.unlink(missing_ok=True)
+        os.link(path, alias)
+    if not files:
+        print(f"artefact_store: NO VERDICT {package}: the step wrote no result file, it ran no test")
+        return 0
+    verdict = "fail" if any(row[2] == "failed" for row in rows) else "pass"
+    document = {"step": {"kind": "test-verdict", "package": package, "profile": profile},
+                "build": build_key, "selection": selection_member(malf_dir)}
+    scratch = Path(tempfile.mkdtemp(prefix="artefact_store."))
+    log = scratch / "results.tar"
+    with tarfile.open(log, "w") as bundle:
+        for path in files:
+            info = bundle.gettarinfo(str(path), arcname=path.name)
+            info.mtime, info.uid, info.gid, info.uname, info.gname = 0, 0, 0, "", ""
+            with path.open("rb") as handle:
+                bundle.addfile(info, handle)
+    output = {"verdict": verdict, "results": rows, "findings": key_of(rows), "judged": judged,
+              "tests": len(rows)}
+    return LocalStore(store).commit(document, {"verdict": output}, {"verdict": ("log", lambda: log)})
 
 
 def _transport_build_ids(transport: Path) -> dict[str, dict]:
@@ -585,8 +714,7 @@ class LocalStore:
             axes = sorted(axis for axis in (before.keys() | output.keys()) - uncompared
                           if before.get(axis) != output.get(axis))
             if axes:
-                old = {entry[0]: entry[1:] for entry in before["entries"]}
-                new = {entry[0]: entry[1:] for entry in output["entries"]}
+                old, new = _units(before), _units(output)
                 units = sorted(path for path in old.keys() | new.keys() if old.get(path) != new.get(path))
                 differ.append((name, axes + [f"{len(units)} {_unit(output)}: " + ", ".join(units[:NAMED_FILES])
                                              + (", ..." if len(units) > NAMED_FILES else "")]))
@@ -605,18 +733,29 @@ class LocalStore:
         return 1 if differ else 0
 
 
+def _units(output: dict) -> dict[str, list]:
+    """An output's comparable units by name: a package's files, a verdict's tests."""
+    if "entries" in output:
+        return {entry[0]: entry[1:] for entry in output["entries"]}
+    return {f"{row[0]}:{row[1]}": row[2:] for row in output.get("results", [])}
+
+
 def _identity(output: dict) -> str:
     """The digest an output is identified by: a package's content, a verdict's findings."""
     return output.get("content") or output["findings"]
 
 
 def _unit(output: dict) -> str:
-    return "file(s)" if "content" in output else "finding(s)"
+    if "content" in output:
+        return "file(s)"
+    return "test(s)" if "results" in output else "finding(s)"
 
 
 def _described(output: dict) -> str:
     if "content" in output:
         return f"content {output['content']} ({output['alias']})"
+    if "verdict" in output and "tests" in output:
+        return f"verdict {output['verdict']} over {output['tests']} test(s) findings {output['findings']}"
     if "verdict" in output:
         return f"verdict {output['verdict']} findings {output['findings']}"
     return "nothing"
@@ -646,9 +785,14 @@ def main(argv: list[str]) -> int:
     if len(argv) >= 6 and argv[0] == "verdict-step":
         return verdict_step(Path(argv[1]), argv[2], Path(argv[3]), Path(argv[4]),
                             [Path(repository) for repository in argv[5:]])
-    if len(argv) == 9 and argv[0] == "conan-step":
+    if len(argv) in (9, 10) and argv[0] == "conan-step":
         return conan_step(Path(argv[1]), Path(argv[2]), Path(argv[3]), argv[4], argv[5],
-                          Path(argv[6]), Path(argv[7]), tuple(argv[8].split()))
+                          Path(argv[6]), Path(argv[7]), tuple(argv[8].split()),
+                          Path(argv[9]) if len(argv) == 10 else None)
+    if len(argv) == 11 and argv[0] == "build-step":
+        return build_step(Path(argv[1]), Path(argv[2]), Path(argv[3]), argv[4], argv[5],
+                          Path(argv[6]), Path(argv[7]), tuple(argv[8].split()), argv[9],
+                          Path(argv[10]))
     print(__doc__, file=sys.stderr)
     return 2
 

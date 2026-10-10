@@ -18,6 +18,11 @@ lines on stdout.
       EVERY workspace recipe, path-sorted — what `malf editables sync`
       re-registers so a coordinated version bump propagates in one pass.
 
+  steps <root_dir>
+      `members`, with a third column: each member's first-party requirements among the
+      members (`requires` and `test_requires`), by name, comma-separated — the step walk's
+      edges (`malf store-create`).
+
   members <root_dir>
       Every recipe under root_dir, topologically sorted by the
       requires/test_requires edges BETWEEN those members (dependencies first,
@@ -255,6 +260,36 @@ def mode_members(root: pathlib.Path):
     emit(order)
 
 
+def mode_steps(root: pathlib.Path):
+    """`members`, each row carrying a third column: the member's first-party requirements
+    (`requires` and `test_requires`) among the members, by name, comma-separated — the edges a
+    step walk needs to skip a dependent of a failed step (DN-142.D5 (4), (7))."""
+    recipes = scan(root)
+    order = []
+    seen = set()
+    visiting = set()
+
+    def visit(ref: str):
+        if ref in seen or ref in visiting:
+            return
+        visiting.add(ref)
+        recipe = recipes[ref]
+        edges = []
+        for dep in recipe["requires"] + recipe["test_requires"]:
+            resolved = resolve_ref(dep, recipes)
+            if resolved is not None:
+                visit(resolved)
+                edges.append(resolved.split("/")[0])
+        order.append((ref, recipe["dir"], ",".join(sorted(set(edges)))))
+        visiting.remove(ref)
+        seen.add(ref)
+
+    for ref in sorted(recipes, key=lambda r: recipes[r]["dir"]):
+        visit(ref)
+    for ref, directory, edges in order:
+        print(f"{ref}\t{directory}\t{edges}")
+
+
 def main() -> int:
     if len(sys.argv) < 3:
         sys.stderr.write(__doc__)
@@ -270,8 +305,10 @@ def main() -> int:
         mode_all(pathlib.Path(sys.argv[2]).resolve())
     elif mode == "members":
         mode_members(pathlib.Path(sys.argv[2]).resolve())
+    elif mode == "steps":
+        mode_steps(pathlib.Path(sys.argv[2]).resolve())
     else:
-        sys.stderr.write(f"malf_graph.py: unknown mode '{mode}' (deps|all|members)\n")
+        sys.stderr.write(f"malf_graph.py: unknown mode '{mode}' (deps|all|members|steps)\n")
         return 2
     return 0
 

@@ -2794,7 +2794,9 @@ rt_create() {   # [conan -c args...] -> rc=<status>; the log in $tp_tmp/rt.log
     CONAN_HOME="$rt_home" conan create "$rt_pkg" -pr:a fixture --build="rt_probe/*" "$@" > "$tp_tmp/rt.log" 2>&1
     echo "rc=$?"
 }
-rt_junit="$rt_home/malf-test-results/rt_probe.xml"
+# note: the fixtures declare no setting and no option, so their package id is the empty one
+rt_empty_id="da39a3ee5e6b4b0d3255bfef95601890afd80709"
+rt_junit="$rt_home/malf-test-results/rt_probe/$rt_empty_id.xml"
 check "global.conf names the helper and the results directory inside the home, and malf stages the helper there byte for byte" \
       "synced 1 1" "$(cmp -s "$MALF_ROOT/malf_recipe_tests.py" "$rt_home/malf_recipe_tests.py" && echo synced) $(grep -c "^user.malf:recipe_tests={{ os.path.join(conan_home_folder, 'malf_recipe_tests.py')" "$rt_home/global.conf") $(grep -c "^user.malf:test_results={{ os.path.join(conan_home_folder, 'malf-test-results')" "$rt_home/global.conf")"
 check "every CI action that stages global.conf stages the test helper beside it" \
@@ -2815,7 +2817,7 @@ check "a create whose tree enabled testing and selects zero tests FAILS, never p
       "rc=1 1" "$(rt_create) $(grep -c '0 test(s) selected in .* — a create that enabled testing must run at least one test' "$tp_tmp/rt.log")"
 rt_tests "RtProbe.Passes:$rt_true"
 check "the results directory is the conf's: a create given another one writes there" \
-      "rc=0 1" "$(rt_create -c "user.malf:test_results=$tp_tmp/elsewhere") $(grep -c 'name="RtProbe.Passes"' "$tp_tmp/elsewhere/rt_probe.xml" 2>/dev/null)"
+      "rc=0 1" "$(rt_create -c "user.malf:test_results=$tp_tmp/elsewhere") $(grep -c 'name="RtProbe.Passes"' "$tp_tmp/elsewhere/rt_probe/$rt_empty_id.xml" 2>/dev/null)"
 mv "$rt_home/malf_recipe_tests.py" "$tp_tmp/helper.bak"
 check "a home that lacks the helper FAILS the build, naming the file — it never skips the tests silently" \
       "rc=1 1" "$(rt_create) $(grep -c "No such file or directory: '$rt_home/malf_recipe_tests.py'" "$tp_tmp/rt.log")"
@@ -2901,16 +2903,17 @@ cs_create() {   # [conan args...] -> rc=<status>; the log in $cs_tmp/cs.log
     CONAN_HOME="$cs_home" conan create "$cs_pkg" -pr:a fixture --build="cs_probe/*" "$@" > "$cs_tmp/cs.log" 2>&1
     echo "rc=$?"
 }
+cs_empty_id="da39a3ee5e6b4b0d3255bfef95601890afd80709"   # note: the fixture declares no setting or option
 cs_results() {   # -> which result files the create left, by name
     local found
-    found="$(ls "$cs_home/malf-test-results" 2>/dev/null | paste -sd,)"
+    found="$(ls "$cs_home/malf-test-results/cs_probe" 2>/dev/null | sed "s/^$cs_empty_id/cs_probe/" | paste -sd,)"
     echo "${found:-none}"
 }
 cs_ctest "$cs_pkg/CTestTestfile.cmake" "CsProbe.Passes:$cs_true"
 cs_ctest "$cs_pkg/test_package/CTestTestfile.cmake" "CsProbeTp.Passes:$cs_true" "CsProbeTp.AlsoPasses:$cs_true"
 check "the writer's create (no conf) runs the tests and the test_package, and leaves two result files, the second naming the test_package's tests" \
       "rc=0 cs_probe.test_package.xml,cs_probe.xml 2" \
-      "$(cs_create) $(cs_results) $(grep -cE 'name="CsProbeTp\.(Passes|AlsoPasses)"' "$cs_home/malf-test-results/cs_probe.test_package.xml" 2>/dev/null)"
+      "$(cs_create) $(cs_results) $(grep -cE 'name="CsProbeTp\.(Passes|AlsoPasses)"' "$cs_home/malf-test-results/cs_probe/$cs_empty_id.test_package.xml" 2>/dev/null)"
 mapfile -t cs_consumer < <(python3 "$MALF_ROOT/malf_recipe_tests.py" create-args consumer)
 cs_ctest "$cs_pkg/CTestTestfile.cmake" "CsProbe.Fails:$cs_false"
 cs_ctest "$cs_pkg/test_package/CTestTestfile.cmake" "CsProbeTp.Fails:$cs_false"
@@ -2959,9 +2962,10 @@ check "a test_package source spelling __FILE__ FAILS the writer's create, whatev
 rm -f "$cs_pkg/test_package/probe.cpp"
 check "with every spelling gone the writer's create passes again" "rc=0" "$(cs_create)"
 
-# DN-142.D14: a `stored: false` package is never created — its step is `malf store-build`, a conan
-# build that stores no package — and store-build takes nothing else. Driven over a fixture workspace
-# whose version_line answers the two lists and a conan stub that records every call it gets.
+# DN-142.D14: a `stored: false` package is never created — its step is a conan build that stores no
+# package, which store-create's walk and store-build run through one function — and store-build
+# takes nothing else. The refusal is driven over a fixture workspace whose version_line answers the
+# two lists and a conan stub that records every call it gets.
 sf_ws="$cs_tmp/sfws"; mkdir -p "$sf_ws/scripts" "$cs_tmp/sfbin"
 cat > "$sf_ws/scripts/version_line.py" <<'PYV'
 import sys
@@ -2973,10 +2977,30 @@ sf_malf() {   # <verb> <package> -> rc=<status> and the refusal's DN-142.D14 lin
     out="$(cd "$cs_tmp" && PATH="$cs_tmp/sfbin:$PATH" MALF_WORKSPACE_ROOT="$sf_ws" CONAN_HOME="$cs_tmp/sfhome" bash "$MALF_BIN" "$1" "$2" 2>&1)"; rc=$?
     printf 'rc=%s %s' "$rc" "$(grep -c 'DN-142.D14' <<< "$out")"
 }
-check "store-create REFUSES a stored: false package, naming store-build, before conan is ever called" \
-      "rc=2 1 none" "$(sf_malf store-create leaf_pkg) $([[ -s "$cs_tmp/sf-conan.log" ]] && echo called || echo none)"
+# The merged act's walk (DN-142.D5 (7) M2): malf_graph's steps in walk order, a `stored: false`
+# step marked `build` (a conan build, never a create), every other `create`; named packages select
+# their closure through every first-party requirement, test ones included; an unknown name refuses.
+sf_walk() {   # [<package>...] -> the walk rows, `|`-joined
+    bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; shift
+        _malf_store_walk "$(printf "a_core/1.0\t/w/a\t\nb_lib/1.0\t/w/b\ta_core\nc_twin/1.0\t/w/c\ta_core,b_lib\nd_app/1.0\t/w/d\tb_lib\ne_side/1.0\t/w/e\t\n")" \
+                         "$(printf "c_twin\t/w/c\n")" "$@"' _ "$MALF_BIN" "$@" 2>&1 | paste -sd'|'
+}
+check "the walk keeps malf's order, marks the stored: false step build and every other create, and carries each step's edges" \
+      "$(printf 'a_core\t/w/a\t\tcreate|b_lib\t/w/b\ta_core\tcreate|c_twin\t/w/c\ta_core,b_lib\tbuild|d_app\t/w/d\tb_lib\tcreate|e_side\t/w/e\t\tcreate')" \
+      "$(sf_walk)"
+check "named packages select their closure in walk order; a name that is no step refuses, naming it" \
+      "$(printf 'a_core\t/w/a\t\tcreate|b_lib\t/w/b\ta_core\tcreate|d_app\t/w/d\tb_lib\tcreate')|malf store-create: no step of malf's walk is named zz_none" \
+      "$(sf_walk d_app)|$(sf_walk zz_none)"
+check "the act never conan-creates a step it marked build: the create branch is the only create, and a build step goes to store-build's one function" \
+      "1 1" "$(grep -c 'if \[\[ "$kind" == "build" \]\]; then' "$MALF_BIN") $(awk '/^cmd_store_create\(\)/,/^}/' "$MALF_BIN" | grep -c '^ *if ! conan create ')"
 check "store-build REFUSES a package that is stored, naming store-create, before conan is ever called" \
       "rc=2 1 none" "$(sf_malf store-build rel_pkg) $([[ -s "$cs_tmp/sf-conan.log" ]] && echo called || echo none)"
+
+# The CI module script bypasses malf and reads the one selection too (DN-142.D5 (5)): it asks the
+# helper's desk-args for its ctest argv and spells no label of its own.
+cm_script="$MALF_ROOT/.github/actions/conan-module/conan_module.sh"
+check "conan_module.sh reads its ctest selection from the helper and spells no ctest label of its own" \
+      "1 0" "$(grep -c 'malf_recipe_tests.py" desk-args' "$cm_script") $(grep -vE '^\s*#' "$cm_script" | grep -cE '(-L|-LE) corpus')"
 
 # DN-142.D5 (4): a test input outside the recipe folder is exported by the helper, tracked files only.
 ex_repo="$cs_tmp/exrepo"; mkdir -p "$ex_repo/pkg" "$ex_repo/support/sub" "$ex_repo/scripts"
@@ -3138,6 +3162,68 @@ store.commit({'step': {'package': 'bi_probe'}, 'n': 1},
              {'package': ('transport', lambda: probe)}, derived={'package': lambda obj: {'build_ids': {'from': obj.name}}})
 body = json.load(open(next(Path('$bi_tmp/store2/records').glob('*.json'))))
 print('derived' if body['outputs']['package']['build_ids'] == {'from': body['outputs']['package']['transport']} else body)" 2>&1 | tail -1)"
+# The step's TEST VERDICT record (DN-142.D5 (3)): keyed by the build step's key and the selection,
+# holding both populations' result set, the digests judged and the logs as an object; an equal key
+# rebuilt compares the result set, and a step that wrote no result file has no verdict.
+bi_junit() {   # <file> <name:outcome>... — a JUnit file of malf's helper's shape
+    { printf '<?xml version="1.0" encoding="UTF-8"?>\n<testsuite name="x" tests="%s">\n' "$(($# - 1))"
+      local spec; for spec in "${@:2}"; do
+          case "${spec#*:}" in
+              failed) printf '<testcase name="%s" status="run"><failure message="x"/></testcase>\n' "${spec%%:*}" ;;
+              *) printf '<testcase name="%s" status="run"/>\n' "${spec%%:*}" ;;
+          esac
+      done; printf '</testsuite>\n'; } > "$1"
+}
+bi_verdict() {   # <results dir> -> rc=<status> and the step output's verdict lines
+    CONAN_HOME="$bi_home" python3 "$MALF_ROOT/artefact_store.py" conan-step "$bi_tmp/vstore" "$bi_home" "$bi_tmp/graph.json" bi_tool fixture "$MALF_ROOT" "$bi_tmp/toolchain.json" "bi_" "$1" > "$bi_tmp/v.log" 2>&1
+    printf 'rc=%s %s' "$?" "$(grep -oE '(STORED|MATCH|MISMATCH|NO VERDICT) bi_tool( verdict)?' "$bi_tmp/v.log" | paste -sd,)"
+}
+bi_empty_id="da39a3ee5e6b4b0d3255bfef95601890afd80709"
+mkdir -p "$bi_tmp/res/bi_tool" "$bi_tmp/res/bi_tool.other"
+bi_junit "$bi_tmp/res/bi_tool/$bi_empty_id.xml" BiTool.One:passed BiTool.Two:passed
+bi_junit "$bi_tmp/res/bi_tool/$bi_empty_id.test_package.xml" BiToolTp.Links:passed
+bi_junit "$bi_tmp/res/bi_tool/$(printf 'f%.0s' {1..40}).xml" BiTool.Variant:passed
+check "a create's step with result files stores its package record AND a verdict record of both populations, judging the package's content digest" \
+      "rc=0 STORED bi_tool,STORED bi_tool verdict [[\"build\", \"BiTool.One\", \"passed\"], [\"build\", \"BiTool.Two\", \"passed\"], [\"test_package\", \"BiToolTp.Links\", \"passed\"]] same" \
+      "$(bi_verdict "$bi_tmp/res") $(python3 -c "
+import json, glob
+recs = [json.load(open(r)) for r in glob.glob('$bi_tmp/vstore/records/*.json')]
+verdict = [r for r in recs if r['inputs']['step']['kind'] == 'test-verdict'][0]
+package = [r for r in recs if r['inputs']['step']['kind'] == 'conan-create'][0]
+print(json.dumps(verdict['outputs']['verdict']['results']), 'same' if verdict['outputs']['verdict']['judged'] == {'bi_tool': package['outputs']['package']['content']} and verdict['inputs']['build'] == package['key'] else 'differ')")"
+check "the verdict reads the step's own binary's results, never a variant's under another package id, and links them under steps/" \
+      "0 2 1" \
+      "$(grep -c 'BiTool.Variant' "$bi_tmp/res/steps/bi_tool.xml") $(grep -c 'BiTool\.\(One\|Two\)' "$bi_tmp/res/steps/bi_tool.xml") $(grep -c 'BiToolTp.Links' "$bi_tmp/res/steps/bi_tool.test_package.xml")"
+check "the same step again matches both records" "rc=0 MATCH bi_tool,MATCH bi_tool verdict" "$(bi_verdict "$bi_tmp/res")"
+bi_junit "$bi_tmp/res/bi_tool/$bi_empty_id.xml" BiTool.One:passed BiTool.Renamed:passed
+check "a rebuilt step at an equal key whose result set differs is a verdict MISMATCH (exit 1) naming the tests" \
+      "rc=1 MATCH bi_tool,MISMATCH bi_tool verdict 1" \
+      "$(bi_verdict "$bi_tmp/res") $(grep -c 'MISMATCH bi_tool verdict at an equal key .* 2 test(s): build:BiTool.Renamed, build:BiTool.Two' "$bi_tmp/v.log")"
+mkdir -p "$bi_tmp/none"
+check "a step that wrote no result file stores no verdict, saying so" \
+      "rc=0 MATCH bi_tool,NO VERDICT bi_tool" "$(bi_verdict "$bi_tmp/none")"
+# A content recipe (`package_type = "build-scripts"`) is created in the BUILD context alone; its
+# step is recorded all the same (measured on insight_scenarios: the graph holds no host node).
+bi_data="$bi_tmp/bi_data"; mkdir -p "$bi_data"; printf 'scenario\n' > "$bi_data/notes.txt"
+cat > "$bi_data/conanfile.py" <<'PYR'
+import os
+import shutil
+
+from conan import ConanFile
+
+
+class BiData(ConanFile):
+    name = "bi_data"
+    version = "0.0.1"
+    package_type = "build-scripts"
+    exports_sources = "notes.txt"
+
+    def package(self):
+        shutil.copy2(os.path.join(self.source_folder, "notes.txt"), self.package_folder)
+PYR
+check "a content recipe created in the build context alone is recorded, its node found in that context" \
+      "rc=0 1" \
+      "$(CONAN_HOME="$bi_home" conan create "$bi_data" -pr:a fixture --build="bi_data/*" --format=json > "$bi_tmp/data.json" 2>/dev/null; CONAN_HOME="$bi_home" python3 "$MALF_ROOT/artefact_store.py" conan-step "$bi_tmp/dstore" "$bi_home" "$bi_tmp/data.json" bi_data fixture "$MALF_ROOT" "$bi_tmp/toolchain.json" "bi_" > "$bi_tmp/d.log" 2>&1; echo "rc=$?") $(grep -c 'STORED bi_data package' "$bi_tmp/d.log")"
 cp "$bi_home/profiles/fixture" "$bi_home/profiles/fixture-b"
 check "two records holding the same bytes under two keys both answer the build-id lookup, and an unknown id answers nothing (exit 1)" \
       "rc=0 2 rc=1" \
