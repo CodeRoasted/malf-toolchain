@@ -103,7 +103,7 @@ jobs:
     runs-on: ${{ inputs.runs-on }}
     steps:
       - name: CI — checkout + toolchain + build env + cross-repo vendor + build/test
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-ci@99e5ec85aa15800937f5b52cd00d20db83f182d9
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-ci@302c14c3485560d19af23ab5f7b4e83dc5fc08b8
         with:
           vendor: ${{ inputs.vendor }}
           deps: ${{ inputs.deps }}
@@ -120,18 +120,18 @@ jobs:
         # The byte-compare is also what makes the coderoast:cpe-coverage ratio a control: a component
         # entering without a CPE mapping changes the ratio and reds this step.
         if: inputs.sbom-path != ''
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-sbom-check@99e5ec85aa15800937f5b52cd00d20db83f182d9
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-sbom-check@302c14c3485560d19af23ab5f7b4e83dc5fc08b8
         with:
           package-dir: ${{ inputs.sbom-package-dir }}
           sbom-path: ${{ inputs.sbom-path }}
 
       - name: Save the conan cache (third-party only; never on the coderoast-release group)
-        uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@99e5ec85aa15800937f5b52cd00d20db83f182d9
+        uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@302c14c3485560d19af23ab5f7b4e83dc5fc08b8
 
       - name: Sift dogfood (advisory; never fails the build)
         if: ${{ always() && inputs.sift-mode != 'off' }}
         continue-on-error: true    # the advisory guarantee lives here, at the job-step boundary
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-ci-sift@99e5ec85aa15800937f5b52cd00d20db83f182d9
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-ci-sift@302c14c3485560d19af23ab5f7b4e83dc5fc08b8
         with:
           mode: ${{ inputs.sift-mode == 'public' && 'render' || 'comment' }}
           changed-outcome: ${{ job.status }}   # the NATIVE token — the engine maps it four-class
