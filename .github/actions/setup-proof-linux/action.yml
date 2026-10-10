@@ -62,11 +62,11 @@ runs:
 
     - name: Provision gcc-16.2 (our own published asset; arm64 picked by uname -m)
       if: inputs.leg == 'gcc'
-      uses: CodeRoasted/malf-toolchain/.github/actions/setup-gcc@1a34b6e8adef0d73a68d9d95e626de483c131986
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-gcc@50b2520873d1fb240b10572c5e88db21a7d0b6f5
 
     - name: Provision clang-21 + libc++-21
       if: inputs.leg == 'clang'
-      uses: CodeRoasted/malf-toolchain/.github/actions/setup-clang21-libcxx@1a34b6e8adef0d73a68d9d95e626de483c131986
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-clang21-libcxx@50b2520873d1fb240b10572c5e88db21a7d0b6f5
 
     - name: Base — Ninja + CMake 4.3.x (+ the gcc-16.2 /opt wiring on the gcc leg), each guarded
       shell: bash
