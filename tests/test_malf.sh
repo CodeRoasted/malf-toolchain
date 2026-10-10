@@ -2855,7 +2855,7 @@ check "the writers' conf set is READ from the helper: a mutated set in the helpe
       "$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; _malf_writer_create_args && printf "%s\n" "${_MALF_WRITER_ARGS[@]}"' _ "$cs_tmp/mutant/malf" | paste -sd'|')"
 check "cut-verify and store-create each splice the set read, and malf spells no skip conf of its own" \
       "1 1 0" \
-      "$(grep -c 'profile_args+=("${_MALF_WRITER_ARGS\[@\]}")' "$MALF_BIN") $(grep -c -- '-s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS\[@\]}" --build=missing' "$MALF_BIN") $(grep -vE '^\s*#' "$MALF_BIN" | grep -cE 'skip_test=|--test-folder')"
+      "$(grep -c 'profile_args+=("${_MALF_WRITER_ARGS\[@\]}")' "$MALF_BIN") $(grep -c -- '-s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS\[@\]}" "${build_args\[@\]}"' "$MALF_BIN") $(grep -vE '^\s*#' "$MALF_BIN" | grep -cE 'skip_test=|--test-folder')"
 
 cs_home="$cs_tmp/home"; cs_pkg="$cs_tmp/cs_probe"; mkdir -p "$cs_pkg/test_package" "$cs_pkg/tests"
 CONAN_HOME="$cs_home" bash "$MALF_BIN" profiles > /dev/null 2>&1
@@ -4482,6 +4482,57 @@ printf '#pragma once\n#define TOP 1\n' > "$as_tmp/ex_top/include/top.h"
 as_create home-a
 check "a changed exported source moves the key: a second record is STORED" \
       "rc=0 STORED ex_top package |2" "$(as_step home-a)|$(ls "$as_tmp/store/records" | wc -l | tr -d ' ')"
+
+# DN-142.D16 (a): a store act's create builds from source only its own package and third-party
+# ones. ex_mid is first-party (the `ex_` namespace) and exported with no binary: the old spelling
+# (`--build=missing`) built it silently inside ex_low's create, the act's spelling fails naming it,
+# and once ex_mid's own create made it the consumer's create passes, its third-party tpdep built.
+# (b): a step whose graph links a first-party digest no record of that package's own step holds is
+# REFUSED before anything is stored, and the read-only `upstreams` replay names such a record.
+mkdir -p "$as_tmp/ex_mid" "$as_tmp/ex_low"
+printf 'from conan import ConanFile\n\n\nclass ExMid(ConanFile):\n    name = "ex_mid"\n    version = "0.1"\n    package_type = "header-library"\n    requires = "tpdep/0.1"\n' > "$as_tmp/ex_mid/conanfile.py"
+printf 'from conan import ConanFile\n\n\nclass ExLow(ConanFile):\n    name = "ex_low"\n    version = "0.1"\n    package_type = "header-library"\n    requires = "ex_mid/0.1"\n' > "$as_tmp/ex_low/conanfile.py"
+as_build_args() { bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; _malf_store_build_args "$2" "$3"' _ "$MALF_BIN" "$1" "$2"; }
+as_fresh() {   # <home name> — tpdep and ex_mid exported, no binary of either
+    local home="$as_tmp/$1"
+    CONAN_HOME="$home" bash "$MALF_BIN" profiles > /dev/null 2>&1
+    printf '[settings]\nos=Linux\narch=x86_64\nbuild_type=Release\n' > "$home/profiles/fixture"
+    CONAN_HOME="$home" conan export "$as_tmp/tpdep" > /dev/null 2>&1
+    CONAN_HOME="$home" conan export "$as_tmp/ex_mid" > /dev/null 2>&1
+}
+as_act() {   # <home name> <package> [build args...] — the create's exit and a missing-binary line
+    local name="$1" package="$2" rc; shift 2
+    CONAN_HOME="$as_tmp/$name" conan create "$as_tmp/$package" -pr:a fixture "$@" --format=json \
+        > "$as_tmp/$name.$package.graph.json" 2> "$as_tmp/$name.$package.log"; rc=$?
+    printf 'rc=%s %s' "$rc" "$(grep -oE "Missing prebuilt package for '[a-z_]+/0.1'" "$as_tmp/$name.$package.log" | sed -n 1p)"
+}
+check "the act's build arguments: the step's own package, then one missing-exclusion per owned namespace" \
+      "--build=ex_low/*|--build=missing:~ex_*|--build=missing:~zz_*" "$(as_build_args ex_low 'ex_ zz_' | paste -sd'|')"
+as_fresh home-old
+check "RED FIRST — the old spelling --build=missing builds a missing first-party upstream inside the consumer's create" \
+      "rc=0 " "$(as_act home-old ex_low --build=missing --build='ex_low/*')"
+as_fresh home-act
+mapfile -t as_low_args < <(as_build_args ex_low ex_)
+mapfile -t as_mid_args < <(as_build_args ex_mid ex_)
+check "(a) the act's spelling FAILS the create, naming the first-party package whose binary is missing" \
+      "rc=1 Missing prebuilt package for 'ex_mid/0.1'" "$(as_act home-act ex_low "${as_low_args[@]}")"
+check "(a) once ex_mid's own create made it, the consumer's create passes, its third-party upstream built from source" \
+      "rc=0 |rc=0 " "$(as_act home-act ex_mid "${as_mid_args[@]}")|$(as_act home-act ex_low "${as_low_args[@]}")"
+as_record_step() {   # <package> — the step's verdict word and exit over the upstream store
+    local out rc
+    out="$(python3 "$MALF_ROOT/artefact_store.py" conan-step "$as_tmp/ustore" "$as_tmp/home-act" "$as_tmp/home-act.$1.graph.json" "$1" fixture "$MALF_ROOT" "$as_tmp/toolchain.json" "ex_" 2>&1)"; rc=$?
+    printf 'rc=%s %s' "$rc" "$(grep -oE "(STORED|MATCH) $1 package|REFUSED $1: [0-9]+ upstream|ex_mid/host" <<< "$out" | tr '\n' ' ')"
+}
+check "(b) RED — a step linking a first-party upstream no record of that package's own step holds is REFUSED, naming it, and stores nothing" \
+      "rc=1 REFUSED ex_low: 1 upstream ex_mid/host |0" "$(as_record_step ex_low)|$(ls "$as_tmp/ustore/records" 2>/dev/null | wc -l | tr -d ' ')"
+check "(b) once the upstream's own step is recorded, the consumer's step is STORED" \
+      "rc=0 STORED ex_mid package |rc=0 STORED ex_low package " "$(as_record_step ex_mid)|$(as_record_step ex_low)"
+check "(b) the read-only replay is silent over a store whose every upstream is recorded" \
+      "rc=0" "$(python3 "$MALF_ROOT/artefact_store.py" upstreams "$as_tmp/ustore" > /dev/null; echo "rc=$?")"
+rm "$(grep -l '"package": "ex_mid"' "$as_tmp/ustore/records/"*.json)"
+check "(b) the replay reds a record whose upstream no record holds any more, naming the package" \
+      "rc=1 ex_low: 1 of 1 upstream(s) unrecorded" \
+      "$(out="$(python3 "$MALF_ROOT/artefact_store.py" upstreams "$as_tmp/ustore")"; rc=$?; printf 'rc=%s %s' "$rc" "$(grep -oE 'ex_low: [0-9]+ of [0-9]+ upstream\(s\) unrecorded' <<< "$out")")"
 rm -rf "$as_tmp"
 echo
 

@@ -5171,7 +5171,7 @@ cmd_store_create() {
     _malf_writer_create_args || return 2
 
     local name path deps kind dep blocked rc=0 total=0
-    local -a failed=() skipped=()
+    local -a failed=() skipped=() build_args=()
     local -A broke=()
     while IFS=$'\t' read -r name path deps kind; do
         total=$((total+1))
@@ -5190,8 +5190,9 @@ cmd_store_create() {
             continue
         fi
         echo "--- store-create [$total] conan create $name ($path) ---"
+        mapfile -t build_args < <(_malf_store_build_args "$name" "$prefixes")
         if ! conan create "$path" --profile:host="$MALF_PROFILE" --profile:build="$MALF_BUILD_PROFILE" \
-                -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" --build=missing --build="$name/*" --format=json \
+                -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${build_args[@]}" --format=json \
                 > "$scratch/$name.graph.json" 2> "$scratch/$name.log"; then
             echo "malf store-create: conan create $name failed — $scratch/$name.log" >&2
             failed+=("$name"); broke["$name"]=1; continue
@@ -5215,6 +5216,20 @@ cmd_store_create() {
 }
 
 # post: the owned package namespaces of the workspace, space-separated, or the function failed.
+# pre: $1 is a store step's package, $2 the owned package namespaces (_malf_owned_prefixes).
+# post: the create's --build arguments, one per line: the step's own package from source, and a
+#       missing binary built from source only when no owned namespace names it, so a first-party
+#       binary absent at the id the graph asks for fails the create naming it (DN-142.D16).
+# note: measured on conan 2.28.1 — an explicit `<name>/*` wins over a `missing:~<prefix>*`
+#       exclusion, and several exclusions all hold, so third-party binaries still build.
+_malf_store_build_args() {
+    local prefix
+    printf '%s\n' "--build=$1/*"
+    for prefix in $2; do
+        printf '%s\n' "--build=missing:~${prefix}*"
+    done
+}
+
 _malf_owned_prefixes() {
     local prefixes
     prefixes="$(python3 - "$MALF_WORKSPACE_ROOT" <<'PY'

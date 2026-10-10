@@ -17,6 +17,10 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
         the record of one `conan create` step, from the graph its `--format=json` printed: stored
         when the key is new (exit 0), compared when it is not (exit 0 on a match, 1 on a mismatch);
         with a results directory, the step's test verdict record beside it (DN-142.D5 (3))
+    artefact_store.py upstreams <store>
+        every create or build record whose inputs name an `upstream` package digest that no record
+        of that package's OWN create step at the same profile holds, one line per record with each
+        unrecorded upstream; exit 0 when there is none, 1 otherwise (DN-142.D16), read-only
     artefact_store.py build-id <store> <build-id>
         every package record whose `build_ids` holds that GNU build-id (40 hex), one line each:
         `<key> <package alias> <path>`; exit 0 when one or more answer, 1 when none (DN-142.D15)
@@ -401,12 +405,67 @@ def _step_document(kind: str, package: str, profile: str, home: Path, malf_dir: 
     }
 
 
+def produced_packages(store: Path, profile: str) -> dict[str, set[str]]:
+    """The content digests each package's own create step recorded at `profile`."""
+    produced: dict[str, set[str]] = {}
+    records = store / "records"
+    for path in sorted(records.glob("*.json")) if records.is_dir() else ():
+        body = json.loads(path.read_text())
+        step = body["inputs"]["step"]
+        content = body["outputs"].get("package", {}).get("content")
+        if step.get("kind") == "conan-create" and step.get("profile") == profile and content:
+            produced.setdefault(step["package"], set()).add(content)
+    return produced
+
+
+def unrecorded_upstreams(store: Path, document: dict) -> list[str]:
+    """Each `upstream` of a step whose digest no record of that package's own step holds.
+
+    A first-party binary the step's graph names must be the one that package's own step created
+    and judged (DN-142.D16): a digest no record holds is a variant some consumer's create built
+    with options of its own, and its tests ran in no step."""
+    produced = produced_packages(store, document["step"]["profile"])
+    return sorted(f"{name} {digest}" for name, digest in document["upstream"].items()
+                  if digest not in produced.get(name.split("/", 1)[0], set()))
+
+
+def _refuse_unrecorded(store: Path, document: dict) -> bool:
+    """True, having named each one, when the step's graph links an unrecorded first-party binary."""
+    unrecorded = unrecorded_upstreams(store, document)
+    if unrecorded:
+        print(f"artefact_store: REFUSED {document['step']['package']}: {len(unrecorded)} upstream "
+              f"package(s) at a digest no record of their own step at {document['step']['profile']} "
+              f"holds, so the step linked a binary no step created and judged (DN-142.D16): "
+              + "; ".join(unrecorded), file=sys.stderr)
+    return bool(unrecorded)
+
+
+def audit_upstreams(store: Path) -> int:
+    """`upstreams`: every step record of the store judged against its own store, read-only."""
+    flagged = 0
+    for path in sorted((store / "records").glob("*.json")):
+        body = json.loads(path.read_text())
+        document = body["inputs"]
+        if document["step"].get("kind") not in ("conan-create", "conan-build") \
+                or "upstream" not in document:
+            continue
+        unrecorded = unrecorded_upstreams(store, document)
+        if unrecorded:
+            flagged += 1
+            print(f"{body['key']} {document['step']['package']}: {len(unrecorded)} of "
+                  f"{len(document['upstream'])} upstream(s) unrecorded: " + "; ".join(unrecorded))
+    print(f"artefact_store: {flagged} record(s) link an upstream no step of its own recorded")
+    return 1 if flagged else 0
+
+
 def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile: str,
                malf_dir: Path, toolchain: Path, prefixes: tuple[str, ...],
                results: Path | None = None) -> int:
     sources, upstream, third_party, target = _step_inputs(home, graph_json, package, prefixes, True)
     document = _step_document("conan-create", package, profile, home, malf_dir, toolchain,
                               sources, upstream, third_party)
+    if _refuse_unrecorded(store, document):
+        return 1
     binary, folder = target
     content, entries = tree_digest(folder)
     _ids, missing = build_ids_of(tree_files(folder))
@@ -435,6 +494,8 @@ def build_step(store: Path, home: Path, graph_json: Path, package: str, profile:
     sources[f"{package}/host"] = source_tree
     document = _step_document("conan-build", package, profile, home, malf_dir, toolchain,
                               sources, upstream, third_party)
+    if _refuse_unrecorded(store, document):
+        return 1
     built = sorted((results / package).glob("*.xml")) if (results / package).is_dir() else []
     package_ids = sorted({path.name.split(".", 1)[0] for path in built})
     if len(package_ids) > 1:
@@ -773,6 +834,8 @@ def main(argv: list[str]) -> int:
         for key, alias, path in found:
             print(f"{key} {alias} {path}")
         return 0 if found else 1
+    if len(argv) == 2 and argv[0] == "upstreams":
+        return audit_upstreams(Path(argv[1]))
     if len(argv) == 2 and argv[0] == "build-ids":
         ids, missing = build_ids_of(tree_files(Path(argv[1])))
         print(json.dumps(ids, sort_keys=True, indent=1))
