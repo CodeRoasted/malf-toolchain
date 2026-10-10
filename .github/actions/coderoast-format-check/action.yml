@@ -37,7 +37,7 @@ runs:
       # clang-format is not part of the compiler leg (`llvm.sh 21` installs clang, lldb, lld and
       # clangd); without it the gate below would resolve the base image's clang-format, major 18 on
       # ubuntu-latest, and refuse on a cause that is not in the source.
-      uses: CodeRoasted/malf-toolchain/.github/actions/setup-clang21-tools@516058310c61c007ae9ba2a6d7d4a718f27213ee
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-clang21-tools@7845728f2a950f8559f29e59789aa84a509db1fa
       with:
         clang-format-major: ${{ inputs.clang-format-major }}
 
