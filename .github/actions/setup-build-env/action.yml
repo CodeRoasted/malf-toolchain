@@ -16,8 +16,8 @@ description: |
   per self-hosted runner, outside the checkout, that outlives the job (`conan-home.sh` says why and
   where). A caller that asks for it also runs `clean-conan-homes.sh` at its job's end.
 
-  Also owns `MALF_TOOLCHAIN_DIR` for the COMPOSITE path (see the step below). Do NOT re-declare
-  either variable in a caller — a per-caller copy of a toolchain-layout fact is two places
+  Also owns `MALF_TOOLCHAIN_DIR` for the COMPOSITE path and `MALF_LOCKFILE_STRICT` (see the steps
+  below). Do NOT re-declare any of them in a caller — a per-caller copy of a toolchain-layout fact is two places
   encoding one thing, one of which rots.
 
 inputs:
@@ -159,6 +159,17 @@ runs:
         toolchain_root="$(cd -- "$ACTION_PATH/../../.." && pwd)"
         echo "MALF_TOOLCHAIN_DIR=$toolchain_root" >> "$GITHUB_ENV"
         echo "MALF_TOOLCHAIN_DIR=$toolchain_root"
+
+    - name: Declare MALF_LOCKFILE_STRICT (every malf verb of the job resolves strictly against conan.lock)
+      shell: bash
+      run: |
+        set -euo pipefail
+        # ADR-4.D2: the desk pins, CI GATES. malf passes `--lockfile-partial` unless this variable is
+        # set, and partial lets a requirement the lock does not name resolve freely against the home.
+        # Until 2026-10-10 nothing in CI set it, so every malf verb a job ran after this action (`malf
+        # bench` in a release's measure step among them) resolved partial. Measured that day,
+        # conan 2.28.1: all 31 workspace roots resolve strictly under all 7 malf/profiles/ profiles.
+        echo "MALF_LOCKFILE_STRICT=1" >> "$GITHUB_ENV"
 
     - name: Stage the canonical conan profile (single source — from malf-toolchain)
       shell: bash
