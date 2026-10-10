@@ -208,7 +208,8 @@ def definition_member(malf_dir: Path) -> dict[str, str]:
 
 def measure_toolchain(compiler_root: Path) -> dict[str, object]:
     """DN-142.D2's `toolchain` member, measured in the job: the compiler tree's digest, and
-    cmake, ninja and conan by version and by the digest of the executable that runs."""
+    cmake, ninja, conan and patchelf by version and by the digest of the executable that runs.
+    patchelf is a member because a published executable's package() runs it (DN-142.D20 (3))."""
     compiler, _ = tree_digest(compiler_root)
     with tempfile.TemporaryDirectory(prefix="artefact_store.") as scratch:
         probe = Path(scratch) / "probe.cmake"
@@ -219,7 +220,8 @@ def measure_toolchain(compiler_root: Path) -> dict[str, object]:
     for name, executable, version_argv in (
             ("cmake", cmake_binary, ["cmake", "--version"]),
             ("ninja", Path(_run(["which", "ninja"]).strip()), ["ninja", "--version"]),
-            ("conan", Path(_run(["which", "conan"]).strip()), ["conan", "--version"])):
+            ("conan", Path(_run(["which", "conan"]).strip()), ["conan", "--version"]),
+            ("patchelf", Path(_run(["which", "patchelf"]).strip()), ["patchelf", "--version"])):
         tools[name] = {"version": _run(version_argv).splitlines()[0].strip(),
                        "executable": file_sha256(executable.resolve())}
     return tools
