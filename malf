@@ -5197,9 +5197,10 @@ cmd_store_create() {
     python3 "$MALF_DIR/artefact_store.py" toolchain "$(dirname "$(dirname "$compiler")")" "$scratch/toolchain.json" || return 2
     _malf_writer_create_args || return 2
 
-    local name path deps kind dep blocked rc=0 total=0
+    local name path deps kind dep blocked rc=0 total=0 run_at step_at step_cpu
     local -a failed=() skipped=()
     local -A broke=()
+    _malf_store_clock "$scratch/times"; run_at="$_MALF_CLOCK_AT"
     while IFS=$'\t' read -r name path deps kind; do
         total=$((total+1))
         blocked=""
@@ -5211,20 +5212,31 @@ cmd_store_create() {
             echo "--- store-create: SKIP $name — upstream $blocked failed ---" >&2
             continue
         fi
+        _malf_store_clock "$scratch/times"; step_at="$_MALF_CLOCK_AT"; step_cpu="$_MALF_CLOCK_CPU"
+        _malf_store_opened "$total" "$kind" "$name" "$path" "$run_at" "$step_at"
         if [[ "$kind" == "build" ]]; then
-            _malf_store_build_one "$name" "$path" "${MALF_STORE_BUILD_REV:-HEAD}" "$store" "$scratch" "$prefixes" \
-                || { failed+=("$name"); broke["$name"]=1; }
+            if _malf_store_build_one "$name" "$path" "${MALF_STORE_BUILD_REV:-HEAD}" "$store" "$scratch" "$prefixes"; then
+                _malf_store_closed "$total" "$name" PASS "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+            else
+                failed+=("$name"); broke["$name"]=1
+                _malf_store_closed "$total" "$name" FAILED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+            fi
             continue
         fi
-        echo "--- store-create [$total] conan create $name ($path) ---"
         if ! _malf_store_create_step "$name" "$path" "$prefixes" "$scratch/$name.graph.json" "$scratch/$name.log"; then
             echo "malf store-create: conan create $name failed — $scratch/$name.log" >&2
-            failed+=("$name"); broke["$name"]=1; continue
+            failed+=("$name"); broke["$name"]=1
+            _malf_store_closed "$total" "$name" FAILED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+            continue
         fi
-        python3 "$MALF_DIR/artefact_store.py" conan-step "$store" "$CONAN_HOME" "$scratch/$name.graph.json" \
+        if python3 "$MALF_DIR/artefact_store.py" conan-step "$store" "$CONAN_HOME" "$scratch/$name.graph.json" \
             "$name" "$MALF_PROFILE_NAME" "$MALF_DIR" "$scratch/toolchain.json" "$prefixes" \
-            "$CONAN_HOME/malf-test-results" \
-            || { echo "malf store-create: recording $name failed, or differs at an equal key (above)" >&2; rc=1; }
+            "$CONAN_HOME/malf-test-results"; then
+            _malf_store_closed "$total" "$name" PASS "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+        else
+            echo "malf store-create: recording $name failed, or differs at an equal key (above)" >&2; rc=1
+            _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+        fi
     done <<< "$wanted"
 
     if [[ ${#failed[@]} -gt 0 || ${#skipped[@]} -gt 0 ]]; then
@@ -5237,6 +5249,36 @@ cmd_store_create() {
     fi
     echo "malf store-create: all $total step(s) built, tested and recorded"
     rm -rf "$scratch"
+}
+
+# A STEP'S TIME IS PRINTED ON ITS OWN TWO LINES, for step 0's timing sidecar (DN-119.D4), which reads
+# one act per step off them. The opening line names the step and the seconds since the walk began;
+# the closing line, `--- store-create [<n>] <name> <PASS|FAILED|UNRECORDED> · at <s> s · wall <s> s
+# · cpu <s> s ---`, adds the step's own wall and its children's CPU. The clock is the kernel's
+# seconds since boot (`/proc/uptime`), never the wall clock, so a clock step cannot move a step's
+# time; the CPU is bash's `times` for this shell's reaped children, which is why it must run in the
+# walking shell itself and never in a command substitution. Pharos's STORE_STEP_CLOSED reads the
+# closing line, and malf's selftest [7q11] parses what these functions print with the same pattern.
+# post: _MALF_CLOCK_AT holds the seconds since boot and _MALF_CLOCK_CPU this shell's children's
+#       user plus system CPU seconds.
+_malf_store_clock() {   # <times file>
+    local idle
+    read -r _MALF_CLOCK_AT idle < /proc/uptime
+    times > "$1"
+    read -r _MALF_CLOCK_CPU < <(awk 'NR == 2 { split($0, f, /[ms ]+/); printf "%.2f\n", f[1] * 60 + f[2] + f[3] * 60 + f[4] }' "$1")
+}
+
+_malf_store_opened() {   # <n> <create|build> <name> <path> <walk start> <step start>
+    awk -v n="$1" -v kind="$2" -v name="$3" -v path="$4" -v run="$5" -v at="$6" \
+        'BEGIN { verb = kind == "build" ? "conan build" : "conan create"
+                 printf "--- store-create [%s] %s %s (%s) · at %.2f s ---\n", n, verb, name, path, at - run }'
+}
+
+_malf_store_closed() {   # <n> <name> <verdict> <walk start> <step start> <step start cpu> <times file>
+    _malf_store_clock "$7"
+    awk -v n="$1" -v name="$2" -v verdict="$3" -v run="$4" -v start="$5" -v cpu0="$6" \
+        -v at="$_MALF_CLOCK_AT" -v cpu="$_MALF_CLOCK_CPU" \
+        'BEGIN { printf "--- store-create [%s] %s %s · at %.2f s · wall %.2f s · cpu %.2f s ---\n", n, name, verdict, at - run, at - start, cpu - cpu0 }'
 }
 
 # One stored step's create: the package from its export, its tests and its test_package run, the

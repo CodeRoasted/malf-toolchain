@@ -5037,6 +5037,38 @@ check "every pin in the lock carries at least one digest ($cl_pins pins)" "$cl_p
 check "conan itself is pinned at the default version" "1" "$(grep -c "^conan==$cl_default " "$cl_lock")"
 echo
 
+echo "[7q16] store-create prints each step's time on its opening and closing lines, for step 0's timing sidecar (DN-119.D4)"
+
+# note: the closing line's pattern is Pharos's STORE_STEP_CLOSED, spelled the same; the walk's own use
+# of the two functions is the cmd_store_create body arm below.
+st_tmp="$(realpath "$(mktemp -d)")"
+st_out="$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e
+    _malf_store_clock "$2/times"; run_at="$_MALF_CLOCK_AT"
+    sleep 0.3
+    _malf_store_clock "$2/times"; step_at="$_MALF_CLOCK_AT"; step_cpu="$_MALF_CLOCK_CPU"
+    _malf_store_opened 3 create st_pkg /w/st "$run_at" "$step_at"
+    python3 -c "import time
+stop = time.process_time() + 0.4
+while time.process_time() < stop: pass"
+    _malf_store_closed 3 st_pkg PASS "$run_at" "$step_at" "$step_cpu" "$2/times"' _ "$MALF_BIN" "$st_tmp" 2>&1)"
+check "the opening line names the step, its verb and directory, and the seconds since the walk began" \
+      "ok" "$(python3 -c 'import re, sys
+line = sys.argv[1].splitlines()[0]
+found = re.fullmatch(r"--- store-create \[3\] conan create st_pkg \(/w/st\) · at ([0-9.]+) s ---", line)
+print("ok" if found and float(found.group(1)) >= 0.3 else repr(line))' "$st_out")"
+check "the closing line carries the verdict, the walk's seconds, the step's wall and its children's CPU, each measured" \
+      "ok" "$(python3 -c 'import re, sys
+line = sys.argv[1].splitlines()[-1]
+found = re.fullmatch(r"--- store-create \[(\d+)\] (\S+) (PASS|FAILED|UNRECORDED) · at ([0-9.]+) s · wall ([0-9.]+) s · cpu ([0-9.]+) s ---", line)
+ok = found and found.group(1, 2, 3) == ("3", "st_pkg", "PASS") and float(found.group(5)) >= 0.4 \
+    and float(found.group(4)) >= float(found.group(5)) + 0.3 and float(found.group(6)) >= 0.3
+print("ok" if ok else repr(line))' "$st_out")"
+st_body="$(sed -n '/^cmd_store_create()/,/^}/p' "$MALF_BIN")"
+check "the walk opens every step it runs and closes it on each of its five exits: a build passed or failed, a create failed, a record stored or not" \
+      "1 1 5" "$(grep -c '_malf_store_clock "$scratch/times"; run_at=' <<< "$st_body") $(grep -c '_malf_store_opened "$total"' <<< "$st_body") $(grep -c '_malf_store_closed "$total"' <<< "$st_body")"
+rm -rf "$st_tmp"
+echo
+
 echo
 echo
 echo "malf selftest: $pass_count passed, $fail_count failed"
