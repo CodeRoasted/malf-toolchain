@@ -5037,6 +5037,29 @@ check "every pin in the lock carries at least one digest ($cl_pins pins)" "$cl_p
 check "conan itself is pinned at the default version" "1" "$(grep -c "^conan==$cl_default " "$cl_lock")"
 echo
 
+echo "[7q11b] setup-build-env provisions patchelf where it is missing, and prints the one that runs (DN-142.D20 (3))"
+# Behavioural, over the action's committed first step: its `run:` script executed against stub
+# dpkg/sudo/cmake/patchelf on PATH, on a seat where every base package but patchelf is installed.
+# The install line is what a hosted or rebuilt seat runs; the version line is the per-seat evidence.
+pe_tmp="$(mktemp -d)"
+pe_action="$MALF_ROOT/.github/actions/setup-build-env/action.yml"
+awk 'f && /^    - name:/{exit} f{sub(/^        /, ""); print} /^      run: \|$/ && !f{f=1}' "$pe_action" > "$pe_tmp/step.sh"
+mkdir -p "$pe_tmp/bin" "$pe_tmp/action"
+printf '#!/bin/sh\n[ "$2" = patchelf ] && [ ! -e "%s/installed" ] && exit 1\nexit 0\n' "$pe_tmp" > "$pe_tmp/bin/dpkg"
+printf '#!/bin/sh\necho "$*" >> "%s/sudo.log"\ncase "$*" in *"apt-get install"*patchelf*) : > "%s/installed" ;; esac\n' "$pe_tmp" "$pe_tmp" > "$pe_tmp/bin/sudo"
+printf '#!/bin/sh\necho "cmake version 4.3.1"\n' > "$pe_tmp/bin/cmake"
+printf '#!/bin/sh\n[ -e "%s/installed" ] || exit 127\necho "patchelf 0.18.0"\n' "$pe_tmp" > "$pe_tmp/bin/patchelf"
+printf 'echo /h\n' > "$pe_tmp/action/conan-home.sh"
+chmod +x "$pe_tmp"/bin/*
+pe_out="$(env PATH="$pe_tmp/bin:$PATH" ACTION_PATH="$pe_tmp/action" GITHUB_ENV="$pe_tmp/env" EXTRA_APT= PERSISTENT=false JOB_TOKEN=x \
+          bash "$pe_tmp/step.sh" 2>&1)"; pe_rc=$?
+check "a seat lacking patchelf alone runs the apt install, and the install names patchelf" \
+      "rc=0 1" "rc=$pe_rc $(grep -c '^apt-get install -y .*patchelf' "$pe_tmp/sudo.log" 2>/dev/null || echo 0)"
+check "the step prints the patchelf that runs and its version" \
+      "1" "$(grep -c "^patchelf: $pe_tmp/bin/patchelf — patchelf 0.18.0\$" <<<"$pe_out")"
+rm -rf "$pe_tmp"
+echo
+
 echo "[7q16] store-create prints each step's time on its opening and closing lines, for step 0's timing sidecar (DN-119.D4)"
 
 # note: the closing line's pattern is Pharos's STORE_STEP_CLOSED, spelled the same; the walk's own use

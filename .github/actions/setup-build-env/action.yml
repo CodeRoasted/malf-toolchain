@@ -68,16 +68,21 @@ runs:
         # apt/pip provision is pure waste AND needs sudo → a password prompt on a self-hosted box.
         # Install only what's actually missing; on a hosted (ephemeral) runner everything is missing
         # so the full provision still runs.
+        # patchelf is in the base because a published executable's package() runs it
+        # (`patchelf --remove-rpath`, DN-142.D20 (3)) and artefact_store's key measures it in the
+        # toolchain member: a create of coderoast_server or insight_sift_tools, and every
+        # `malf store-create`, fails on a seat without it. Every hosted Ubuntu image ships it.
         need_apt=0
-        for pkg in ninja-build python3-pip build-essential $EXTRA_APT; do
+        for pkg in ninja-build python3-pip build-essential patchelf $EXTRA_APT; do
           dpkg -s "$pkg" >/dev/null 2>&1 || { need_apt=1; break; }
         done
         if [ "$need_apt" = 1 ]; then
           sudo apt-get update
-          sudo apt-get install -y ninja-build python3-pip build-essential $EXTRA_APT
+          sudo apt-get install -y ninja-build python3-pip build-essential patchelf $EXTRA_APT
         else
           echo "apt base (+ extra: '${EXTRA_APT:-none}') already present — skipping apt (idempotent skip)"
         fi
+        echo "patchelf: $(command -v patchelf) — $(patchelf --version)"
         # Pin the dev-validated CMake 4.3.x workspace-wide (dev/CI parity). Repos that arm
         # `import std` need CXX_MODULE_STD (experimental UUID 451f2fe2 — present only in CMake
         # 4.3.x); Ubuntu Noble ships 3.28 without that gate. Install only if not already 4.3.x
