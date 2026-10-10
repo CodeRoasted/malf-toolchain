@@ -2931,6 +2931,15 @@ check "a same-size rewrite that preserves the mtime MOVES the digest" \
 cm_rows="$(python3 "$MALF_ROOT/artefact_store.py" content-manifest-rows "$tp_tmp/data.sha256" v1/)"
 check "a committed sha256sum manifest's rows give the digest of the root it verifies, reading nothing under it" \
       "equal 64" "$([[ "$(python3 "$MALF_ROOT/artefact_store.py" content-manifest "$tp_tmp/data")" == "$cm_rows" ]] && echo equal || echo differs) $(grep -cE '^[0-9a-f]{64}$' <<< "$cm_rows" | sed 's/^1$/64/')"
+check "the toolchain member measures patchelf on Linux, where package() runs it, and nowhere else" \
+      "patchelf|none" "$(python3 -c 'import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import artefact_store as store
+linux = "patchelf" if "patchelf" in store.measure_toolchain(Path(sys.argv[2])) else "absent"
+sys.platform = "win32"
+other = "patchelf" if "patchelf" in store.measure_toolchain(Path(sys.argv[2])) else "none"
+print(f"{linux}|{other}")' "$MALF_ROOT" "$tp_tmp/data")"
 rm -rf "$tp_tmp"
 echo
 

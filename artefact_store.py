@@ -256,7 +256,8 @@ def definition_member(malf_dir: Path) -> dict[str, str]:
 def measure_toolchain(compiler_root: Path) -> dict[str, object]:
     """DN-142.D2's `toolchain` member, measured in the job: the compiler tree's digest, and
     cmake, ninja, conan and patchelf by version and by the digest of the executable that runs.
-    patchelf is a member because a published executable's package() runs it (DN-142.D20 (3))."""
+    patchelf is a member because a published executable's package() runs it (DN-142.D20 (3)), and
+    only on Linux, where those package() methods run it: another seat measures no patchelf."""
     compiler, _ = tree_digest(compiler_root)
     with tempfile.TemporaryDirectory(prefix="artefact_store.") as scratch:
         probe = Path(scratch) / "probe.cmake"
@@ -264,11 +265,13 @@ def measure_toolchain(compiler_root: Path) -> dict[str, object]:
         cmake_binary = Path(subprocess.run(["cmake", "-P", str(probe)], capture_output=True,
                                            text=True, check=True).stderr.strip())
     tools: dict[str, object] = {"compiler": compiler}
-    for name, executable, version_argv in (
-            ("cmake", cmake_binary, ["cmake", "--version"]),
-            ("ninja", Path(_run(["which", "ninja"]).strip()), ["ninja", "--version"]),
-            ("conan", Path(_run(["which", "conan"]).strip()), ["conan", "--version"]),
-            ("patchelf", Path(_run(["which", "patchelf"]).strip()), ["patchelf", "--version"])):
+    measured = [("cmake", cmake_binary, ["cmake", "--version"]),
+                ("ninja", Path(_run(["which", "ninja"]).strip()), ["ninja", "--version"]),
+                ("conan", Path(_run(["which", "conan"]).strip()), ["conan", "--version"])]
+    if sys.platform.startswith("linux"):
+        measured.append(("patchelf", Path(_run(["which", "patchelf"]).strip()),
+                         ["patchelf", "--version"]))
+    for name, executable, version_argv in measured:
         tools[name] = {"version": _run(version_argv).splitlines()[0].strip(),
                        "executable": file_sha256(executable.resolve())}
     return tools
