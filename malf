@@ -1617,7 +1617,9 @@ cmd_build() {
 # runs the same selection inside its `conan create`: one definition, two callers. This function
 # only asks the helper for the argv and runs ctest with it; the helper exits 3 when an owed run
 # selects nothing, having said so, and this side adds the tree's configure role.
-_malf_test_run() {                   # <build_dir> <verbose> <regex> <corpus_only>
+# ctest runs with stdin on /dev/null, as every ctest the helper runs does: ctest hands its stdin to
+# each test, and a test offered the caller's terminal can block on it (step 0 of 1.10.7 hung so).
+_malf_test_run() {                  # <build_dir> <verbose> <regex> <corpus_only>
     local build_dir="$1" selected rc=0 in_sweep=false ctest_args=()
     [[ -n "${MALF_SWEEP:-}" ]] && in_sweep=true
     selected="$(mktemp)"
@@ -1631,7 +1633,7 @@ _malf_test_run() {                   # <build_dir> <verbose> <regex> <corpus_onl
     fi
     mapfile -d '' -t ctest_args < "$selected"
     rm -f "$selected"
-    ctest "${ctest_args[@]}"
+    ctest "${ctest_args[@]}" < /dev/null
 }
 
 # post: the tree's configure role on stderr, so an empty selection's red names its cause.

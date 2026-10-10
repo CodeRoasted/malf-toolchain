@@ -2761,6 +2761,26 @@ check "malf test reads the selection from the helper: a mutated label in the hel
 check "malf spells no ctest label of its own" \
       "0" "$(grep -cE '(-L|-LE) corpus' "$MALF_BIN")"
 
+# NO TEST READS ITS CALLER'S STDIN. ctest hands its own stdin to each test, and step 0 of 1.10.7 hung
+# in a test that offered a prompt to the terminal its build inherited. Each arm runs its caller with
+# a fresh pseudo-terminal as stdin and a probe test that fails when its stdin is a terminal; the
+# premise arm proves the probe sees the terminal through a bare ctest, so a green below is the
+# redirection's and never a blind probe's.
+pty_stdin() {   # <command...> -> the command's exit status, its stdin a pseudo-terminal nobody types into
+    python3 -c 'import pty, subprocess, sys
+master, slave = pty.openpty()
+sys.exit(subprocess.run(sys.argv[1:], stdin=slave, check=False).returncode)' "$@"
+}
+mkdir -p "$tp_tmp/stdin"
+printf '#!/bin/sh\n[ -t 0 ] && { echo "the probe test read a terminal stdin"; exit 1; }\nexit 0\n' > "$tp_tmp/stdin_probe"
+chmod +x "$tp_tmp/stdin_probe"
+printf 'add_test(StdinProbe.IsNotATerminal "%s")\n' "$tp_tmp/stdin_probe" > "$tp_tmp/stdin/CTestTestfile.cmake"
+check "premise — a bare ctest hands a terminal stdin to its test, so the probe reds" \
+      "8" "$(pty_stdin ctest --test-dir "$tp_tmp/stdin" >/dev/null 2>&1; echo $?)"
+check "malf test runs ctest with stdin on /dev/null: the probe passes under a terminal stdin" \
+      "rc=0" "$(pty_stdin bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e
+        ( _malf_test_run "$2" false "" false ) >/dev/null 2>&1; echo "rc=$?"' _ "$MALF_BIN" "$tp_tmp/stdin")"
+
 # Inside a create. A fixture recipe exports a CTestTestfile.cmake, which conan copies into its build folder (no compiler), and
 # calls the helper as every first-party recipe does; the home is staged by malf's own conf sync.
 rt_home="$tp_tmp/home"; rt_pkg="$tp_tmp/rt_probe"; mkdir -p "$rt_pkg"
@@ -2804,8 +2824,8 @@ check "every CI action that stages global.conf stages the test helper beside it"
 rt_tests "RtProbe.Passes:$rt_true" "RtProbe.CorpusFails:$rt_false:corpus"
 check "a create runs the selection: the default population passes, the corpus test is built and never run, and the JUnit file names exactly the test that ran" \
       "rc=0 1 0" "$(rt_create) $(grep -c 'name="RtProbe.Passes"' "$rt_junit" 2>/dev/null) $(grep -c 'RtProbe.CorpusFails' "$rt_junit" 2>/dev/null)"
-check "the create's ctest argv is the desk selection plus the guard and --output-junit, nothing else" \
-      "1" "$(grep -cE "^\S* ?.*ctest --test-dir \S+ --output-on-failure -LE corpus --no-tests=error --output-junit $rt_junit\$" "$tp_tmp/rt.log")"
+check "the create's ctest argv is the desk selection plus the guard and --output-junit, its stdin the null device, nothing else" \
+      "1" "$(grep -cE "^\S* ?.*ctest --test-dir \S+ --output-on-failure -LE corpus --no-tests=error --output-junit $rt_junit < /dev/null\$" "$tp_tmp/rt.log")"
 rt_tests "RtProbe.Passes:$rt_true" "RtProbe.Fails:$rt_false"
 check "a red test FAILS the create, and the log names it" \
       "rc=1 1" "$(rt_create) $(grep -cE '[0-9]+ - RtProbe.Fails \(Failed\)' "$tp_tmp/rt.log")"
@@ -2815,6 +2835,9 @@ check "under tools.build:skip_test the same red recipe passes, says so, and writ
 rt_tests "RtProbe.CorpusFails:$rt_false:corpus"
 check "a create whose tree enabled testing and selects zero tests FAILS, never passes vacuously" \
       "rc=1 1" "$(rt_create) $(grep -c '0 test(s) selected in .* — a create that enabled testing must run at least one test' "$tp_tmp/rt.log")"
+rt_tests "StdinProbe.IsNotATerminal:$tp_tmp/stdin_probe"
+check "a create runs its tests with stdin on the null device: the probe passes under a terminal stdin" \
+      "rc=0" "$(pty_stdin env CONAN_HOME="$rt_home" conan create "$rt_pkg" -pr:a fixture --build="rt_probe/*" > "$tp_tmp/rt.log" 2>&1; echo "rc=$?")"
 rt_tests "RtProbe.Passes:$rt_true"
 check "the results directory is the conf's: a create given another one writes there" \
       "rc=0 1" "$(rt_create -c "user.malf:test_results=$tp_tmp/elsewhere") $(grep -c 'name="RtProbe.Passes"' "$tp_tmp/elsewhere/rt_probe/$rt_empty_id.xml" 2>/dev/null)"

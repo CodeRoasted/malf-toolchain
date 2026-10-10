@@ -37,6 +37,10 @@ name (DN-142.D13 (3)). Inside a create malf's path map (`malf-path-map.cmake`, D
 the create. Both runners refuse a test source that spells one of the three before any test runs;
 `locators <dir>...` prints the same findings for a tree.
 
+NO TEST READS ITS CALLER'S STDIN. Every ctest run of tests this file starts, and `malf test`'s, has
+stdin on the null device, because ctest hands its own stdin to each test: step 0 of 1.10.7 hung in a test that
+offered an interactive prompt to the terminal its build inherited, which no keystroke could reach.
+
 Staged by malf beside global.conf in every conan home it uses (malf's conf sync, setup-build-env,
 setup-proof-linux, setup-proof-msvc); global.conf names it as `user.malf:recipe_tests`, and a
 recipe loads it with `runpy.run_path`. A home that lacks it fails the build, never skips the tests.
@@ -192,7 +196,6 @@ def run_tests(conanfile) -> None:
         `<user.malf:test_results>/<name>/<package id>.xml` holds the run, or the build failed
     """
     from conan.errors import ConanException
-    from conan.tools.build import cmd_args_to_string
 
     if conanfile.conf.get("tools.build:skip_test", check_type=bool):
         conanfile.output.info("malf: tools.build:skip_test is set, so no test runs in this build")
@@ -211,8 +214,17 @@ def run_tests(conanfile) -> None:
         return
     junit = _junit(results, conanfile.name, f"{conanfile.info.package_id()}.xml")
     conanfile.output.info(f"malf: running the test selection of {conanfile.name}, JUnit to {junit}")
-    conanfile.run(cmd_args_to_string(["ctest", *arguments, "--output-junit", junit]),
-                  env=["conanbuild", "conanrun"])
+    conanfile.run(ctest_command(arguments, junit), env=["conanbuild", "conanrun"])
+
+
+def ctest_command(arguments: list[str], junit: str) -> str:
+    """The shell command of a create's ctest run: its stdin is the null device, never the create's.
+
+    note: `ConanFile.run` takes no stdin, so the redirection rides the command it runs.
+    """
+    from conan.tools.build import cmd_args_to_string
+
+    return f"{cmd_args_to_string(['ctest', *arguments, '--output-junit', junit])} < {os.devnull}"
 
 
 def run_test_package(conanfile) -> None:
@@ -225,7 +237,7 @@ def run_test_package(conanfile) -> None:
         of at least one test, or the create failed
     """
     from conan.errors import ConanException
-    from conan.tools.build import can_run, cmd_args_to_string
+    from conan.tools.build import can_run
 
     if conanfile.conf.get("tools.build:skip_test", check_type=bool):
         conanfile.output.info("malf: tools.build:skip_test is set, so no test_package test runs")
@@ -245,8 +257,7 @@ def run_test_package(conanfile) -> None:
     junit = _junit(results, tested,
                    f"{conanfile.dependencies[tested].pref.package_id}.test_package.xml")
     conanfile.output.info(f"malf: running the test_package selection of {tested}, JUnit to {junit}")
-    conanfile.run(cmd_args_to_string(["ctest", *arguments, "--output-junit", junit]),
-                  env=["conanbuild", "conanrun"])
+    conanfile.run(ctest_command(arguments, junit), env=["conanbuild", "conanrun"])
 
 
 def _desk_args(argv: list[str]) -> int:
