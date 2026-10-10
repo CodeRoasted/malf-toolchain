@@ -85,12 +85,12 @@ runs:
     - name: Provision clang-21 and the version-matched clang-tidy, asserted to be clang-21's OWN
       # The assertion is this gate's arming (the description's second hole): a clang-tidy outside
       # clang-21's install directory makes `malf lint` skip every module unit and pass.
-      uses: CodeRoasted/malf-toolchain/.github/actions/setup-clang21-tools@a832ca6ed8891620c3a4bbe9193b455f4ff1e4b5
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-clang21-tools@b77a9adfcf2f423a4d318ab2e6d5d99eae6a21a8
       with:
         clang-tidy-major: ${{ inputs.clang-tidy-major }}
 
     - name: Setup build env (apt + CMake 4.3.x + Conan + dep cache + canonical profile)
-      uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-env@a832ca6ed8891620c3a4bbe9193b455f4ff1e4b5
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-env@b77a9adfcf2f423a4d318ab2e6d5d99eae6a21a8
       with:
         profile: ${{ inputs.profile }}
 
