@@ -37,6 +37,21 @@ name (DN-142.D13 (3)). Inside a create malf's path map (`malf-path-map.cmake`, D
 the create. Both runners refuse a test source that spells one of the three before any test runs;
 `locators <dir>...` prints the same findings for a tree.
 
+THE CORPUS LEGS (DN-142.D21 (1), (3)). When the conf `user.malf:corpus_gates` names a parameter
+document holding an entry for the package, `run_tests` runs each of its legs after the default
+selection, in order (`sample`, then `full`): one ctest over the `corpus`-labelled tests of the leg's
+named suites, never the bare label, with the leg's mount variables set on that command and nowhere
+else, JUnit to `<package id>.corpus-<leg>.xml`. A suite that selects no test, and a selected test
+registered without `SKIP_REGULAR_EXPRESSION` (so a GTEST_SKIP would read as a pass), are rows of the
+leg's sidecar `<package id>.corpus-<leg>.json`, with the run's exit status. A red leg is recorded,
+never raised: the package was judged by its default selection, and the corpus verdict is a record of
+its own. The document is written by step 0's Pharos; its paths never enter a key.
+
+WHAT THE DEFAULT RUN ALSO RECORDS. `<package id>.corpus-listed.json`, every `corpus`-labelled test
+name of the tree, listed and never run, so the corpus label closes against the registry from the
+records alone; and `<package id>.targets.txt`, the tree's linked targets (the outputs of ninja's
+CXX executable, static and shared library linker rules), for step 0's built-targets compare.
+
 NO TEST READS ITS CALLER'S STDIN. Every ctest run of tests this file starts, and `malf test`'s, has
 stdin on the null device, because ctest hands its own stdin to each test: step 0 of 1.10.7 hung in a test that
 offered an interactive prompt to the terminal its build inherited, which no keystroke could reach.
@@ -48,6 +63,7 @@ recipe loads it with `runpy.run_path`. A home that lacks it fails the build, nev
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -55,6 +71,12 @@ import sys
 from pathlib import Path
 
 CORPUS_LABEL = "corpus"
+CORPUS_GATES_CONF = "user.malf:corpus_gates"
+# The ninja rules whose outputs are a tree's linked targets (CMake's Ninja generator names them
+# `<rule>__<target>_<config>`): what B3c compares between B3's tree and the create's.
+LINKER_RULES = re.compile(r"^(CXX_EXECUTABLE_LINKER|CXX_STATIC_LIBRARY_LINKER|CXX_SHARED_LIBRARY_LINKER)")
+# The property gtest_discover_tests sets, without which ctest reads a GTEST_SKIP as a pass.
+SKIP_PROPERTY = "SKIP_REGULAR_EXPRESSION"
 # DN-142.D13 (1): the writer's create sets no skip conf; the consumer's runs no test and builds no
 # test_package, on conan's default graph. Never `tools.graph:skip_test`.
 CREATE_ARGS: dict[str, tuple[str, ...]] = {
@@ -116,6 +138,54 @@ def guarded(build_dir: str, arguments: list[str], *, owed: bool) -> tuple[list[s
         count = "no" if total is None else str(total)
         return arguments, f"{count} test(s) selected in {build_dir} by: {' '.join(arguments)}"
     return [*arguments, "--no-tests=error"], None
+
+
+def shown_tests(arguments: list[str]) -> list[dict]:
+    """The tests `ctest <arguments>` selects, from `--show-only=json-v1`: each a dict with its
+    `name` and `properties`. Raises RuntimeError when ctest cannot list them."""
+    listed = subprocess.run(["ctest", *arguments, "--show-only=json-v1"], capture_output=True,
+                            text=True, check=False, stdin=subprocess.DEVNULL)
+    if listed.returncode != 0:
+        raise RuntimeError(f"ctest {' '.join(arguments)} --show-only=json-v1 exited "
+                           f"{listed.returncode}: {listed.stderr.strip()[-300:]}")
+    return json.loads(listed.stdout).get("tests", [])
+
+
+def corpus_listing(build_dir: str) -> list[str]:
+    """Every `corpus`-labelled test name of the tree, sorted; empty when it registers no CTest file."""
+    if not (Path(build_dir) / "CTestTestfile.cmake").is_file():
+        return []
+    return sorted(test["name"] for test in shown_tests(["--test-dir", build_dir, "-L", CORPUS_LABEL]))
+
+
+def linked_targets(build_dir: str) -> list[str] | None:
+    """The tree's linked targets, relative to it and sorted: the outputs of ninja's CXX executable,
+    static and shared library linker rules, without the `*.cmake` files a POST_BUILD gtest
+    discovery declares as their byproducts. None when the tree has no `build.ninja`. Raises
+    RuntimeError when ninja cannot list them."""
+    if not (Path(build_dir) / "build.ninja").is_file():
+        return None
+    listed = subprocess.run(["ninja", "-C", build_dir, "-t", "targets", "all"], capture_output=True,
+                            text=True, check=False, stdin=subprocess.DEVNULL)
+    if listed.returncode != 0:
+        raise RuntimeError(f"ninja -C {build_dir} -t targets all exited {listed.returncode}: "
+                           f"{listed.stderr.strip()[-300:]}")
+    root = Path(build_dir).resolve()
+    targets = set()
+    for line in listed.stdout.splitlines():
+        target, _separator, rule = line.rpartition(": ")
+        if not target or not LINKER_RULES.match(rule.strip()) or target.endswith(".cmake"):
+            continue
+        path = Path(target)
+        if path.is_absolute() and path.resolve().is_relative_to(root):
+            target = path.resolve().relative_to(root).as_posix()
+        targets.add(target)
+    return sorted(targets)
+
+
+def corpus_regex(suites: list[str]) -> str:
+    """The `-R` expression selecting exactly the named suites' tests."""
+    return "^(" + "|".join(re.escape(suite) for suite in suites) + r")\."
 
 
 def _is_test_source(relative: Path, *, every_source: bool) -> bool:
@@ -209,12 +279,76 @@ def run_tests(conanfile) -> None:
     if empty is not None:
         raise ConanException(f"malf: {conanfile.name}: {empty} — a create that enabled testing "
                              "must run at least one test")
+    package_id = conanfile.info.package_id()
+    try:
+        targets = linked_targets(build_dir)
+    except RuntimeError as unlisted:
+        raise ConanException(f"malf: {conanfile.name}: {unlisted}") from unlisted
+    if targets is not None:
+        Path(_junit(results, conanfile.name, f"{package_id}.targets.txt")).write_text(
+            "".join(f"{target}\n" for target in targets))
     if not (Path(build_dir) / "CTestTestfile.cmake").is_file():
         conanfile.output.info(f"malf: {conanfile.name} enabled no testing, so no test runs")
         return
-    junit = _junit(results, conanfile.name, f"{conanfile.info.package_id()}.xml")
+    try:
+        listed = corpus_listing(build_dir)
+    except RuntimeError as unlisted:
+        raise ConanException(f"malf: {conanfile.name}: {unlisted}") from unlisted
+    Path(_junit(results, conanfile.name, f"{package_id}.corpus-listed.json")).write_text(
+        json.dumps(listed, indent=1) + "\n")
+    junit = _junit(results, conanfile.name, f"{package_id}.xml")
     conanfile.output.info(f"malf: running the test selection of {conanfile.name}, JUnit to {junit}")
     conanfile.run(ctest_command(arguments, junit), env=["conanbuild", "conanrun"])
+    run_corpus_legs(conanfile, build_dir, results, package_id)
+
+
+def run_corpus_legs(conanfile, build_dir: str, results: str, package_id: str) -> None:
+    """The legs `user.malf:corpus_gates` names for this package, each its own ctest run; a red leg
+    is recorded in its JUnit file and sidecar, never raised (DN-142.D21 (1)).
+
+    post: for each leg, `<package id>.corpus-<leg>.json` holds `{leg, suites, exit, rows}`, `exit`
+        the ctest status (None when no suite selected a test) and `rows` the `absent` and
+        `unguarded` rows; `<package id>.corpus-<leg>.xml` holds the run when one happened
+    """
+    from conan.errors import ConanException
+    from conan.tools.build import cmd_args_to_string
+
+    document_path = conanfile.conf.get(CORPUS_GATES_CONF)
+    if not document_path:
+        return
+    legs = json.loads(Path(document_path).read_text()).get("packages", {}).get(conanfile.name)
+    if not legs:
+        return
+    if os.name != "posix":
+        raise ConanException(f"malf: {conanfile.name}: the corpus legs set their mounts through "
+                             "`env`, which this platform lacks; step 0 runs them on Linux only")
+    for leg in legs:
+        name, suites, environment = leg["leg"], leg["suites"], leg["environment"]
+        population = f"corpus-{name}"
+        selected = [suite for suite in suites
+                    if (selected_count(["--test-dir", build_dir, "-L", CORPUS_LABEL, "-R",
+                                        corpus_regex([suite])]) or 0) > 0]
+        rows = [[population, f"{suite}.*", "absent"] for suite in suites if suite not in selected]
+        status = None
+        if selected:
+            arguments = ["--test-dir", build_dir, "--output-on-failure", "-L", CORPUS_LABEL,
+                         "-R", corpus_regex(selected)]
+            try:
+                shown = shown_tests(arguments)
+            except RuntimeError as unlisted:
+                raise ConanException(f"malf: {conanfile.name}: {unlisted}") from unlisted
+            rows += [[population, test["name"], "unguarded"] for test in shown
+                     if SKIP_PROPERTY not in {item.get("name") for item in test.get("properties", [])}]
+            junit = _junit(results, conanfile.name, f"{package_id}.{population}.xml")
+            mounts = [f"{variable}={value}" for variable, value in sorted(environment.items())]
+            conanfile.output.info(f"malf: running the {population} leg of {conanfile.name} "
+                                  f"({', '.join(selected)}), JUnit to {junit}")
+            command = (f"{cmd_args_to_string(['env', *mounts])} "
+                       f"{ctest_command(arguments, junit)}")
+            status = conanfile.run(command, env=["conanbuild", "conanrun"], ignore_errors=True)
+        Path(_junit(results, conanfile.name, f"{package_id}.{population}.json")).write_text(
+            json.dumps({"leg": name, "suites": suites, "exit": status, "rows": rows},
+                       indent=1, sort_keys=True) + "\n")
 
 
 def ctest_command(arguments: list[str], junit: str) -> str:
@@ -307,13 +441,34 @@ def _locators(argv: list[str]) -> int:
     return 1 if findings else 0
 
 
-VERBS = {"desk-args": (6, _desk_args), "create-args": (None, _create_args), "locators": (None, _locators)}
+def _targets(argv: list[str]) -> int:
+    """`targets <build dir>`: the tree's linked targets, one per line (the definition the create's
+    `<package id>.targets.txt` holds); exit 1 when the tree has no build.ninja, 2 when ninja failed."""
+    if len(argv) != 1:
+        print("usage: malf_recipe_tests.py targets <build dir>", file=sys.stderr)
+        return 2
+    try:
+        targets = linked_targets(argv[0])
+    except RuntimeError as unlisted:
+        print(f"malf_recipe_tests.py targets: {unlisted}", file=sys.stderr)
+        return 2
+    if targets is None:
+        print(f"malf_recipe_tests.py targets: {argv[0]} holds no build.ninja", file=sys.stderr)
+        return 1
+    for target in targets:
+        print(target)
+    return 0
+
+
+VERBS = {"desk-args": (6, _desk_args), "create-args": (None, _create_args), "locators": (None, _locators),
+         "targets": (1, _targets)}
 
 if __name__ == "__main__":
     verb = VERBS.get(sys.argv[1]) if len(sys.argv) > 1 else None
     if verb is None or (verb[0] is not None and len(sys.argv) - 2 != verb[0]):
         print("usage: malf_recipe_tests.py desk-args <out file> <build_dir> <corpus_only> <regex> "
               "<verbose> <in_sweep>\n       malf_recipe_tests.py create-args <writer|consumer>\n"
-              "       malf_recipe_tests.py locators <dir>...", file=sys.stderr)
+              "       malf_recipe_tests.py locators <dir>...\n"
+              "       malf_recipe_tests.py targets <build dir>", file=sys.stderr)
         sys.exit(2)
     sys.exit(verb[1](sys.argv[2:]))

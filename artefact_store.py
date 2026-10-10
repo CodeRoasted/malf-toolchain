@@ -13,10 +13,12 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
     artefact_store.py tree <folder>
         the content digest of a file tree, one line of 64 hex
     artefact_store.py conan-step <store> <conan home> <create graph.json> <package> <profile name>
-                                 <malf dir> <toolchain.json> <prefixes> [<results dir>]
+                                 <malf dir> <toolchain.json> <prefixes> [<results dir> [<corpus gates>]]
         the record of one `conan create` step, from the graph its `--format=json` printed: stored
         when the key is new (exit 0), compared when it is not (exit 0 on a match, 1 on a mismatch);
-        with a results directory, the step's test verdict record beside it (DN-142.D5 (3))
+        with a results directory, the step's test verdict record beside it (DN-142.D5 (3)); with
+        the corpus gates parameter document naming the package, its corpus verdict too
+        (DN-142.D21 (1)), whose red is that record's verdict and never this command's exit
     artefact_store.py upstreams <store>
         every create or build record whose inputs name an `upstream` package digest that no record
         of that package's OWN create step at the same profile holds, one line per record with each
@@ -32,6 +34,13 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
         the verdict record of one `conan build` step (a `stored: false` package, DN-142.D14): keyed
         like a create's record by its inputs, the source being the package's git tree id; it stores
         no package and judges the upstream packages the build linked
+    artefact_store.py content-manifest <root>
+        the content digest of a data root (DN-142.D21 (5)): SHA-256 over the canonical JSON of the
+        sorted [relative path, sha256] of every regular file under it, symlinks followed; a file
+        root is the one row [".", sha256]. One line of 64 hex
+    artefact_store.py content-manifest-rows <sha256sum file> <prefix>
+        the same digest computed from a committed `sha256sum` manifest whose paths carry <prefix>,
+        for a root that manifest was just verified equal to; nothing under the root is read
     artefact_store.py toolchain <compiler root> <out.json>
         the measured toolchain member, written once per run (hashing the compiler tree is the
         expensive part of a key)
@@ -59,6 +68,14 @@ the build and `<package>/<package id>.test_package.xml` for the test_package), `
 the package's, or for a `stored: false` step the upstream packages it linked) and the logs as an
 object, never compared. A rebuild at an equal key compares the verdict, the result set and `judged`,
 never a timing.
+
+A step's CORPUS VERDICT (DN-142.D21) is a third record, output name `corpus`, written when the
+corpus gates parameter document names the package: its key is the build step's plus the selection
+`-L corpus` with the legs and their suites, plus `data`, each mount role's content digest (never
+its path); its rows are `[corpus-<leg>, test name, outcome]`, the outcome one of `passed`,
+`failed`, `skipped`, `disabled`, `absent` (a named suite that selected no test, or ran none) and
+`unguarded` (a test ctest could not see skip). Its verdict is `pass` only when every row is
+`passed`: a skipped corpus gate is the green-blind state the corpus run exists to refuse.
 
 MALF_STORE_DEFINITION, when set, is `<name>=<directory> ...`: each named directory's tracked tree
 joins the key's `definition` beside malf's, for a step another tool drives (Pharos at step 0).
@@ -157,6 +174,36 @@ def tree_entries(folder: Path, exclude_root_manifest: bool = True) -> list[list[
             else:
                 raise KeyError_(f"{path}: neither a regular file nor a symlink")
     return sorted(entries)
+
+
+def content_manifest(root: Path) -> str:
+    """DN-142.D21 (5)'s content digest of a data root: SHA-256 over the canonical JSON of the sorted
+    `[relative path, sha256]` of every regular file under it, symlinks followed; a file root is the
+    one row `[".", sha256]`. No mtime, size or inode enters it, so a same-size rewrite moves it."""
+    if root.is_file():
+        return key_of([[".", file_sha256(root)]])
+    if not root.is_dir():
+        raise FileNotFoundError(f"{root} is neither a file nor a directory")
+    rows = []
+    for directory, subdirectories, names in os.walk(root, followlinks=True):
+        subdirectories.sort()
+        for name in names:
+            path = Path(directory) / name
+            if path.is_file():
+                rows.append([path.relative_to(root).as_posix(), file_sha256(path)])
+    return key_of(sorted(rows))
+
+
+def manifest_rows_digest(manifest: Path, prefix: str) -> str:
+    """`content_manifest` of the root a `sha256sum` manifest names, from the manifest's rows alone:
+    every line is `<sha256>  <prefix><relative path>`. pre: the root was just verified equal to it."""
+    rows = []
+    for line in manifest.read_text().splitlines():
+        digest, separator, path = line.partition("  ")
+        if not separator or not path.startswith(prefix) or len(digest) != 64:
+            raise ValueError(f"{manifest}: not a `<sha256>  {prefix}<path>` line: {line!r}")
+        rows.append([path.removeprefix(prefix), digest])
+    return key_of(sorted(rows))
 
 
 def tree_digest(folder: Path) -> tuple[str, list[list[str]]]:
@@ -462,7 +509,7 @@ def audit_upstreams(store: Path) -> int:
 
 def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile: str,
                malf_dir: Path, toolchain: Path, prefixes: tuple[str, ...],
-               results: Path | None = None) -> int:
+               results: Path | None = None, corpus_gates: Path | None = None) -> int:
     sources, upstream, third_party, target = _step_inputs(home, graph_json, package, prefixes, True)
     document = _step_document("conan-create", package, profile, home, malf_dir, toolchain,
                               sources, upstream, third_party)
@@ -483,8 +530,12 @@ def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile:
     if results is None:
         return stored
     package_id = binary.split(":", 1)[1].split("#", 1)[0]
-    return max(stored, verdict_record(store, key_of(document), package, package_id, profile,
-                                      malf_dir, results, {package: content}))
+    judged = max(stored, verdict_record(store, key_of(document), package, package_id, profile,
+                                        malf_dir, results, {package: content}))
+    if corpus_gates is None:
+        return judged
+    return max(judged, corpus_record(store, key_of(document), package, package_id, profile,
+                                     malf_dir, results, {package: content}, corpus_gates))
 
 
 def build_step(store: Path, home: Path, graph_json: Path, package: str, profile: str,
@@ -511,30 +562,47 @@ def build_step(store: Path, home: Path, graph_json: Path, package: str, profile:
 VERDICT_POPULATIONS = (("build", "{pid}.xml"), ("test_package", "{pid}.test_package.xml"))
 
 
-def junit_results(results: Path, package: str, package_id: str
-                  ) -> tuple[list[list[str]], list[Path]]:
-    """([population, test name, outcome] sorted, the JUnit files read) of one step's binary, from
-    malf's helper's result files `<results>/<package>/<package id>.*`; an outcome is `passed`,
+# What the helper's default run records beside its JUnit files, never compared by population:
+# the corpus-labelled names it listed and did not run, and the tree's linked targets.
+LISTED_SUFFIX = ".corpus-listed.json"
+TARGETS_SUFFIX = ".targets.txt"
+
+
+def junit_rows(path: Path, population: str) -> list[list[str]]:
+    """`[population, test name, outcome]` per test case of one JUnit file; an outcome is `passed`,
     `failed`, `skipped` or `disabled`."""
     import xml.etree.ElementTree as ElementTree
 
+    rows = []
+    for case in ElementTree.parse(path).getroot().iter("testcase"):
+        status = case.get("status")
+        if case.find("failure") is not None or case.find("error") is not None:
+            outcome = "failed"
+        elif status == "disabled":
+            outcome = "disabled"
+        elif case.find("skipped") is not None or status == "notrun":
+            outcome = "skipped"
+        else:
+            outcome = "passed"
+        rows.append([population, case.get("name") or "", outcome])
+    return rows
+
+
+def junit_results(results: Path, package: str, package_id: str
+                  ) -> tuple[list[list[str]], list[Path]]:
+    """([population, test name, outcome] sorted, the JUnit files read) of one step's binary, from
+    malf's helper's result files `<results>/<package>/<package id>.*`, with the corpus-labelled
+    names the default run listed as `[corpus-listed, name, listed]` rows."""
     rows, files = [], []
     for population, pattern in VERDICT_POPULATIONS:
         path = results / package / pattern.format(pid=package_id)
         if not path.is_file():
             continue
         files.append(path)
-        for case in ElementTree.parse(path).getroot().iter("testcase"):
-            status = case.get("status")
-            if case.find("failure") is not None or case.find("error") is not None:
-                outcome = "failed"
-            elif status == "disabled":
-                outcome = "disabled"
-            elif case.find("skipped") is not None or status == "notrun":
-                outcome = "skipped"
-            else:
-                outcome = "passed"
-            rows.append([population, case.get("name") or "", outcome])
+        rows += junit_rows(path, population)
+    listed = results / package / f"{package_id}{LISTED_SUFFIX}"
+    if listed.is_file():
+        rows += [["corpus-listed", name, "listed"] for name in json.loads(listed.read_text())]
     return sorted(rows), files
 
 
@@ -555,12 +623,9 @@ def verdict_record(store: Path, build_key: str, package: str, package_id: str, p
     `<results>/steps/<package>.xml` and `.test_package.xml`, where a reader of the run finds the
     population the step's binary ran, whatever variants of it the walk's later creates built."""
     rows, files = junit_results(results, package, package_id)
-    steps = results / "steps"
-    steps.mkdir(parents=True, exist_ok=True)
-    for path in files:
-        alias = steps / (package + path.name.removeprefix(package_id))
-        alias.unlink(missing_ok=True)
-        os.link(path, alias)
+    _link_step_files(results, package, package_id,
+                     files + [path for suffix in (LISTED_SUFFIX, TARGETS_SUFFIX)
+                              if (path := results / package / f"{package_id}{suffix}").is_file()])
     if not files:
         print(f"artefact_store: NO VERDICT {package}: the step wrote no result file, it ran no test")
         return 0
@@ -578,6 +643,77 @@ def verdict_record(store: Path, build_key: str, package: str, package_id: str, p
     output = {"verdict": verdict, "results": rows, "findings": key_of(rows), "judged": judged,
               "tests": len(rows)}
     return LocalStore(store).commit(document, {"verdict": output}, {"verdict": ("log", lambda: log)})
+
+
+def _link_step_files(results: Path, package: str, package_id: str, files: list[Path]) -> None:
+    """Link each of the step's own files at `<results>/steps/<package><suffix>`."""
+    steps = results / "steps"
+    steps.mkdir(parents=True, exist_ok=True)
+    for path in files:
+        alias = steps / (package + path.name.removeprefix(package_id))
+        alias.unlink(missing_ok=True)
+        os.link(path, alias)
+
+
+def corpus_rows(results: Path, package: str, package_id: str, legs: list[dict]
+                ) -> tuple[list[list[str]], list[Path]]:
+    """The corpus verdict's rows, each leg's JUnit rows and its sidecar's `absent` and `unguarded`
+    rows, plus one `absent` row per named suite with no test row at all (a leg that never ran, or
+    ran without it); and the files read."""
+    rows, files = [], []
+    for leg in legs:
+        population = f"corpus-{leg['leg']}"
+        junit = results / package / f"{package_id}.{population}.xml"
+        sidecar = results / package / f"{package_id}.{population}.json"
+        leg_rows = []
+        if junit.is_file():
+            files.append(junit)
+            leg_rows += junit_rows(junit, population)
+        if sidecar.is_file():
+            files.append(sidecar)
+            leg_rows += json.loads(sidecar.read_text())["rows"]
+        for suite in leg["suites"]:
+            if not any(row[1].startswith(f"{suite}.") for row in leg_rows):
+                leg_rows.append([population, f"{suite}.*", "absent"])
+        rows += leg_rows
+    return sorted({tuple(row): row for row in rows}.values()), files
+
+
+def corpus_record(store: Path, build_key: str, package: str, package_id: str, profile: str,
+                  malf_dir: Path, results: Path, judged: dict[str, str], gates: Path) -> int:
+    """Store or compare one step's corpus verdict (DN-142.D21 (1), (3), (5)) when the corpus gates
+    parameter document names the package; exit 0 when it names none. The verdict's red is in the
+    record, never in the exit: a red corpus gate is judged by step 0's corpus stage, and failing
+    here would fail the package's step for a cause that is not the package."""
+    document_in = json.loads(gates.read_text())
+    legs = document_in.get("packages", {}).get(package)
+    if not legs:
+        return 0
+    rows, files = corpus_rows(results, package, package_id, legs)
+    _link_step_files(results, package, package_id, files)
+    selection = selection_member(malf_dir)
+    selection.update({"labels": ["-L", "corpus"],
+                      "legs": [{"leg": leg["leg"], "suites": sorted(leg["suites"])} for leg in legs]})
+    document = {"step": {"kind": "test-verdict", "package": package, "profile": profile},
+                "build": build_key, "selection": selection, "data": document_in["data"]}
+    verdict = "pass" if rows and all(row[2] == "passed" for row in rows) else "fail"
+    scratch = Path(tempfile.mkdtemp(prefix="artefact_store."))
+    log = scratch / "corpus.tar"
+    with tarfile.open(log, "w") as bundle:
+        for path in files:
+            info = bundle.gettarinfo(str(path), arcname=path.name)
+            info.mtime, info.uid, info.gid, info.uname, info.gname = 0, 0, 0, "", ""
+            with path.open("rb") as handle:
+                bundle.addfile(info, handle)
+    output = {"verdict": verdict, "results": rows, "findings": key_of(rows), "judged": judged,
+              "tests": len(rows)}
+    stored = LocalStore(store).commit(document, {"corpus": output}, {"corpus": ("log", lambda: log)})
+    if verdict != "pass":
+        bad = [row for row in rows if row[2] != "passed"]
+        print(f"artefact_store: CORPUS RED {package}: {len(bad)} row(s) not passed: "
+              + ", ".join(f"{row[0]} {row[1]} {row[2]}" for row in bad[:NAMED_FILES])
+              + (", ..." if len(bad) > NAMED_FILES else ""))
+    return stored
 
 
 def _transport_build_ids(transport: Path) -> dict[str, dict]:
@@ -844,16 +980,23 @@ def main(argv: list[str]) -> int:
         for path in missing:
             print(f"artefact_store: no GNU build-id: {path}", file=sys.stderr)
         return 1 if missing else 0
+    if len(argv) == 2 and argv[0] == "content-manifest":
+        print(content_manifest(Path(argv[1])))
+        return 0
+    if len(argv) == 3 and argv[0] == "content-manifest-rows":
+        print(manifest_rows_digest(Path(argv[1]), argv[2]))
+        return 0
     if len(argv) == 3 and argv[0] == "toolchain":
         Path(argv[2]).write_text(json.dumps(measure_toolchain(Path(argv[1])), sort_keys=True))
         return 0
     if len(argv) >= 6 and argv[0] == "verdict-step":
         return verdict_step(Path(argv[1]), argv[2], Path(argv[3]), Path(argv[4]),
                             [Path(repository) for repository in argv[5:]])
-    if len(argv) in (9, 10) and argv[0] == "conan-step":
+    if len(argv) in (9, 10, 11) and argv[0] == "conan-step":
         return conan_step(Path(argv[1]), Path(argv[2]), Path(argv[3]), argv[4], argv[5],
                           Path(argv[6]), Path(argv[7]), tuple(argv[8].split()),
-                          Path(argv[9]) if len(argv) == 10 else None)
+                          Path(argv[9]) if len(argv) >= 10 else None,
+                          Path(argv[10]) if len(argv) == 11 else None)
     if len(argv) == 11 and argv[0] == "build-step":
         return build_step(Path(argv[1]), Path(argv[2]), Path(argv[3]), argv[4], argv[5],
                           Path(argv[6]), Path(argv[7]), tuple(argv[8].split()), argv[9],

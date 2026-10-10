@@ -2845,6 +2845,92 @@ mv "$rt_home/malf_recipe_tests.py" "$tp_tmp/helper.bak"
 check "a home that lacks the helper FAILS the build, naming the file — it never skips the tests silently" \
       "rc=1 1" "$(rt_create) $(grep -c "No such file or directory: '$rt_home/malf_recipe_tests.py'" "$tp_tmp/rt.log")"
 mv "$tp_tmp/helper.bak" "$rt_home/malf_recipe_tests.py"
+
+# THE CORPUS LEGS (DN-142.D21 (1), (3)): with `user.malf:corpus_gates` naming a document that names
+# the package, the create runs each leg's suites under the leg's mounts, records what ctest cannot
+# say (a suite that selects nothing, a test ctest cannot see skip), and never fails on a red leg;
+# the corpus verdict artefact_store keeps from it is `pass` only when every row passed.
+rc_doc="$tp_tmp/corpus_gates.json"
+rc_corpus="$rt_home/malf-test-results/rt_probe/$rt_empty_id.corpus-sample"
+printf '#!/bin/sh\n[ "$RT_MOUNT" = /mnt/rt-mount ] || { echo "RT_MOUNT is <$RT_MOUNT>"; exit 1; }\n' > "$tp_tmp/rc_reads"
+printf '#!/bin/sh\necho "[  SKIPPED ] RtCorpus.Reads: no mount"\n' > "$tp_tmp/rc_skips"
+printf '#!/bin/sh\n[ -z "${RT_MOUNT+set}" ] || { echo "a default test sees RT_MOUNT=$RT_MOUNT"; exit 1; }\n' > "$tp_tmp/rc_unset"
+chmod +x "$tp_tmp/rc_reads" "$tp_tmp/rc_skips" "$tp_tmp/rc_unset"
+rc_tests() {   # <test lines...> — each `name:command[:guarded|plain]`, the third field a corpus label
+    local spec name command corpus
+    : > "$rt_pkg/CTestTestfile.cmake"
+    for spec in "$@"; do
+        IFS=: read -r name command corpus <<< "$spec"
+        printf 'add_test([=[%s]=] "%s")\n' "$name" "$command" >> "$rt_pkg/CTestTestfile.cmake"
+        case "$corpus" in
+            guarded) printf 'set_tests_properties([=[%s]=] PROPERTIES LABELS corpus SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])\n' "$name" >> "$rt_pkg/CTestTestfile.cmake" ;;
+            plain)   printf 'set_tests_properties([=[%s]=] PROPERTIES LABELS corpus)\n' "$name" >> "$rt_pkg/CTestTestfile.cmake" ;;
+        esac
+    done
+}
+rc_document() {   # <suite>... — one sample leg over the named suites, RT_MOUNT its one mount
+    python3 -c 'import json, sys
+print(json.dumps({"data": {"rt_role": "0" * 64}, "packages": {"rt_probe": [
+    {"leg": "sample", "suites": sys.argv[1:], "environment": {"RT_MOUNT": "/mnt/rt-mount"}}]}}))' "$@" > "$rc_doc"
+}
+rc_verdict() {   # -> `<verdict> <outcome>...` of the corpus record artefact_store keeps from the last create
+    rm -rf "$tp_tmp/cstore"
+    python3 -c 'import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import artefact_store as store
+store.corpus_record(Path(sys.argv[2]), "rt-build-key", "rt_probe", sys.argv[3], "fixture", Path(sys.argv[1]),
+                    Path(sys.argv[4]), {"rt_probe": "rt-content"}, Path(sys.argv[5]))
+record = json.loads(next((Path(sys.argv[2]) / "records").glob("*.json")).read_text())
+corpus = record["outputs"]["corpus"]
+print(corpus["verdict"], " ".join(f"{row[1]}={row[2]}" for row in corpus["results"]))' \
+        "$MALF_ROOT" "$tp_tmp/cstore" "$rt_empty_id" "$rt_home/malf-test-results" "$rc_doc" 2>&1 | grep -v '^artefact_store: '
+}
+rm -rf "$rt_home/malf-test-results/rt_probe"
+rc_tests "RtProbe.NoMount:$tp_tmp/rc_unset" "RtCorpus.Reads:$tp_tmp/rc_reads:guarded"
+rc_document RtCorpus
+check "without the corpus conf a create runs no corpus leg and lists its corpus names: no corpus file, RtCorpus.Reads listed" \
+      "rc=0 absent 1" "$(rt_create) $([[ -e "$rc_corpus.xml" ]] && echo present || echo absent) $(grep -c '"RtCorpus.Reads"' "$rt_home/malf-test-results/rt_probe/$rt_empty_id.corpus-listed.json" 2>/dev/null)"
+check "with the conf the leg runs its suite under the leg's mount, JUnit naming the test, and the default test never sees the mount" \
+      "rc=0 1 1 pass RtCorpus.Reads=passed" "$(rt_create -c "user.malf:corpus_gates=$rc_doc") $(grep -c 'name="RtCorpus.Reads"' "$rc_corpus.xml" 2>/dev/null) $(grep -c 'name="RtProbe.NoMount"' "$rt_junit" 2>/dev/null) $(rc_verdict)"
+check "the leg's mount rides its ctest command alone: env RT_MOUNT=... ctest ... -L corpus -R '^(RtCorpus)\\.'" \
+      "1" "$(grep -F "env RT_MOUNT=/mnt/rt-mount ctest --test-dir " "$tp_tmp/rt.log" | grep -cF -- "--output-on-failure -L corpus -R '^(RtCorpus)\\.' --output-junit $rc_corpus.xml < /dev/null")"
+rc_tests "RtProbe.NoMount:$tp_tmp/rc_unset" "RtCorpus.Reads:$tp_tmp/rc_skips:guarded"
+check "a corpus test that GTEST_SKIPs under the conf is a skipped row and the corpus verdict FAILS" \
+      "rc=0 fail RtCorpus.Reads=skipped" "$(rt_create -c "user.malf:corpus_gates=$rc_doc") $(rc_verdict)"
+rc_tests "RtProbe.NoMount:$tp_tmp/rc_unset" "RtCorpus.Reads:$tp_tmp/rc_reads:guarded"
+rc_document RtCorpus RtMissing
+check "a suite the document names and the tree does not register is an absent row and the corpus verdict FAILS" \
+      "rc=0 fail RtCorpus.Reads=passed RtMissing.*=absent" "$(rt_create -c "user.malf:corpus_gates=$rc_doc") $(rc_verdict)"
+rc_tests "RtProbe.NoMount:$tp_tmp/rc_unset" "RtCorpus.Reads:$tp_tmp/rc_reads:plain"
+rc_document RtCorpus
+check "a corpus test registered without SKIP_REGULAR_EXPRESSION is an unguarded row and the corpus verdict FAILS" \
+      "rc=0 fail RtCorpus.Reads=passed RtCorpus.Reads=unguarded" "$(rt_create -c "user.malf:corpus_gates=$rc_doc") $(rc_verdict)"
+rc_tests "RtProbe.NoMount:$tp_tmp/rc_unset" "RtCorpus.Reads:$rt_false:guarded"
+check "a FAILING corpus test leaves the create green, its package built, and the corpus verdict FAILS" \
+      "rc=0 1 fail RtCorpus.Reads=failed" "$(rt_create -c "user.malf:corpus_gates=$rc_doc") $(CONAN_HOME="$rt_home" conan list 'rt_probe/*:*' --format=json 2>/dev/null | grep -c "$rt_empty_id") $(rc_verdict)"
+rc_tests "RtProbe.NoMount:$tp_tmp/rc_unset" "RtCorpus.Reads:$tp_tmp/rc_reads:guarded"
+check "premise — the default test that asserts no mount REDS the create when a mount leaks into its environment" \
+      "rc=1" "$(RT_MOUNT=leaked rt_create)"
+mkdir -p "$tp_tmp/ninja"
+printf 'rule CXX_EXECUTABLE_LINKER__app_Release\n  command = true\nrule CXX_STATIC_LIBRARY_LINKER__lib_Release\n  command = true\nrule CXX_COMPILER__app_Release\n  command = true\nbuild bin/app bin/app[1]_tests.cmake: CXX_EXECUTABLE_LINKER__app_Release obj.o\nbuild %s/lib.a: CXX_STATIC_LIBRARY_LINKER__lib_Release obj.o\nbuild obj.o: CXX_COMPILER__app_Release src.cpp\n' "$tp_tmp/ninja" > "$tp_tmp/ninja/build.ninja"
+check "a tree's linked targets are its linker rules' outputs relative to it, never an object nor a gtest discovery byproduct (\`targets\`, the definition B3c compares)" \
+      "bin/app|lib.a" "$(python3 "$MALF_ROOT/malf_recipe_tests.py" targets "$tp_tmp/ninja" | paste -sd'|')"
+
+# THE CONTENT MANIFEST (DN-142.D21 (5)): one digest of a data root's bytes, whatever path reaches
+# them; a same-size rewrite that keeps the mtime moves it.
+mkdir -p "$tp_tmp/data/sub"; printf 'alpha\n' > "$tp_tmp/data/a.log"; printf 'beta\n' > "$tp_tmp/data/sub/b.log"
+ln -s "$tp_tmp/data" "$tp_tmp/data-link"
+cm_real="$(python3 "$MALF_ROOT/artefact_store.py" content-manifest "$tp_tmp/data")"
+check "the same tree through a symlinked root and a real one is ONE digest, 64 hex" \
+      "equal 64" "$([[ "$cm_real" == "$(python3 "$MALF_ROOT/artefact_store.py" content-manifest "$tp_tmp/data-link")" ]] && echo equal || echo differs) $(grep -cE '^[0-9a-f]{64}$' <<< "$cm_real" | sed 's/^1$/64/')"
+cm_mtime="$(stat -c %y "$tp_tmp/data/a.log")"; printf 'alphA\n' > "$tp_tmp/data/a.log"; touch -d "$cm_mtime" "$tp_tmp/data/a.log"
+check "a same-size rewrite that preserves the mtime MOVES the digest" \
+      "moved" "$([[ "$cm_real" != "$(python3 "$MALF_ROOT/artefact_store.py" content-manifest "$tp_tmp/data")" ]] && echo moved || echo unmoved)"
+( cd "$tp_tmp/data" && sha256sum a.log sub/b.log | sed 's|  |  v1/|' ) > "$tp_tmp/data.sha256"
+cm_rows="$(python3 "$MALF_ROOT/artefact_store.py" content-manifest-rows "$tp_tmp/data.sha256" v1/)"
+check "a committed sha256sum manifest's rows give the digest of the root it verifies, reading nothing under it" \
+      "equal 64" "$([[ "$(python3 "$MALF_ROOT/artefact_store.py" content-manifest "$tp_tmp/data")" == "$cm_rows" ]] && echo equal || echo differs) $(grep -cE '^[0-9a-f]{64}$' <<< "$cm_rows" | sed 's/^1$/64/')"
 rm -rf "$tp_tmp"
 echo
 
@@ -2934,8 +3020,8 @@ cs_results() {   # -> which result files the create left, by name
 }
 cs_ctest "$cs_pkg/CTestTestfile.cmake" "CsProbe.Passes:$cs_true"
 cs_ctest "$cs_pkg/test_package/CTestTestfile.cmake" "CsProbeTp.Passes:$cs_true" "CsProbeTp.AlsoPasses:$cs_true"
-check "the writer's create (no conf) runs the tests and the test_package, and leaves two result files, the second naming the test_package's tests" \
-      "rc=0 cs_probe.test_package.xml,cs_probe.xml 2" \
+check "the writer's create (no conf) runs the tests and the test_package, and leaves two result files, the second naming the test_package's tests, beside the corpus names it listed" \
+      "rc=0 cs_probe.corpus-listed.json,cs_probe.test_package.xml,cs_probe.xml 2" \
       "$(cs_create) $(cs_results) $(grep -cE 'name="CsProbeTp\.(Passes|AlsoPasses)"' "$cs_home/malf-test-results/cs_probe/$cs_empty_id.test_package.xml" 2>/dev/null)"
 mapfile -t cs_consumer < <(python3 "$MALF_ROOT/malf_recipe_tests.py" create-args consumer)
 cs_ctest "$cs_pkg/CTestTestfile.cmake" "CsProbe.Fails:$cs_false"
@@ -2945,7 +3031,7 @@ check "the consumer's create passes a red recipe and a red test_package: no test
       "$(cs_create "${cs_consumer[@]}") $(grep -c 'tools.build:skip_test is set, so no test runs in this build' "$cs_tmp/cs.log") $(grep -c 'cs_probe/0.0.1 (test package)' "$cs_tmp/cs.log") $(cs_results)"
 cs_ctest "$cs_pkg/CTestTestfile.cmake" "CsProbe.Passes:$cs_true"
 check "a red test_package test FAILS the writer's create, after the package's own result was written" \
-      "rc=1 1 cs_probe.test_package.xml,cs_probe.xml" \
+      "rc=1 1 cs_probe.corpus-listed.json,cs_probe.test_package.xml,cs_probe.xml" \
       "$(cs_create) $(grep -cE '[0-9]+ - CsProbeTp.Fails \(Failed\)' "$cs_tmp/cs.log") $(cs_results)"
 check "under tools.build:skip_test alone the test_package is built and its red test does not run, saying so, and nothing is written" \
       "rc=0 1 none" \

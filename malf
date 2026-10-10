@@ -5135,6 +5135,12 @@ _malf_writer_create_args() {
 # A new key is STORED; a stored key is REBUILT and COMPARED, and a differing output at an equal key
 # fails, naming both digests and the differing files or tests.
 #
+# THE CORPUS GATES (DN-142.D21): MALF_CORPUS_GATES, when set, names the parameter document step 0's
+# Pharos writes. Every create then carries `-c user.malf:corpus_gates=<document>`, so the package the
+# document names runs its corpus legs inside its create (malf_recipe_tests.py), and its corpus
+# verdict is recorded beside its test verdict. A `user.*` conf is never a package-id input, and the
+# document's mount paths reach no key: its `data` digests do.
+#
 # Named packages select their closure in the walk (their first-party requirements, test ones
 # included); none named means every step. A step whose first-party requirement failed is SKIPPED,
 # never failed for a missing upstream, and the walk goes on.
@@ -5196,6 +5202,14 @@ cmd_store_create() {
     echo "=== malf store-create: $(wc -l <<< "$wanted") step(s), home $CONAN_HOME, store $store ==="
     python3 "$MALF_DIR/artefact_store.py" toolchain "$(dirname "$(dirname "$compiler")")" "$scratch/toolchain.json" || return 2
     _malf_writer_create_args || return 2
+    local -a corpus_args=()
+    if [[ -n "${MALF_CORPUS_GATES:-}" ]]; then
+        [[ -f "$MALF_CORPUS_GATES" ]] \
+            || { echo "malf store-create: MALF_CORPUS_GATES='$MALF_CORPUS_GATES' names no file" >&2; return 2; }
+        _MALF_WRITER_ARGS+=(-c "user.malf:corpus_gates=$MALF_CORPUS_GATES")
+        corpus_args=("$MALF_CORPUS_GATES")
+        echo "=== malf store-create: the corpus gates of $MALF_CORPUS_GATES run in the creates it names ==="
+    fi
 
     local name path deps kind dep blocked rc=0 total=0 run_at step_at step_cpu
     local -a failed=() skipped=()
@@ -5231,7 +5245,7 @@ cmd_store_create() {
         fi
         if python3 "$MALF_DIR/artefact_store.py" conan-step "$store" "$CONAN_HOME" "$scratch/$name.graph.json" \
             "$name" "$MALF_PROFILE_NAME" "$MALF_DIR" "$scratch/toolchain.json" "$prefixes" \
-            "$CONAN_HOME/malf-test-results"; then
+            "$CONAN_HOME/malf-test-results" "${corpus_args[@]}"; then
             _malf_store_closed "$total" "$name" PASS "$run_at" "$step_at" "$step_cpu" "$scratch/times"
         else
             echo "malf store-create: recording $name failed, or differs at an equal key (above)" >&2; rc=1
