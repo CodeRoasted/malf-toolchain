@@ -41,6 +41,12 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
     artefact_store.py content-manifest-rows <sha256sum file> <prefix>
         the same digest computed from a committed `sha256sum` manifest whose paths carry <prefix>,
         for a root that manifest was just verified equal to; nothing under the root is read
+    artefact_store.py executables <package dir> <package>
+        the `executables:` map the package declares in its repository's packages.yml at HEAD
+        (DN-142.D22), as canonical JSON; `{}` when it declares none
+    artefact_store.py published-check <folder>
+        each linked ELF file under <folder> whose bytes are not in the published form, one
+        `<path>: symbol table|runpath` line; exit 1 when there is one
     artefact_store.py toolchain <compiler root> <out.json>
         the measured toolchain member, written once per run (hashing the compiler tree is the
         expensive part of a key)
@@ -76,6 +82,14 @@ its path); its rows are `[corpus-<leg>, test name, outcome]`, the outcome one of
 `failed`, `skipped`, `disabled`, `absent` (a named suite that selected no test, or ran none) and
 `unguarded` (a test ctest could not see skip). Its verdict is `pass` only when every row is
 `passed`: a skipped corpus gate is the green-blind state the corpus run exists to refuse.
+
+A step's EXECUTABLES (DN-142.D22) are classified by its package's `executables:` map in the
+recorded `packages.yml` (`published` or `run-from-cache`), which `malf store-create` hands over in a
+JSON file named by MALF_STEP_EXECUTABLES and which enters the create's key as `step.executables`
+(`{}` when none, the meaning of an unset variable too). The store REFUSES, before the record, an
+executable entry the map does not name, a map key naming no executable entry, and a `published`
+ELF carrying a symbol table (`.symtab` or `.debug_*`), a runpath (DT_RPATH or DT_RUNPATH) or no
+build-id; a `run-from-cache` entry keeps its runpath.
 
 MALF_STORE_DEFINITION, when set, is `<name>=<directory> ...`: each named directory's tracked tree
 joins the key's `definition` beside malf's, for a step another tool drives (Pharos at step 0).
@@ -366,6 +380,103 @@ def elf_build_id(data: bytes) -> str | None:
     raise NoBuildId("no NT_GNU_BUILD_ID note in any PT_NOTE segment")
 
 
+# DN-142.D22: which of a package's executables are PUBLISHED, and the published form's predicates,
+# read from the bytes beside elf_build_id (section headers for the names, PT_DYNAMIC for the tags).
+EXECUTABLE_CLASSES = ("published", "run-from-cache")
+EXECUTABLES_ENV = "MALF_STEP_EXECUTABLES"
+SHT_SYMTAB = 2
+PT_DYNAMIC = 2
+DT_NULL, DT_RPATH, DT_RUNPATH = 0, 15, 29
+
+
+def elf_published_defects(data: bytes) -> list[str]:
+    """What keeps a LINKED ELF file's bytes from the published form: `symbol table` (a `.symtab`
+    section or any `.debug_*` one; `.dynsym` is the loader's and stays) and `runpath` (DT_RPATH or
+    DT_RUNPATH in the PT_DYNAMIC segment). Empty for a file that is not a linked ELF file."""
+    if not data.startswith(ELF_MAGIC) or len(data) < 64:
+        return []
+    wide, order = data[4] == 2, "<" if data[5] == 1 else ">"
+    if struct.unpack_from(order + "H", data, 16)[0] not in ELF_LINKED_TYPES:
+        return []
+    word = "Q" if wide else "I"
+    defects = []
+    if wide:
+        phoff, shoff = struct.unpack_from(order + "QQ", data, 32)
+        phentsize, phnum, shentsize, shnum, shstrndx = struct.unpack_from(order + "HHHHH", data, 54)
+    else:
+        phoff, shoff = struct.unpack_from(order + "II", data, 28)
+        phentsize, phnum, shentsize, shnum, shstrndx = struct.unpack_from(order + "HHHHH", data, 42)
+    sections = []
+    for index in range(shnum if shoff else 0):
+        base = shoff + index * shentsize
+        name, kind = struct.unpack_from(order + "II", data, base)
+        offset = struct.unpack_from(order + word, data, base + (24 if wide else 16))[0]
+        sections.append((name, kind, offset))
+    names_at = sections[shstrndx][2] if 0 < shstrndx < len(sections) else None
+
+    def section_name(offset: int) -> str:
+        if names_at is None:
+            return ""
+        end = data.index(b"\0", names_at + offset)
+        return data[names_at + offset:end].decode("ascii", "replace")
+    if any(kind == SHT_SYMTAB or section_name(name) == ".symtab"
+           or section_name(name).startswith(".debug") for name, kind, _offset in sections):
+        defects.append("symbol table")
+    entry = 16 if wide else 8
+    for index in range(phnum):
+        base = phoff + index * phentsize
+        if struct.unpack_from(order + "I", data, base)[0] != PT_DYNAMIC:
+            continue
+        offset = struct.unpack_from(order + word, data, base + (8 if wide else 4))[0]
+        size = struct.unpack_from(order + word, data, base + (32 if wide else 16))[0]
+        for cursor in range(offset, offset + size - entry + 1, entry):
+            tag = struct.unpack_from(order + word, data, cursor)[0]
+            if tag == DT_NULL:
+                break
+            if tag in (DT_RPATH, DT_RUNPATH):
+                defects.append("runpath")
+                break
+    return defects
+
+
+def executable_findings(entries: list[list[str]], files: dict[str, bytes],
+                        declared: dict[str, str]) -> list[str]:
+    """DN-142.D22 (1), (2): `<path>: <reason>` for every executable entry the declaration does not
+    classify (`unclassified`), every declared path naming no executable entry (`stale`), and every
+    defect of a `published` ELF entry (`symbol table`, `runpath`, `no build-id`); sorted."""
+    executables = {path for path, mode, _digest in entries if mode == "executable"}
+    findings = [f"{path}: unclassified" for path in sorted(executables - declared.keys())]
+    findings += [f"{path}: stale" for path in sorted(declared.keys() - executables)]
+    for path in sorted(executables & declared.keys()):
+        if declared[path] != "published":
+            continue
+        findings += [f"{path}: {defect}" for defect in elf_published_defects(files[path])]
+        try:
+            elf_build_id(files[path])
+        except NoBuildId:
+            findings.append(f"{path}: no build-id")
+    return findings
+
+
+def declared_executables(package_dir: Path, package: str) -> dict[str, str]:
+    """The `executables:` map `package` declares in the `packages.yml` of the repository holding
+    `package_dir`, read from its RECORDED commit's blob (HEAD), never the disk; `{}` when it declares
+    none. Raises ValueError on a class outside EXECUTABLE_CLASSES or an undeclared package."""
+    import yaml
+
+    top = Path(_run(["git", "-C", str(package_dir), "rev-parse", "--show-toplevel"]).strip())
+    document = yaml.safe_load(_run(["git", "-C", str(top), "show", "HEAD:packages.yml"])) or {}
+    entry = (document.get("packages") or {}).get(package)
+    if entry is None:
+        raise ValueError(f"{top}/packages.yml at HEAD declares no package {package}")
+    declared = entry.get("executables") or {}
+    wrong = {path: kind for path, kind in declared.items() if kind not in EXECUTABLE_CLASSES}
+    if wrong:
+        raise ValueError(f"{package}: executables classed outside {', '.join(EXECUTABLE_CLASSES)}: "
+                         + ", ".join(f"{path}: {kind}" for path, kind in sorted(wrong.items())))
+    return dict(sorted(declared.items()))
+
+
 def build_ids_of(files: dict[str, bytes]) -> tuple[dict[str, str], list[str]]:
     """(`{path: build-id}` over the linked ELF files among `files`, the paths of those lacking one)."""
     ids, missing = {}, []
@@ -516,15 +627,25 @@ def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile:
     sources, upstream, third_party, target = _step_inputs(home, graph_json, package, prefixes, True)
     document = _step_document("conan-create", package, profile, home, malf_dir, toolchain,
                               sources, upstream, third_party)
+    declared_path = os.environ.get(EXECUTABLES_ENV)
+    declared = json.loads(Path(declared_path).read_text()) if declared_path else {}
+    document["step"]["executables"] = declared
     if _refuse_unrecorded(store, document):
         return 1
     binary, folder = target
     content, entries = tree_digest(folder)
-    _ids, missing = build_ids_of(tree_files(folder))
+    files = tree_files(folder)
+    _ids, missing = build_ids_of(files)
     if missing:
         print(f"artefact_store: REFUSED {package}: {len(missing)} linked ELF file(s) carry no GNU "
               f"build-id, so the store's index would not be total over what ships (DN-142.D15): "
               + ", ".join(missing), file=sys.stderr)
+        return 1
+    findings = executable_findings(entries, files, declared)
+    if findings:
+        print(f"artefact_store: REFUSED {package}: {len(findings)} executable finding(s) against "
+              f"its packages.yml `executables:` declaration (DN-142.D22): " + "; ".join(findings),
+              file=sys.stderr)
         return 1
     stored = LocalStore(store).commit(document, {"package": {"alias": binary, "content": content,
                                                              "entries": entries}},
@@ -983,6 +1104,16 @@ def main(argv: list[str]) -> int:
         for path in missing:
             print(f"artefact_store: no GNU build-id: {path}", file=sys.stderr)
         return 1 if missing else 0
+    if len(argv) == 3 and argv[0] == "executables":
+        print(json.dumps(declared_executables(Path(argv[1]), argv[2]), sort_keys=True))
+        return 0
+    if len(argv) == 2 and argv[0] == "published-check":
+        files = tree_files(Path(argv[1]))
+        found = [f"{path}: {defect}" for path in sorted(files)
+                 for defect in elf_published_defects(files[path])]
+        for line in found:
+            print(line)
+        return 1 if found else 0
     if len(argv) == 2 and argv[0] == "content-manifest":
         print(content_manifest(Path(argv[1])))
         return 0

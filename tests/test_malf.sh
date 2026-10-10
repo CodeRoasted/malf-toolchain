@@ -3249,6 +3249,10 @@ class BiTool(ConanFile):
 PYR
 printf 'not an ELF file\n' > "$bi_pkg/notes.txt"
 printf '{}' > "$bi_tmp/toolchain.json"
+# The fixture's one executable is a cached tool (DN-142.D22): the store refuses an executable no
+# declaration classifies, so every step below runs with this declaration unless an arm says otherwise.
+printf '{"bin/tool": "run-from-cache"}' > "$bi_tmp/executables.json"
+export MALF_STEP_EXECUTABLES="$bi_tmp/executables.json"
 bi_step() {   # <tool file> <store> [profile] -> rc=<status>; the step's output in $bi_tmp/step.log
     cp "$1" "$bi_pkg/tool"
     CONAN_HOME="$bi_home" conan create "$bi_pkg" -pr:a fixture --build="bi_tool/*" --format=json > "$bi_tmp/graph.json" 2> "$bi_tmp/create.log" || { echo "rc=create-failed"; return; }
@@ -3280,6 +3284,38 @@ store.commit({'step': {'package': 'bi_probe'}, 'n': 1},
              {'package': ('transport', lambda: probe)}, derived={'package': lambda obj: {'build_ids': {'from': obj.name}}})
 body = json.load(open(next(Path('$bi_tmp/store2/records').glob('*.json'))))
 print('derived' if body['outputs']['package']['build_ids'] == {'from': body['outputs']['package']['transport']} else body)" 2>&1 | tail -1)"
+# THE PUBLISHED FORM (DN-142.D22): the package's `executables:` declaration classifies every
+# executable entry, and a `published` ELF carries no symbol table, no runpath and a build-id —
+# judged from the bytes before the record, a refusal storing nothing. Desk-compiled fixtures.
+printf 'int main(void) { return 0; }\n' > "$bi_tmp/pub.c"
+cc -O1 -Wl,--build-id=sha1 -o "$bi_tmp/pub-symtab" "$bi_tmp/pub.c"
+cc -O1 -s -Wl,--build-id=sha1 -o "$bi_tmp/pub-clean" "$bi_tmp/pub.c"
+cc -O1 -s -Wl,--build-id=sha1 -Wl,--enable-new-dtags -Wl,-rpath,/opt/fixture/lib64 -o "$bi_tmp/pub-runpath" "$bi_tmp/pub.c"
+cc -O1 -s -Wl,--build-id=sha1 -Wl,--disable-new-dtags -Wl,-rpath,/opt/fixture/lib64 -o "$bi_tmp/pub-rpath" "$bi_tmp/pub.c"
+check "premise — the fixtures are what their names say: a .symtab, none, a RUNPATH, an RPATH" \
+      "1 0 1 1" "$(readelf -S -W "$bi_tmp/pub-symtab" | grep -c ' \.symtab') $(readelf -S -W "$bi_tmp/pub-clean" | grep -c ' \.symtab') $(readelf -d "$bi_tmp/pub-runpath" | grep -c '(RUNPATH)') $(readelf -d "$bi_tmp/pub-rpath" | grep -c '(RPATH)')"
+bi_declared() {   # <tool file> <declaration json> -> rc=<status> <records stored>, the REFUSED line in $bi_tmp/step.log
+    rm -rf "$bi_tmp/pstore"; printf '%s' "$2" > "$bi_tmp/declared.json"
+    MALF_STEP_EXECUTABLES="$bi_tmp/declared.json" bi_step "$1" "$bi_tmp/pstore" | tr -d '\n'
+    printf ' %s' "$(ls "$bi_tmp/pstore/records" 2>/dev/null | wc -l | tr -d ' ')"
+}
+check "an executable the declaration does not classify is REFUSED as unclassified, nothing stored" \
+      "rc=1 0 1" "$(bi_declared "$bi_tmp/pub-clean" '{}') $(grep -c 'REFUSED bi_tool: 1 executable finding(s).*bin/tool: unclassified' "$bi_tmp/step.log")"
+check "a declared path naming no executable entry is REFUSED as stale, nothing stored" \
+      "rc=1 0 1" "$(bi_declared "$bi_tmp/pub-clean" '{"bin/tool": "published", "bin/gone": "published"}') $(grep -c 'bin/gone: stale' "$bi_tmp/step.log")"
+check "a published ELF with a .symtab is REFUSED as symbol table, nothing stored" \
+      "rc=1 0 1" "$(bi_declared "$bi_tmp/pub-symtab" '{"bin/tool": "published"}') $(grep -c 'bin/tool: symbol table' "$bi_tmp/step.log")"
+check "a published ELF with a RUNPATH is REFUSED as runpath, nothing stored" \
+      "rc=1 0 1" "$(bi_declared "$bi_tmp/pub-runpath" '{"bin/tool": "published"}') $(grep -c 'bin/tool: runpath' "$bi_tmp/step.log")"
+check "a published ELF with a DT_RPATH (--disable-new-dtags) is REFUSED as runpath, nothing stored" \
+      "rc=1 0 1" "$(bi_declared "$bi_tmp/pub-rpath" '{"bin/tool": "published"}') $(grep -c 'bin/tool: runpath' "$bi_tmp/step.log")"
+check "a run-from-cache ELF keeps its RUNPATH and is STORED" \
+      "rc=0 1" "$(bi_declared "$bi_tmp/pub-runpath" '{"bin/tool": "run-from-cache"}')"
+check "a published ELF stripped, without a runpath, with a build-id is STORED, and the create's key carries the declaration as step.executables" \
+      "rc=0 1 {\"bin/tool\": \"published\"}" "$(bi_declared "$bi_tmp/pub-clean" '{"bin/tool": "published"}') $(python3 -c "import json, glob; print(json.dumps(json.load(open(glob.glob('$bi_tmp/pstore/records/*.json')[0]))['inputs']['step']['executables']))")"
+check "the declaration is read from packages.yml at HEAD, never the disk: a working-tree edit is not seen" \
+      "{\"bin/tool\": \"run-from-cache\"}" "$(rm -rf "$bi_tmp/decl"; mkdir -p "$bi_tmp/decl/pkg"; cd "$bi_tmp/decl" && git init -q && printf 'packages:\n  bi_tool:\n    path: pkg\n    executables: {bin/tool: run-from-cache}\n' > packages.yml && git add packages.yml && git -c user.email=t@t -c user.name=t commit -qm one && sed -i 's/run-from-cache/published/' packages.yml && python3 "$MALF_ROOT/artefact_store.py" executables "$bi_tmp/decl/pkg" bi_tool)"
+
 # The step's TEST VERDICT record (DN-142.D5 (3)): keyed by the build step's key and the selection,
 # holding both populations' result set, the digests judged and the logs as an object; an equal key
 # rebuilt compares the result set, and a step that wrote no result file has no verdict.
@@ -3341,12 +3377,13 @@ class BiData(ConanFile):
 PYR
 check "a content recipe created in the build context alone is recorded, its node found in that context" \
       "rc=0 1" \
-      "$(CONAN_HOME="$bi_home" conan create "$bi_data" -pr:a fixture --build="bi_data/*" --format=json > "$bi_tmp/data.json" 2>/dev/null; CONAN_HOME="$bi_home" python3 "$MALF_ROOT/artefact_store.py" conan-step "$bi_tmp/dstore" "$bi_home" "$bi_tmp/data.json" bi_data fixture "$MALF_ROOT" "$bi_tmp/toolchain.json" "bi_" > "$bi_tmp/d.log" 2>&1; echo "rc=$?") $(grep -c 'STORED bi_data package' "$bi_tmp/d.log")"
+      "$(CONAN_HOME="$bi_home" conan create "$bi_data" -pr:a fixture --build="bi_data/*" --format=json > "$bi_tmp/data.json" 2>/dev/null; MALF_STEP_EXECUTABLES= CONAN_HOME="$bi_home" python3 "$MALF_ROOT/artefact_store.py" conan-step "$bi_tmp/dstore" "$bi_home" "$bi_tmp/data.json" bi_data fixture "$MALF_ROOT" "$bi_tmp/toolchain.json" "bi_" > "$bi_tmp/d.log" 2>&1; echo "rc=$?") $(grep -c 'STORED bi_data package' "$bi_tmp/d.log")"
 cp "$bi_home/profiles/fixture" "$bi_home/profiles/fixture-b"
 check "two records holding the same bytes under two keys both answer the build-id lookup, and an unknown id answers nothing (exit 1)" \
       "rc=0 2 rc=1" \
       "$(bi_step "$bi_true" "$bi_tmp/store" fixture-b | tr -d '\n') $(python3 "$MALF_ROOT/artefact_store.py" build-id "$bi_tmp/store" "$bi_expected" | grep -c ' bi_tool/0.0.1.* bin/tool$') $(python3 "$MALF_ROOT/artefact_store.py" build-id "$bi_tmp/store" "$(printf '0%.0s' {1..40})" > /dev/null; echo "rc=$?")"
 rm -rf "$bi_tmp"
+unset MALF_STEP_EXECUTABLES
 echo
 
 echo "[7q3] a build SWEEP settles every member in target role and recomposes the repo database"
@@ -5182,8 +5219,8 @@ ok = found and found.group(1, 2, 3) == ("3", "st_pkg", "PASS") and float(found.g
     and float(found.group(4)) >= float(found.group(5)) + 0.3 and float(found.group(6)) >= 0.3
 print("ok" if ok else repr(line))' "$st_out")"
 st_body="$(sed -n '/^cmd_store_create()/,/^}/p' "$MALF_BIN")"
-check "the walk opens every step it runs and closes it on each of its five exits: a build passed or failed, a create failed, a record stored or not" \
-      "1 1 5" "$(grep -c '_malf_store_clock "$scratch/times"; run_at=' <<< "$st_body") $(grep -c '_malf_store_opened "$total"' <<< "$st_body") $(grep -c '_malf_store_closed "$total"' <<< "$st_body")"
+check "the walk opens every step it runs and closes it on each of its six exits: a build passed or failed, a create failed, a declaration unread, a record stored or not" \
+      "1 1 6" "$(grep -c '_malf_store_clock "$scratch/times"; run_at=' <<< "$st_body") $(grep -c '_malf_store_opened "$total"' <<< "$st_body") $(grep -c '_malf_store_closed "$total"' <<< "$st_body")"
 rm -rf "$st_tmp"
 echo
 

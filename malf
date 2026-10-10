@@ -5135,6 +5135,11 @@ _malf_writer_create_args() {
 # A new key is STORED; a stored key is REBUILT and COMPARED, and a differing output at an equal key
 # fails, naming both digests and the differing files or tests.
 #
+# THE EXECUTABLES (DN-142.D22): each step's `executables:` map is read from its repository's
+# packages.yml at HEAD (the recorded commit, never the disk) and handed to the record through
+# MALF_STEP_EXECUTABLES; the store refuses an unclassified or stale executable and a published one
+# that is not stripped, carries a runpath or has no build-id.
+#
 # THE CORPUS GATES (DN-142.D21): MALF_CORPUS_GATES, when set, names the parameter document step 0's
 # Pharos writes. Every create then carries `-c user.malf:corpus_gates=<document>`, so the package the
 # document names runs its corpus legs inside its create (malf_recipe_tests.py), and its corpus
@@ -5243,7 +5248,13 @@ cmd_store_create() {
             _malf_store_closed "$total" "$name" FAILED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
             continue
         fi
-        if python3 "$MALF_DIR/artefact_store.py" conan-step "$store" "$CONAN_HOME" "$scratch/$name.graph.json" \
+        if ! python3 "$MALF_DIR/artefact_store.py" executables "$path" "$name" > "$scratch/$name.executables.json"; then
+            echo "malf store-create: the \`executables:\` declaration of $name could not be read from its packages.yml at HEAD (DN-142.D22)" >&2; rc=1
+            _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+            continue
+        fi
+        if MALF_STEP_EXECUTABLES="$scratch/$name.executables.json" \
+            python3 "$MALF_DIR/artefact_store.py" conan-step "$store" "$CONAN_HOME" "$scratch/$name.graph.json" \
             "$name" "$MALF_PROFILE_NAME" "$MALF_DIR" "$scratch/toolchain.json" "$prefixes" \
             "$CONAN_HOME/malf-test-results" "${corpus_args[@]}"; then
             _malf_store_closed "$total" "$name" PASS "$run_at" "$step_at" "$step_cpu" "$scratch/times"
