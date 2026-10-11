@@ -693,10 +693,9 @@ def build_step(store: Path, home: Path, graph_json: Path, package: str, profile:
 VERDICT_POPULATIONS = (("build", "{pid}.xml"), ("test_package", "{pid}.test_package.xml"))
 
 
-# What the helper's default run records beside its JUnit files, never compared by population:
-# the corpus-labelled names it listed and did not run, and the tree's linked targets.
+# What the helper's default run records beside its JUnit files, never a population of its own:
+# the corpus-labelled names it listed and did not run.
 LISTED_SUFFIX = ".corpus-listed.json"
-TARGETS_SUFFIX = ".targets.txt"
 
 
 def junit_rows(path: Path, population: str) -> list[list[str]]:
@@ -755,8 +754,8 @@ def verdict_record(store: Path, build_key: str, package: str, package_id: str, p
     population the step's binary ran, whatever variants of it the walk's later creates built."""
     rows, files = junit_results(results, package, package_id)
     _link_step_files(results, package, package_id,
-                     files + [path for suffix in (LISTED_SUFFIX, TARGETS_SUFFIX)
-                              if (path := results / package / f"{package_id}{suffix}").is_file()])
+                     files + [path for path in (results / package / f"{package_id}{LISTED_SUFFIX}",)
+                              if path.is_file()])
     if not files:
         print(f"artefact_store: NO VERDICT {package}: the step wrote no result file, it ran no test")
         return 0
