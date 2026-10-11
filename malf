@@ -1633,7 +1633,18 @@ _malf_test_run() {                  # <build_dir> <verbose> <regex> <corpus_only
     fi
     mapfile -d '' -t ctest_args < "$selected"
     rm -f "$selected"
-    ctest "${ctest_args[@]}" < /dev/null
+    # A SKIP IS A RED UNLESS THE PACKAGE DECLARES IT (DN-142.D23): the run's JUnit is judged by the
+    # helper against the tree's own tests/declared_skips.json at the profile this run resolved. A
+    # ctest red exits through ctest's status first. A --filter or --corpus run judges no stale
+    # declaration, since it selected only part of the tree.
+    local junit="$build_dir/malf-test.junit.xml" status=0 source filtered=false
+    [[ -n "$3" || "$4" == true ]] && filtered=true
+    rm -f "$junit"
+    ctest "${ctest_args[@]}" --output-junit "$junit" < /dev/null || status=$?
+    [[ $status -eq 0 ]] || return "$status"
+    # note: a tree with no CMakeCache.txt names no source, so it declares nothing, every skip red.
+    source="$(python3 "$MALF_DIR/malf_recipe_tests.py" tree-source "$build_dir")" || source=""
+    python3 "$MALF_DIR/malf_recipe_tests.py" judge-skips "$junit" "$source" "$MALF_PROFILE_NAME" "$filtered"
 }
 
 # post: the tree's configure role on stderr, so an empty selection's red names its cause.
@@ -5121,6 +5132,10 @@ _malf_writer_create_args() {
     listed="$(python3 "$MALF_DIR/malf_recipe_tests.py" create-args writer)" \
         || { echo "malf: the writer's conf set could not be read from malf_recipe_tests.py" >&2; return 1; }
     [[ -z "$listed" ]] || mapfile -t _MALF_WRITER_ARGS <<< "$listed"
+    # DN-142.D23: the profile a writer create's skips are judged at, the same name as its -pr.
+    [[ -n "${MALF_PROFILE_NAME:-}" ]] \
+        || { echo "malf: no profile is resolved, so a writer create's skips could not be judged" >&2; return 1; }
+    _MALF_WRITER_ARGS+=(-c "user.malf:profile=$MALF_PROFILE_NAME")
 }
 
 # THE STORE'S ROOT (DN-142.D6, the Founder's ruling R-2): MALF_STORE_DIR, else $HOME/coderoast-store,
@@ -5427,7 +5442,8 @@ _malf_store_build_one() {   # <name> <path> <rev> <store> <scratch> <prefixes>
         echo "malf store-build: $name left $left revision(s) in $CONAN_HOME — a stored: false step stores no package (DN-142.D14)" >&2
         return 1
     fi
-    python3 "$MALF_DIR/artefact_store.py" build-step "$store" "$CONAN_HOME" "$scratch/$name.graph.json" \
+    MALF_STEP_SOURCE="$scratch/$name/$prefix" \
+        python3 "$MALF_DIR/artefact_store.py" build-step "$store" "$CONAN_HOME" "$scratch/$name.graph.json" \
         "$name" "$MALF_PROFILE_NAME" "$MALF_DIR" "$scratch/toolchain.json" "$prefixes" "$tree" \
         "$CONAN_HOME/malf-test-results" || return 1
     echo "malf store-build: $name built and tested from its tracked tree $tree; no package of it in the cache"

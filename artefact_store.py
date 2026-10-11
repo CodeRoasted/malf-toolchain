@@ -81,6 +81,12 @@ the package's, or for a `stored: false` step the upstream packages it linked) an
 object, never compared. A rebuild at an equal key compares the verdict, the result set and `judged`,
 never a timing.
 
+A step's test verdict is `fail` on a failed row OR on an undeclared skip or a declaration defect
+(DN-142.D23): every skipped or disabled row of the build or test_package population must be named,
+with its outcome and the step's profile, by a row of the package's `tests/declared_skips.json`,
+read from the create's keyed export_source folder (a `conan build` step's from the materialized
+source MALF_STEP_SOURCE names). The covered rows are kept as `excused` and printed as EXCUSED.
+
 A step's CORPUS VERDICT (DN-142.D21) is a third record, output name `corpus`, written when the
 corpus gates parameter document names the package: its key is the build step's plus the selection
 `-L corpus` with the legs and their suites, plus `data`, each mount role's content digest (never
@@ -390,6 +396,9 @@ def elf_build_id(data: bytes) -> str | None:
 # read from the bytes beside elf_build_id (section headers for the names, PT_DYNAMIC for the tags).
 EXECUTABLE_CLASSES = ("published", "run-from-cache")
 EXECUTABLES_ENV = "MALF_STEP_EXECUTABLES"
+# DN-142.D23: a `conan build` step's materialized source root, where its declared skips are read
+# (a create's are read from its keyed export_source folder instead).
+STEP_SOURCE_ENV = "MALF_STEP_SOURCE"
 SHT_SYMTAB = 2
 PT_DYNAMIC = 2
 DT_NULL, DT_RPATH, DT_RUNPATH = 0, 15, 29
@@ -661,8 +670,10 @@ def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile:
     if results is None:
         return stored
     package_id = binary.split(":", 1)[1].split("#", 1)[0]
+    recipe = binary.split(":", 1)[0]
+    declared = _helper().read_declarations(_cache_path(home, recipe, "export_source"))
     judged = max(stored, verdict_record(store, key_of(document), package, package_id, profile,
-                                        malf_dir, results, {package: content}))
+                                        malf_dir, results, {package: content}, declared))
     if corpus_gates is None:
         return judged
     return max(judged, corpus_record(store, key_of(document), package, package_id, profile,
@@ -685,9 +696,14 @@ def build_step(store: Path, home: Path, graph_json: Path, package: str, profile:
     if len(package_ids) > 1:
         sys.exit(f"artefact_store: {results / package} holds results of {len(package_ids)} package "
                  f"ids, and a `conan build` step builds one: {', '.join(package_ids)}")
+    source = os.environ.get(STEP_SOURCE_ENV)
+    if not source:
+        sys.exit(f"artefact_store: build-step {package}: {STEP_SOURCE_ENV} names no source directory, "
+                 "so its declared skips cannot be read (DN-142.D23)")
     return verdict_record(store, key_of(document), package, package_ids[0] if package_ids else "-",
                           profile, malf_dir, results,
-                          {name.split("/")[0]: digest for name, digest in upstream.items()})
+                          {name.split("/")[0]: digest for name, digest in upstream.items()},
+                          _helper().read_declarations(source))
 
 
 VERDICT_POPULATIONS = (("build", "{pid}.xml"), ("test_package", "{pid}.test_package.xml"))
@@ -698,24 +714,17 @@ VERDICT_POPULATIONS = (("build", "{pid}.xml"), ("test_package", "{pid}.test_pack
 LISTED_SUFFIX = ".corpus-listed.json"
 
 
-def junit_rows(path: Path, population: str) -> list[list[str]]:
-    """`[population, test name, outcome]` per test case of one JUnit file; an outcome is `passed`,
-    `failed`, `skipped` or `disabled`."""
-    import xml.etree.ElementTree as ElementTree
+def _helper():
+    """malf's test helper, beside this file: the one reading of a JUnit row and of a skip."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import malf_recipe_tests
 
-    rows = []
-    for case in ElementTree.parse(path).getroot().iter("testcase"):
-        status = case.get("status")
-        if case.find("failure") is not None or case.find("error") is not None:
-            outcome = "failed"
-        elif status == "disabled":
-            outcome = "disabled"
-        elif case.find("skipped") is not None or status == "notrun":
-            outcome = "skipped"
-        else:
-            outcome = "passed"
-        rows.append([population, case.get("name") or "", outcome])
-    return rows
+    return malf_recipe_tests
+
+
+def junit_rows(path: Path, population: str) -> list[list[str]]:
+    """`[population, test name, outcome]` per test case of one JUnit file, by the helper's reading."""
+    return _helper().junit_rows(path, population)
 
 
 def junit_results(results: Path, package: str, package_id: str
@@ -747,7 +756,8 @@ def selection_member(malf_dir: Path) -> dict[str, object]:
 
 
 def verdict_record(store: Path, build_key: str, package: str, package_id: str, profile: str,
-                   malf_dir: Path, results: Path, judged: dict[str, str]) -> int:
+                   malf_dir: Path, results: Path, judged: dict[str, str],
+                   declarations: list | None = None) -> int:
     """Store or compare one step's test verdict (DN-142.D5 (3)); a step with no result file ran no
     test and has no verdict to keep (exit 0, saying so). The step's own files are linked at
     `<results>/steps/<package>.xml` and `.test_package.xml`, where a reader of the run finds the
@@ -759,7 +769,15 @@ def verdict_record(store: Path, build_key: str, package: str, package_id: str, p
     if not files:
         print(f"artefact_store: NO VERDICT {package}: the step wrote no result file, it ran no test")
         return 0
-    verdict = "fail" if any(row[2] == "failed" for row in rows) else "pass"
+    undeclared, excused, defects = _helper().skip_findings(
+        [row for row in rows if row[0] != "corpus-listed"], declarations or [], profile,
+        unfiltered=True)
+    verdict = "fail" if any(row[2] == "failed" for row in rows) or undeclared or defects else "pass"
+    if excused:
+        print(f"artefact_store: EXCUSED {package} {len(excused)} declared skip(s): "
+              + ", ".join(row[1] for row in excused))
+    if undeclared or defects:
+        print(f"artefact_store: SKIP RED {package}: " + "; ".join(undeclared + defects))
     document = {"step": {"kind": "test-verdict", "package": package, "profile": profile},
                 "build": build_key, "selection": selection_member(malf_dir)}
     scratch = Path(tempfile.mkdtemp(prefix="artefact_store."))
@@ -771,7 +789,7 @@ def verdict_record(store: Path, build_key: str, package: str, package_id: str, p
             with path.open("rb") as handle:
                 bundle.addfile(info, handle)
     output = {"verdict": verdict, "results": rows, "findings": key_of(rows), "judged": judged,
-              "tests": len(rows)}
+              "tests": len(rows), "excused": excused}
     return LocalStore(store).commit(document, {"verdict": output}, {"verdict": ("log", lambda: log)})
 
 

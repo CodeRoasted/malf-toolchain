@@ -2722,25 +2722,25 @@ tp_run() {
 tp_argv() { printf 'ARGV:'; printf '[%s]' "$@"; printf '\n'; }
 E="$tp_tmp/empty"; N="$tp_tmp/never"
 check "the default population: guarded by -N, then run with --no-tests=error" \
-      "$(tp_argv --test-dir "$E" --output-on-failure -LE corpus -N; tp_argv --test-dir "$E" --output-on-failure -LE corpus --no-tests=error; echo rc=0)" \
+      "$(tp_argv --test-dir "$E" --output-on-failure -LE corpus -N; tp_argv --test-dir "$E" --output-on-failure -LE corpus --no-tests=error --output-junit "$E/malf-test.junit.xml"; echo rc=0)" \
       "$(tp_run "$MALF_BIN" "$E" false "" false "")"
 check "--verbose rides after --output-on-failure" \
-      "$(tp_argv --test-dir "$E" --output-on-failure --verbose -LE corpus -N; tp_argv --test-dir "$E" --output-on-failure --verbose -LE corpus --no-tests=error; echo rc=0)" \
+      "$(tp_argv --test-dir "$E" --output-on-failure --verbose -LE corpus -N; tp_argv --test-dir "$E" --output-on-failure --verbose -LE corpus --no-tests=error --output-junit "$E/malf-test.junit.xml"; echo rc=0)" \
       "$(tp_run "$MALF_BIN" "$E" true "" false "")"
 check "a --filter is -R before the label, and is owed outside a sweep" \
-      "$(tp_argv --test-dir "$E" --output-on-failure -R 'Suite\..*' -LE corpus -N; tp_argv --test-dir "$E" --output-on-failure -R 'Suite\..*' -LE corpus --no-tests=error; echo rc=0)" \
+      "$(tp_argv --test-dir "$E" --output-on-failure -R 'Suite\..*' -LE corpus -N; tp_argv --test-dir "$E" --output-on-failure -R 'Suite\..*' -LE corpus --no-tests=error --output-junit "$E/malf-test.junit.xml"; echo rc=0)" \
       "$(tp_run "$MALF_BIN" "$E" false 'Suite\..*' false "")"
 check "--corpus alone selects the label and owes nothing: no guard, no --no-tests=error" \
-      "$(tp_argv --test-dir "$E" --output-on-failure -L corpus; echo rc=0)" \
+      "$(tp_argv --test-dir "$E" --output-on-failure -L corpus --output-junit "$E/malf-test.junit.xml"; echo rc=0)" \
       "$(tp_run "$MALF_BIN" "$E" false "" true "")"
 check "a tree that never enabled testing owes nothing" \
-      "$(tp_argv --test-dir "$N" --output-on-failure -LE corpus; echo rc=0)" \
+      "$(tp_argv --test-dir "$N" --output-on-failure -LE corpus --output-junit "$N/malf-test.junit.xml"; echo rc=0)" \
       "$(tp_run "$MALF_BIN" "$N" false "" false "")"
 check "a --filter inside a sweep member owes nothing (the declared bound)" \
-      "$(tp_argv --test-dir "$N" --output-on-failure -R 'A.b' -LE corpus; echo rc=0)" \
+      "$(tp_argv --test-dir "$N" --output-on-failure -R 'A.b' -LE corpus --output-junit "$N/malf-test.junit.xml"; echo rc=0)" \
       "$(tp_run "$MALF_BIN" "$N" false 'A.b' false sweep)"
 check "a --filter with --corpus outside a sweep is owed even with no CTestTestfile, and an argument with a space stays one argument" \
-      "$(tp_argv --test-dir "$N" --output-on-failure --verbose -R 'X y' -L corpus -N; tp_argv --test-dir "$N" --output-on-failure --verbose -R 'X y' -L corpus --no-tests=error; echo rc=0)" \
+      "$(tp_argv --test-dir "$N" --output-on-failure --verbose -R 'X y' -L corpus -N; tp_argv --test-dir "$N" --output-on-failure --verbose -R 'X y' -L corpus --no-tests=error --output-junit "$N/malf-test.junit.xml"; echo rc=0)" \
       "$(tp_run "$MALF_BIN" "$N" true 'X y' true "")"
 check "an owed selection of zero tests reds before ctest runs, stating the count and the selection" \
       "$(tp_argv --test-dir "$E" --output-on-failure -LE corpus -N; echo rc=1)|malf test: 0 test(s) selected in $E by: --test-dir $E --output-on-failure -LE corpus" \
@@ -2756,7 +2756,7 @@ print(0 if e is None and a[-1] == "--no-tests=error" else a, 1 if f is not None 
 mkdir -p "$tp_tmp/mutant"; cp "$MALF_BIN" "$MALF_ROOT/malf_recipe_tests.py" "$tp_tmp/mutant/"
 sed -i 's/^CORPUS_LABEL = "corpus"$/CORPUS_LABEL = "kitchen"/' "$tp_tmp/mutant/malf_recipe_tests.py"
 check "malf test reads the selection from the helper: a mutated label in the helper is the label ctest gets" \
-      "$(tp_argv --test-dir "$N" --output-on-failure -LE kitchen; echo rc=0)" \
+      "$(tp_argv --test-dir "$N" --output-on-failure -LE kitchen --output-junit "$N/malf-test.junit.xml"; echo rc=0)" \
       "$(tp_run "$tp_tmp/mutant/malf" "$N" false "" false "")"
 check "malf spells no ctest label of its own" \
       "0" "$(grep -cE '(-L|-LE) corpus' "$MALF_BIN")"
@@ -2811,7 +2811,7 @@ rt_tests() {   # <test lines...> — each `name:command[:corpus]`
     done
 }
 rt_create() {   # [conan -c args...] -> rc=<status>; the log in $tp_tmp/rt.log
-    CONAN_HOME="$rt_home" conan create "$rt_pkg" -pr:a fixture --build="rt_probe/*" "$@" > "$tp_tmp/rt.log" 2>&1
+    CONAN_HOME="$rt_home" conan create "$rt_pkg" -pr:a fixture --build="rt_probe/*" -c user.malf:profile=linux-gcc16-release "$@" > "$tp_tmp/rt.log" 2>&1
     echo "rc=$?"
 }
 # note: the fixtures declare no setting and no option, so their package id is the empty one
@@ -2837,7 +2837,7 @@ check "a create whose tree enabled testing and selects zero tests FAILS, never p
       "rc=1 1" "$(rt_create) $(grep -c '0 test(s) selected in .* — a create that enabled testing must run at least one test' "$tp_tmp/rt.log")"
 rt_tests "StdinProbe.IsNotATerminal:$tp_tmp/stdin_probe"
 check "a create runs its tests with stdin on the null device: the probe passes under a terminal stdin" \
-      "rc=0" "$(pty_stdin env CONAN_HOME="$rt_home" conan create "$rt_pkg" -pr:a fixture --build="rt_probe/*" > "$tp_tmp/rt.log" 2>&1; echo "rc=$?")"
+      "rc=0" "$(pty_stdin env CONAN_HOME="$rt_home" conan create "$rt_pkg" -pr:a fixture --build="rt_probe/*" -c user.malf:profile=linux-gcc16-release > "$tp_tmp/rt.log" 2>&1; echo "rc=$?")"
 rt_tests "RtProbe.Passes:$rt_true"
 check "the results directory is the conf's: a create given another one writes there" \
       "rc=0 1" "$(rt_create -c "user.malf:test_results=$tp_tmp/elsewhere") $(grep -c 'name="RtProbe.Passes"' "$tp_tmp/elsewhere/rt_probe/$rt_empty_id.xml" 2>/dev/null)"
@@ -2845,6 +2845,14 @@ mv "$rt_home/malf_recipe_tests.py" "$tp_tmp/helper.bak"
 check "a home that lacks the helper FAILS the build, naming the file — it never skips the tests silently" \
       "rc=1 1" "$(rt_create) $(grep -c "No such file or directory: '$rt_home/malf_recipe_tests.py'" "$tp_tmp/rt.log")"
 mv "$tp_tmp/helper.bak" "$rt_home/malf_recipe_tests.py"
+
+rt_tests "RtProbe.Passes:$rt_true"
+check "a create whose tests ran under no user.malf:profile FAILS: no skip of it can be judged (DN-142.D23)" \
+      "rc=1 1" "$(CONAN_HOME="$rt_home" conan create "$rt_pkg" -pr:a fixture --build="rt_probe/*" > "$tp_tmp/rt.log" 2>&1; echo -n "rc=$? "; grep -c 'names no profile, so no skip of the run can be judged' "$tp_tmp/rt.log")"
+printf '#!/bin/sh\necho "[  SKIPPED ] RtProbe.Skips: no fixture"\n' > "$tp_tmp/rc_skip_default"; chmod +x "$tp_tmp/rc_skip_default"
+printf 'add_test([=[RtProbe.Passes]=] "%s")\nadd_test([=[RtProbe.Skips]=] "%s")\nset_tests_properties([=[RtProbe.Skips]=] PROPERTIES SKIP_REGULAR_EXPRESSION [==[\\[  SKIPPED \\]]==])\n' "$rt_true" "$tp_tmp/rc_skip_default" > "$rt_pkg/CTestTestfile.cmake"
+check "a create whose default selection skips an undeclared test FAILS, naming it and its message" \
+      "rc=1 1 1" "$(echo -n "$(rt_create) "; echo -n "$(grep -c 'build RtProbe.Skips skipped' "$tp_tmp/rt.log") "; grep -c 'undeclared skip(s)' "$tp_tmp/rt.log")"
 
 # THE CORPUS LEGS (DN-142.D21 (1), (3)): with `user.malf:corpus_gates` naming a document that names
 # the package, the create runs each leg's suites under the leg's mounts, records what ctest cannot
@@ -2963,8 +2971,8 @@ check "the vendor create reads the consumer set from the helper and spells no sk
 # writer set is mutated hands the mutated set to its caller, and both writers splice what it read.
 mkdir -p "$cs_tmp/mutant"; cp "$MALF_BIN" "$MALF_ROOT/malf_recipe_tests.py" "$cs_tmp/mutant/"
 sed -i 's/^    "writer": (),$/    "writer": ("-c", "user.probe:writer=1"),/' "$cs_tmp/mutant/malf_recipe_tests.py"
-check "the writers' conf set is READ from the helper: a mutated set in the helper is the set malf hands its creates" \
-      "-c|user.probe:writer=1" \
+check "the writers' conf set is READ from the helper: a mutated set in the helper is the set malf hands its creates, then the profile its skips are judged at (DN-142.D23)" \
+      "-c|user.probe:writer=1|-c|user.malf:profile=$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; printf %s "$MALF_PROFILE_NAME"' _ "$MALF_BIN")" \
       "$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; _malf_writer_create_args && printf "%s\n" "${_MALF_WRITER_ARGS[@]}"' _ "$cs_tmp/mutant/malf" | paste -sd'|')"
 check "store-create splices the set read, and malf spells no skip conf of its own" \
       "1 0" \
@@ -3013,7 +3021,7 @@ cs_ctest() {   # <file> <name:command>... — a CTestTestfile registering each t
 }
 cs_create() {   # [conan args...] -> rc=<status>; the log in $cs_tmp/cs.log
     rm -rf "$cs_home/malf-test-results"
-    CONAN_HOME="$cs_home" conan create "$cs_pkg" -pr:a fixture --build="cs_probe/*" "$@" > "$cs_tmp/cs.log" 2>&1
+    CONAN_HOME="$cs_home" conan create "$cs_pkg" -pr:a fixture --build="cs_probe/*" -c user.malf:profile=linux-gcc16-release "$@" > "$cs_tmp/cs.log" 2>&1
     echo "rc=$?"
 }
 cs_empty_id="da39a3ee5e6b4b0d3255bfef95601890afd80709"   # note: the fixture declares no setting or option
@@ -4804,6 +4812,72 @@ check "a document lacking a member of the kind is REFUSED, naming it, and nothin
       "rc=1 REFUSED verdict timing/fixture|2" \
       "$(gv_step "$(gv_doc '{"runs": 9}' | python3 -c 'import json, sys; d = json.load(sys.stdin); d.pop("context"); print(json.dumps(d))')" "$(gv_out pass '{}')" '{}')|$(ls "$gv_tmp/store/records" | wc -l | tr -d ' ')"
 rm -rf "$gv_tmp"
+echo
+
+echo "[7q7m] a skip is a red unless the package declares it: undeclared, wrong-profile, malformed and stale declarations red, a declared one is excused, a test_package skip is never declared (DN-142.D23)"
+sk_tmp="$(realpath "$(mktemp -d)")"
+sk_junit() {   # <file> <name:outcome>... — a JUnit file of ctest's shape
+    { printf '<?xml version="1.0" encoding="UTF-8"?>\n<testsuite name="x" tests="%s">\n' "$(($# - 1))"
+      local spec; for spec in "${@:2}"; do
+          case "${spec#*:}" in
+              skipped)  printf '<testcase name="%s" status="notrun"><skipped message="SKIPPED: no namespace"/></testcase>\n' "${spec%%:*}" ;;
+              disabled) printf '<testcase name="%s" status="disabled"/>\n' "${spec%%:*}" ;;
+              *)        printf '<testcase name="%s" status="run"/>\n' "${spec%%:*}" ;;
+          esac
+      done; printf '</testsuite>\n'; } > "$1"
+}
+sk_judge() {   # <declarations json> <junit> <population> <profile> <unfiltered> -> `<undeclared>|<excused>|<defects>` counts
+    printf '%s' "$1" > "$sk_tmp/decl.json"
+    python3 -c 'import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import malf_recipe_tests as t
+rows = t.junit_rows(Path(sys.argv[3]), sys.argv[4])
+undeclared, excused, defects = t.skip_findings(rows, json.loads(Path(sys.argv[2]).read_text()), sys.argv[5], sys.argv[6] == "true")
+print(f"{len(undeclared)}|{len(excused)}|{len(defects)}")' "$MALF_ROOT" "$sk_tmp/decl.json" "$2" "$3" "$4" "$5"
+}
+sk_row() {   # <test> <outcome> <profile> [why] -> one declaration row
+    printf '{"test": "%s", "outcome": "%s", "profiles": ["%s"], "condition": "c", "why": "%s", "refs": ["DN-142.D23"]}' "$1" "$2" "$3" "${4-the reason}"
+}
+sk_junit "$sk_tmp/skip.xml" "Suite.Runs:passed" "Suite.Skips:skipped"
+sk_junit "$sk_tmp/disabled.xml" "Suite.Runs:passed" "Suite.DISABLED_Off:disabled"
+sk_junit "$sk_tmp/clean.xml" "Suite.Runs:passed"
+check "an undeclared skipped row is a red" "1|0|0" "$(sk_judge '[]' "$sk_tmp/skip.xml" build linux-gcc16-release true)"
+check "an undeclared disabled row is a red" "1|0|0" "$(sk_judge '[]' "$sk_tmp/disabled.xml" build linux-gcc16-release true)"
+check "a skip declared for another profile is a red on this one" \
+      "1|0|0" "$(sk_judge "[$(sk_row Suite.Skips skipped linux-clang21-asan)]" "$sk_tmp/skip.xml" build linux-gcc16-release true)"
+check "a row naming a profile malf/profiles has no file for is a defect" \
+      "1|0|1" "$(sk_judge "[$(sk_row Suite.Skips skipped linux-clang99-x)]" "$sk_tmp/skip.xml" build linux-clang99-x true)"
+check "a malformed row is a defect: an empty why, and a glob in test" \
+      "1|0|2" "$(sk_judge "[$(sk_row Suite.Skips skipped linux-gcc16-release '') , $(sk_row 'Suite.*' skipped linux-gcc16-release)]" "$sk_tmp/skip.xml" build linux-gcc16-release true)"
+check "a row whose key is missing is a defect" \
+      "1|0|1" "$(sk_judge '[{"test": "Suite.Skips", "outcome": "skipped", "profiles": ["linux-gcc16-release"], "condition": "c", "refs": []}]' "$sk_tmp/skip.xml" build linux-gcc16-release true)"
+check "a declared test the unfiltered run never names is a stale defect" \
+      "0|0|1" "$(sk_judge "[$(sk_row Suite.Gone skipped linux-gcc16-release)]" "$sk_tmp/clean.xml" build linux-gcc16-release true)"
+check "the same stale row on a filtered run is no red" \
+      "0|0|0" "$(sk_judge "[$(sk_row Suite.Gone skipped linux-gcc16-release)]" "$sk_tmp/clean.xml" build linux-gcc16-release false)"
+check "a skip declared for this profile and outcome is excused, never a red" \
+      "0|1|0" "$(sk_judge "[$(sk_row Suite.Skips skipped linux-gcc16-release)]" "$sk_tmp/skip.xml" build linux-gcc16-release true)"
+check "a test_package skip is a red even when a row names the test" \
+      "1|0|0" "$(sk_judge "[$(sk_row Suite.Skips skipped linux-gcc16-release)]" "$sk_tmp/skip.xml" test_package linux-gcc16-release false)"
+mkdir -p "$sk_tmp/res/sk_pkg"; cp "$sk_tmp/skip.xml" "$sk_tmp/res/sk_pkg/da39a3ee5e6b4b0d3255bfef95601890afd80709.xml"
+check "the stored test verdict over an undeclared skip is fail, and over a declared one pass with the row kept as excused" \
+      "fail [] pass [['build', 'Suite.Skips', 'skipped']]" \
+      "$(python3 -c 'import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import artefact_store as store
+out = []
+for name, declared in (("a", []), ("b", [{"test": "Suite.Skips", "outcome": "skipped", "profiles": ["linux-gcc16-release"], "condition": "c", "why": "w", "refs": []}])):
+    root = Path(sys.argv[2]) / name
+    store.verdict_record(root, "k" + name, "sk_pkg", "da39a3ee5e6b4b0d3255bfef95601890afd80709", "linux-gcc16-release", Path(sys.argv[1]), Path(sys.argv[3]), {}, declared)
+    verdict = json.loads(next((root / "records").glob("*.json")).read_text())["outputs"]["verdict"]
+    out += [verdict["verdict"], str(verdict["excused"])]
+print("RESULT " + " ".join(out))' "$MALF_ROOT" "$sk_tmp/stores" "$sk_tmp/res" 2>/dev/null | sed -n 's/^RESULT //p')"
+check "malf test's judgment: an undeclared skip exits 1, the same run declared exits 0 naming it EXCUSED" \
+      "1 0 1" \
+      "$(python3 "$MALF_ROOT/malf_recipe_tests.py" judge-skips "$sk_tmp/skip.xml" "$sk_tmp/none" linux-gcc16-release false > /dev/null 2>&1; echo -n "$? "; mkdir -p "$sk_tmp/src/tests"; printf '[%s]' "$(sk_row Suite.Skips skipped linux-gcc16-release)" > "$sk_tmp/src/tests/declared_skips.json"; out="$(python3 "$MALF_ROOT/malf_recipe_tests.py" judge-skips "$sk_tmp/skip.xml" "$sk_tmp/src" linux-gcc16-release false)"; echo -n "$? "; grep -c 'EXCUSED declared skip Suite.Skips' <<< "$out")"
+rm -rf "$sk_tmp"
 echo
 
 echo "[7q7i] every ship-leg act resolves against malf/conan.lock, strictly: never the home's own revision, never a requirement the lock does not name (W486 G2)"

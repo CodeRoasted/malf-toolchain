@@ -51,6 +51,15 @@ WHAT THE DEFAULT RUN ALSO RECORDS. `<package id>.corpus-listed.json`, every `cor
 name of the tree, listed and never run, so the corpus label closes against the registry from the
 records alone.
 
+A SKIP IS A RED UNLESS THE PACKAGE DECLARES IT (DN-142.D23; the Founder, 2026-10-11). After a green
+run, every `skipped` or `disabled` row of the default selection or a test_package must be covered by
+a row of the package's `tests/declared_skips.json` naming the exact test, outcome and profile; a
+test_package row is never covered. A malformed declaration, a profile with no file in
+`malf/profiles/`, and, on an unfiltered run, a declared test no row of the run names (stale) are
+reds too. Inside a create the profile is `user.malf:profile`, which every writer create carries;
+tests that ran under no profile cannot be judged, and raise. The declaration is read from the
+package's source folder, which in a create is the keyed export, so it enters the key with it.
+
 NO TEST READS ITS CALLER'S STDIN. Every ctest run of tests this file starts, and `malf test`'s, has
 stdin on the null device, because ctest hands its own stdin to each test: step 0 of 1.10.7 hung in a test that
 offered an interactive prompt to the terminal its build inherited, which no keystroke could reach.
@@ -71,6 +80,13 @@ from pathlib import Path
 
 CORPUS_LABEL = "corpus"
 CORPUS_GATES_CONF = "user.malf:corpus_gates"
+# DN-142.D23: the declaration file of a package's skips, relative to its source root, and its row.
+DECLARED_SKIPS = "tests/declared_skips.json"
+SKIP_OUTCOMES = ("skipped", "disabled")
+DECLARATION_KEYS = frozenset({"test", "outcome", "profiles", "condition", "why", "refs"})
+JUDGED_POPULATIONS = ("build", "test_package")
+PROFILE_CONF = "user.malf:profile"
+PROFILES_DIR = Path(__file__).resolve().parent / "profiles"
 # The property gtest_discover_tests sets, without which ctest reads a GTEST_SKIP as a pass.
 SKIP_PROPERTY = "SKIP_REGULAR_EXPRESSION"
 # DN-142.D13 (1): the writer's create sets no skip conf; the consumer's runs no test and builds no
@@ -145,6 +161,136 @@ def shown_tests(arguments: list[str]) -> list[dict]:
         raise RuntimeError(f"ctest {' '.join(arguments)} --show-only=json-v1 exited "
                            f"{listed.returncode}: {listed.stderr.strip()[-300:]}")
     return json.loads(listed.stdout).get("tests", [])
+
+
+def junit_rows(path: Path, population: str) -> list[list[str]]:
+    """`[population, test name, outcome]` per test case of one JUnit file; an outcome is `passed`,
+    `failed`, `skipped` or `disabled`. The one reading of a JUnit outcome: artefact_store reads it
+    from here."""
+    import xml.etree.ElementTree as ElementTree
+
+    rows = []
+    for case in ElementTree.parse(path).getroot().iter("testcase"):
+        status = case.get("status")
+        if case.find("failure") is not None or case.find("error") is not None:
+            outcome = "failed"
+        elif status == "disabled":
+            outcome = "disabled"
+        elif case.find("skipped") is not None or status == "notrun":
+            outcome = "skipped"
+        else:
+            outcome = "passed"
+        rows.append([population, case.get("name") or "", outcome])
+    return rows
+
+
+def skip_message(path: Path, name: str) -> str:
+    """The skip's own text for test `name` of one JUnit file, empty when it carries none."""
+    import xml.etree.ElementTree as ElementTree
+
+    for case in ElementTree.parse(path).getroot().iter("testcase"):
+        if case.get("name") == name:
+            skipped = case.find("skipped")
+            text = (skipped.get("message") if skipped is not None else None) or ""
+            output = case.findtext("system-out") or ""
+            found = [line.strip() for line in output.splitlines() if "SKIPPED" in line or "Skipped" in line]
+            return (text or (found[0] if found else ""))[:300]
+    return ""
+
+
+def read_declarations(source_dir: str | Path) -> list:
+    """The rows of `<source dir>/tests/declared_skips.json`, or [] when the package declares none."""
+    path = Path(source_dir) / DECLARED_SKIPS
+    if not path.is_file():
+        return []
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError as unparsed:
+        return [{"__unparsed__": f"{path}: {unparsed}"}]
+    return document if isinstance(document, list) else [{"__unparsed__": f"{path}: not a JSON list"}]
+
+
+def skip_findings(rows: list[list[str]], declarations: list, profile: str, unfiltered: bool,
+                  profiles_dir: Path = PROFILES_DIR) -> tuple[list[str], list[list[str]], list[str]]:
+    """(undeclared, excused, defects) of one run's rows `[population, name, outcome]` against the
+    package's declarations (DN-142.D23 (2)).
+
+    post: undeclared names each skipped or disabled row of the build or test_package population no
+        declaration covers by exact (test, outcome, profile), a test_package row never covered;
+        excused holds the covered rows; defects names each malformed row (a missing or unknown
+        key, an empty why, a glob in test, an outcome outside the two, empty profiles), each
+        profile with no file in malf's profiles, and, on an unfiltered run, each declared test
+        no row of the run names
+    """
+    defects = []
+    valid = []
+    for index, row in enumerate(declarations):
+        where = f"row {index}"
+        if not isinstance(row, dict) or "__unparsed__" in row:
+            defects.append(f"{where}: {row.get('__unparsed__') if isinstance(row, dict) else row!r}")
+            continue
+        keys = set(row)
+        wrong = sorted(keys ^ DECLARATION_KEYS)
+        if wrong:
+            defects.append(f"{where}: missing or unknown key(s) {', '.join(wrong)}")
+            continue
+        test = row["test"]
+        if not isinstance(test, str) or not test or any(char in test for char in "*?["):
+            defects.append(f"{where}: test {test!r} is not one exact name (no glob)")
+            continue
+        if row["outcome"] not in SKIP_OUTCOMES:
+            defects.append(f"{where} ({test}): outcome {row['outcome']!r} is neither skipped nor disabled")
+            continue
+        if not str(row["why"]).strip():
+            defects.append(f"{where} ({test}): an empty why")
+            continue
+        if not isinstance(row["profiles"], list) or not row["profiles"]:
+            defects.append(f"{where} ({test}): profiles is empty")
+            continue
+        unknown = [name for name in row["profiles"] if not (profiles_dir / str(name)).is_file()]
+        if unknown:
+            defects.append(f"{where} ({test}): no profile file for {', '.join(map(str, unknown))} "
+                           f"in {profiles_dir}")
+            continue
+        valid.append(row)
+    covered = {(row["test"], row["outcome"], name) for row in valid for name in row["profiles"]}
+    undeclared, excused = [], []
+    for population, name, outcome in rows:
+        if population not in JUDGED_POPULATIONS or outcome not in SKIP_OUTCOMES:
+            continue
+        if population == "build" and (name, outcome, profile) in covered:
+            excused.append([population, name, outcome])
+        else:
+            undeclared.append(f"{population} {name} {outcome}"
+                              + (" (a test_package skip is never declared)" if population == "test_package" else ""))
+    if unfiltered:
+        ran = {name for _population, name, _outcome in rows}
+        defects += [f"stale: {row['test']} is declared and no row of this run names it"
+                    for row in valid if row["test"] not in ran]
+    return undeclared, excused, defects
+
+
+def _judge_run(conanfile, junit: str, population: str, source_dir: str) -> None:
+    """Raise when the run's JUnit holds an undeclared skip or the declaration a defect."""
+    from conan.errors import ConanException
+
+    profile = conanfile.conf.get(PROFILE_CONF)
+    if not profile:
+        raise ConanException(f"malf: {conanfile.name or conanfile.tested_reference_str}: tests ran "
+                             f"and {PROFILE_CONF} names no profile, so no skip of the run can be "
+                             "judged (DN-142.D23)")
+    rows = junit_rows(Path(junit), population)
+    undeclared, excused, defects = skip_findings(rows, read_declarations(source_dir), profile,
+                                                 unfiltered=True)
+    for row in excused:
+        conanfile.output.info(f"malf: EXCUSED declared skip {row[1]} ({row[2]}) on {profile}")
+    if undeclared or defects:
+        named = [f"{entry} — {skip_message(Path(junit), entry.split(' ')[1]) or 'no message'}"
+                 for entry in undeclared] + defects
+        raise ConanException(f"malf: {conanfile.name or conanfile.tested_reference_str}: "
+                             f"{len(undeclared)} undeclared skip(s) and {len(defects)} declaration "
+                             f"defect(s) on {profile} (DN-142.D23; declare in {DECLARED_SKIPS}):\n  "
+                             + "\n  ".join(named))
 
 
 def corpus_listing(build_dir: str) -> list[str]:
@@ -263,6 +409,7 @@ def run_tests(conanfile) -> None:
     junit = _junit(results, conanfile.name, f"{package_id}.xml")
     conanfile.output.info(f"malf: running the test selection of {conanfile.name}, JUnit to {junit}")
     conanfile.run(ctest_command(arguments, junit), env=["conanbuild", "conanrun"])
+    _judge_run(conanfile, junit, "build", str(conanfile.source_folder))
     run_corpus_legs(conanfile, build_dir, results, package_id)
 
 
@@ -356,6 +503,7 @@ def run_test_package(conanfile) -> None:
                    f"{conanfile.dependencies[tested].pref.package_id}.test_package.xml")
     conanfile.output.info(f"malf: running the test_package selection of {tested}, JUnit to {junit}")
     conanfile.run(ctest_command(arguments, junit), env=["conanbuild", "conanrun"])
+    _judge_run(conanfile, junit, "test_package", str(conanfile.source_folder))
 
 
 def _desk_args(argv: list[str]) -> int:
@@ -405,13 +553,63 @@ def _locators(argv: list[str]) -> int:
     return 1 if findings else 0
 
 
-VERBS = {"desk-args": (6, _desk_args), "create-args": (None, _create_args), "locators": (None, _locators)}
+def tree_source_dir(build_dir: str) -> str | None:
+    """A build tree's source root, `CMAKE_HOME_DIRECTORY` from its CMakeCache.txt; None if absent."""
+    cache = Path(build_dir) / "CMakeCache.txt"
+    if not cache.is_file():
+        return None
+    for line in cache.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith("CMAKE_HOME_DIRECTORY:"):
+            return line.split("=", 1)[1]
+    return None
+
+
+def _judge_skips(argv: list[str]) -> int:
+    """`judge-skips <junit> <source dir> <profile> <filtered>`: `malf test`'s judgment of a desk run;
+    exit 1 naming each undeclared skip and defect, 0 otherwise, each excused row printed. An empty
+    source dir declares nothing; a JUnit ctest did not write is a run of no test."""
+    junit, source_dir, profile, filtered = argv
+    if not profile:
+        print("malf test: no profile was resolved, so no skip can be judged (DN-142.D23)", file=sys.stderr)
+        return 1
+    if not Path(junit).is_file():
+        print(f"malf test: ctest wrote no JUnit at {junit}: no test ran, so no skip either",
+              file=sys.stderr)
+        return 0
+    rows = junit_rows(Path(junit), "build")
+    declarations = read_declarations(source_dir) if source_dir else []
+    undeclared, excused, defects = skip_findings(rows, declarations, profile,
+                                                 unfiltered=filtered != "true")
+    for row in excused:
+        print(f"malf test: EXCUSED declared skip {row[1]} ({row[2]}) on {profile}")
+    for entry in undeclared:
+        print(f"malf test: UNDECLARED skip {entry} — "
+              f"{skip_message(Path(junit), entry.split(' ')[1]) or 'no message'} "
+              f"(declare it in {source_dir}/{DECLARED_SKIPS}, DN-142.D23)", file=sys.stderr)
+    for defect in defects:
+        print(f"malf test: declaration defect in {source_dir}/{DECLARED_SKIPS}: {defect}", file=sys.stderr)
+    return 1 if undeclared or defects else 0
+
+
+def _tree_source(argv: list[str]) -> int:
+    """`tree-source <build dir>`: the tree's CMAKE_HOME_DIRECTORY, exit 1 when it has none."""
+    found = tree_source_dir(argv[0])
+    if found is None:
+        return 1
+    print(found)
+    return 0
+
+
+VERBS = {"desk-args": (6, _desk_args), "create-args": (None, _create_args), "locators": (None, _locators),
+         "judge-skips": (4, _judge_skips), "tree-source": (1, _tree_source)}
 
 if __name__ == "__main__":
     verb = VERBS.get(sys.argv[1]) if len(sys.argv) > 1 else None
     if verb is None or (verb[0] is not None and len(sys.argv) - 2 != verb[0]):
         print("usage: malf_recipe_tests.py desk-args <out file> <build_dir> <corpus_only> <regex> "
               "<verbose> <in_sweep>\n       malf_recipe_tests.py create-args <writer|consumer>\n"
-              "       malf_recipe_tests.py locators <dir>...", file=sys.stderr)
+              "       malf_recipe_tests.py locators <dir>...\n"
+              "       malf_recipe_tests.py judge-skips <junit> <source dir> <profile> <filtered>\n"
+              "       malf_recipe_tests.py tree-source <build dir>", file=sys.stderr)
         sys.exit(2)
     sys.exit(verb[1](sys.argv[2:]))
