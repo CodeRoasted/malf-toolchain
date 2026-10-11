@@ -3122,6 +3122,29 @@ check "store-build REFUSES a package that is stored, naming store-create, before
 cm_script="$MALF_ROOT/.github/actions/conan-module/conan_module.sh"
 check "conan_module.sh reads its ctest selection from the helper and spells no ctest label of its own" \
       "1 0" "$(grep -c 'malf_recipe_tests.py" desk-args' "$cm_script") $(grep -vE '^\s*#' "$cm_script" | grep -cE '(-L|-LE) corpus')"
+check "conan_module.sh's ctest writes its JUnit and judges its skips at the step's own profile, against the module's declarations (DN-142.D23)" \
+      "1 1" "$(grep -cE '^\s*ctest "\$\{ctest_args\[@\]\}" --output-junit "\$junit" < /dev/null$' "$cm_script") $(grep -cE '^\s*python3 "\$TOOLCHAIN_ROOT/malf_recipe_tests.py" judge-skips "\$junit" "\$PWD/\$MODULE" "\$PROFILE_NAME" false$' "$cm_script")"
+check "every conan create or install under malf's .github that can run tests names user.malf:profile, or carries the consumer set that runs none (DN-142.D23)" \
+      "none" "$(python3 - "$MALF_ROOT/.github" <<'PYC'
+import re, sys
+from pathlib import Path
+bad = []
+for path in sorted(Path(sys.argv[1]).rglob("*")):
+    if not path.is_file() or path.suffix not in (".yml", ".yaml", ".sh"):
+        continue
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for index, line in enumerate(lines):
+        if not re.match(r"^\s*(if ! )?conan (create|install) ", line):
+            continue
+        command, cursor = line, index
+        while command.rstrip().endswith("\\") and cursor + 1 < len(lines):
+            cursor += 1
+            command += lines[cursor]
+        if "user.malf:profile=" not in command and "consumer_args" not in command:
+            bad.append(f"{path.relative_to(Path(sys.argv[1]).parent)}:{index + 1}")
+print(" ".join(bad) or "none")
+PYC
+)"
 
 # DN-142.D5 (4): a test input outside the recipe folder is exported by the helper, tracked files only.
 ex_repo="$cs_tmp/exrepo"; mkdir -p "$ex_repo/pkg" "$ex_repo/support/sub" "$ex_repo/scripts"

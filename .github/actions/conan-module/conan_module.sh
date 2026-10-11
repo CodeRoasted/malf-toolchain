@@ -208,6 +208,7 @@ if [ "$TEST" = "true" ]; then
       --build=missing \
       --profile:host="$PROFILE" \
       --profile:build="$PROFILE" \
+      -c "user.malf:profile=$PROFILE_NAME" \
       "${LOCKFILE_ARGS[@]}" \
       -s build_type=Release
     # shellcheck disable=SC2086  # CMAKE_ARGS is intentionally word-split into separate -D flags
@@ -234,7 +235,14 @@ if [ "$TEST" = "true" ]; then
     mapfile -d '' -t ctest_args < "$selection"
     rm -f "$selection"
     echo "conan_module: $MODULE — ctest ${ctest_args[*]}"
-    ctest "${ctest_args[@]}"
+    # A SKIP IS A RED UNLESS THE PACKAGE DECLARES IT (DN-142.D23), on this path as in `malf test`
+    # and in a create: this is the suite a package tag runs, so an undeclared skip here would be
+    # a green over a test that never ran. The JUnit is judged against the module's own
+    # tests/declared_skips.json at this profile, the whole default selection, stale rows included.
+    junit="$PWD/build/$MODULE/conan-module.junit.xml"
+    rm -f "$junit"
+    ctest "${ctest_args[@]}" --output-junit "$junit" < /dev/null
+    python3 "$TOOLCHAIN_ROOT/malf_recipe_tests.py" judge-skips "$junit" "$PWD/$MODULE" "$PROFILE_NAME" false
   ) 2>&1 | tee -a "$LOG"
   build_status=${PIPESTATUS[0]}
   set -e
@@ -251,6 +259,7 @@ if [ "$CREATE" = "true" ]; then
       --build-test=missing \
       --profile:host="$PROFILE" \
       --profile:build="$PROFILE" \
+      -c "user.malf:profile=$PROFILE_NAME" \
       "${LOCKFILE_ARGS[@]}"
   } 2>&1 | tee -a "$LOG"
 fi

@@ -21,7 +21,7 @@ inputs:
     description: Module path relative to the repo root (e.g. `core`, `.`, `infra/redis`, `explain`).
     required: true
   test:
-    description: "'true' to conan install + cmake build + ctest the module (Release). Anything else skips the phase."
+    description: "'true' to conan install + cmake build + ctest the module (Release), a skipped or disabled test red unless the module's tests/declared_skips.json declares it at this profile (DN-142.D23). Anything else skips the phase."
     required: true
   create:
     description: "'true' to run `conan create <module>`. Anything else skips it."

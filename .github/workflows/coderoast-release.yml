@@ -146,8 +146,12 @@ jobs:
             if [ "$ver" != "$VERSION" ]; then
               echo "::error::$dir/conanfile.py version='$ver' != tag '$TAG' (version $VERSION)"; exit 1
             fi
+            # The create runs the package's tests and judges every skipped or disabled row against
+            # its tests/declared_skips.json at THIS profile (DN-142.D23), which the helper reads
+            # from `user.malf:profile`: a create whose tests ran without it fails.
             conan create "$dir" \
               --profile:host="$PROFILE_PATH" --profile:build="$PROFILE_PATH" \
+              -c "user.malf:profile=$PROFILE" \
               --lockfile="$MALF_TOOLCHAIN_DIR/conan.lock" \
               --build=missing --build-test=missing
             # conan cache save captures the recipe + all cached binaries for the ref; the consumer
