@@ -5254,7 +5254,7 @@ cmd_store_create() {
         echo "=== malf store-create: the corpus gates of $MALF_CORPUS_GATES run in the creates it names ==="
     fi
 
-    local name path deps kind dep blocked rc=0 total=0 run_at step_at step_cpu
+    local name path deps kind dep blocked rc=0 total=0 run_at step_rc
     local -a failed=() skipped=()
     local -A broke=()
     _malf_store_clock "$scratch/times"; run_at="$_MALF_CLOCK_AT"
@@ -5269,37 +5269,15 @@ cmd_store_create() {
             echo "--- store-create: SKIP $name — upstream $blocked failed ---" >&2
             continue
         fi
-        _malf_store_clock "$scratch/times"; step_at="$_MALF_CLOCK_AT"; step_cpu="$_MALF_CLOCK_CPU"
-        _malf_store_opened "$total" "$kind" "$name" "$path" "$run_at" "$step_at"
-        if [[ "$kind" == "build" ]]; then
-            if _malf_store_build_one "$name" "$path" "${MALF_STORE_BUILD_REV:-HEAD}" "$store" "$scratch" "$prefixes"; then
-                _malf_store_closed "$total" "$name" PASS "$run_at" "$step_at" "$step_cpu" "$scratch/times"
-            else
-                failed+=("$name"); broke["$name"]=1
-                _malf_store_closed "$total" "$name" FAILED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
-            fi
-            continue
-        fi
-        if ! _malf_store_create_step "$name" "$path" "$prefixes" "$scratch/$name.graph.json" "$scratch/$name.log"; then
-            echo "malf store-create: conan create $name failed — $scratch/$name.log" >&2
-            failed+=("$name"); broke["$name"]=1
-            _malf_store_closed "$total" "$name" FAILED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
-            continue
-        fi
-        if ! python3 "$MALF_DIR/artefact_store.py" executables "$path" "$name" > "$scratch/$name.executables.json"; then
-            echo "malf store-create: the \`executables:\` declaration of $name could not be read from its packages.yml at HEAD (DN-142.D22)" >&2; rc=1
-            _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
-            continue
-        fi
-        if MALF_STEP_EXECUTABLES="$scratch/$name.executables.json" \
-            python3 "$MALF_DIR/artefact_store.py" conan-step "$store" "$CONAN_HOME" "$scratch/$name.graph.json" \
-            "$name" "$MALF_PROFILE_NAME" "$MALF_DIR" "$scratch/toolchain.json" "$prefixes" \
-            "$CONAN_HOME/malf-test-results" "${corpus_args[@]}"; then
-            _malf_store_closed "$total" "$name" PASS "$run_at" "$step_at" "$step_cpu" "$scratch/times"
-        else
-            echo "malf store-create: recording $name failed, or differs at an equal key (above)" >&2; rc=1
-            _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
-        fi
+        step_rc=0
+        _malf_store_run_step "$total" "$name" "$path" "$kind" "$store" "$scratch" "$prefixes" "$run_at" \
+            "${corpus_args[@]}" || step_rc=$?
+        case $step_rc in
+            0) ;;
+            "$_MALF_STEP_FAILED") failed+=("$name"); broke["$name"]=1 ;;
+            "$_MALF_STEP_SKIPPED") skipped+=("$name (its third-party step: $_MALF_THIRD_PARTY_CAUSE)"); broke["$name"]=1 ;;
+            *) rc=1 ;;
+        esac
     done <<< "$wanted"
 
     if [[ ${#failed[@]} -gt 0 || ${#skipped[@]} -gt 0 ]]; then
@@ -5312,6 +5290,60 @@ cmd_store_create() {
     fi
     echo "malf store-create: all $total step(s) built, tested and recorded"
     rm -rf "$scratch"
+}
+
+# ONE STEP OF THE WALK, run in the walking shell (its CPU is this shell's reaped children): the
+# step's third-party steps first (_malf_store_third_party), then its create and its records, or its
+# `conan build` for a `stored: false` package. Each exit closes the step's line with its verdict:
+# PASS; FAILED (the create or the build failed); UNRECORDED (the executables declaration unread, or
+# a record refused or differing at an equal key); SKIPPED (a third-party step failed or differed:
+# nothing is built on a third-party binary no step judged, DN-142.D17 (5)).
+# pre: the walk's environment (cmd_store_create), $9... the corpus gates arguments.
+# post: exit 0 PASS, _MALF_STEP_FAILED, _MALF_STEP_UNRECORDED or _MALF_STEP_SKIPPED, the last with
+#       _MALF_THIRD_PARTY_CAUSE naming the cause.
+_MALF_STEP_FAILED=1
+_MALF_STEP_UNRECORDED=2
+_MALF_STEP_SKIPPED=4
+_malf_store_run_step() {   # <n> <name> <path> <create|build> <store> <scratch> <prefixes> <walk start> [<corpus gates>]
+    local total="$1" name="$2" path="$3" kind="$4" store="$5" scratch="$6" prefixes="$7" run_at="$8"
+    local -a corpus_args=("${@:9}")
+    local step_at step_cpu
+    if ! _malf_store_third_party "$total" "$name" "$path" "$prefixes" "$store" "$scratch" "$run_at"; then
+        echo "--- store-create: SKIP $name — its third-party step: $_MALF_THIRD_PARTY_CAUSE, and nothing is built on a third-party binary no step judged (DN-142.D17 (5)) ---" >&2
+        _malf_store_clock "$scratch/times"; step_at="$_MALF_CLOCK_AT"; step_cpu="$_MALF_CLOCK_CPU"
+        _malf_store_closed "$total" "$name" SKIPPED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+        return "$_MALF_STEP_SKIPPED"
+    fi
+    _malf_store_clock "$scratch/times"; step_at="$_MALF_CLOCK_AT"; step_cpu="$_MALF_CLOCK_CPU"
+    _malf_store_opened "$total" "$kind" "$name" "$path" "$run_at" "$step_at"
+    if [[ "$kind" == "build" ]]; then
+        if _malf_store_build_one "$name" "$path" "${MALF_STORE_BUILD_REV:-HEAD}" "$store" "$scratch" "$prefixes"; then
+            _malf_store_closed "$total" "$name" PASS "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+            return 0
+        fi
+        _malf_store_closed "$total" "$name" FAILED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+        return "$_MALF_STEP_FAILED"
+    fi
+    if ! _malf_store_create_step "$name" "$path" "$prefixes" "$scratch/$name.graph.json" "$scratch/$name.log"; then
+        echo "malf store-create: conan create $name failed — $scratch/$name.log" >&2
+        _malf_store_closed "$total" "$name" FAILED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+        return "$_MALF_STEP_FAILED"
+    fi
+    if ! python3 "$MALF_DIR/artefact_store.py" executables "$path" "$name" > "$scratch/$name.executables.json"; then
+        echo "malf store-create: the \`executables:\` declaration of $name could not be read from its packages.yml at HEAD (DN-142.D22)" >&2
+        _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+        return "$_MALF_STEP_UNRECORDED"
+    fi
+    if MALF_STEP_EXECUTABLES="$scratch/$name.executables.json" \
+        python3 "$MALF_DIR/artefact_store.py" conan-step "$store" "$CONAN_HOME" "$scratch/$name.graph.json" \
+        "$name" "$MALF_PROFILE_NAME" "$MALF_DIR" "$scratch/toolchain.json" "$prefixes" \
+        "$CONAN_HOME/malf-test-results" "${corpus_args[@]}"; then
+        _malf_store_closed "$total" "$name" PASS "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+        return 0
+    fi
+    echo "malf store-create: recording $name failed, or differs at an equal key (above)" >&2
+    _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+    return "$_MALF_STEP_UNRECORDED"
 }
 
 # A STEP'S TIME IS PRINTED ON ITS OWN TWO LINES, for step 0's timing sidecar (DN-119.D4), which reads
@@ -5331,9 +5363,9 @@ _malf_store_clock() {   # <times file>
     read -r _MALF_CLOCK_CPU < <(awk 'NR == 2 { split($0, f, /[ms ]+/); printf "%.2f\n", f[1] * 60 + f[2] + f[3] * 60 + f[4] }' "$1")
 }
 
-_malf_store_opened() {   # <n> <create|build> <name> <path> <walk start> <step start>
+_malf_store_opened() {   # <n> <create|build|install> <name> <path> <walk start> <step start>
     awk -v n="$1" -v kind="$2" -v name="$3" -v path="$4" -v run="$5" -v at="$6" \
-        'BEGIN { verb = kind == "build" ? "conan build" : "conan create"
+        'BEGIN { verb = kind == "build" ? "conan build" : kind == "install" ? "conan install" : "conan create"
                  printf "--- store-create [%s] %s %s (%s) · at %.2f s ---\n", n, verb, name, path, at - run }'
 }
 
@@ -5348,27 +5380,89 @@ _malf_store_closed() {   # <n> <name> <verdict> <walk start> <step start> <step 
 # graph printed as JSON for artefact_store.py.
 # pre: CONAN_HOME, the profile, _MALF_WRITER_ARGS and _MALF_SHIP_LOCK are set (cmd_store_create).
 # post: the create's graph is in <graph> and its log in <log>; the status is the create's.
+#
+# A FIRST-PARTY STEP BUILDS EXACTLY ONE PACKAGE, ITS OWN (DN-142.D17 (1), (10)): its create builds
+# from source the step's package and nothing else, and runs with NO REMOTE, so every other binary
+# it links is one already in the home: a first-party upstream its own step created, a third-party
+# one its own `third-party-create` step built and recorded (_malf_store_third_party). A binary
+# missing from the home fails the create naming it, never builds or downloads inside it.
 _malf_store_create_step() {   # <name> <path> <prefixes> <graph> <log>
     local -a build_args
-    mapfile -t build_args < <(_malf_store_build_args "$1" "$3")
+    mapfile -t build_args < <(_malf_store_build_args "$1")
     conan create "$2" --profile:host="$MALF_PROFILE" --profile:build="$MALF_BUILD_PROFILE" \
         -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${build_args[@]}" "${_MALF_SHIP_LOCK[@]}" \
-        --format=json > "$4" 2> "$5"
+        --no-remote --format=json > "$4" 2> "$5"
 }
 
-# post: the owned package namespaces of the workspace, space-separated, or the function failed.
-# pre: $1 is a store step's package, $2 the owned package namespaces (_malf_owned_prefixes).
-# post: the create's --build arguments, one per line: the step's own package from source, and a
-#       missing binary built from source only when no owned namespace names it, so a first-party
-#       binary absent at the id the graph asks for fails the create naming it (DN-142.D16).
-# note: measured on conan 2.28.1 — an explicit `<name>/*` wins over a `missing:~<prefix>*`
-#       exclusion, and several exclusions all hold, so third-party binaries still build.
+# pre: $1 is a store step's package.
+# post: the create's --build arguments, one per line: the step's own package from source, and
+#       nothing else, so a binary absent from the home at the id the graph asks for, first-party
+#       (DN-142.D16) or third-party (DN-142.D17 (1)), fails the create naming it.
 _malf_store_build_args() {
-    local prefix
     printf '%s\n' "--build=$1/*"
-    for prefix in $2; do
-        printf '%s\n' "--build=missing:~${prefix}*"
+}
+
+# THE THIRD-PARTY STEPS OF A FIRST-PARTY STEP (DN-142.D17 (2), (4), (10)), run before its create or
+# its build: the step's recipe resolved at the act's profile under the strict lock (`conan graph
+# info`, no binary built), artefact_store.py's `third-party-plan` naming each third-party reference
+# whose binary is missing, would be built or downloaded, or is present at a content no record holds;
+# re-resolved with those references to be built until the plan adds nothing (a reference built
+# from source needs its build-context tools, which a resolve that reuses its binary skips). Then
+# ONE `conan install` of the step's recipe builds exactly those references, in exactly the
+# configuration the step's graph names (its options included), into the act's scratch folder, and
+# `third-party-step` records each node it built in dependency order, comparing it at an equal key.
+# A downloaded binary is never consumed: the plan builds it (`--build=<ref>`), and a graph that
+# still downloads is refused. The phase prints its own opening and closing lines,
+# `<name>:third-party`, closing PASS, FAILED or MISMATCH.
+# pre: CONAN_HOME, MALF_PROFILE, MALF_BUILD_PROFILE, MALF_CONFIG, MALF_PROFILE_NAME, _MALF_WRITER_ARGS
+#      and _MALF_SHIP_LOCK as store-create sets them, and <scratch>/toolchain.json written.
+# post: exit 0 every third-party node the step needs is held by a record; 1 a resolve, the plan, the
+#       install or a refusal failed; 3 a third-party binary rebuilt at an equal key differs. On a
+#       non-zero exit _MALF_THIRD_PARTY_CAUSE names the references and the cause.
+_malf_store_third_party() {   # <n> <name> <path> <prefixes> <store> <scratch> <walk start>
+    local index="$1" name="$2" path="$3" prefixes="$4" store="$5" scratch="$6" run_at="$7"
+    local graph="$scratch/$name.third-party.graph.json" log="$scratch/$name.third-party.log"
+    local round planned rc=0 step_at step_cpu verdict=PASS
+    local -a common=(--profile:host="$MALF_PROFILE" --profile:build="$MALF_BUILD_PROFILE"
+                     -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${_MALF_SHIP_LOCK[@]}")
+    local -a builds=() next=()
+    _MALF_THIRD_PARTY_CAUSE=""
+    _malf_store_clock "$scratch/times"; step_at="$_MALF_CLOCK_AT"; step_cpu="$_MALF_CLOCK_CPU"
+    _malf_store_opened "$index" install "$name:third-party" "$path" "$run_at" "$step_at"
+    for round in 1 2 3 4 5 6 7 8 9; do
+        if ! conan graph info "$path" "${common[@]}" "${builds[@]}" --format=json > "$graph" 2>> "$log"; then
+            _MALF_THIRD_PARTY_CAUSE="resolving its graph failed ($log)"; rc=1; break
+        fi
+        if ! planned="$(python3 "$MALF_DIR/artefact_store.py" third-party-plan "$store" "$CONAN_HOME" \
+                "$graph" "$prefixes" "$MALF_PROFILE_NAME")"; then
+            _MALF_THIRD_PARTY_CAUSE="its third-party plan was refused (above)"; rc=1; break
+        fi
+        next=()
+        [[ -z "$planned" ]] || mapfile -t next < <(sed 's/^/--build=/' <<< "$planned")
+        [[ "${next[*]}" == "${builds[*]}" ]] && break
+        builds=("${next[@]}")
+        [[ $round -lt 9 ]] || { _MALF_THIRD_PARTY_CAUSE="its plan was still growing after $round resolves"; rc=1; }
     done
+    if [[ $rc -eq 0 && ${#builds[@]} -gt 0 ]]; then
+        echo "--- store-create: $name: ${#builds[@]} third-party-create step(s): ${builds[*]#--build=} ---"
+        if ! conan install "$path" "${common[@]}" "${builds[@]}" --output-folder="$scratch/$name.third-party" \
+                --format=json > "$scratch/$name.third-party.install.json" 2>> "$log"; then
+            _MALF_THIRD_PARTY_CAUSE="building ${builds[*]#--build=} failed ($log)"; rc=1
+        else
+            python3 "$MALF_DIR/artefact_store.py" third-party-step "$store" "$CONAN_HOME" \
+                "$scratch/$name.third-party.install.json" "$prefixes" "$MALF_PROFILE_NAME" "$MALF_DIR" \
+                "$scratch/toolchain.json" || rc=$?
+            case $rc in
+                0) ;;
+                3) _MALF_THIRD_PARTY_CAUSE="a third-party binary differs at an equal key (MISMATCH above)" ;;
+                *) _MALF_THIRD_PARTY_CAUSE="recording ${builds[*]#--build=} was refused (above)"; rc=1 ;;
+            esac
+        fi
+    fi
+    [[ $rc -eq 0 ]] || verdict=FAILED
+    [[ $rc -eq 3 ]] && verdict=MISMATCH
+    _malf_store_closed "$index" "$name:third-party" "$verdict" "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+    return "$rc"
 }
 
 _malf_owned_prefixes() {
@@ -5483,9 +5577,16 @@ cmd_store_build() {
     prefixes="$(_malf_owned_prefixes)" || { echo "malf store-build: the owned package namespaces could not be derived" >&2; return 2; }
     compiler="$(sed -n 's/^CXX=//p' "$MALF_PROFILE")"
     python3 "$MALF_DIR/artefact_store.py" toolchain "$(dirname "$(dirname "$compiler")")" "$scratch/toolchain.json" || return 2
+    local path index=0 run_at
+    _malf_store_clock "$scratch/times"; run_at="$_MALF_CLOCK_AT"
     for name in "$@"; do
-        _malf_store_build_one "$name" "$(awk -F'\t' -v n="$name" '$1 == n {print $2}' <<< "$unstored")" \
-            "${MALF_STORE_BUILD_REV:-HEAD}" "$store" "$scratch" "$prefixes" || rc=1
+        index=$((index+1))
+        path="$(awk -F'\t' -v n="$name" '$1 == n {print $2}' <<< "$unstored")"
+        if ! _malf_store_third_party "$index" "$name" "$path" "$prefixes" "$store" "$scratch" "$run_at"; then
+            echo "malf store-build: SKIP $name — its third-party step: $_MALF_THIRD_PARTY_CAUSE (DN-142.D17 (5))" >&2
+            rc=1; continue
+        fi
+        _malf_store_build_one "$name" "$path" "${MALF_STORE_BUILD_REV:-HEAD}" "$store" "$scratch" "$prefixes" || rc=1
     done
     [[ $rc -eq 0 ]] && rm -rf "$scratch"
     return "$rc"

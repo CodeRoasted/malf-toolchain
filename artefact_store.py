@@ -19,10 +19,24 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
         with a results directory, the step's test verdict record beside it (DN-142.D5 (3)); with
         the corpus gates parameter document naming the package, its corpus verdict too
         (DN-142.D21 (1)), whose red is that record's verdict and never this command's exit
+    artefact_store.py third-party-plan <store> <conan home> <graph info.json> <prefixes> <profile name>
+        each third-party reference a first-party step's resolved graph needs built by a step of its
+        own, `<name>/<version>` a line (DN-142.D17 (2), (4), (10)): one conan marks Missing, Build
+        or Download, and one present at a content no third-party-create record at the profile
+        holds; exit 1 refusing a python_requires or a node state no step can address
+    artefact_store.py third-party-step <store> <conan home> <install graph.json> <prefixes>
+                                      <profile name> <malf dir> <toolchain.json>
+        one `third-party-create` record per third-party node the install built, in dependency
+        order, keyed by its reference, package id, profile, malf's tree, its recipe's export, its
+        dependencies' contents (each held by a record, or refused), the toolchain, the profile
+        and the system; its output the whole package folder, compared at an equal key, no
+        transport kept. Exit 0 stored or matching, 3 a mismatch, 1 a refusal (DN-142.D17 (2))
     artefact_store.py upstreams <store>
         every create or build record whose inputs name an `upstream` package digest that no record
         of that package's OWN create step at the same profile holds, one line per record with each
-        unrecorded upstream; exit 0 when there is none, 1 otherwise (DN-142.D16), read-only
+        unrecorded upstream, and every such record whose `third_party` names a content no
+        third-party-create record at its profile holds (DN-142.D17 (4)); exit 0 when there is
+        none, 1 otherwise (DN-142.D16), read-only
     artefact_store.py build-id <store> <build-id>
         every package record whose `build_ids` holds that GNU build-id (40 hex), one line each:
         `<key> <package alias> <path>`; exit 0 when one or more answer, 1 when none (DN-142.D15)
@@ -70,6 +84,16 @@ from the create's folder, so it indexes exactly the bytes the store keeps; it is
 the content digest covers, so it is an index, never compared and never a key member. A first-party
 package one of whose linked ELF files carries no note is refused before anything is stored: the
 index is total over what ships, or a build answering with an id would find no record.
+
+A THIRD-PARTY BINARY IS THE OUTPUT OF A STEP OF ITS OWN (DN-142.D17): a `third-party-create`
+record per configuration (`<ref>#<rrev>:<package id>`) the writer consumes, keyed by its reference,
+package id and profile, malf's tree, its recipe's export digest, its dependencies' contents, the
+toolchain, the profile and the system; its output the WHOLE package folder, compared at an equal key
+like any package, with no transport kept. A first-party step's create builds only its own package
+(a third-party node it built or downloaded refuses the step), and a step whose `third_party` names a
+content no `third-party-create` record at its profile holds is refused; when a record holds that
+configuration at another content, the refusal names the folder and the files written into it after
+its step judged it. A graph carrying a `python_requires` is refused by every key derivation.
 
 A step's TEST VERDICT is a record of its own (DN-142.D5 (3), DN-142.D7), never a field of the
 package record: the consumer's create runs no test, so a package record holding results could never
@@ -539,19 +563,38 @@ def graph_nodes(graph_json: Path) -> list[dict]:
     return [node for index, node in nodes.items() if index != "0"]
 
 
+def _alias(node: dict) -> tuple[str, str, str]:
+    """(recipe `<ref>#<rrev>`, configuration `<recipe>:<package id>`, binary `<configuration>#<prev>`)."""
+    recipe = f"{node['ref'].split('#')[0]}#{node['rrev']}"
+    configuration = f"{recipe}:{node['package_id']}"
+    return recipe, configuration, f"{configuration}#{node['prev']}"
+
+
+def refuse_python_requires(nodes: list[dict], graph_json: Path) -> None:
+    """Exit naming each node that carries a `python_requires`: recipe code no graph node is, so no
+    key member names it, and a key would hold it silently by omission (DN-142.D17 (11))."""
+    carried = sorted(f"{node['ref'].split('#')[0]} carries {', '.join(sorted(node['python_requires']))}"
+                     for node in nodes if node.get("python_requires"))
+    if carried:
+        sys.exit(f"artefact_store: REFUSED the graph {graph_json}: {len(carried)} node(s) carry a "
+                 "python_requires, recipe code that is no graph node and so no member of any key "
+                 "(DN-142.D17 (11)): " + "; ".join(carried))
+
+
 def _step_inputs(home: Path, graph_json: Path, package: str, prefixes: tuple[str, ...],
-                 with_root: bool) -> tuple[dict, dict, dict, tuple[str, Path] | None]:
-    """(sources, upstream, third_party, the target's (binary, folder)) of a step's graph."""
+                 with_root: bool) -> tuple[dict, dict, dict, tuple[str, Path] | None, dict]:
+    """(sources, upstream, third_party, the target's (binary, folder), each third-party node's
+    folder) of a step's graph."""
     nodes = graph_nodes(graph_json)
-    sources, upstream, third_party = {}, {}, {}
+    refuse_python_requires(nodes, graph_json)
+    sources, upstream, third_party, folders = {}, {}, {}, {}
     target = None
     # note: a `build-scripts` package (a content recipe) is created in the build context alone
     created = "host" if any(node["name"] == package and node["context"] == "host" for node in nodes) \
         else "build"
     for node in nodes:
         name = node["name"]
-        recipe = f"{node['ref'].split('#')[0]}#{node['rrev']}"
-        binary = f"{recipe}:{node['package_id']}#{node['prev']}"
+        recipe, _configuration, binary = _alias(node)
         if node.get("binary") == "Skip":
             continue
         folder = _cache_path(home, binary)
@@ -565,9 +608,10 @@ def _step_inputs(home: Path, graph_json: Path, package: str, prefixes: tuple[str
             third_party[f"{name}/{node['context']}"] = {
                 "ref": recipe, "package_id": node["package_id"],
                 "content": tree_digest(folder)[0]}
+            folders[f"{name}/{node['context']}"] = folder
     if with_root and target is None:
         sys.exit(f"artefact_store: the graph {graph_json} holds no node named {package}")
-    return sources, upstream, third_party, target
+    return sources, upstream, third_party, target, folders
 
 
 def _step_document(kind: str, package: str, profile: str, home: Path, malf_dir: Path,
@@ -620,7 +664,9 @@ def _refuse_unrecorded(store: Path, document: dict) -> bool:
 
 
 def audit_upstreams(store: Path) -> int:
-    """`upstreams`: every step record of the store judged against its own store, read-only."""
+    """`upstreams`: every step record of the store judged against its own store, read-only: each
+    first-party upstream its own step must have recorded (DN-142.D16), and each third-party input
+    a `third-party-create` record must hold (DN-142.D17 (4))."""
     flagged = 0
     for path in sorted((store / "records").glob("*.json")):
         body = json.loads(path.read_text())
@@ -629,24 +675,228 @@ def audit_upstreams(store: Path) -> int:
                 or "upstream" not in document:
             continue
         unrecorded = unrecorded_upstreams(store, document)
+        held = third_party_records(store, document["step"]["profile"])
+        unheld = sorted(f"{label} {member['ref']}:{member['package_id']} {member['content']}"
+                        for label, member in document.get("third_party", {}).items()
+                        if member["content"] not in {output["content"] for output in
+                                                     held.get(f"{member['ref']}:{member['package_id']}", [])})
         if unrecorded:
-            flagged += 1
             print(f"{body['key']} {document['step']['package']}: {len(unrecorded)} of "
                   f"{len(document['upstream'])} upstream(s) unrecorded: " + "; ".join(unrecorded))
-    print(f"artefact_store: {flagged} record(s) link an upstream no step of its own recorded")
+        if unheld:
+            print(f"{body['key']} {document['step']['package']}: {len(unheld)} third-party input(s) "
+                  "no third-party-create record holds: " + "; ".join(unheld))
+        flagged += bool(unrecorded or unheld)
+    print(f"artefact_store: {flagged} record(s) link an upstream no step of its own recorded, or "
+          "a third-party binary no step of its own judged")
     return 1 if flagged else 0
+
+
+THIRD_PARTY_KIND = "third-party-create"
+MISMATCHED = 3
+BUILT_BINARIES = ("Build", "Download")
+PLANNED_BINARIES = ("Missing", "Build", "Download")
+
+
+def third_party_records(store: Path, profile: str) -> dict[str, list[dict]]:
+    """The package output of every `third-party-create` record at `profile`, by configuration
+    (`<ref>#<rrev>:<package id>`)."""
+    held: dict[str, list[dict]] = {}
+    records = store / "records"
+    for path in sorted(records.glob("*.json")) if records.is_dir() else ():
+        body = json.loads(path.read_text())
+        step = body["inputs"]["step"]
+        if step.get("kind") == THIRD_PARTY_KIND and step.get("profile") == profile:
+            output = body["outputs"]["package"]
+            held.setdefault(output["alias"].rsplit("#", 1)[0], []).append(output)
+    return held
+
+
+def unheld_third_party(held: dict[str, list[dict]], third_party: dict, folders: dict) -> list[str]:
+    """Each third-party input whose content no `third-party-create` record holds (DN-142.D17 (4)).
+
+    A configuration that HAS a record at another content was written after its step judged it:
+    the finding names its folder and the files that differ from the record, the detector of
+    DN-142.D17 (8) for a package that writes into itself when it is used."""
+    findings = []
+    for label, member in sorted(third_party.items()):
+        configuration = f"{member['ref']}:{member['package_id']}"
+        recorded = held.get(configuration, [])
+        if member["content"] in {output["content"] for output in recorded}:
+            continue
+        if not recorded:
+            findings.append(f"{label} {configuration} at content {member['content']}: no "
+                            "third-party-create record holds it")
+            continue
+        before = {entry[0]: entry[1:] for entry in recorded[-1]["entries"]}
+        after = {entry[0]: entry[1:] for entry in tree_digest(folders[label])[1]}
+        new = sorted(after.keys() - before.keys())
+        changed = sorted(path for path in after.keys() & before.keys() if after[path] != before[path])
+        removed = sorted(before.keys() - after.keys())
+        named = "; ".join(f"{word} {len(paths)}: " + ", ".join(paths[:NAMED_FILES])
+                          + (", ..." if len(paths) > NAMED_FILES else "")
+                          for word, paths in (("new", new), ("changed", changed), ("removed", removed))
+                          if paths)
+        findings.append(f"{label} {configuration}: CHANGED SINCE ITS RECORD, its folder "
+                        f"{folders[label]} was written after its step judged it: {named}")
+    return findings
+
+
+def _refuse_unheld_third_party(store: Path, document: dict, folders: dict) -> bool:
+    """True, having named each one, when the step consumed a third-party binary no step judged."""
+    findings = unheld_third_party(third_party_records(store, document["step"]["profile"]),
+                                  document["third_party"], folders)
+    if findings:
+        print(f"artefact_store: REFUSED {document['step']['package']}: {len(findings)} third-party "
+              f"package(s) at a content no third-party-create record at "
+              f"{document['step']['profile']} holds, so the step consumed a binary no step of its "
+              "own built and judged (DN-142.D17 (4), (8)): " + "; ".join(findings), file=sys.stderr)
+    return bool(findings)
+
+
+def built_third_party(nodes: list[dict], prefixes: tuple[str, ...]) -> list[str]:
+    """Each third-party node a first-party step's graph built or downloaded (DN-142.D17 (1))."""
+    return sorted(f"{node['ref'].split('#')[0]} ({node['context']}) {node['binary']}"
+                  for node in nodes
+                  if not _owned(node["name"], prefixes) and node.get("binary") in BUILT_BINARIES)
+
+
+def third_party_plan(store: Path, home: Path, graph_json: Path, prefixes: tuple[str, ...],
+                     profile: str) -> int:
+    """`third-party-plan`: each third-party reference a first-party step's graph (`conan graph
+    info` of the step's recipe, under the strict lock) needs built by a step of its own, one
+    `<name>/<version>` a line, its reason on stderr: a node conan marks Missing, Build or
+    Download (a downloaded binary is never consumed, DN-142.D17 (10)), and a present one whose
+    content no record holds (DN-142.D17 (4)). A planned reference makes the build-context tools
+    its build needs appear in the next resolve, so the caller re-plans until nothing is added.
+    Exit 1 on a third-party node in a state the plan does not know."""
+    nodes = graph_nodes(graph_json)
+    refuse_python_requires(nodes, graph_json)
+    held = third_party_records(store, profile)
+    plan: dict[str, str] = {}
+    unknown = []
+    for node in nodes:
+        state = node.get("binary")
+        if _owned(node["name"], prefixes) or state == "Skip":
+            continue
+        _recipe, configuration, binary = _alias(node)
+        pattern = node["ref"].split("#")[0]
+        if state in PLANNED_BINARIES:
+            plan.setdefault(pattern, f"{configuration} ({node['context']}) is {state}")
+        elif state == "Cache":
+            content = tree_digest(_cache_path(home, binary))[0]
+            if content not in {output["content"] for output in held.get(configuration, [])}:
+                plan.setdefault(pattern, f"{configuration} ({node['context']}) is present at "
+                                         f"content {content}, which no record holds")
+        else:
+            unknown.append(f"{configuration} ({node['context']}) is {state}")
+    if unknown:
+        print(f"artefact_store: REFUSED the plan of {graph_json}: {len(unknown)} third-party "
+              "node(s) in a state no step of its own can address: " + "; ".join(unknown),
+              file=sys.stderr)
+        return 1
+    for pattern, reason in sorted(plan.items()):
+        print(pattern)
+        print(f"artefact_store: PLAN third-party-create {pattern}: {reason}", file=sys.stderr)
+    return 0
+
+
+def _dependency_order(nodes: dict[str, dict], wanted: list[str]) -> list[str]:
+    """The `wanted` node ids, each after every node it depends on."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def visit(index: str) -> None:
+        if index in seen:
+            return
+        seen.add(index)
+        for dependency in sorted(nodes[index].get("dependencies", {}), key=int):
+            visit(dependency)
+        if index in wanted:
+            ordered.append(index)
+
+    for index in sorted(wanted, key=int):
+        visit(index)
+    return ordered
+
+
+def third_party_step(store: Path, home: Path, graph_json: Path, prefixes: tuple[str, ...],
+                     profile: str, malf_dir: Path, toolchain: Path) -> int:
+    """`third-party-step`: one `third-party-create` record per third-party node the graph built
+    (DN-142.D17 (2)), in dependency order, from the `conan install --format=json` graph that
+    built them. Its key: the reference, package id and profile; malf's tree; the recipe's export
+    digest; each dependency's content, each of which a record must hold (DN-142.D17 (4)); the
+    toolchain, the profile and the system. Its output is the whole package folder, compared at
+    an equal key; no transport is kept, nothing publishes a third-party package.
+    post: exit 0 every node stored or matching; 3 (MISMATCHED) a node rebuilt at an equal key
+          differs; else 1 a node consumed an unheld dependency (its record not written) or a
+          binary was downloaded."""
+    nodes = json.loads(graph_json.read_text())["graph"]["nodes"]
+    listed = [node for index, node in nodes.items() if index != "0"]
+    refuse_python_requires(listed, graph_json)
+    downloaded = [entry for entry in built_third_party(listed, prefixes) if entry.endswith("Download")]
+    if downloaded:
+        print(f"artefact_store: REFUSED {graph_json}: {len(downloaded)} third-party binary(ies) "
+              "downloaded, a producer outside the writer's domain (DN-142.D17 (10)): "
+              + "; ".join(downloaded), file=sys.stderr)
+        return 1
+    built = [index for index, node in nodes.items()
+             if index != "0" and not _owned(node["name"], prefixes) and node.get("binary") == "Build"]
+    held = third_party_records(store, profile)
+    shared = {"definition": definition_member(malf_dir),
+              "toolchain": json.loads(toolchain.read_text()),
+              "profile": profile_member(home, profile, malf_dir), "system": system_member()}
+    worst, mismatched = 0, False
+    for index in _dependency_order(nodes, built):
+        node = nodes[index]
+        recipe, _configuration, binary = _alias(node)
+        third_party, folders = {}, {}
+        for dependency in node.get("dependencies", {}):
+            upstream = nodes[dependency]
+            if upstream.get("binary") == "Skip":
+                continue
+            label = f"{upstream['name']}/{upstream['context']}"
+            folders[label] = _cache_path(home, _alias(upstream)[2])
+            third_party[label] = {"ref": _alias(upstream)[0], "package_id": upstream["package_id"],
+                                  "content": tree_digest(folders[label])[0]}
+        document = {"step": {"kind": THIRD_PARTY_KIND, "package": node["name"], "reference": recipe,
+                             "package_id": node["package_id"], "profile": profile},
+                    "definition": shared["definition"], "sources": _export_digest(home, recipe),
+                    "third_party": third_party, "toolchain": shared["toolchain"],
+                    "profile": shared["profile"], "system": shared["system"]}
+        findings = unheld_third_party(held, third_party, folders)
+        if findings:
+            print(f"artefact_store: REFUSED {node['name']} third-party-create: {len(findings)} "
+                  "dependency(ies) at a content no record holds, so its record is not written "
+                  "(DN-142.D17 (4), (5)): " + "; ".join(findings), file=sys.stderr)
+            worst = 1
+            continue
+        content, entries = tree_digest(_cache_path(home, binary))
+        output = {"alias": binary, "content": content, "entries": entries}
+        if LocalStore(store).commit(document, {"package": output}, {}) == 0:
+            held.setdefault(binary.rsplit("#", 1)[0], []).append(output)
+        else:
+            mismatched = True
+    return MISMATCHED if mismatched else worst
 
 
 def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile: str,
                malf_dir: Path, toolchain: Path, prefixes: tuple[str, ...],
                results: Path | None = None, corpus_gates: Path | None = None) -> int:
-    sources, upstream, third_party, target = _step_inputs(home, graph_json, package, prefixes, True)
+    built = built_third_party(graph_nodes(graph_json), prefixes)
+    if built:
+        print(f"artefact_store: REFUSED {package}: its create built or downloaded {len(built)} "
+              "third-party package(s), and a first-party step builds exactly one package, its own "
+              "(DN-142.D17 (1)): " + "; ".join(built), file=sys.stderr)
+        return 1
+    sources, upstream, third_party, target, folders = _step_inputs(home, graph_json, package,
+                                                                   prefixes, True)
     document = _step_document("conan-create", package, profile, home, malf_dir, toolchain,
                               sources, upstream, third_party)
     declared_path = os.environ.get(EXECUTABLES_ENV)
     declared = json.loads(Path(declared_path).read_text()) if declared_path else {}
     document["step"]["executables"] = declared
-    if _refuse_unrecorded(store, document):
+    if _refuse_unrecorded(store, document) | _refuse_unheld_third_party(store, document, folders):
         return 1
     binary, folder = target
     content, entries = tree_digest(folder)
@@ -685,11 +935,17 @@ def build_step(store: Path, home: Path, graph_json: Path, package: str, profile:
                results: Path) -> int:
     """The verdict record of a `stored: false` package's `conan build` step (DN-142.D14): no
     package record, the source its git tree id, `judged` the upstream packages it linked."""
-    sources, upstream, third_party, _target = _step_inputs(home, graph_json, package, prefixes, False)
+    built = built_third_party(graph_nodes(graph_json), prefixes)
+    if built:
+        print(f"artefact_store: REFUSED {package}: its build built or downloaded {len(built)} "
+              "third-party package(s) (DN-142.D17 (1)): " + "; ".join(built), file=sys.stderr)
+        return 1
+    sources, upstream, third_party, _target, folders = _step_inputs(home, graph_json, package,
+                                                                    prefixes, False)
     sources[f"{package}/host"] = source_tree
     document = _step_document("conan-build", package, profile, home, malf_dir, toolchain,
                               sources, upstream, third_party)
-    if _refuse_unrecorded(store, document):
+    if _refuse_unrecorded(store, document) | _refuse_unheld_third_party(store, document, folders):
         return 1
     built = sorted((results / package).glob("*.xml")) if (results / package).is_dir() else []
     package_ids = sorted({path.name.split(".", 1)[0] for path in built})
@@ -1219,6 +1475,12 @@ def main(argv: list[str]) -> int:
                           Path(argv[6]), Path(argv[7]), tuple(argv[8].split()),
                           Path(argv[9]) if len(argv) >= 10 else None,
                           Path(argv[10]) if len(argv) == 11 else None)
+    if len(argv) == 6 and argv[0] == "third-party-plan":
+        return third_party_plan(Path(argv[1]), Path(argv[2]), Path(argv[3]), tuple(argv[4].split()),
+                                argv[5])
+    if len(argv) == 8 and argv[0] == "third-party-step":
+        return third_party_step(Path(argv[1]), Path(argv[2]), Path(argv[3]), tuple(argv[4].split()),
+                                argv[5], Path(argv[6]), Path(argv[7]))
     if len(argv) == 11 and argv[0] == "build-step":
         return build_step(Path(argv[1]), Path(argv[2]), Path(argv[3]), argv[4], argv[5],
                           Path(argv[6]), Path(argv[7]), tuple(argv[8].split()), argv[9],

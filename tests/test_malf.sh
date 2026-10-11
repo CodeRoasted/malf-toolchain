@@ -3129,7 +3129,7 @@ check "named packages select their closure in walk order; a name that is no step
       "$(printf 'a_core\t/w/a\t\tcreate|b_lib\t/w/b\ta_core\tcreate|d_app\t/w/d\tb_lib\tcreate')|malf store-create: no step of malf's walk is named zz_none" \
       "$(sf_walk d_app)|$(sf_walk zz_none)"
 check "the act never conan-creates a step it marked build: the create branch is the only create, and a build step goes to store-build's one function" \
-      "1 1 0" "$(grep -c 'if \[\[ "$kind" == "build" \]\]; then' "$MALF_BIN") $(awk '/^cmd_store_create\(\)/,/^}/' "$MALF_BIN" | grep -c '^ *if ! _malf_store_create_step ') $(awk '/^cmd_store_create\(\)/,/^}/' "$MALF_BIN" | grep -cE '^ *(if ! )?conan create ')"
+      "1 1 0 1" "$(grep -c 'if \[\[ "$kind" == "build" \]\]; then' "$MALF_BIN") $(awk '/^_malf_store_run_step\(\)/,/^}/' "$MALF_BIN" | grep -c '^ *if ! _malf_store_create_step ') $(awk '/^(cmd_store_create|_malf_store_run_step)\(\)/,/^}/' "$MALF_BIN" | grep -cE '^ *(if ! )?conan create ') $(awk '/^cmd_store_create\(\)/,/^}/' "$MALF_BIN" | grep -c '^ *_malf_store_run_step ')"
 check "store-build REFUSES a package that is stored, naming store-create, before conan is ever called" \
       "rc=2 1 none" "$(sf_malf store-build rel_pkg) $([[ -s "$cs_tmp/sf-conan.log" ]] && echo called || echo none)"
 
@@ -4691,15 +4691,16 @@ as_create() {   # <home name> — the graph of a create of ex_top in that home
     local home="$as_tmp/$1"
     CONAN_HOME="$home" bash "$MALF_BIN" profiles > /dev/null 2>&1
     printf '[settings]\nos=Linux\narch=x86_64\nbuild_type=Release\n' > "$home/profiles/fixture"
-    CONAN_HOME="$home" conan create "$as_tmp/tpdep" -pr:a fixture > "$as_tmp/$1.tp.log" 2>&1
-    CONAN_HOME="$home" conan create "$as_tmp/ex_top" -pr:a fixture --format=json > "$as_tmp/$1.graph.json" 2> "$as_tmp/$1.log"
+    CONAN_HOME="$home" conan create "$as_tmp/tpdep" -pr:a fixture --format=json > "$as_tmp/$1.tp.json" 2> "$as_tmp/$1.tp.log"
+    CONAN_HOME="$home" conan create "$as_tmp/ex_top" -pr:a fixture --build='ex_top/*' --no-remote --format=json > "$as_tmp/$1.graph.json" 2> "$as_tmp/$1.log"
 }
-as_step() {   # <home name> — the step's verdict line and exit, the key and digests elided
+as_step() {   # <home name> — the step's verdict line and exit, the key and digests elided; tpdep's own step recorded first (DN-142.D17 (4))
     local out rc
+    python3 "$MALF_ROOT/artefact_store.py" third-party-step "$as_tmp/store" "$as_tmp/$1" "$as_tmp/$1.tp.json" ex_ fixture "$MALF_ROOT" "$as_tmp/toolchain.json" > /dev/null 2>&1
     out="$(python3 "$MALF_ROOT/artefact_store.py" conan-step "$as_tmp/store" "$as_tmp/$1" "$as_tmp/$1.graph.json" ex_top fixture "$MALF_ROOT" "$as_tmp/toolchain.json" "ex_" 2>&1)"; rc=$?
     printf 'rc=%s %s' "$rc" "$(grep -oE 'artefact_store: [A-Z]+ ex_top package|[0-9]+ file\(s\): .*' <<< "$out" | sed 's/artefact_store: //' | tr '\n' ' ')"
 }
-as_key() { python3 -c 'import json, sys; print(*sorted(r.removesuffix(".json") for r in sys.argv[1:]))' $(ls "$as_tmp/store/records"); }
+as_key() { python3 -c 'import json, sys; print(*sorted(r.rsplit("/", 1)[-1].removesuffix(".json") for r in sys.argv[1:]))' $(grep -l '"package": "ex_top"' "$as_tmp/store/records/"*.json); }
 as_create home-a; as_create home-b-at-a-longer-path
 check "the first create of a key is STORED" "rc=0 STORED ex_top package " "$(as_step home-a)"
 as_first="$(as_key)"
@@ -4715,7 +4716,7 @@ check "the mismatch is an event beside the record, and the record is not rewritt
 printf '#pragma once\n#define TOP 1\n' > "$as_tmp/ex_top/include/top.h"
 as_create home-a
 check "a changed exported source moves the key: a second record is STORED" \
-      "rc=0 STORED ex_top package |2" "$(as_step home-a)|$(ls "$as_tmp/store/records" | wc -l | tr -d ' ')"
+      "rc=0 STORED ex_top package |2" "$(as_step home-a)|$(grep -l '"package": "ex_top"' "$as_tmp/store/records/"*.json | wc -l | tr -d ' ')"
 
 # DN-142.D16 (a): a store act's create builds from source only its own package and third-party
 # ones. ex_mid is first-party (the `ex_` namespace) and exported with no binary: the old spelling
@@ -4726,7 +4727,7 @@ check "a changed exported source moves the key: a second record is STORED" \
 mkdir -p "$as_tmp/ex_mid" "$as_tmp/ex_low"
 printf 'from conan import ConanFile\n\n\nclass ExMid(ConanFile):\n    name = "ex_mid"\n    version = "0.1"\n    package_type = "header-library"\n    requires = "tpdep/0.1"\n' > "$as_tmp/ex_mid/conanfile.py"
 printf 'from conan import ConanFile\n\n\nclass ExLow(ConanFile):\n    name = "ex_low"\n    version = "0.1"\n    package_type = "header-library"\n    requires = "ex_mid/0.1"\n' > "$as_tmp/ex_low/conanfile.py"
-as_build_args() { bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; _malf_store_build_args "$2" "$3"' _ "$MALF_BIN" "$1" "$2"; }
+as_build_args() { bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; _malf_store_build_args "$2"' _ "$MALF_BIN" "$1"; }
 as_fresh() {   # <home name> — tpdep and ex_mid exported, no binary of either
     local home="$as_tmp/$1"
     CONAN_HOME="$home" bash "$MALF_BIN" profiles > /dev/null 2>&1
@@ -4740,17 +4741,19 @@ as_act() {   # <home name> <package> [build args...] — the create's exit and a
         > "$as_tmp/$name.$package.graph.json" 2> "$as_tmp/$name.$package.log"; rc=$?
     printf 'rc=%s %s' "$rc" "$(grep -oE "Missing prebuilt package for '[a-z_]+/0.1'" "$as_tmp/$name.$package.log" | sed -n 1p)"
 }
-check "the act's build arguments: the step's own package, then one missing-exclusion per owned namespace" \
-      "--build=ex_low/*|--build=missing:~ex_*|--build=missing:~zz_*" "$(as_build_args ex_low 'ex_ zz_' | paste -sd'|')"
+check "the act's build arguments: the step's own package and nothing else (DN-142.D17 (1))" \
+      "--build=ex_low/*" "$(as_build_args ex_low | paste -sd'|')"
 as_fresh home-old
 check "RED FIRST — the old spelling --build=missing builds a missing first-party upstream inside the consumer's create" \
       "rc=0 " "$(as_act home-old ex_low --build=missing --build='ex_low/*')"
 as_fresh home-act
-mapfile -t as_low_args < <(as_build_args ex_low ex_)
-mapfile -t as_mid_args < <(as_build_args ex_mid ex_)
+CONAN_HOME="$as_tmp/home-act" conan create "$as_tmp/tpdep" -pr:a fixture --format=json > "$as_tmp/home-act.tpdep.json" 2> /dev/null
+python3 "$MALF_ROOT/artefact_store.py" third-party-step "$as_tmp/ustore" "$as_tmp/home-act" "$as_tmp/home-act.tpdep.json" ex_ fixture "$MALF_ROOT" "$as_tmp/toolchain.json" > /dev/null 2>&1
+mapfile -t as_low_args < <(as_build_args ex_low)
+mapfile -t as_mid_args < <(as_build_args ex_mid)
 check "(a) the act's spelling FAILS the create, naming the first-party package whose binary is missing" \
       "rc=1 Missing prebuilt package for 'ex_mid/0.1'" "$(as_act home-act ex_low "${as_low_args[@]}")"
-check "(a) once ex_mid's own create made it, the consumer's create passes, its third-party upstream built from source" \
+check "(a) once ex_mid's own create made it, the consumer's create passes, its third-party upstream the one tpdep's own step built" \
       "rc=0 |rc=0 " "$(as_act home-act ex_mid "${as_mid_args[@]}")|$(as_act home-act ex_low "${as_low_args[@]}")"
 as_record_step() {   # <package> — the step's verdict word and exit over the upstream store
     local out rc
@@ -4758,7 +4761,7 @@ as_record_step() {   # <package> — the step's verdict word and exit over the u
     printf 'rc=%s %s' "$rc" "$(grep -oE "(STORED|MATCH) $1 package|REFUSED $1: [0-9]+ upstream|ex_mid/host" <<< "$out" | tr '\n' ' ')"
 }
 check "(b) RED — a step linking a first-party upstream no record of that package's own step holds is REFUSED, naming it, and stores nothing" \
-      "rc=1 REFUSED ex_low: 1 upstream ex_mid/host |0" "$(as_record_step ex_low)|$(ls "$as_tmp/ustore/records" 2>/dev/null | wc -l | tr -d ' ')"
+      "rc=1 REFUSED ex_low: 1 upstream ex_mid/host |0" "$(as_record_step ex_low)|$(grep -l '"package": "ex_low"' "$as_tmp/ustore/records/"*.json 2>/dev/null | wc -l | tr -d ' ')"
 check "(b) once the upstream's own step is recorded, the consumer's step is STORED" \
       "rc=0 STORED ex_mid package |rc=0 STORED ex_low package " "$(as_record_step ex_mid)|$(as_record_step ex_low)"
 check "(b) the read-only replay is silent over a store whose every upstream is recorded" \
@@ -4788,7 +4791,7 @@ tq_third() {   # <name> <package() body line> [<class line>...]
 tq_third tpv 'save(self, os.path.join(self.package_folder, "lib", "libtpv.a"), self.build_folder)'
 tq_third tpr 'save(self, os.path.join(self.package_folder, "lib", "libtpr.a"), "the same bytes in every home")'
 tq_third tpd 'save(self, os.path.join(self.package_folder, "lib", "libtpd.a"), self.build_folder)'
-tq_third tpw 'save(self, os.path.join(self.package_folder, "bin", "tpw.sh"), "#!/bin/sh\\necho ran >> \"$(dirname \"$0\")/../written-at-use\"\\n"); os.chmod(os.path.join(self.package_folder, "bin", "tpw.sh"), 0o755)' 'package_type = "application"'
+tq_third tpw 'save(self, os.path.join(self.package_folder, "bin", "tpw.sh"), "#!/bin/sh\necho ran >> \"$(dirname \"$0\")/../written-at-use\"\n"); os.chmod(os.path.join(self.package_folder, "bin", "tpw.sh"), 0o755)' 'package_type = "application"'
 tq_third tpp 'save(self, os.path.join(self.package_folder, "lib", "libtpp.a"), "x")' 'python_requires = "pyreq/0.1"'
 mkdir -p "$tq_src/pyreq"
 printf 'from conan import ConanFile\n\n\nclass PyReq(ConanFile):\n    name = "pyreq"\n    version = "0.1"\n    package_type = "python-require"\n' > "$tq_src/pyreq/conanfile.py"
@@ -4800,7 +4803,7 @@ tq_first() {   # <name> <requirement line> [<build() body line>]
 tq_first ex_v 'requires = "tpv/0.1"'
 tq_first ex_r 'requires = "tpr/0.1"'
 tq_first ex_d 'requires = "tpd/0.1"'
-tq_first ex_w 'tool_requires = "tpw/0.1"' 'self.run("tpw.sh")'
+tq_first ex_w 'tool_requires = "tpw/0.1"' 'self.run(self.dependencies.build["tpw"].package_folder + "/bin/tpw.sh")'
 tq_first ex_p 'requires = "tpp/0.1"'
 printf 'packages: {}\n' > "$tq_src/packages.yml"
 git -C "$tq_src" init -q && git -C "$tq_src" add -A && git -C "$tq_src" -c user.email=t@t -c user.name=t commit -qm fixtures
@@ -4836,7 +4839,10 @@ check "(a) act 1: tpv's own third-party-create is STORED, then the consumer's cr
       "rc=0 1 1 1" "$(tq_step a store-v ex_v) $(tq_has 'STORED tpv package') $(tq_has 'STORED ex_v package') $(tq_has '\[1\] ex_v PASS')"
 check "(a) RED — act 2: tpv rebuilt at an EQUAL key differs, a MISMATCH naming its file; its own line closes MISMATCH, the consumer's SKIPPED, and nothing of it is built" \
       "rc=4 1 1 1 0" \
-      "$(tq_step a-second-home-at-a-longer-path store-v ex_v) $(tq_has 'MISMATCH tpv package at an equal key .*1 file(s): lib/libtpv.a') $(tq_has '\[1\] ex_v:third-party MISMATCH') $(tq_has '\[1\] ex_v SKIPPED') $(CONAN_HOME="$tq_tmp/a-second-home-at-a-longer-path" conan list 'ex_v/0.1:*' --format=json 2>/dev/null | python3 -c 'import json, sys; print(sum(len(r.get("packages", {})) for v in json.load(sys.stdin).get("Local Cache", {}).values() for r in v.get("revisions", {}).values()))')"
+      "$(tq_step a-second-home-at-a-longer-path store-v ex_v) $(tq_has 'MISMATCH tpv package at an equal key .*1 file(s): lib/libtpv.a') $(tq_has '\[1\] ex_v:third-party MISMATCH') $(tq_has '\[1\] ex_v SKIPPED') $(CONAN_HOME="$tq_tmp/a-second-home-at-a-longer-path" conan list 'ex_v/0.1:*' --format=json 2>/dev/null | python3 -c 'import json, sys
+cache = json.load(sys.stdin).get("Local Cache", {})
+print(sum(len(recipe.get("packages", {})) for body in cache.values() if isinstance(body, dict)
+          for recipe in body.get("revisions", {}).values()))')"
 # (a′) the reproducible control: the same two acts over tpr.
 check "(a′) the reproducible control: act 2 MATCHES tpr's third-party-create and the consumer's create at equal keys" \
       "rc=0 rc=0 1 1 2" \
@@ -4889,10 +4895,13 @@ check "(d) RED — a binary restored from another home is rebuilt by its own ste
 from pathlib import Path
 tp, consumer = json.loads(sys.argv[1]), json.loads(sys.argv[2])
 home, restored = sys.argv[3], sys.argv[4]
-built = [path for path in Path(home, "p").glob("*/p/lib/libtpd.a") if tp["content"]]
-print("written-in-y" if any(path.read_text().startswith(home) for path in built) else "not-written-in-y",
+sys.path.insert(0, sys.argv[5])
+import artefact_store
+recorded = [library for library in Path(home, "p").rglob("libtpd.a")
+            if artefact_store.tree_digest(library.parents[1])[0] == tp["content"]]
+print("written-in-y" if recorded and all(library.read_text().startswith(home) for library in recorded) else "not-written-in-y",
       "differs-from-restored" if tp["content"] != restored else "is-the-restored",
-      "consumer-links-it" if consumer["third_party"]["tpd/host"]["content"] == tp["content"] else "consumer-links-another")' "$(tq_record store-d tpd third-party-create)" "$(tq_record store-d ex_d conan-create)" "$tq_tmp/y" "$tq_restored")"
+      "consumer-links-it" if consumer["third_party"]["tpd/host"]["content"] == tp["content"] else "consumer-links-another")' "$(tq_record store-d tpd third-party-create)" "$(tq_record store-d ex_d conan-create)" "$tq_tmp/y" "$tq_restored" "$MALF_ROOT")"
 
 # (e) a package written into when it is used: tpw's script appends to its own folder when ex_w's
 # build runs it, after tpw's own step recorded it.
@@ -5328,7 +5337,7 @@ check "the purge says what it removed, naming the home" \
 cv_body="$(sed -n '/^cmd_store_create()/,/^}/p' "$MALF_BIN")"
 check "store-create purges its home before its first create, and refuses when the purge fails" \
       "before refuses" \
-      "$( (( $(grep -n '_malf_purge_first_party || return 2' <<< "$cv_body" | cut -d: -f1) < $(grep -n '_malf_store_create_step ' <<< "$cv_body" | cut -d: -f1 | head -1) )) && printf before) $(grep -q '_malf_purge_first_party || return 2' <<< "$cv_body" && printf refuses)"
+      "$( (( $(grep -n '_malf_purge_first_party || return 2' <<< "$cv_body" | cut -d: -f1) < $(grep -n '_malf_store_run_step ' <<< "$cv_body" | cut -d: -f1 | head -1) )) && printf before) $(grep -q '_malf_purge_first_party || return 2' <<< "$cv_body" && printf refuses)"
 check "no verb named cut-verify is left: no dispatch arm, no function, no usage line" \
       "0" "$(grep -cE 'cmd_cut_verify|^ *cut-verify\)|malf cut-verify \[' "$MALF_BIN")"
 rm -rf "$cv_tmp"
@@ -5498,13 +5507,14 @@ print("ok" if found and float(found.group(1)) >= 0.3 else repr(line))' "$st_out"
 check "the closing line carries the verdict, the walk's seconds, the step's wall and its children's CPU, each measured" \
       "ok" "$(python3 -c 'import re, sys
 line = sys.argv[1].splitlines()[-1]
-found = re.fullmatch(r"--- store-create \[(\d+)\] (\S+) (PASS|FAILED|UNRECORDED) · at ([0-9.]+) s · wall ([0-9.]+) s · cpu ([0-9.]+) s ---", line)
+found = re.fullmatch(r"--- store-create \[(\d+)\] (\S+) (PASS|FAILED|UNRECORDED|SKIPPED|MISMATCH) · at ([0-9.]+) s · wall ([0-9.]+) s · cpu ([0-9.]+) s ---", line)
 ok = found and found.group(1, 2, 3) == ("3", "st_pkg", "PASS") and float(found.group(5)) >= 0.4 \
     and float(found.group(4)) >= float(found.group(5)) + 0.3 and float(found.group(6)) >= 0.3
 print("ok" if ok else repr(line))' "$st_out")"
 st_body="$(sed -n '/^cmd_store_create()/,/^}/p' "$MALF_BIN")"
-check "the walk opens every step it runs and closes it on each of its six exits: a build passed or failed, a create failed, a declaration unread, a record stored or not" \
-      "1 1 6" "$(grep -c '_malf_store_clock "$scratch/times"; run_at=' <<< "$st_body") $(grep -c '_malf_store_opened "$total"' <<< "$st_body") $(grep -c '_malf_store_closed "$total"' <<< "$st_body")"
+st_step="$(sed -n '/^_malf_store_run_step()/,/^}/p' "$MALF_BIN")"
+check "the walk opens every step it runs and closes it on each of its seven exits: its third-party step failed, a build passed or failed, a create failed, a declaration unread, a record stored or not" \
+      "1 1 7 1" "$(grep -c '_malf_store_clock "$scratch/times"; run_at=' <<< "$st_body") $(grep -c '_malf_store_opened "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total" "$name" SKIPPED' <<< "$st_step")"
 rm -rf "$st_tmp"
 echo
 
