@@ -3315,6 +3315,10 @@ check "a published ELF stripped, without a runpath, with a build-id is STORED, a
       "rc=0 1 {\"bin/tool\": \"published\"}" "$(bi_declared "$bi_tmp/pub-clean" '{"bin/tool": "published"}') $(python3 -c "import json, glob; print(json.dumps(json.load(open(glob.glob('$bi_tmp/pstore/records/*.json')[0]))['inputs']['step']['executables']))")"
 check "the declaration is read from packages.yml at HEAD, never the disk: a working-tree edit is not seen" \
       "{\"bin/tool\": \"run-from-cache\"}" "$(rm -rf "$bi_tmp/decl"; mkdir -p "$bi_tmp/decl/pkg"; cd "$bi_tmp/decl" && git init -q && printf 'packages:\n  bi_tool:\n    path: pkg\n    executables: {bin/tool: run-from-cache}\n' > packages.yml && git add packages.yml && git -c user.email=t@t -c user.name=t commit -qm one && sed -i 's/run-from-cache/published/' packages.yml && python3 "$MALF_ROOT/artefact_store.py" executables "$bi_tmp/decl/pkg" bi_tool)"
+check "a step packages.yml does not list (an umbrella recipe, coderoast_ipc's shape) reads as no declaration, {}, never an error that stops its record" \
+      "rc=0 {}" "$(out="$(python3 "$MALF_ROOT/artefact_store.py" executables "$bi_tmp/decl/pkg" bi_umbrella 2>&1)"; echo "rc=$? $out")"
+check "an umbrella step that holds an executable is still REFUSED as unclassified: no declaration classifies nothing" \
+      "rc=1 0 1" "$(bi_declared "$bi_tmp/pub-clean" "$(python3 "$MALF_ROOT/artefact_store.py" executables "$bi_tmp/decl/pkg" bi_umbrella)") $(grep -c 'bin/tool: unclassified' "$bi_tmp/step.log")"
 
 # The step's TEST VERDICT record (DN-142.D5 (3)): keyed by the build step's key and the selection,
 # holding both populations' result set, the digests judged and the logs as an object; an equal key

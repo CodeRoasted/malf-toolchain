@@ -467,14 +467,15 @@ def executable_findings(entries: list[list[str]], files: dict[str, bytes],
 def declared_executables(package_dir: Path, package: str) -> dict[str, str]:
     """The `executables:` map `package` declares in the `packages.yml` of the repository holding
     `package_dir`, read from its RECORDED commit's blob (HEAD), never the disk; `{}` when it declares
-    none. Raises ValueError on a class outside EXECUTABLE_CLASSES or an undeclared package."""
+    none — and when the file names no entry for it at all, as for coderoast-ipc's umbrella recipe
+    `coderoast_ipc`, a step of malf's walk that packages.yml does not list. That is safe by the
+    store's own rule: an executable the package holds is then unclassified, and refused.
+    Raises ValueError on a class outside EXECUTABLE_CLASSES."""
     import yaml
 
     top = Path(_run(["git", "-C", str(package_dir), "rev-parse", "--show-toplevel"]).strip())
     document = yaml.safe_load(_run(["git", "-C", str(top), "show", "HEAD:packages.yml"])) or {}
-    entry = (document.get("packages") or {}).get(package)
-    if entry is None:
-        raise ValueError(f"{top}/packages.yml at HEAD declares no package {package}")
+    entry = (document.get("packages") or {}).get(package) or {}
     declared = entry.get("executables") or {}
     wrong = {path: kind for path, kind in declared.items() if kind not in EXECUTABLE_CLASSES}
     if wrong:
