@@ -453,8 +453,13 @@ _malf_default_build_root() {
 # stale-binary ABI skew, 2026-07-10). cmp -s keeps it a no-op when already in sync. The path-map
 # fragment (ROADMAP N366), the recipe-exports helper (DN-142.D4 (b)) and the test helper
 # (DN-142.D5) ride with global.conf, which names each inside the home.
+# EVERY PROFILE OF THE REGISTRY rides too (DN-142.D23): the test helper, staged in the home, judges a
+# skip declaration's profile names against the `profiles/` beside it, so a home holding only the
+# profile it was last used with called a declaration for another registry profile a defect.
+# Measured 2026-10-11: a cold store-create home held linux-gcc16-release alone, and logcraft_core's
+# create failed on its declared linux-clang21-asan row.
 _malf_sync_conan_conf() {
-    local conf_file source
+    local conf_file source profile
     for conf_file in global.conf settings_user.yml malf-path-map.cmake malf_recipe_exports.py malf_recipe_tests.py; do
         source="$MALF_DIR/$conf_file"
         [[ "$conf_file" == *.cmake ]] && source="$MALF_DIR/cmake/$conf_file"
@@ -463,6 +468,12 @@ _malf_sync_conan_conf() {
         if [[ ! -f "$CONAN_HOME/$conf_file" ]] || ! cmp -s "$source" "$CONAN_HOME/$conf_file"; then
             _malf_install_file "$source" "$CONAN_HOME/$conf_file" || exit 1
         fi
+    done
+    mkdir -p "$CONAN_HOME/profiles"
+    for profile in "$MALF_DIR"/profiles/*; do
+        [[ -f "$profile" ]] || continue
+        [[ -f "$CONAN_HOME/profiles/${profile##*/}" ]] && cmp -s "$profile" "$CONAN_HOME/profiles/${profile##*/}" && continue
+        _malf_install_file "$profile" "$CONAN_HOME/profiles/${profile##*/}" || exit 1
     done
 }
 

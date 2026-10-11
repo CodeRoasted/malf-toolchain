@@ -5126,6 +5126,24 @@ check "malf test's judgment: an undeclared skip exits 1, the same run declared e
 rm -rf "$sk_tmp"
 echo
 
+echo "[7q7o] every home malf syncs holds every profile of the registry, so a skip declared for another registry profile is no defect inside a create (DN-142.D23)"
+po_home="$(realpath "$(mktemp -d)")/home"
+bash -c 'MALF_SOURCE_ONLY=1 source "$1" > /dev/null 2>&1; set +e; export CONAN_HOME="$2"; _malf_sync_conan_conf' _ "$MALF_BIN" "$po_home"
+check "a fresh home synced by malf holds every registry profile, byte for byte" \
+      "$(ls "$MALF_ROOT/profiles" | wc -l | tr -d ' ') 0" \
+      "$(ls "$po_home/profiles" | wc -l | tr -d ' ') $(for po_profile in "$MALF_ROOT"/profiles/*; do cmp -s "$po_profile" "$po_home/profiles/${po_profile##*/}" || echo "$po_profile"; done | wc -l | tr -d ' ')"
+check "the helper staged in that home finds a declaration for another registry profile valid, and a profile the registry lacks still a defect" \
+      "0|1" \
+      "$(python3 -c 'import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import malf_recipe_tests as t
+row = lambda profile: {"test": "S.T", "outcome": "skipped", "profiles": [profile], "condition": "c", "why": "w", "refs": []}
+for profile in ("linux-clang21-asan", "linux-clang99-x"):
+    print(len(t.skip_findings([["build", "S.T", "skipped"]], [row(profile)], "linux-gcc16-release", False, Path(sys.argv[1]) / "profiles")[2]))' "$po_home" | paste -sd'|')"
+rm -rf "$(dirname "$po_home")"
+echo
+
 echo "[7q7i] every ship-leg act resolves against malf/conan.lock, strictly: never the home's own revision, never a requirement the lock does not name (W486 G2)"
 # note: measured 2026-10-10, the first DN-142.D16 store-create resolved with no lockfile and took the
 # home's own boost recipe revision, cmake, hiredis and libpq where malf/conan.lock names others. The
