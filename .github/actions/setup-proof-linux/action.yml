@@ -174,3 +174,12 @@ runs:
           cp "$MALF_DIR/malf_recipe_exports.py" "$HOME_DIR/malf_recipe_exports.py"
           cp "$MALF_DIR/malf_recipe_tests.py" "$HOME_DIR/malf_recipe_tests.py"
         fi
+
+    - name: Register malf's recipe overlay as the first remote (DN-142.D17 (8))
+      # The lock pins three overlay revisions; a home without the remote cannot resolve them. malf's
+      # own function, from the leg's own malf checkout: the why is the script's header.
+      shell: bash
+      env:
+        HOME_DIR: ${{ inputs.conan-home }}
+        MALF_DIR: ${{ inputs.malf-dir }}
+      run: bash "$GITHUB_ACTION_PATH/register-overlay.sh" "$HOME_DIR" "$MALF_DIR"

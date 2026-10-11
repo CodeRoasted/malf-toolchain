@@ -146,3 +146,21 @@ runs:
           Copy-Item "$env:MALF_DIR/malf_recipe_exports.py" "$env:HOME_DIR/malf_recipe_exports.py"
           Copy-Item "$env:MALF_DIR/malf_recipe_tests.py" "$env:HOME_DIR/malf_recipe_tests.py"
         }
+
+    - name: Register malf's recipe overlay as the first remote (DN-142.D17 (8))
+      # The lock pins three overlay revisions; a home without the remote cannot resolve them. pwsh,
+      # never bash: on the self-hosted Windows runners `bash` resolves to WSL, so this leg cannot
+      # source malf. The ONE second spelling of `_malf_sync_overlay_remote` (malf/malf), held equal
+      # to it by tests/test_proof_bricks.sh: name, type, URL `<malf checkout>/overlay`, first.
+      shell: pwsh
+      env:
+        HOME_DIR: ${{ inputs.conan-home }}
+        MALF_DIR: ${{ inputs.malf-dir }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $overlay = Join-Path (Resolve-Path $env:MALF_DIR).Path 'overlay'
+        if (Test-Path (Join-Path $overlay 'recipes')) {
+          $env:CONAN_HOME = $env:HOME_DIR
+          conan remote add malf-overlay $overlay --type local-recipes-index --index 0 --force
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        }

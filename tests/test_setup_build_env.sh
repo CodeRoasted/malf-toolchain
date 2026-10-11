@@ -22,6 +22,10 @@ check "a fresh home receives every profile of malf's registry, byte-equal" \
 check "and malf's five home files, byte-equal" "equal equal equal equal equal" \
       "$(for f in global.conf settings_user.yml cmake/malf-path-map.cmake malf_recipe_exports.py malf_recipe_tests.py; do cmp -s "$root/$f" "$home/${f##*/}" && printf 'equal ' || printf 'differs(%s) ' "${f##*/}"; done | sed 's/ $//')"
 
+check "and malf's recipe overlay as its FIRST remote, from this tree (DN-142.D17 (8))" \
+      "malf-overlay|$root/overlay|local-recipes-index" \
+      "$(python3 -c 'import json, sys; first = json.load(open(sys.argv[1]))["remotes"][0]; print(first["name"], first["url"], first.get("remote_type"), sep="|")' "$home/remotes.json" 2>&1)"
+
 home="$scratch/restored"
 mkdir -p "$home/profiles"
 echo "a stale policy" > "$home/global.conf"
