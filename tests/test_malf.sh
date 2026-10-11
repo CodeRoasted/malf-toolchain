@@ -5144,6 +5144,38 @@ for profile in ("linux-clang21-asan", "linux-clang99-x"):
 rm -rf "$(dirname "$po_home")"
 echo
 
+echo "[7q7p] malf's recipe overlay: every home resolves from it first, the lock pins each recipe at the revision it serves, and autoconf's frozen-state rewrite is exact (DN-142.D17 (8))"
+ov_tmp="$(realpath "$(mktemp -d)")"
+bash -c 'MALF_SOURCE_ONLY=1 source "$1" > /dev/null 2>&1; set +e; export CONAN_HOME="$2"; _malf_sync_conan_conf' _ "$MALF_BIN" "$ov_tmp/home"
+check "a home malf syncs resolves from the overlay FIRST, as a local recipes index at malf's overlay/" \
+      "malf-overlay $MALF_ROOT/overlay local-recipes-index" \
+      "$(python3 -c 'import json, sys; first = json.load(open(sys.argv[1]))["remotes"][0]; print(first["name"], first["url"], first.get("remote_type"))' "$ov_tmp/home/remotes.json")"
+check "every overlay recipe is pinned in malf/conan.lock at the revision the overlay serves, so a patch the lock does not name cannot be built" \
+      "0" \
+      "$(for ov_recipe in "$MALF_ROOT"/overlay/recipes/*/config.yml; do
+            ov_name="$(basename "$(dirname "$ov_recipe")")"
+            for ov_version in $(python3 -c 'import sys, yaml; print(" ".join(yaml.safe_load(open(sys.argv[1]))["versions"]))' "$ov_recipe"); do
+                ov_served="$(CONAN_HOME="$ov_tmp/home" conan list "$ov_name/$ov_version#*" -r malf-overlay --format=json 2>/dev/null | python3 -c 'import json, sys; print(" ".join(rev for body in json.load(sys.stdin)["malf-overlay"].values() for rev in body.get("revisions", {})))')"
+                grep -q "\"$ov_name/$ov_version#$ov_served%" "$MALF_ROOT/conan.lock" || echo "$ov_name/$ov_version served $ov_served, not the lock's"
+            done
+        done | tee "$ov_tmp/unpinned" | wc -l | tr -d ' ')"
+[[ -s "$ov_tmp/unpinned" ]] && sed 's/^/       /' "$ov_tmp/unpinned"
+check "autoconf's frozen-state rewrite: a state without the prefix is unchanged, the prefix leaves every record re-measured, a record it does not know refuses" \
+      "same|T4,8;namea/b.m4:1;D-1,3;x/y;F3,7;finbuiltin|refused" \
+      "$(python3 -c 'import runpy, sys
+rewrite = runpy.run_path(sys.argv[1])["_without_prefix"]
+frozen = b"# frozen\nV1\nQ1,1\n[]\nT4,13\nname/src/a/b.m4:1\nD-1,8\n/src/x/y\nF3,7\nfinbuiltin\n"
+same = rewrite(frozen, b"/nothere/") == frozen
+out = rewrite(frozen, b"/src/").decode()
+parts = [line for line in out.splitlines() if line[:1] in "TDF" or line.startswith(("name", "x/", "fin"))]
+try:
+    rewrite(b"X9,9\n", b"/src/"); refused = "accepted"
+except ValueError:
+    refused = "refused"
+print(("same" if same else "changed") + "|" + ";".join(parts) + "|" + refused)' "$MALF_ROOT/overlay/recipes/autoconf/all/conanfile.py")"
+rm -rf "$ov_tmp"
+echo
+
 echo "[7q7i] every ship-leg act resolves against malf/conan.lock, strictly: never the home's own revision, never a requirement the lock does not name (W486 G2)"
 # note: measured 2026-10-10, the first DN-142.D16 store-create resolved with no lockfile and took the
 # home's own boost recipe revision, cmake, hiredis and libpq where malf/conan.lock names others. The

@@ -458,6 +458,37 @@ _malf_default_build_root() {
 # profile it was last used with called a declaration for another registry profile a defect.
 # Measured 2026-10-11: a cold store-create home held linux-gcc16-release alone, and logcraft_core's
 # create failed on its declared linux-clang21-asan row.
+# MALF'S RECIPE OVERLAY (DN-142.D17 (8)): `overlay/` is a conan local recipes index of the
+# third-party recipes malf patches for reproducible bytes (each recipe names its change), and
+# malf/conan.lock pins their revisions, so every home malf syncs resolves from it FIRST, as remote
+# `malf-overlay`. A recipe the overlay does not hold falls through to conancenter.
+# post: the home's first remote is `malf-overlay` at $MALF_DIR/overlay, or the function failed.
+_malf_sync_overlay_remote() {
+    [[ -d "$MALF_DIR/overlay/recipes" ]] || return 0
+    mkdir -p "$CONAN_HOME"
+    # note: remotes.json is written directly, never through `conan remote add`, so a sync costs no
+    #       conan process; a home conan has not initialized yet gets conan's default remote behind
+    #       the overlay, as `conan remote list` would show it on first use.
+    python3 - "$CONAN_HOME/remotes.json" "$MALF_DIR/overlay" <<'PY' \
+        || { echo "malf: could not register the recipe overlay $MALF_DIR/overlay as remote malf-overlay in $CONAN_HOME" >&2; return 1; }
+import json, os, sys
+path, url = sys.argv[1], sys.argv[2]
+overlay = {"name": "malf-overlay", "url": url, "verify_ssl": True, "remote_type": "local-recipes-index"}
+if os.path.exists(path):
+    remotes = json.load(open(path))["remotes"]
+else:
+    remotes = [{"name": "conancenter", "url": "https://center2.conan.io", "verify_ssl": True}]
+wanted = [overlay] + [remote for remote in remotes if remote.get("name") != "malf-overlay"]
+if wanted != remotes:
+    import tempfile
+    descriptor, staged = tempfile.mkstemp(dir=os.path.dirname(path), prefix="remotes.json.malf-")
+    with os.fdopen(descriptor, "w") as handle:
+        json.dump({"remotes": wanted}, handle, indent=1)
+        handle.write("\n")
+    os.replace(staged, path)
+PY
+}
+
 _malf_sync_conan_conf() {
     local conf_file source profile
     for conf_file in global.conf settings_user.yml malf-path-map.cmake malf_recipe_exports.py malf_recipe_tests.py; do
@@ -469,6 +500,7 @@ _malf_sync_conan_conf() {
             _malf_install_file "$source" "$CONAN_HOME/$conf_file" || exit 1
         fi
     done
+    _malf_sync_overlay_remote || exit 1
     mkdir -p "$CONAN_HOME/profiles"
     for profile in "$MALF_DIR"/profiles/*; do
         [[ -f "$profile" ]] || continue
