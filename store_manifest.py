@@ -217,11 +217,16 @@ def build(store: Path, record_bytes: bytes, plan: dict) -> tuple[bytes, dict[str
 
 
 def sign(path: Path, key: Path) -> Path:
+    """`<path>.sig`, never over an existing one: ssh-keygen would ask on stdin whether to overwrite,
+    and a caller whose stdin is an open pipe then waits forever (measured on the selftest)."""
+    signature = path.with_name(path.name + ".sig")
+    if signature.exists():
+        raise Refused(f"{signature} already exists: a signature is written once, never replaced")
     done = subprocess.run(["ssh-keygen", "-Y", "sign", "-q", "-f", str(key), "-n", NAMESPACE, str(path)],
-                          capture_output=True, text=True, check=False)
+                          capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL)
     if done.returncode != 0:
         raise Refused(f"ssh-keygen could not sign {path}: {done.stderr.strip()[-300:]}")
-    return path.with_name(path.name + ".sig")
+    return signature
 
 
 def verify(slice_bytes: bytes, signature: Path, allowed: Path, repository: str) -> list[dict]:
@@ -405,7 +410,7 @@ def selftest() -> int:
         keys.mkdir()
         for name in ("writer", "other"):
             subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", name, "-f", str(keys / name)],
-                           check=True)
+                           check=True, stdin=subprocess.DEVNULL)
         allowed = keys / "allowed_signers"
         allowed.write_text(f'{WRITER_IDENTITY} namespaces="{NAMESPACE}" '
                            f"{(keys / 'writer.pub').read_text().strip()}\n")

@@ -8,10 +8,12 @@ name: CodeRoast publish
 #             store package (`store-<repository>`, read with the job's own GITHUB_TOKEN, granted
 #             Read on that one package, DN-142.D6 R5), verifies the writer's signature against
 #             `keys/store-writer.allowed_signers` at this workflow's own revision, refuses a slice
-#             that names any other step-0 record, fetches every object by its digest, extracts
-#             each single-file asset and checks its digest, then attaches the staged files and the
-#             signed slice to the Release. A slice, an object or an entry that does not verify
-#             stages nothing, and the Release is not created.
+#             that names any other step-0 record or another visibility than the repository's
+#             own now (DN-142.D24), fetches every object by its digest, extracts each single-file
+#             asset and checks its digest, then attaches the staged files and the signed slice to
+#             the Release, and reads the Release back: its assets equal the staged files, both
+#             ways. A slice, an object or an entry that does not verify stages nothing, and the
+#             Release is not created.
 #
 # NOTHING HERE CHECKS OUT THE CALLER'S SOURCE, PROVISIONS A TOOLCHAIN, COMPILES, TESTS OR PACKS:
 # stage-malf copies this revision's own tree (the tools and the writer's public key), and the only
@@ -60,9 +62,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RECORD: ${{ needs.attest.outputs.record-sha256 }}
+          # The second producer of the repository's visibility (DN-142.D24): step 0 read it from the
+          # API into the slice, and the job's own event context says what it is now.
+          VISIBILITY: ${{ github.event.repository.visibility }}
         run: |
           set -euo pipefail
-          python3 .malf/store_publish.py stage "${GITHUB_REPOSITORY#*/}" "$RECORD" \
+          python3 .malf/store_publish.py stage "${GITHUB_REPOSITORY#*/}" "$VISIBILITY" "$RECORD" \
             .malf/keys/store-writer.allowed_signers "$RUNNER_TEMP/assets"
 
       - name: Create the Release at the existing tag and attach the staged assets
@@ -76,3 +81,14 @@ jobs:
           gh release create "$TAG" --verify-tag --title "$TAG" \
             --notes "Published from the CodeRoast store by digest: the bytes step 0 built and judged in the run whose record has sha256 $RECORD. The attached slice and its signature list every asset's digest." \
             "$RUNNER_TEMP"/assets/*
+
+      - name: Read the Release back — it holds exactly the slice's assets, both ways (GATING)
+        # DN-142.D24 (3): a hand-edited workflow that attached one more file would otherwise drift
+        # unseen; the reading is made from outside, after the upload, on the Release itself.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --json assets > "$RUNNER_TEMP/release.json"
+          python3 .malf/store_publish.py check-release "$RUNNER_TEMP/assets" "$RUNNER_TEMP/release.json"
