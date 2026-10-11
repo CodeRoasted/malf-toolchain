@@ -188,7 +188,24 @@ diagnose_crash() {
   fi
 }
 
+# A HOSTED ubuntu-24.04 image restricts unprivileged user namespaces through AppArmor
+# (kernel.apparmor_restrict_unprivileged_userns=1). Tests that need one (coderoast-ipc's private-pid
+# and private-tmpfs segment tests) then SKIP there, and since DN-142.D23 an undeclared skip is a red:
+# measured on coderoast-ipc's ci run 38185357790, four such skips. The hosted VM is the job's own and
+# is discarded with it, so the restriction is lifted for the job and the tests RUN, rather than being
+# declared away. A self-hosted runner (no sudo, NoNewPrivileges) is left exactly as it is; a skip
+# there stays the package's to declare.
+lift_userns_restriction() {
+  local knob=kernel.apparmor_restrict_unprivileged_userns value
+  [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] || return 0
+  value="$(sysctl -n "$knob" 2>/dev/null || true)"
+  [ "$value" = 1 ] || { echo "conan_module: $knob is '${value:-absent}' on this hosted runner; nothing to lift"; return 0; }
+  sudo sysctl -q -w "$knob=0"
+  echo "conan_module: $knob lifted from 1 to $(sysctl -n "$knob") for this hosted job"
+}
+
 if [ "$TEST" = "true" ]; then
+  lift_userns_restriction
   # Build + test in a SUBSHELL with `set -e` active, run as a plain pipeline statement (NOT an `if`
   # condition). Putting the group in an `if`/`&&`/`||` condition DISABLES `set -e` inside it, so an
   # early failure (conan install unresolved dep, cmake configure, compile) would NOT abort — execution
