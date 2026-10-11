@@ -15,7 +15,7 @@
         "logcraft_core/1.10.7",
         "libpqxx/8.0.1#02ecdb931a0cee3aef41661c542ca6e1%1775511214.571",
         "libpq/17.11#492684c71526baac9592d864d9770bd9%1791747276.5098517",
-        "libcurl/8.20.0#c90b0c91a33d9a79b519c1c70bafc823%1780907438.587",
+        "libcurl/8.20.0#c1405e2f51cb706737fda1943725c5bb%1791753692.7236695",
         "jsoncpp/1.9.5#9415a4cf4d2e8965408f3a01a8339b48%1726135495.806",
         "insight_sift/1.10.7",
         "insight_semantic_test_frameworks/1.10.7",

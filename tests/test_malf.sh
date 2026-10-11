@@ -4802,6 +4802,7 @@ tq_third tpy 'save(self, os.path.join(self.package_folder, "bin", "tool.py"), "i
 tq_third tpz 'save(self, os.path.join(self.package_folder, "lib", "libtpz.a"), "z")' 'tool_requires = "tpy/0.1"' 'def build(self):' '    self.run("python3 " + self.dependencies.build["tpy"].package_folder + "/bin/tool.py")'
 tq_third tpu 'save(self, os.path.join(self.package_folder, "lib", "libtpu.a"), "u")' 'tool_requires = "tpw/0.1"' 'def build(self):' '    self.run(self.dependencies.build["tpw"].package_folder + "/bin/tpw.sh")'
 tq_third tpn 'save(self, os.path.join(self.package_folder, "bin", "tpn.sh"), "#!/bin/sh\nexport PYTHONDONTWRITEBYTECODE=1\n")' 'package_type = "application"' 'def finalize(self):' '    from conan.tools.files import copy, replace_in_file; copy(self, "*", src=self.immutable_package_folder, dst=self.package_folder); replace_in_file(self, os.path.join(self.package_folder, "bin", "tpn.sh"), "export PYTHONDONTWRITEBYTECODE=1", "")'
+tq_third tpt 'from conan.tools.files import copy; copy(self, "stamp", self.build_folder, os.path.join(self.package_folder, "lib"))' 'def build(self):' '    self.run("echo built on: ${SOURCE_DATE_EPOCH:-$(date +%s%N)} > stamp")'
 mkdir -p "$tq_src/pyreq"
 printf 'from conan import ConanFile\n\n\nclass PyReq(ConanFile):\n    name = "pyreq"\n    version = "0.1"\n    package_type = "python-require"\n' > "$tq_src/pyreq/conanfile.py"
 tq_first() {   # <name> <requirement line> [<build() body line>]
@@ -4818,13 +4819,14 @@ tq_first ex_f 'requires = "tpf/0.1"'
 tq_first ex_z 'requires = "tpz/0.1"'
 tq_first ex_u 'requires = "tpu/0.1"'
 tq_first ex_n 'tool_requires = "tpn/0.1"'
+tq_first ex_t 'requires = "tpt/0.1"'
 printf 'packages: {}\n' > "$tq_src/packages.yml"
 git -C "$tq_src" init -q && git -C "$tq_src" add -A && git -C "$tq_src" -c user.email=t@t -c user.name=t commit -qm fixtures
 tq_home() {   # <home name> — a fresh conan home holding every fixture recipe and no binary
     local home="$tq_tmp/$1" recipe
     CONAN_HOME="$home" bash "$MALF_BIN" profiles > /dev/null 2>&1
     printf '[settings]\nos=Linux\narch=x86_64\nbuild_type=Release\n[buildenv]\nCC=gcc\nCXX=g++\n' > "$home/profiles/fixture"
-    for recipe in pyreq tpv tpr tpd tpw tpp tpf tpy tpz tpu tpn; do CONAN_HOME="$home" conan export "$tq_src/$recipe" > /dev/null 2>&1; done
+    for recipe in pyreq tpv tpr tpd tpw tpp tpf tpy tpz tpu tpn tpt; do CONAN_HOME="$home" conan export "$tq_src/$recipe" > /dev/null 2>&1; done
 }
 tq_step() {   # <home name> <store name> <package> — malf's step function over the fixture home; its output in $tq_tmp/out, its exit printed
     mkdir -p "$tq_tmp/scratch-$1"; printf '{"compiler": "fixture"}' > "$tq_tmp/scratch-$1/toolchain.json"
@@ -4974,6 +4976,12 @@ check "(h′) RED — a third-party folder written after conan packaged it is re
 tq_home h3
 check "(h″) RED — a finalized package is judged by the folder it packaged and recorded by the folder its consumers use" \
       "rc=0 1 1" "$(tq_step h3 store-h3 ex_n) $(tq_has 'STORED tpn package') $(tq_has 'artefact_store: STORED ex_n package')"
+# (s) a build that stamps its own time (openssl's `built on:`) reads the writer's SOURCE_DATE_EPOCH,
+# so its step rebuilt in the SAME home, its binary removed, matches at the equal key.
+tq_home t
+check "(s) RED — a third-party build that stamps its build time MATCHES when its step rebuilds it in the same home" \
+      "rc=0 rc=0 1" \
+      "$(tq_step t store-t ex_t) $(CONAN_HOME="$tq_tmp/t" conan remove 'tpt/0.1:*' -c > /dev/null 2>&1; tq_step t store-t ex_t) $(tq_has 'artefact_store: MATCH tpt package')"
 rm -rf "$tq_tmp"
 echo
 
@@ -5173,6 +5181,17 @@ try:
 except ValueError:
     refused = "refused"
 print(("same" if same else "changed") + "|" + ";".join(parts) + "|" + refused)' "$MALF_ROOT/overlay/recipes/autoconf/all/conanfile.py")"
+mkdir -p "$ov_tmp/pkg/bin" "$ov_tmp/pkg/lib" "$ov_tmp/pkg2/bin"
+printf 'echo -L/home/seat/p/b/opens1/p/lib\n' > "$ov_tmp/pkg/bin/curl-config"; printf 'a' > "$ov_tmp/pkg/lib/libcurl.a"
+printf 'echo x\n' > "$ov_tmp/pkg2/bin/curl-config"; printf 'curl' > "$ov_tmp/pkg2/bin/curl"
+check "libcurl's overlay ships no curl-config, whose configure echo names the build host's package folders, and keeps every other file" \
+      "lib/libcurl.a|bin/curl" \
+      "$(python3 -c 'import runpy, sys
+from pathlib import Path
+drop = runpy.run_path(sys.argv[1])["_drop_config_script"]
+for folder in sys.argv[2:]:
+    drop(folder)
+print("|".join(" ".join(sorted(str(p.relative_to(folder)) for p in Path(folder).rglob("*") if p.is_file())) for folder in sys.argv[2:]))' "$MALF_ROOT/overlay/recipes/libcurl/all/conanfile.py" "$ov_tmp/pkg" "$ov_tmp/pkg2")"
 rm -rf "$ov_tmp"
 echo
 
