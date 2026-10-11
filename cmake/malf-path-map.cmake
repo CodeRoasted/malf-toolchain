@@ -37,9 +37,12 @@ if(CMAKE_HOST_WIN32)
 endif()
 include_guard(GLOBAL)
 
+# THE HOME'S TOKEN, spelled here once: malf's compiler wrapper (wrap/malf-cc) reads it from this line
+# for the builds outside CMake it maps (DN-142.D17 (8)), so one folder maps to one name either way.
+set(MALF_HOME_TOKEN conan-home)
 foreach(language IN ITEMS C CXX)
     string(APPEND CMAKE_${language}_FLAGS_INIT
-           " -fmacro-prefix-map=${CMAKE_CURRENT_LIST_DIR}=conan-home"
+           " -fmacro-prefix-map=${CMAKE_CURRENT_LIST_DIR}=${MALF_HOME_TOKEN}"
            " -fmacro-prefix-map=${CMAKE_SOURCE_DIR}=. -fmacro-prefix-map=${CMAKE_BINARY_DIR}=build")
 endforeach()
 

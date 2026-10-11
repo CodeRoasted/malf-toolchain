@@ -4793,6 +4793,14 @@ tq_third tpr 'save(self, os.path.join(self.package_folder, "lib", "libtpr.a"), "
 tq_third tpd 'save(self, os.path.join(self.package_folder, "lib", "libtpd.a"), self.build_folder)'
 tq_third tpw 'save(self, os.path.join(self.package_folder, "bin", "tpw.sh"), "#!/bin/sh\necho ran >> \"$(dirname \"$0\")/../written-at-use\"\n"); os.chmod(os.path.join(self.package_folder, "bin", "tpw.sh"), 0o755)' 'package_type = "application"'
 tq_third tpp 'save(self, os.path.join(self.package_folder, "lib", "libtpp.a"), "x")' 'python_requires = "pyreq/0.1"'
+# commit B's fixtures: tpf compiles a C file carrying __FILE__ with $CC outside CMake and records the
+# compiler it was handed, as curl-config does; tpy is a python tool importing a module of its own
+# package; tpz runs it while it builds; tpu runs tpw's script, which writes into tpw's folder.
+mkdir -p "$tq_src/tpf"; printf 'const char *where = __FILE__;\n' > "$tq_src/tpf/f.c"
+tq_third tpf 'from conan.tools.files import copy; copy(self, "f.o", self.build_folder, os.path.join(self.package_folder, "lib")); copy(self, "tpf-config", self.build_folder, os.path.join(self.package_folder, "bin"))' 'exports_sources = "f.c"' 'def build(self):' '    self.run("$CC -c " + os.path.join(self.source_folder, "f.c") + " -o f.o && echo \"CC=$CC\" > tpf-config")'
+tq_third tpy 'save(self, os.path.join(self.package_folder, "bin", "tool.py"), "import helper\nhelper.run()\n"); save(self, os.path.join(self.package_folder, "bin", "helper.py"), "def run():\n    pass\n")' 'package_type = "application"'
+tq_third tpz 'save(self, os.path.join(self.package_folder, "lib", "libtpz.a"), "z")' 'tool_requires = "tpy/0.1"' 'def build(self):' '    self.run("python3 " + self.dependencies.build["tpy"].package_folder + "/bin/tool.py")'
+tq_third tpu 'save(self, os.path.join(self.package_folder, "lib", "libtpu.a"), "u")' 'tool_requires = "tpw/0.1"' 'def build(self):' '    self.run(self.dependencies.build["tpw"].package_folder + "/bin/tpw.sh")'
 mkdir -p "$tq_src/pyreq"
 printf 'from conan import ConanFile\n\n\nclass PyReq(ConanFile):\n    name = "pyreq"\n    version = "0.1"\n    package_type = "python-require"\n' > "$tq_src/pyreq/conanfile.py"
 tq_first() {   # <name> <requirement line> [<build() body line>]
@@ -4805,19 +4813,23 @@ tq_first ex_r 'requires = "tpr/0.1"'
 tq_first ex_d 'requires = "tpd/0.1"'
 tq_first ex_w 'tool_requires = "tpw/0.1"' 'self.run(self.dependencies.build["tpw"].package_folder + "/bin/tpw.sh")'
 tq_first ex_p 'requires = "tpp/0.1"'
+tq_first ex_f 'requires = "tpf/0.1"'
+tq_first ex_z 'requires = "tpz/0.1"'
+tq_first ex_u 'requires = "tpu/0.1"'
 printf 'packages: {}\n' > "$tq_src/packages.yml"
 git -C "$tq_src" init -q && git -C "$tq_src" add -A && git -C "$tq_src" -c user.email=t@t -c user.name=t commit -qm fixtures
 tq_home() {   # <home name> — a fresh conan home holding every fixture recipe and no binary
     local home="$tq_tmp/$1" recipe
     CONAN_HOME="$home" bash "$MALF_BIN" profiles > /dev/null 2>&1
-    printf '[settings]\nos=Linux\narch=x86_64\nbuild_type=Release\n' > "$home/profiles/fixture"
-    for recipe in pyreq tpv tpr tpd tpw tpp; do CONAN_HOME="$home" conan export "$tq_src/$recipe" > /dev/null 2>&1; done
+    printf '[settings]\nos=Linux\narch=x86_64\nbuild_type=Release\n[buildenv]\nCC=gcc\nCXX=g++\n' > "$home/profiles/fixture"
+    for recipe in pyreq tpv tpr tpd tpw tpp tpf tpy tpz tpu; do CONAN_HOME="$home" conan export "$tq_src/$recipe" > /dev/null 2>&1; done
 }
 tq_step() {   # <home name> <store name> <package> — malf's step function over the fixture home; its output in $tq_tmp/out, its exit printed
     mkdir -p "$tq_tmp/scratch-$1"; printf '{"compiler": "fixture"}' > "$tq_tmp/scratch-$1/toolchain.json"
     bash -c 'MALF_SOURCE_ONLY=1 source "$1" > /dev/null 2>&1; set +e
         export CONAN_HOME="$2"; MALF_PROFILE="$2/profiles/fixture"; MALF_BUILD_PROFILE="$MALF_PROFILE"
         MALF_CONFIG=Release; MALF_PROFILE_NAME=fixture; _MALF_WRITER_ARGS=(); _MALF_SHIP_LOCK=()
+        _malf_writer_environment || exit 9
         _malf_store_run_step 1 "$5" "$6/$5" create "$3" "$4" ex_ 0' \
         _ "$MALF_BIN" "$tq_tmp/$1" "$tq_tmp/$2" "$tq_tmp/scratch-$1" "$3" "$tq_src" > "$tq_tmp/out" 2>&1
     echo "rc=$?"
@@ -4846,7 +4858,7 @@ print(sum(len(recipe.get("packages", {})) for body in cache.values() if isinstan
 # (a′) the reproducible control: the same two acts over tpr.
 check "(a′) the reproducible control: act 2 MATCHES tpr's third-party-create and the consumer's create at equal keys" \
       "rc=0 rc=0 1 1 2" \
-      "$(tq_step a store-r ex_r) $(tq_step a-second-home-at-a-longer-path store-r ex_r) $(tq_has 'MATCH tpr package') $(tq_has 'MATCH ex_r package') $(ls "$tq_tmp/store-r/records" | wc -l | tr -d ' ')"
+      "$(tq_step a store-r ex_r) $(tq_step a-second-home-at-a-longer-path store-r ex_r) $(tq_has 'artefact_store: MATCH tpr package') $(tq_has 'artefact_store: MATCH ex_r package') $(ls "$tq_tmp/store-r/records" | wc -l | tr -d ' ')"
 
 # (a″) a recipe a remote served carries no export_sources folder (conan 2.28.1 creates one only for
 # a recipe exported from a local path): its step is keyed by its export alone.
@@ -4929,6 +4941,31 @@ CONAN_HOME="$tq_tmp/f" conan create "$tq_src/ex_p" -pr:a fixture --build='ex_p/*
 check "(f) RED — the key derivation of a first-party step refuses a graph carrying a python_requires, naming it" \
       "rc=1 1" \
       "$(MALF_STEP_EXECUTABLES= python3 "$MALF_ROOT/artefact_store.py" conan-step "$tq_tmp/store-f2" "$tq_tmp/f" "$tq_tmp/f.json" ex_p fixture "$MALF_ROOT" "$tq_tmp/scratch-a/toolchain.json" ex_ > "$tq_tmp/out" 2>&1; echo -n "rc=$? "; tq_has 'tpp/0.1 carries pyreq/0.1#')"
+# (g) a build outside CMake writes the absolute path of what it compiles into the bytes; malf's
+# wrapper maps every folder of the home, so two homes of different path LENGTH build equal bytes.
+tq_home g; tq_home g-a-second-home-at-a-much-longer-path
+check "(g) RED — a non-CMake third-party build carrying __FILE__ MATCHES across two homes of different path length" \
+      "rc=0 rc=0 1 1" \
+      "$(tq_step g store-g ex_f) $(tq_step g-a-second-home-at-a-much-longer-path store-g ex_f) $(tq_has 'artefact_store: MATCH tpf package') $(tq_has 'artefact_store: MATCH ex_f package')"
+# (g′) and the wrapper leaks nothing: the package id is the same (the MATCH is at an equal key), no
+# file of the package names the home or the wrapper's own path, and the recorded compiler is its name.
+tq_folder="$(CONAN_HOME="$tq_tmp/g-a-second-home-at-a-much-longer-path" conan cache path "$(CONAN_HOME="$tq_tmp/g-a-second-home-at-a-much-longer-path" conan list 'tpf/0.1#*:*#*' --format=json 2>/dev/null | python3 -c 'import json, sys
+for ref, body in json.load(sys.stdin)["Local Cache"].items():
+    for rrev, recipe in body["revisions"].items():
+        for pid, package in recipe["packages"].items():
+            print(f"{ref}#{rrev}:{pid}#{list(package["revisions"])[-1]}")')")"
+check "(g′) RED — the wrapped build names neither home nor the wrapper's path in any file, conaninfo.txt included, and records its compiler by name" \
+      "lib/f.o 0 0 CC=malf-cc" \
+      "$(cd "$tq_folder" && ls lib/f.o) $(grep -rlF "$tq_tmp" "$tq_folder" | wc -l | tr -d ' ') $(grep -rlF "$MALF_ROOT" "$tq_folder" | wc -l | tr -d ' ') $(cat "$tq_folder/bin/tpf-config")"
+# (h) a python tool run from a package writes no bytecode into that package's folder.
+tq_home h
+check "(h) RED — a build that runs a python tool from a built package leaves no __pycache__ in that package's folder, and the step passes" \
+      "rc=0 0" "$(tq_step h store-h ex_z) $(find "$tq_tmp/h/p" -path '*/p/bin/__pycache__' | wc -l | tr -d ' ')"
+# (h′) a package written into by a build in the SAME install that built it is caught by its own
+# manifest: tpu's build runs tpw's script, after conan packaged tpw and before its step records it.
+tq_home h2
+check "(h′) RED — a third-party folder written after conan packaged it is refused by its own step, naming the new file, and its consumer is SKIPPED" \
+      "rc=4 1" "$(tq_step h2 store-h2 ex_u) $(tq_has 'REFUSED tpw third-party-create: its folder .* was written after conan packaged it.*new written-at-use')"
 rm -rf "$tq_tmp"
 echo
 
@@ -5114,11 +5151,13 @@ check "the fixture: two distinct tpdep revisions, each lock naming one, and the 
       "distinct latest=b" \
       "$([[ -n "$ls_rev_a" && -n "$ls_rev_b" && "$ls_rev_a" != "$ls_rev_b" ]] && printf distinct) latest=$(CONAN_HOME="$ls_home" conan list 'tpdep/1.0#latest' --format=json 2>/dev/null | python3 -c 'import json, sys; revs = [r for v in json.load(sys.stdin)["Local Cache"].values() for r in v["revisions"]]; print("b" if revs == [sys.argv[1]] else revs)' "$ls_rev_b")"
 # The act's own create, sourced from malf with the lockfile malf derives from MALF_DIR, as
-# cmd_store_create runs it. Prints the exit status and the tpdep revision the create's graph holds.
+# cmd_store_create runs it, its profile alone: the writer's layer (_malf_writer_environment) is no
+# part of what a lockfile resolves. Prints the exit status and the tpdep revision the create's graph holds.
 ls_step() {   # <malf dir> <package>
     rm -f "$ls_tmp/graph.json" "$ls_tmp/create.log"
     CONAN_HOME="$ls_home" bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e
         MALF_DIR="$2"; MALF_PROFILE="$3"; MALF_BUILD_PROFILE="$3"; MALF_CONFIG=Release
+        _MALF_WRITER_PROFILES=(--profile:host="$3" --profile:build="$3")
         _malf_writer_create_args || exit 3
         _malf_ship_lock_args || exit 2
         _malf_store_create_step "$4" "$5" ls_ "$6/graph.json" "$6/create.log"' \

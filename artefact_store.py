@@ -94,6 +94,9 @@ like any package, with no transport kept. A first-party step's create builds onl
 content no `third-party-create` record at its profile holds is refused; when a record holds that
 configuration at another content, the refusal names the folder and the files written into it after
 its step judged it. A graph carrying a `python_requires` is refused by every key derivation.
+A third-party step also refuses a package folder that differs from its own `conanmanifest.txt`, the
+md5 conan wrote when it packaged it, naming each file written after packaging, so a folder a later
+build of the same install wrote into is never recorded as the package's own bytes.
 
 A step's TEST VERDICT is a record of its own (DN-142.D5 (3), DN-142.D7), never a field of the
 package record: the consumer's create runs no test, so a package record holding results could never
@@ -333,12 +336,18 @@ def system_member() -> str:
     return hashlib.sha256("\n".join(sorted(listing.splitlines())).encode()).hexdigest()
 
 
+WRITER_PROFILE = Path("config") / "writer.profile"
+
+
 def profile_member(home: Path, profile: str, malf_dir: Path) -> str:
-    """DN-142.D2's `profile` member: `conan profile show` at the step's profile, with the two
+    """DN-142.D2's `profile` member: `conan profile show` at the step's profile with malf's writer
+    layer composed over it, as every writer act composes it (DN-142.D17 (8)), with the two
     absolute prefixes it can carry (the conan home, malf's checkout) replaced by fixed tokens;
     what those files contain is keyed by `definition` (malf's tree) and nothing else."""
-    shown = _run(["conan", "profile", "show", f"--profile:host={profile}",
-                  f"--profile:build={profile}"], {**os.environ, "CONAN_HOME": str(home)})
+    layer = str(malf_dir / WRITER_PROFILE)
+    shown = _run(["conan", "profile", "show", f"--profile:host={profile}", f"--profile:host={layer}",
+                  f"--profile:build={profile}", f"--profile:build={layer}"],
+                 {**os.environ, "CONAN_HOME": str(home)})
     for prefix, token in ((str(home), "<conan-home>"), (str(malf_dir), "<malf>")):
         shown = shown.replace(prefix, token)
     return hashlib.sha256("\n".join(line.rstrip() for line in shown.splitlines()).encode()).hexdigest()
@@ -805,6 +814,31 @@ def third_party_plan(store: Path, home: Path, graph_json: Path, prefixes: tuple[
     return 0
 
 
+def written_after_packaging(folder: Path) -> list[str]:
+    """Each file of a package folder that differs from the folder's own `conanmanifest.txt`, the
+    md5 conan wrote when it packaged it: `new <path>`, `changed <path>`, `removed <path>`. A folder
+    written into after packaging (a tool run from it writing its bytecode, DN-142.D17 (8)) is caught
+    even when the act that wrote it is the one recording it."""
+    manifest = {}
+    for line in (folder / "conanmanifest.txt").read_text().splitlines()[1:]:
+        if line:
+            path, _separator, digest = line.rpartition(": ")
+            manifest[path] = digest
+    present = {}
+    for root, directories, files in os.walk(folder):
+        for name in files + [entry for entry in directories if (Path(root) / entry).is_symlink()]:
+            path = Path(root) / name
+            relative = path.relative_to(folder).as_posix()
+            if relative == "conanmanifest.txt":
+                continue
+            present[relative] = (hashlib.md5(os.readlink(path).encode()).hexdigest() if path.is_symlink()
+                                 else hashlib.md5(path.read_bytes()).hexdigest())
+    return sorted([f"new {path}" for path in present.keys() - manifest.keys()]
+                  + [f"changed {path}" for path in present.keys() & manifest.keys()
+                     if present[path] != manifest[path]]
+                  + [f"removed {path}" for path in manifest.keys() - present.keys()])
+
+
 def _dependency_order(nodes: dict[str, dict], wanted: list[str]) -> list[str]:
     """The `wanted` node ids, each after every node it depends on."""
     ordered: list[str] = []
@@ -875,7 +909,16 @@ def third_party_step(store: Path, home: Path, graph_json: Path, prefixes: tuple[
                   "(DN-142.D17 (4), (5)): " + "; ".join(findings), file=sys.stderr)
             worst = 1
             continue
-        content, entries = tree_digest(_cache_path(home, binary))
+        folder = _cache_path(home, binary)
+        written = written_after_packaging(folder)
+        if written:
+            print(f"artefact_store: REFUSED {node['name']} third-party-create: its folder {folder} "
+                  f"was written after conan packaged it, so its bytes are not its build's "
+                  f"(DN-142.D17 (8)): {len(written)} file(s): " + ", ".join(written[:NAMED_FILES])
+                  + (", ..." if len(written) > NAMED_FILES else ""), file=sys.stderr)
+            worst = 1
+            continue
+        content, entries = tree_digest(folder)
         output = {"alias": binary, "content": content, "entries": entries}
         if LocalStore(store).commit(document, {"package": output}, {}) == 0:
             held.setdefault(binary.rsplit("#", 1)[0], []).append(output)

@@ -5126,6 +5126,29 @@ cmd_store_verdict() {
 # consumer's: today it sets no skip conf, so a writer's create builds and runs every test and every
 # test_package. Read, never spelled here, so a writer conf added there reaches both writers.
 # post: _MALF_WRITER_ARGS holds the set, or the function failed naming the helper
+# THE WRITER'S BUILD ENVIRONMENT (DN-142.D17 (8), commit B), set once by each writer act before its
+# first conan call: its profiles, the act's profile with malf's config/writer.profile composed over
+# it in both contexts, so every build compiles through malf's wrapper (wrap/malf-cc, which maps the
+# conan home's folders out of the file names the preprocessor writes); the real compilers the
+# wrapper runs, read from the profile's own CC and CXX; and PYTHONDONTWRITEBYTECODE=1, so a python
+# tool run from a package never writes its bytecode into that package's folder (meson's
+# `__pycache__`, measured G2). All three are malf's tree, so they enter every key via `definition`.
+# pre: MALF_PROFILE and MALF_BUILD_PROFILE name the act's profile files.
+# post: _MALF_WRITER_PROFILES holds the four profile arguments, and MALF_REAL_CC, MALF_REAL_CXX and
+#       PYTHONDONTWRITEBYTECODE are exported; or the function failed naming what is missing.
+_malf_writer_environment() {
+    local cc cxx build_cc build_cxx
+    cc="$(sed -n 's/^CC=//p' "$MALF_PROFILE")"; cxx="$(sed -n 's/^CXX=//p' "$MALF_PROFILE")"
+    build_cc="$(sed -n 's/^CC=//p' "$MALF_BUILD_PROFILE")"; build_cxx="$(sed -n 's/^CXX=//p' "$MALF_BUILD_PROFILE")"
+    [[ -n "$cc" && -n "$cxx" ]] \
+        || { echo "malf: $MALF_PROFILE names no CC and CXX, so the writer's compiler wrapper has nothing to run" >&2; return 1; }
+    [[ "$cc" == "$build_cc" && "$cxx" == "$build_cxx" ]] \
+        || { echo "malf: the host profile's compilers ($cc, $cxx) are not the build profile's ($build_cc, $build_cxx), and the wrapper runs one pair" >&2; return 1; }
+    export MALF_REAL_CC="$cc" MALF_REAL_CXX="$cxx" PYTHONDONTWRITEBYTECODE=1
+    _MALF_WRITER_PROFILES=(--profile:host="$MALF_PROFILE" --profile:host="$MALF_DIR/config/writer.profile"
+                           --profile:build="$MALF_BUILD_PROFILE" --profile:build="$MALF_DIR/config/writer.profile")
+}
+
 _malf_writer_create_args() {
     _MALF_WRITER_ARGS=()
     local listed
@@ -5245,6 +5268,7 @@ cmd_store_create() {
     echo "=== malf store-create: $(wc -l <<< "$wanted") step(s), home $CONAN_HOME, store $store ==="
     python3 "$MALF_DIR/artefact_store.py" toolchain "$(dirname "$(dirname "$compiler")")" "$scratch/toolchain.json" || return 2
     _malf_writer_create_args || return 2
+    _malf_writer_environment || return 2
     local -a corpus_args=()
     if [[ -n "${MALF_CORPUS_GATES:-}" ]]; then
         [[ -f "$MALF_CORPUS_GATES" ]] \
@@ -5389,7 +5413,7 @@ _malf_store_closed() {   # <n> <name> <verdict> <walk start> <step start> <step 
 _malf_store_create_step() {   # <name> <path> <prefixes> <graph> <log>
     local -a build_args
     mapfile -t build_args < <(_malf_store_build_args "$1")
-    conan create "$2" --profile:host="$MALF_PROFILE" --profile:build="$MALF_BUILD_PROFILE" \
+    conan create "$2" "${_MALF_WRITER_PROFILES[@]}" \
         -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${build_args[@]}" "${_MALF_SHIP_LOCK[@]}" \
         --no-remote --format=json > "$4" 2> "$5"
 }
@@ -5414,8 +5438,8 @@ _malf_store_build_args() {
 # A downloaded binary is never consumed: the plan builds it (`--build=<ref>`), and a graph that
 # still downloads is refused. The phase prints its own opening and closing lines,
 # `<name>:third-party`, closing PASS, FAILED or MISMATCH.
-# pre: CONAN_HOME, MALF_PROFILE, MALF_BUILD_PROFILE, MALF_CONFIG, MALF_PROFILE_NAME, _MALF_WRITER_ARGS
-#      and _MALF_SHIP_LOCK as store-create sets them, and <scratch>/toolchain.json written.
+# pre: CONAN_HOME, MALF_CONFIG, MALF_PROFILE_NAME, _MALF_WRITER_PROFILES (_malf_writer_environment),
+#      _MALF_WRITER_ARGS and _MALF_SHIP_LOCK as store-create sets them, and <scratch>/toolchain.json written.
 # post: exit 0 every third-party node the step needs is held by a record; 1 a resolve, the plan, the
 #       install or a refusal failed; 3 a third-party binary rebuilt at an equal key differs. On a
 #       non-zero exit _MALF_THIRD_PARTY_CAUSE names the references and the cause.
@@ -5423,7 +5447,7 @@ _malf_store_third_party() {   # <n> <name> <path> <prefixes> <store> <scratch> <
     local index="$1" name="$2" path="$3" prefixes="$4" store="$5" scratch="$6" run_at="$7"
     local graph="$scratch/$name.third-party.graph.json" log="$scratch/$name.third-party.log"
     local round planned rc=0 step_at step_cpu verdict=PASS
-    local -a common=(--profile:host="$MALF_PROFILE" --profile:build="$MALF_BUILD_PROFILE"
+    local -a common=("${_MALF_WRITER_PROFILES[@]}"
                      -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${_MALF_SHIP_LOCK[@]}")
     local -a builds=() next=()
     _MALF_THIRD_PARTY_CAUSE=""
@@ -5526,7 +5550,7 @@ _malf_store_build_one() {   # <name> <path> <rev> <store> <scratch> <prefixes>
     git -C "$repo" archive "$rev" -- "$prefix" | tar -x -C "$scratch/$name" \
         || { echo "malf store-build: git archive $rev -- $prefix failed in $repo" >&2; return 1; }
     echo "--- store-build: conan build $name ($repo at $(git -C "$repo" rev-parse --short=12 "$rev"):$prefix) ---"
-    if ! conan build "$scratch/$name/$prefix" --profile:host="$MALF_PROFILE" --profile:build="$MALF_BUILD_PROFILE" \
+    if ! conan build "$scratch/$name/$prefix" "${_MALF_WRITER_PROFILES[@]}" \
             -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${_MALF_SHIP_LOCK[@]}" --build=never \
             --format=json > "$scratch/$name.graph.json" 2> "$scratch/$name.log"; then
         echo "malf store-build: conan build $name failed — $scratch/$name.log" >&2; return 1
@@ -5571,6 +5595,7 @@ cmd_store_build() {
     rm -f "$CONAN_HOME/editable_packages.json"
     unset MALF_EDITABLE_BUILD_DIR
     _malf_writer_create_args || return 2
+    _malf_writer_environment || return 2
     _malf_ship_lock_args || return 2
     local scratch prefixes compiler rc=0
     scratch="$(mktemp -d /tmp/malf-store-build.XXXXXX)"

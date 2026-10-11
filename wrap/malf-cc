@@ -1,0 +1,43 @@
+#!/bin/sh
+# malf-cc / malf-c++ — the compiler a writer act hands a build (DN-142.D17 (8), commit B): the real
+# compiler, run with the same arguments, then one -ffile-prefix-map per folder of the conan home.
+#
+# WHY. A build outside CMake (autotools, make, meson's own) writes the absolute path of the files it
+# compiles into `__FILE__` and `#line` names, and conan builds in `<home>/p/b/<name><13 hex>/b`, a
+# folder name drawn from uuid4 per build: so two homes, or two builds in one home, produce different
+# bytes (measured G2: libcurl's `vtls/openssl.c`, flex's `misc.c` and `tables.c`, libpq's eight `.l`
+# sources). malf-path-map.cmake maps a CMake build's own directories; this maps every folder of the
+# home, for every build that compiles through it, each to `<token>/p/<name>` or `<token>/p/b/<name>`
+# with the drawn suffix dropped, the token read from malf-path-map.cmake so it is spelled once.
+#
+# WHY APPENDED. gcc tries the LAST map first: these maps come after the build's own arguments, so a
+# folder's own map wins over the CMake fragment's coarser map of the whole home.
+#
+# WHY A WRAPPER AND NOT A CONF. tools.build:cflags is a package-id input (global.conf), and a path
+# there would give every home its own package ids. The wrapper is handed by name (`CC=malf-cc`
+# through writer.profile's PATH), so a build that records its compiler (curl-config,
+# Makefile.global) records this name, never a path of the seat. It rewrites no other argument: a
+# `-D` value can be a path the binary ACTS on (DN-142.D17 (12)).
+#
+# pre: MALF_REAL_CC and MALF_REAL_CXX name the real compilers and CONAN_HOME the home (malf's writer
+#      acts export all three).
+here="$(cd "$(dirname "$0")" && pwd)"
+case "$(basename "$0")" in
+    malf-c++) real="${MALF_REAL_CXX:?malf-c++: MALF_REAL_CXX names no compiler}" ;;
+    *)        real="${MALF_REAL_CC:?malf-cc: MALF_REAL_CC names no compiler}" ;;
+esac
+home="${CONAN_HOME:?malf-cc: CONAN_HOME names no conan home}"
+token="$(sed -n 's/^set(MALF_HOME_TOKEN \([A-Za-z0-9_.-]*\))$/\1/p' "$here/../cmake/malf-path-map.cmake")"
+[ -n "$token" ] || { echo "malf-cc: $here/../cmake/malf-path-map.cmake declares no MALF_HOME_TOKEN" >&2; exit 2; }
+for folder in "$home"/p/* "$home"/p/b/*; do
+    [ -d "$folder" ] || continue
+    name="${folder##*/}"
+    [ "$folder" = "$home/p/b" ] && continue
+    case "$folder" in
+        "$home"/p/b/*) where=p/b ;;
+        *)             where=p ;;
+    esac
+    stem="${name%?????????????}"
+    set -- "$@" "-ffile-prefix-map=$folder=$token/$where/$stem"
+done
+exec "$real" "$@"
