@@ -5251,6 +5251,42 @@ check "the walk opens every step it runs and closes it on each of its six exits:
 rm -rf "$st_tmp"
 echo
 
+echo "[7q17] the store's root is a fixed path outside every cache: the default is \$HOME/coderoast-store, and a root under ~/.cache or \$XDG_CACHE_HOME is REFUSED by every store verb before it reads anything (DN-142.D6, the Founder's ruling R-2)"
+sr_tmp="$(mktemp -d /tmp/malf-storeroot.XXXXXX)"
+mkdir -p "$sr_tmp/home/.cache" "$sr_tmp/xdg" "$sr_tmp/bin" "$sr_tmp/home/.cache/real"
+ln -s "$sr_tmp/home/.cache/real" "$sr_tmp/home/link-into-cache"
+printf '#!/usr/bin/env bash\necho "$*" >> %s/conan.log\nexit 0\n' "$sr_tmp" > "$sr_tmp/bin/conan"; chmod +x "$sr_tmp/bin/conan"
+sr_root() {   # <MALF_STORE_DIR or ''> -> rc=<status> <root printed, or the refusal's R-2 count>
+    local out rc
+    out="$(HOME="$sr_tmp/home" XDG_CACHE_HOME="$sr_tmp/xdg" bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e
+        if [[ -n "$2" ]]; then export MALF_STORE_DIR="$2"; else unset MALF_STORE_DIR; fi
+        _malf_store_root probe' _ "$MALF_BIN" "$1" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]]; then printf 'rc=0 %s' "$out"; else printf 'rc=%s %s' "$rc" "$(grep -c 'REFUSED.*R-2' <<< "$out")"; fi
+}
+check "unset, the root is \$HOME/coderoast-store — on the release account, the ruled ~ghrelease/coderoast-store" \
+      "rc=0 $sr_tmp/home/coderoast-store" "$(sr_root '')"
+check "an explicit root outside every cache is taken as given, resolved" \
+      "rc=0 $sr_tmp/elsewhere/store" "$(sr_root "$sr_tmp/elsewhere/./store")"
+check "a root under ~/.cache, the ~/.cache itself, one under \$XDG_CACHE_HOME, and a symlink resolving into ~/.cache are each REFUSED at exit 2" \
+      "rc=2 1|rc=2 1|rc=2 1|rc=2 1" \
+      "$(sr_root "$sr_tmp/home/.cache/coderoast-artefact-store")|$(sr_root "$sr_tmp/home/.cache")|$(sr_root "$sr_tmp/xdg/store")|$(sr_root "$sr_tmp/home/link-into-cache/store")"
+check "a sibling whose NAME merely starts with .cache is not under the cache" \
+      "rc=0 $sr_tmp/home/.cache-not/store" "$(sr_root "$sr_tmp/home/.cache-not/store")"
+sr_verb() {   # <verb> <arg>... -> rc=<status> <R-2 refusal count> <conan called|none>
+    local out rc
+    rm -f "$sr_tmp/conan.log"
+    out="$(cd "$sr_tmp" && PATH="$sr_tmp/bin:$PATH" HOME="$sr_tmp/home" XDG_CACHE_HOME="$sr_tmp/xdg" \
+        MALF_STORE_DIR="$sr_tmp/home/.cache/store" CONAN_HOME="$sr_tmp/conanhome" bash "$MALF_BIN" "$@" 2>&1)"; rc=$?
+    printf 'rc=%s %s %s' "$rc" "$(grep -c "malf $1: REFUSED.*R-2" <<< "$out")" "$([[ -s "$sr_tmp/conan.log" ]] && echo called || echo none)"
+}
+check "store-create, store-build and store-verdict each refuse a cache root before conan is ever called" \
+      "rc=2 1 none|rc=2 1 none|rc=2 1 none" \
+      "$(sr_verb store-create some_pkg)|$(sr_verb store-build some_pkg)|$(sr_verb store-verdict format "$MALF_ROOT")"
+check "no store verb spells a store default of its own: the root has one definition" \
+      "1 1 3" "$(grep -c 'MALF_STORE_DIR:-' "$MALF_BIN") $(sed -n '/^_malf_store_root()/,/^}/p' "$MALF_BIN" | grep -c 'MALF_STORE_DIR:-') $(grep -cE 'store="\$\(_malf_store_root store-(create|build|verdict)\)"' "$MALF_BIN")"
+rm -rf "$sr_tmp"
+echo
+
 echo
 echo
 echo "malf selftest: $pass_count passed, $fail_count failed"

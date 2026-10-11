@@ -5104,7 +5104,8 @@ cmd_store_verdict() {
         git -C "$arg" rev-parse --show-toplevel > /dev/null 2>&1 \
             || { echo "malf store-verdict: $arg is not a git repository" >&2; return 2; }
     done
-    local store="${MALF_STORE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/coderoast-artefact-store}"
+    local store
+    store="$(_malf_store_root store-verdict)" || return 2
     local clang_format_bin
     clang_format_bin="$(_malf_clang_format_bin)" || return 1
     python3 "$MALF_DIR/artefact_store.py" verdict-step "$store" "$predicate" "$MALF_DIR" "$clang_format_bin" "$@"
@@ -5120,6 +5121,27 @@ _malf_writer_create_args() {
     listed="$(python3 "$MALF_DIR/malf_recipe_tests.py" create-args writer)" \
         || { echo "malf: the writer's conf set could not be read from malf_recipe_tests.py" >&2; return 1; }
     [[ -z "$listed" ]] || mapfile -t _MALF_WRITER_ARGS <<< "$listed"
+}
+
+# THE STORE'S ROOT (DN-142.D6, the Founder's ruling R-2): MALF_STORE_DIR, else $HOME/coderoast-store,
+# a FIXED path outside every cache, so on the release runner's account the default IS the ruled
+# ~ghrelease/coderoast-store. A root under ~/.cache or $XDG_CACHE_HOME is REFUSED, symlinks resolved:
+# a cache may be wiped by anyone, and the store holds what no rebuild restores — the objects a
+# release references and step 0's last green record, B3c's reference.
+# Usage: _malf_store_root <verb>   -> the resolved root on stdout, or exit 2 naming the cache
+_malf_store_root() {
+    local verb="$1" root="${MALF_STORE_DIR:-$HOME/coderoast-store}" resolved cache
+    resolved="$(realpath -m -- "$root")" \
+        || { echo "malf $verb: the store root '$root' cannot be resolved" >&2; return 2; }
+    for cache in "$HOME/.cache" "${XDG_CACHE_HOME:-}"; do
+        [[ -n "$cache" ]] || continue
+        cache="$(realpath -m -- "$cache")" || continue
+        if [[ "$resolved" == "$cache" || "$resolved" == "$cache"/* ]]; then
+            echo "malf $verb: REFUSED — the store root $root resolves to $resolved, under the cache $cache; a cache may be wiped, and the store keeps every object a release references and step 0's B3c reference. Set MALF_STORE_DIR to a path outside every cache (default \$HOME/coderoast-store; DN-142.D6, R-2)" >&2
+            return 2
+        fi
+    done
+    printf '%s\n' "$resolved"
 }
 
 # malf store-create [<package>...] — ROADMAP N358's ONE build act (DN-142.D5 (1), (4), (7) M2): every
@@ -5160,13 +5182,14 @@ _malf_writer_create_args() {
 #
 # Exit 0 every step green and every output stored or matching; 1 a step failed, was skipped, or
 # rebuilt at an equal key differs; 2 refused before any step.
-# Usage: malf store-create [<package>...]   (MALF_STORE_DIR: the store, default
-#        ~/.cache/coderoast-artefact-store)
+# Usage: malf store-create [<package>...]   (MALF_STORE_DIR: the store, default ~/coderoast-store;
+#        a root under a cache is refused, _malf_store_root)
 cmd_store_create() {
     local arg
     for arg in "$@"; do [[ "$arg" != -* ]] || _malf_refuse_option store-create "$arg"; done
+    local store
+    store="$(_malf_store_root store-create)" || return 2
     _malf_apply_profile "${MALF_CUT_VERIFY_PROFILE:-linux-gcc16-release}"
-    local store="${MALF_STORE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/coderoast-artefact-store}"
     local cut_home="${MALF_CUT_VERIFY_CONAN_HOME:-$MALF_CONAN_HOME_BASE/cut-verify}"
     local seed_home="${MALF_TWIN_SEED_HOME:-$cut_home}"
     local scratch; scratch="$(mktemp -d /tmp/malf-store.XXXXXX)"
@@ -5420,7 +5443,8 @@ cmd_store_build() {
     local arg
     for arg in "$@"; do [[ "$arg" != -* ]] || _malf_refuse_option store-build "$arg"; done
     _malf_apply_profile "${MALF_CUT_VERIFY_PROFILE:-linux-gcc16-release}"
-    local unstored store="${MALF_STORE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/coderoast-artefact-store}"
+    local unstored store
+    store="$(_malf_store_root store-build)" || return 2
     unstored="$(python3 "$MALF_WORKSPACE_ROOT/scripts/version_line.py" unstored "$MALF_WORKSPACE_ROOT")" \
         || { echo "malf store-build: failed to resolve the stored: false packages" >&2; return 2; }
     local name
