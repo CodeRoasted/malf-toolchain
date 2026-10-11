@@ -354,11 +354,15 @@ def _cache_path(home: Path, reference: str, folder: str | None = None) -> Path:
 
 
 def _export_digest(home: Path, recipe: str) -> str:
-    """A first-party recipe's exported set: the export and export_sources folders together."""
-    parts = {}
-    for folder in ("export", "export_source"):
-        path = _cache_path(home, recipe, None if folder == "export" else folder)
-        parts[folder] = tree_digest(path)[0] if path.is_dir() else None
+    """A recipe's exported set: the export and export_sources folders together, the second None
+    when the recipe has none.
+
+    note: the export_sources folder is the export folder's sibling `es`; `conan cache path
+          --folder=export_source` exits non-zero when it is absent, as for a recipe a remote served
+          (measured on conan 2.28.1, cmake/4.4.4 from conancenter)."""
+    export = _cache_path(home, recipe)
+    parts = {"export": tree_digest(export)[0] if export.is_dir() else None,
+             "export_source": tree_digest(export.parent / "es")[0] if (export.parent / "es").is_dir() else None}
     return key_of(parts)
 
 

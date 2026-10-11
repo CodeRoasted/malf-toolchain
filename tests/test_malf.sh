@@ -4848,6 +4848,15 @@ check "(a′) the reproducible control: act 2 MATCHES tpr's third-party-create a
       "rc=0 rc=0 1 1 2" \
       "$(tq_step a store-r ex_r) $(tq_step a-second-home-at-a-longer-path store-r ex_r) $(tq_has 'MATCH tpr package') $(tq_has 'MATCH ex_r package') $(ls "$tq_tmp/store-r/records" | wc -l | tr -d ' ')"
 
+# (a″) a recipe a remote served carries no export_sources folder (conan 2.28.1 creates one only for
+# a recipe exported from a local path): its step is keyed by its export alone.
+tq_home a3
+rm -rf "$(dirname "$(CONAN_HOME="$tq_tmp/a3" conan cache path "$(CONAN_HOME="$tq_tmp/a3" conan list 'tpr/0.1#*' --format=json 2>/dev/null | python3 -c 'import json, sys
+for ref, body in json.load(sys.stdin)["Local Cache"].items():
+    print(f"{ref}#{next(iter(body["revisions"]))}")')")")/es"
+check "(a″) RED — a third-party recipe with no export_sources folder, as a remote serves one, is recorded by its own step" \
+      "rc=0 1" "$(tq_step a3 store-a3 ex_r) $(tq_has 'STORED tpr package')"
+
 # (b) a third-party binary built inside a first-party create fails the step, naming the node.
 tq_home b
 CONAN_HOME="$tq_tmp/b" conan create "$tq_src/ex_v" -pr:a fixture --build=missing --format=json > "$tq_tmp/b.json" 2> /dev/null
