@@ -40,7 +40,7 @@ on:
 
 jobs:
   attest:
-    uses: CodeRoasted/malf-toolchain/.github/workflows/coderoast-attest.yml@184b8031aad1ba9c3dd39e80d13c3393e3f4fcf4
+    uses: CodeRoasted/malf-toolchain/.github/workflows/coderoast-attest.yml@caaf977f57509dff66ff2464c363ad3e8636e53b
     with:
       runs-on: ${{ inputs.runs-on }}
     secrets:
@@ -54,7 +54,7 @@ jobs:
       packages: read    # this repository's own store package, the only one it is granted
     steps:
       - name: Stage malf-toolchain at this workflow's revision (the tools and the writer's public key)
-        uses: CodeRoasted/malf-toolchain/.github/actions/stage-malf@184b8031aad1ba9c3dd39e80d13c3393e3f4fcf4
+        uses: CodeRoasted/malf-toolchain/.github/actions/stage-malf@caaf977f57509dff66ff2464c363ad3e8636e53b
         with:
           path: .malf
 
