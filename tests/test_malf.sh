@@ -352,6 +352,14 @@ check "store_replica selftest: 12 arms, every refusal fired and the round trip b
 
 echo
 
+echo "[7j] store_manifest carries its own refusal proof (selftest): a manifest admits only evaluated digests, a slice verifies only under the writer's key, and DN-142.D22 (3) binds both directions"
+manifest_selftest_output="$(timeout 120 python3 "$MALF_ROOT/store_manifest.py" selftest 2>&1)"
+manifest_selftest_status=$?
+check "store_manifest selftest: 18 arms, every refusal fired, the green manifest, slices, signature and extraction intact" \
+      "ok" "$([[ $manifest_selftest_status -eq 0 ]] && grep -q '^store_manifest selftest: 18 arm(s), 0 failure(s)$' <<< "$manifest_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$manifest_selftest_output")")"
+
+echo
+
 echo "[7h] comment_contract_lint carries its own grammar proof (--selftest), post-format leg included"
 
 # The comment-grammar phase of `malf format` (ADR-26.D7). Its selftest falsifies every violation
@@ -4760,6 +4768,150 @@ check "(b) the replay reds a record whose upstream no record holds any more, nam
       "rc=1 ex_low: 1 of 1 upstream(s) unrecorded" \
       "$(out="$(python3 "$MALF_ROOT/artefact_store.py" upstreams "$as_tmp/ustore")"; rc=$?; printf 'rc=%s %s' "$rc" "$(grep -oE 'ex_low: [0-9]+ of [0-9]+ upstream\(s\) unrecorded' <<< "$out")")"
 rm -rf "$as_tmp"
+echo
+
+echo "[7q7n] a third-party binary enters a first-party key only as the output of its OWN step, judged by its whole folder, and a first-party create builds only itself, with no remote (DN-142.D17)"
+# The fixtures are python-only recipes, so no compiler runs. tpv's package holds its own build
+# folder, so it differs between two homes; tpr's is constant; tpd's also holds its build folder, so
+# the record can show WHICH build it holds; tpw is a tool whose script appends to a file of its own
+# package folder each time it runs; tpp carries a python_requires. The first-party consumers (the
+# `ex_` namespace) are header libraries. Each act runs malf's own step function, in the walk's
+# environment, over a fixture home: its third-party steps, its create, its records.
+tq_tmp="$(realpath "$(mktemp -d)")"
+tq_src="$tq_tmp/src"; mkdir -p "$tq_src"
+tq_third() {   # <name> <package() body line> [<class line>...]
+    mkdir -p "$tq_src/$1"
+    { printf 'import os\nfrom conan import ConanFile\nfrom conan.tools.files import save\n\n\nclass Fixture(ConanFile):\n    name = "%s"\n    version = "0.1"\n' "$1"
+      local line; for line in "${@:3}"; do printf '    %s\n' "$line"; done
+      printf '\n    def package(self):\n        %s\n' "$2"; } > "$tq_src/$1/conanfile.py"
+}
+tq_third tpv 'save(self, os.path.join(self.package_folder, "lib", "libtpv.a"), self.build_folder)'
+tq_third tpr 'save(self, os.path.join(self.package_folder, "lib", "libtpr.a"), "the same bytes in every home")'
+tq_third tpd 'save(self, os.path.join(self.package_folder, "lib", "libtpd.a"), self.build_folder)'
+tq_third tpw 'save(self, os.path.join(self.package_folder, "bin", "tpw.sh"), "#!/bin/sh\\necho ran >> \"$(dirname \"$0\")/../written-at-use\"\\n"); os.chmod(os.path.join(self.package_folder, "bin", "tpw.sh"), 0o755)' 'package_type = "application"'
+tq_third tpp 'save(self, os.path.join(self.package_folder, "lib", "libtpp.a"), "x")' 'python_requires = "pyreq/0.1"'
+mkdir -p "$tq_src/pyreq"
+printf 'from conan import ConanFile\n\n\nclass PyReq(ConanFile):\n    name = "pyreq"\n    version = "0.1"\n    package_type = "python-require"\n' > "$tq_src/pyreq/conanfile.py"
+tq_first() {   # <name> <requirement line> [<build() body line>]
+    mkdir -p "$tq_src/$1"
+    { printf 'from conan import ConanFile\n\n\nclass Fixture(ConanFile):\n    name = "%s"\n    version = "0.1"\n    package_type = "header-library"\n    %s\n' "$1" "$2"
+      [[ -z "${3:-}" ]] || printf '\n    def build(self):\n        %s\n' "$3"; } > "$tq_src/$1/conanfile.py"
+}
+tq_first ex_v 'requires = "tpv/0.1"'
+tq_first ex_r 'requires = "tpr/0.1"'
+tq_first ex_d 'requires = "tpd/0.1"'
+tq_first ex_w 'tool_requires = "tpw/0.1"' 'self.run("tpw.sh")'
+tq_first ex_p 'requires = "tpp/0.1"'
+printf 'packages: {}\n' > "$tq_src/packages.yml"
+git -C "$tq_src" init -q && git -C "$tq_src" add -A && git -C "$tq_src" -c user.email=t@t -c user.name=t commit -qm fixtures
+tq_home() {   # <home name> — a fresh conan home holding every fixture recipe and no binary
+    local home="$tq_tmp/$1" recipe
+    CONAN_HOME="$home" bash "$MALF_BIN" profiles > /dev/null 2>&1
+    printf '[settings]\nos=Linux\narch=x86_64\nbuild_type=Release\n' > "$home/profiles/fixture"
+    for recipe in pyreq tpv tpr tpd tpw tpp; do CONAN_HOME="$home" conan export "$tq_src/$recipe" > /dev/null 2>&1; done
+}
+tq_step() {   # <home name> <store name> <package> — malf's step function over the fixture home; its output in $tq_tmp/out, its exit printed
+    mkdir -p "$tq_tmp/scratch-$1"; printf '{"compiler": "fixture"}' > "$tq_tmp/scratch-$1/toolchain.json"
+    bash -c 'MALF_SOURCE_ONLY=1 source "$1" > /dev/null 2>&1; set +e
+        export CONAN_HOME="$2"; MALF_PROFILE="$2/profiles/fixture"; MALF_BUILD_PROFILE="$MALF_PROFILE"
+        MALF_CONFIG=Release; MALF_PROFILE_NAME=fixture; _MALF_WRITER_ARGS=(); _MALF_SHIP_LOCK=()
+        _malf_store_run_step 1 "$5" "$6/$5" create "$3" "$4" ex_ 0' \
+        _ "$MALF_BIN" "$tq_tmp/$1" "$tq_tmp/$2" "$tq_tmp/scratch-$1" "$3" "$tq_src" > "$tq_tmp/out" 2>&1
+    echo "rc=$?"
+}
+tq_has() { grep -c -- "$1" "$tq_tmp/out"; }
+tq_record() {   # <store name> <package> <kind> — the newest record's outputs.package.content and third_party, as JSON
+    python3 -c 'import json, sys
+from pathlib import Path
+bodies = [json.loads(path.read_text()) for path in Path(sys.argv[1], "records").glob("*.json")]
+found = [body for body in bodies if body["inputs"]["step"].get("package") == sys.argv[2] and body["inputs"]["step"]["kind"] == sys.argv[3]]
+print(json.dumps({"content": found[-1]["outputs"]["package"]["content"], "third_party": found[-1]["inputs"].get("third_party")}) if len(found) == 1 else f"{len(found)} records")' "$tq_tmp/$1" "$2" "$3"
+}
+
+# (a) THE COMPARE FIRES FOR A FIRST-PARTY CONSUMER: two acts, two fresh homes at paths of different
+# length, one store. Act 1 records tpv's own step and ex_v's; act 2 rebuilds tpv at the equal key,
+# differs, and builds nothing on it.
+tq_home a; tq_home a-second-home-at-a-longer-path
+check "(a) act 1: tpv's own third-party-create is STORED, then the consumer's create, its line PASS" \
+      "rc=0 1 1 1" "$(tq_step a store-v ex_v) $(tq_has 'STORED tpv package') $(tq_has 'STORED ex_v package') $(tq_has '\[1\] ex_v PASS')"
+check "(a) RED — act 2: tpv rebuilt at an EQUAL key differs, a MISMATCH naming its file; its own line closes MISMATCH, the consumer's SKIPPED, and nothing of it is built" \
+      "rc=4 1 1 1 0" \
+      "$(tq_step a-second-home-at-a-longer-path store-v ex_v) $(tq_has 'MISMATCH tpv package at an equal key .*1 file(s): lib/libtpv.a') $(tq_has '\[1\] ex_v:third-party MISMATCH') $(tq_has '\[1\] ex_v SKIPPED') $(CONAN_HOME="$tq_tmp/a-second-home-at-a-longer-path" conan list 'ex_v/0.1:*' --format=json 2>/dev/null | python3 -c 'import json, sys; print(sum(len(r.get("packages", {})) for v in json.load(sys.stdin).get("Local Cache", {}).values() for r in v.get("revisions", {}).values()))')"
+# (a′) the reproducible control: the same two acts over tpr.
+check "(a′) the reproducible control: act 2 MATCHES tpr's third-party-create and the consumer's create at equal keys" \
+      "rc=0 rc=0 1 1 2" \
+      "$(tq_step a store-r ex_r) $(tq_step a-second-home-at-a-longer-path store-r ex_r) $(tq_has 'MATCH tpr package') $(tq_has 'MATCH ex_r package') $(ls "$tq_tmp/store-r/records" | wc -l | tr -d ' ')"
+
+# (b) a third-party binary built inside a first-party create fails the step, naming the node.
+tq_home b
+CONAN_HOME="$tq_tmp/b" conan create "$tq_src/ex_v" -pr:a fixture --build=missing --format=json > "$tq_tmp/b.json" 2> /dev/null
+check "(b) RED — a first-party create that built a third-party package is REFUSED, naming it, and stores nothing" \
+      "rc=1 1 0" \
+      "$(python3 "$MALF_ROOT/artefact_store.py" conan-step "$tq_tmp/store-b" "$tq_tmp/b" "$tq_tmp/b.json" ex_v fixture "$MALF_ROOT" "$tq_tmp/scratch-a/toolchain.json" ex_ > "$tq_tmp/out" 2>&1; echo -n "rc=$? "; echo -n "$(tq_has 'REFUSED ex_v: its create built or downloaded 1 third-party package(s).*tpv/0.1 (host) Build') "; ls "$tq_tmp/store-b/records" 2>/dev/null | wc -l | tr -d ' ')"
+
+# (c) a third-party content no record holds is refused, in the act and in the read-only replay.
+tq_home c
+CONAN_HOME="$tq_tmp/c" conan create "$tq_src/tpr" -pr:a fixture > /dev/null 2>&1
+CONAN_HOME="$tq_tmp/c" conan create "$tq_src/ex_r" -pr:a fixture --build='ex_r/*' --no-remote --format=json > "$tq_tmp/c.json" 2> /dev/null
+check "(c) RED — a first-party step linking a third-party binary no third-party-create record holds is REFUSED, naming it, and stores nothing" \
+      "rc=1 1 0" \
+      "$(MALF_STEP_EXECUTABLES= python3 "$MALF_ROOT/artefact_store.py" conan-step "$tq_tmp/store-c" "$tq_tmp/c" "$tq_tmp/c.json" ex_r fixture "$MALF_ROOT" "$tq_tmp/scratch-a/toolchain.json" ex_ > "$tq_tmp/out" 2>&1; echo -n "rc=$? "; echo -n "$(tq_has 'REFUSED ex_r: 1 third-party package(s).*tpr/host tpr/0.1#[0-9a-f]*:[0-9a-f]* at content [0-9a-f]*: no third-party-create record holds it') "; ls "$tq_tmp/store-c/records" 2>/dev/null | wc -l | tr -d ' ')"
+mkdir -p "$tq_tmp/store-replay/records"
+printf '{"key": "k", "inputs": {"step": {"kind": "conan-create", "package": "ex_r", "profile": "fixture"}, "upstream": {}, "third_party": {"tpr/host": {"ref": "tpr/0.1#r", "package_id": "p", "content": "%s"}}}, "outputs": {}}' "$(printf 'c%.0s' {1..64})" > "$tq_tmp/store-replay/records/k.json"
+check "(c) RED — the read-only replay names a stored record whose third-party content no record holds" \
+      "rc=1 1" \
+      "$(python3 "$MALF_ROOT/artefact_store.py" upstreams "$tq_tmp/store-replay" > "$tq_tmp/out" 2>&1; echo -n "rc=$? "; tq_has 'ex_r: 1 third-party input(s) no third-party-create record holds: tpr/host')"
+
+# (d) a binary the writer did not build is never consumed: a Download is planned as the writer's
+# build, the first-party create runs with no remote, and a binary RESTORED into the home (built in
+# another home, `conan cache save` / `conan cache restore`) is rebuilt by its step, the record and
+# the consumer both holding the writer's own build.
+printf '{"graph": {"nodes": {"0": {"name": "cli", "ref": "conanfile", "context": "host", "binary": null}, "1": {"name": "tpd", "ref": "tpd/0.1#r", "rrev": "r", "package_id": "p", "prev": null, "context": "host", "binary": "Download"}}}}' > "$tq_tmp/download.json"
+check "(d) RED — a node conan would download is planned as the writer's own build" \
+      "tpd/0.1|1" \
+      "$(python3 "$MALF_ROOT/artefact_store.py" third-party-plan "$tq_tmp/store-d" "$tq_tmp/a" "$tq_tmp/download.json" ex_ fixture 2> "$tq_tmp/out")|$(tq_has 'PLAN third-party-create tpd/0.1: tpd/0.1#r:p (host) is Download')"
+check "(d) RED — the first-party create runs with no remote and builds only its own package" \
+      "1 --build=ex_d/*" \
+      "$(sed -n '/^_malf_store_create_step()/,/^}/p' "$MALF_BIN" | grep -c -- '--no-remote --format=json') $(bash -c 'MALF_SOURCE_ONLY=1 source "$1" > /dev/null 2>&1; set +e; _malf_store_build_args ex_d' _ "$MALF_BIN" | paste -sd' ')"
+tq_home x; tq_home y
+CONAN_HOME="$tq_tmp/x" conan create "$tq_src/tpd" -pr:a fixture > /dev/null 2>&1
+CONAN_HOME="$tq_tmp/x" conan cache save 'tpd/0.1:*' --file="$tq_tmp/tpd.tgz" > /dev/null 2>&1
+CONAN_HOME="$tq_tmp/y" conan cache restore "$tq_tmp/tpd.tgz" > /dev/null 2>&1
+tq_restored="$(python3 "$MALF_ROOT/artefact_store.py" tree "$(CONAN_HOME="$tq_tmp/x" conan cache path "$(CONAN_HOME="$tq_tmp/x" conan list 'tpd/0.1#*:*#*' --format=json 2>/dev/null | python3 -c 'import json, sys
+for ref, body in json.load(sys.stdin)["Local Cache"].items():
+    for rrev, recipe in body["revisions"].items():
+        for pid, package in recipe["packages"].items():
+            for prev in package["revisions"]:
+                print(f"{ref}#{rrev}:{pid}#{prev}")')")")"
+check "(d) RED — a binary restored from another home is rebuilt by its own step: the record holds the writer's build, never the restored one, and the no-remote consumer links exactly that content" \
+      "rc=0 1 written-in-y differs-from-restored consumer-links-it" \
+      "$(tq_step y store-d ex_d) $(tq_has 'PLAN third-party-create tpd/0.1: .* is present at content') $(python3 -c 'import json, sys
+from pathlib import Path
+tp, consumer = json.loads(sys.argv[1]), json.loads(sys.argv[2])
+home, restored = sys.argv[3], sys.argv[4]
+built = [path for path in Path(home, "p").glob("*/p/lib/libtpd.a") if tp["content"]]
+print("written-in-y" if any(path.read_text().startswith(home) for path in built) else "not-written-in-y",
+      "differs-from-restored" if tp["content"] != restored else "is-the-restored",
+      "consumer-links-it" if consumer["third_party"]["tpd/host"]["content"] == tp["content"] else "consumer-links-another")' "$(tq_record store-d tpd third-party-create)" "$(tq_record store-d ex_d conan-create)" "$tq_tmp/y" "$tq_restored")"
+
+# (e) a package written into when it is used: tpw's script appends to its own folder when ex_w's
+# build runs it, after tpw's own step recorded it.
+tq_home e
+check "(e) RED — the step that ran a tool which wrote into its own package folder fails, naming the folder and the new file" \
+      "rc=2 1 1" \
+      "$(tq_step e store-e ex_w) $(tq_has 'STORED tpw package') $(tq_has 'REFUSED ex_w: 1 third-party package(s).*tpw/build tpw/0.1#[0-9a-f]*:[0-9a-f]*: CHANGED SINCE ITS RECORD, its folder .* was written after its step judged it: new 1: written-at-use')"
+
+# (f) a python_requires is recipe code no graph node is: refused, naming it.
+tq_home f
+check "(f) RED — a step whose graph carries a python_requires is SKIPPED, its third-party plan refused naming it" \
+      "rc=4 1 1" \
+      "$(tq_step f store-f ex_p) $(tq_has 'REFUSED the graph .* 1 node(s) carry a python_requires.*tpp/0.1 carries pyreq/0.1#') $(tq_has '\[1\] ex_p SKIPPED')"
+CONAN_HOME="$tq_tmp/f" conan create "$tq_src/tpp" -pr:a fixture > /dev/null 2>&1
+CONAN_HOME="$tq_tmp/f" conan create "$tq_src/ex_p" -pr:a fixture --build='ex_p/*' --format=json > "$tq_tmp/f.json" 2> /dev/null
+check "(f) RED — the key derivation of a first-party step refuses a graph carrying a python_requires, naming it" \
+      "rc=1 1" \
+      "$(MALF_STEP_EXECUTABLES= python3 "$MALF_ROOT/artefact_store.py" conan-step "$tq_tmp/store-f2" "$tq_tmp/f" "$tq_tmp/f.json" ex_p fixture "$MALF_ROOT" "$tq_tmp/scratch-a/toolchain.json" ex_ > "$tq_tmp/out" 2>&1; echo -n "rc=$? "; tq_has 'tpp/0.1 carries pyreq/0.1#')"
+rm -rf "$tq_tmp"
 echo
 
 echo "[7q7h] a verdict is a keyed record binding the trees it judged; a fail is stored, a flip at an equal key fails, and a run that judged nothing writes no record (DN-142.D7; ROADMAP N358)"
