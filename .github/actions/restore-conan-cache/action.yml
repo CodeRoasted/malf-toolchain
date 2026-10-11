@@ -52,7 +52,7 @@ runs:
   using: composite
   steps:
     - name: Ensure oras (pinned)
-      uses: CodeRoasted/malf-toolchain/.github/actions/ensure-oras@fef0cd4e4d9fe97a4ec9fa184fc3fffd0c724c6a
+      uses: CodeRoasted/malf-toolchain/.github/actions/ensure-oras@0fa0c1d39cf64ead5f3d3457d23b0168f42f1782
 
     - name: Restore third-party conan cache from ${{ inputs.registry }}:${{ inputs.tag }} (Windows, best-effort)
       if: runner.os == 'Windows'
