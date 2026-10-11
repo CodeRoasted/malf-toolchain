@@ -2913,8 +2913,8 @@ rc_tests "RtProbe.NoMount:$tp_tmp/rc_unset" "RtCorpus.Reads:$tp_tmp/rc_reads:gua
 check "premise — the default test that asserts no mount REDS the create when a mount leaks into its environment" \
       "rc=1" "$(RT_MOUNT=leaked rt_create)"
 mkdir -p "$tp_tmp/ninja"
-printf 'rule CXX_EXECUTABLE_LINKER__app_Release\n  command = true\nrule CXX_STATIC_LIBRARY_LINKER__lib_Release\n  command = true\nrule CXX_COMPILER__app_Release\n  command = true\nbuild bin/app bin/app[1]_tests.cmake: CXX_EXECUTABLE_LINKER__app_Release obj.o\nbuild %s/lib.a: CXX_STATIC_LIBRARY_LINKER__lib_Release obj.o\nbuild obj.o: CXX_COMPILER__app_Release src.cpp\n' "$tp_tmp/ninja" > "$tp_tmp/ninja/build.ninja"
-check "a tree's linked targets are its linker rules' outputs relative to it, never an object nor a gtest discovery byproduct (\`targets\`, the definition B3c compares)" \
+printf 'rule CXX_EXECUTABLE_LINKER__app_Release\n  command = true\nrule CXX_STATIC_LIBRARY_LINKER__lib_Release\n  command = true\nrule CXX_COMPILER__app_Release\n  command = true\nbuild bin/app bin/app[1]_tests.cmake: CXX_EXECUTABLE_LINKER__app_Release obj.o\nbuild %s/lib.a: CXX_STATIC_LIBRARY_LINKER__lib_Release obj.o\nbuild lib__cmake_cxx_std_23.a: CXX_STATIC_LIBRARY_LINKER__lib_Release obj.o\nbuild obj.o: CXX_COMPILER__app_Release src.cpp\n' "$tp_tmp/ninja" > "$tp_tmp/ninja/build.ninja"
+check "a tree's linked targets are its linker rules' outputs relative to it, never an object, a gtest discovery byproduct nor CMake's own import-std library (\`targets\`, the definition B3c compares)" \
       "bin/app|lib.a" "$(python3 "$MALF_ROOT/malf_recipe_tests.py" targets "$tp_tmp/ninja" | paste -sd'|')"
 
 # THE CONTENT MANIFEST (DN-142.D21 (5)): one digest of a data root's bytes, whatever path reaches

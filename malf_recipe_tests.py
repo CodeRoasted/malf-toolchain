@@ -75,6 +75,10 @@ CORPUS_GATES_CONF = "user.malf:corpus_gates"
 # The ninja rules whose outputs are a tree's linked targets (CMake's Ninja generator names them
 # `<rule>__<target>_<config>`): what B3c compares between B3's tree and the create's.
 LINKER_RULES = re.compile(r"^(CXX_EXECUTABLE_LINKER|CXX_STATIC_LIBRARY_LINKER|CXX_SHARED_LIBRARY_LINKER)")
+# The libraries CMake itself synthesizes, never a package's product: `__cmake_cxx_std_<N>` is the
+# `import std` module target CMake adds to every tree that compiles with CXX_MODULE_STD, so whether a
+# tree links one says which CMake ran, not what the package builds.
+CMAKE_INTERNAL_TARGETS = ("lib__cmake_", "__cmake_")
 # The property gtest_discover_tests sets, without which ctest reads a GTEST_SKIP as a pass.
 SKIP_PROPERTY = "SKIP_REGULAR_EXPRESSION"
 # DN-142.D13 (1): the writer's create sets no skip conf; the consumer's runs no test and builds no
@@ -161,7 +165,7 @@ def corpus_listing(build_dir: str) -> list[str]:
 def linked_targets(build_dir: str) -> list[str] | None:
     """The tree's linked targets, relative to it and sorted: the outputs of ninja's CXX executable,
     static and shared library linker rules, without the `*.cmake` files a POST_BUILD gtest
-    discovery declares as their byproducts. None when the tree has no `build.ninja`. Raises
+    discovery declares as their byproducts, and without CMake's own `__cmake_*` libraries. None when the tree has no `build.ninja`. Raises
     RuntimeError when ninja cannot list them."""
     if not (Path(build_dir) / "build.ninja").is_file():
         return None
@@ -175,6 +179,8 @@ def linked_targets(build_dir: str) -> list[str] | None:
     for line in listed.stdout.splitlines():
         target, _separator, rule = line.rpartition(": ")
         if not target or not LINKER_RULES.match(rule.strip()) or target.endswith(".cmake"):
+            continue
+        if Path(target).name.startswith(CMAKE_INTERNAL_TARGETS):
             continue
         path = Path(target)
         if path.is_absolute() and path.resolve().is_relative_to(root):
