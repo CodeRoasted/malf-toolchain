@@ -23,6 +23,9 @@ more; setting it by hand is the remedy, and the next run verifies it.
         ghcr.io/coderoasted/store-<repository>, the package guarded before and after; an object
         already replicated is verified, never rewritten. Token: the file MALF_STORE_TOKEN_FILE
         (the writer account's classic PAT, `write:packages`), never an argument or an echo.
+    store_replica.py push-slice <repository> <step-0 record digest> <slice> <signature>
+        the writer's act: the repository's signed manifest slice for that step-0 record, under
+        the tag slice-<record digest>, the package guarded the same way; never rewritten
     store_replica.py fetch <repository> <object digest> <out file>
         a reader's act: the object by its digest, written only after its SHA-256 is verified.
         Token: GITHUB_TOKEN (the repository's own, `packages: read`).
@@ -60,6 +63,9 @@ OCI_EMPTY = "application/vnd.oci.empty.v1+json"
 OBJECT_TYPE = "application/vnd.coderoast.store.object.v1"
 SENTINEL_TYPE = "application/vnd.coderoast.store.sentinel.v1"
 SENTINEL_TAG = "store-sentinel"
+SLICE_TYPE = "application/vnd.coderoast.store.slice.v1"
+SLICE_MEDIA = "application/vnd.coderoast.store.slice.v1+json"
+SIGNATURE_MEDIA = "application/vnd.coderoast.store.signature.v1"
 EMPTY_BYTES = b"{}"
 EMPTY_DIGEST = "sha256:" + hashlib.sha256(EMPTY_BYTES).hexdigest()
 CHUNK = 1 << 20
@@ -92,6 +98,21 @@ def package_of(repository: str) -> str:
 
 def object_tag(hex_digest: str) -> str:
     return f"sha256-{hex_digest}"
+
+
+def slice_tag(record_hex: str) -> str:
+    return f"slice-{record_hex}"
+
+
+def slice_manifest(slice_bytes: bytes, signature: bytes) -> bytes:
+    """A repository's signed slice for one step-0 record: the slice and its signature, two layers."""
+    return canonical({
+        "schemaVersion": 2, "mediaType": OCI_MANIFEST, "artifactType": SLICE_TYPE,
+        "config": {"mediaType": OCI_EMPTY, "digest": EMPTY_DIGEST, "size": len(EMPTY_BYTES)},
+        "layers": [{"mediaType": SLICE_MEDIA, "digest": "sha256:" + hashlib.sha256(slice_bytes).hexdigest(),
+                    "size": len(slice_bytes)},
+                   {"mediaType": SIGNATURE_MEDIA, "digest": "sha256:" + hashlib.sha256(signature).hexdigest(),
+                    "size": len(signature)}]})
 
 
 def object_manifest(hex_digest: str, size: int, artifact: str = OBJECT_TYPE) -> bytes:
@@ -207,15 +228,14 @@ class Registry:
                           f"written hash to {expected}")
         return expected
 
-    def get_layer(self, hex_digest: str, out: Path) -> None:
-        """The object's bytes from its manifest's one layer, written to `out` only once verified."""
-        tag = object_tag(hex_digest)
+    def layers(self, tag: str) -> list[dict]:
         answer = self.call("GET", f"manifests/{tag}", "pull", {"Accept": OCI_MANIFEST})
         if answer.status != 200:
             raise Refused(f"GET manifest {self.name}:{tag}: HTTP {answer.status}")
-        layers = json.loads(answer.body).get("layers", [])
-        if len(layers) != 1 or layers[0].get("digest") != f"sha256:{hex_digest}":
-            raise Refused(f"{self.name}:{tag} does not name sha256:{hex_digest} as its one layer")
+        return json.loads(answer.body).get("layers", [])
+
+    def blob(self, hex_digest: str) -> bytes:
+        """A blob's bytes, only once they hash to the digest asked for; a redirect is followed bare."""
         blob = self.call("GET", f"blobs/sha256:{hex_digest}", "pull")
         if blob.status in (301, 302, 303, 307, 308):
             blob = _send(urllib.request.Request(blob.headers["location"]))
@@ -224,9 +244,29 @@ class Registry:
         got = hashlib.sha256(blob.body).hexdigest()
         if got != hex_digest:
             raise Refused(f"the blob served for sha256:{hex_digest} hashes to sha256:{got}")
+        return blob.body
+
+    def get_layer(self, hex_digest: str, out: Path) -> None:
+        """The object's bytes from its manifest's one layer, written to `out` only once verified."""
+        tag = object_tag(hex_digest)
+        layers = self.layers(tag)
+        if len(layers) != 1 or layers[0].get("digest") != f"sha256:{hex_digest}":
+            raise Refused(f"{self.name}:{tag} does not name sha256:{hex_digest} as its one layer")
+        data = self.blob(hex_digest)
         staged = out.with_name(f".{out.name}.partial")
-        staged.write_bytes(blob.body)
+        staged.write_bytes(data)
         staged.replace(out)
+
+    def get_slice(self, record_hex: str) -> tuple[bytes, bytes]:
+        """(the slice, its signature) for one step-0 record, each verified against its layer digest.
+        The signature itself is the publish job's to verify (store_manifest.verify)."""
+        tag = slice_tag(record_hex)
+        layers = self.layers(tag)
+        media = [layer.get("mediaType") for layer in layers]
+        if media != [SLICE_MEDIA, SIGNATURE_MEDIA]:
+            raise Refused(f"{self.name}:{tag} holds layers {media}, not a slice and its signature")
+        slice_layer, signature_layer = (layer["digest"].split(":", 1)[1] for layer in layers)
+        return self.blob(slice_layer), self.blob(signature_layer)
 
 
 def github_guard(api: str, org: str, token: str) -> Callable[[str], dict | None]:
@@ -262,12 +302,9 @@ def verify_private(view: Callable[[str], dict | None], org: str, package: str) -
                       f"workflows write it; unlink it in {settings}")
 
 
-def replicate(store: Path, registry: Registry, view: Callable[[str], dict | None], org: str,
-              package: str, digests: list[str], say: Callable[[str], None]) -> None:
-    """Push each named object of `store`, the package guarded before the first and after the last."""
-    for hex_digest in digests:
-        if not DIGEST_HEX.match(hex_digest):
-            raise Refused(f"{hex_digest!r} is not an object digest (64 hex)")
+def ensure_guarded(registry: Registry, view: Callable[[str], dict | None], org: str, package: str,
+                   say: Callable[[str], None]) -> None:
+    """The package exists, private and unlinked, before any product byte reaches it."""
     if view(package) is None:
         registry.push_blob(EMPTY_DIGEST.split(":")[1], EMPTY_BYTES)
         sentinel = canonical({
@@ -277,6 +314,15 @@ def replicate(store: Path, registry: Registry, view: Callable[[str], dict | None
         registry.put_manifest(SENTINEL_TAG, sentinel)
         say(f"store_replica: created {package} with an empty sentinel; guarding it before any object")
     verify_private(view, org, package)
+
+
+def replicate(store: Path, registry: Registry, view: Callable[[str], dict | None], org: str,
+              package: str, digests: list[str], say: Callable[[str], None]) -> None:
+    """Push each named object of `store`, the package guarded before the first and after the last."""
+    for hex_digest in digests:
+        if not DIGEST_HEX.match(hex_digest):
+            raise Refused(f"{hex_digest!r} is not an object digest (64 hex)")
+    ensure_guarded(registry, view, org, package, say)
     for hex_digest in digests:
         source = store / "objects" / hex_digest
         if not source.is_file():
@@ -299,6 +345,31 @@ def replicate(store: Path, registry: Registry, view: Callable[[str], dict | None
         if registry.manifest_digest(object_tag(hex_digest)) != expected:
             raise Refused(f"{package}:{object_tag(hex_digest)} did not read back as {expected}")
         say(f"store_replica: PUSHED {package} sha256:{hex_digest} (manifest {expected})")
+    verify_private(view, org, package)
+
+
+def replicate_slice(registry: Registry, view: Callable[[str], dict | None], org: str, package: str,
+                    record_hex: str, slice_bytes: bytes, signature: bytes, say: Callable[[str], None]) -> None:
+    """Push a repository's signed slice under `slice-<step-0 record digest>`, never rewritten."""
+    if not DIGEST_HEX.match(record_hex):
+        raise Refused(f"{record_hex!r} is not a step-0 record digest (64 hex)")
+    ensure_guarded(registry, view, org, package, say)
+    manifest = slice_manifest(slice_bytes, signature)
+    expected = "sha256:" + hashlib.sha256(manifest).hexdigest()
+    held = registry.manifest_digest(slice_tag(record_hex))
+    if held is not None:
+        if held != expected:
+            raise Refused(f"{package}:{slice_tag(record_hex)} holds {held}, not this slice's manifest "
+                          f"{expected}: a record's slice is never rewritten")
+        say(f"store_replica: PRESENT {package} {slice_tag(record_hex)}")
+    else:
+        registry.push_blob(EMPTY_DIGEST.split(":")[1], EMPTY_BYTES)
+        for data in (slice_bytes, signature):
+            registry.push_blob(hashlib.sha256(data).hexdigest(), data)
+        registry.put_manifest(slice_tag(record_hex), manifest)
+        if registry.manifest_digest(slice_tag(record_hex)) != expected:
+            raise Refused(f"{package}:{slice_tag(record_hex)} did not read back as {expected}")
+        say(f"store_replica: PUSHED {package} {slice_tag(record_hex)} (manifest {expected})")
     verify_private(view, org, package)
 
 
@@ -537,6 +608,14 @@ def main(argv: list[str]) -> int:
             registry = Registry(REGISTRY, f"{ORG}/{package}",
                                 (os.environ.get(REGISTRY_USER_ENV, REGISTRY_USER_DEFAULT), token))
             replicate(Path(argv[1]), registry, github_guard(API, ORG, token), ORG, package, argv[3:], say)
+            return 0
+        if len(argv) == 5 and argv[0] == "push-slice":
+            token = _token(TOKEN_FILE_ENV, "writer")
+            package = package_of(argv[1])
+            registry = Registry(REGISTRY, f"{ORG}/{package}",
+                                (os.environ.get(REGISTRY_USER_ENV, REGISTRY_USER_DEFAULT), token))
+            replicate_slice(registry, github_guard(API, ORG, token), ORG, package, argv[2],
+                            Path(argv[3]).read_bytes(), Path(argv[4]).read_bytes(), say)
             return 0
         if len(argv) == 4 and argv[0] == "fetch":
             if not DIGEST_HEX.match(argv[2]):
