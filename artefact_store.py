@@ -814,6 +814,15 @@ def third_party_plan(store: Path, home: Path, graph_json: Path, prefixes: tuple[
     return 0
 
 
+def immutable_folder(folder: Path) -> Path:
+    """The folder conan PACKAGED for a package folder `conan cache path` answers: itself, or, for a
+    recipe with a `finalize()` method, the immutable `p` beside the `f` folder conan derives from it
+    per home and hands its consumers (meson/1.10.2 strips its scripts' PYTHONDONTWRITEBYTECODE line
+    there, measured 2026-10-11). The record holds the folder consumers use; its manifest is `p`'s."""
+    immutable = folder.parent / "p"
+    return immutable if folder.name == "f" and immutable.is_dir() else folder
+
+
 def written_after_packaging(folder: Path) -> list[str]:
     """Each file of a package folder that differs from the folder's own `conanmanifest.txt`, the
     md5 conan wrote when it packaged it: `new <path>`, `changed <path>`, `removed <path>`. A folder
@@ -910,9 +919,10 @@ def third_party_step(store: Path, home: Path, graph_json: Path, prefixes: tuple[
             worst = 1
             continue
         folder = _cache_path(home, binary)
-        written = written_after_packaging(folder)
+        packaged = immutable_folder(folder)
+        written = written_after_packaging(packaged)
         if written:
-            print(f"artefact_store: REFUSED {node['name']} third-party-create: its folder {folder} "
+            print(f"artefact_store: REFUSED {node['name']} third-party-create: its folder {packaged} "
                   f"was written after conan packaged it, so its bytes are not its build's "
                   f"(DN-142.D17 (8)): {len(written)} file(s): " + ", ".join(written[:NAMED_FILES])
                   + (", ..." if len(written) > NAMED_FILES else ""), file=sys.stderr)

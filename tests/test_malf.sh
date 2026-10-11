@@ -4801,6 +4801,7 @@ tq_third tpf 'from conan.tools.files import copy; copy(self, "f.o", self.build_f
 tq_third tpy 'save(self, os.path.join(self.package_folder, "bin", "tool.py"), "import helper\nhelper.run()\n"); save(self, os.path.join(self.package_folder, "bin", "helper.py"), "def run():\n    pass\n")' 'package_type = "application"'
 tq_third tpz 'save(self, os.path.join(self.package_folder, "lib", "libtpz.a"), "z")' 'tool_requires = "tpy/0.1"' 'def build(self):' '    self.run("python3 " + self.dependencies.build["tpy"].package_folder + "/bin/tool.py")'
 tq_third tpu 'save(self, os.path.join(self.package_folder, "lib", "libtpu.a"), "u")' 'tool_requires = "tpw/0.1"' 'def build(self):' '    self.run(self.dependencies.build["tpw"].package_folder + "/bin/tpw.sh")'
+tq_third tpn 'save(self, os.path.join(self.package_folder, "bin", "tpn.sh"), "#!/bin/sh\nexport PYTHONDONTWRITEBYTECODE=1\n")' 'package_type = "application"' 'def finalize(self):' '    from conan.tools.files import copy, replace_in_file; copy(self, "*", src=self.immutable_package_folder, dst=self.package_folder); replace_in_file(self, os.path.join(self.package_folder, "bin", "tpn.sh"), "export PYTHONDONTWRITEBYTECODE=1", "")'
 mkdir -p "$tq_src/pyreq"
 printf 'from conan import ConanFile\n\n\nclass PyReq(ConanFile):\n    name = "pyreq"\n    version = "0.1"\n    package_type = "python-require"\n' > "$tq_src/pyreq/conanfile.py"
 tq_first() {   # <name> <requirement line> [<build() body line>]
@@ -4816,13 +4817,14 @@ tq_first ex_p 'requires = "tpp/0.1"'
 tq_first ex_f 'requires = "tpf/0.1"'
 tq_first ex_z 'requires = "tpz/0.1"'
 tq_first ex_u 'requires = "tpu/0.1"'
+tq_first ex_n 'tool_requires = "tpn/0.1"'
 printf 'packages: {}\n' > "$tq_src/packages.yml"
 git -C "$tq_src" init -q && git -C "$tq_src" add -A && git -C "$tq_src" -c user.email=t@t -c user.name=t commit -qm fixtures
 tq_home() {   # <home name> — a fresh conan home holding every fixture recipe and no binary
     local home="$tq_tmp/$1" recipe
     CONAN_HOME="$home" bash "$MALF_BIN" profiles > /dev/null 2>&1
     printf '[settings]\nos=Linux\narch=x86_64\nbuild_type=Release\n[buildenv]\nCC=gcc\nCXX=g++\n' > "$home/profiles/fixture"
-    for recipe in pyreq tpv tpr tpd tpw tpp tpf tpy tpz tpu; do CONAN_HOME="$home" conan export "$tq_src/$recipe" > /dev/null 2>&1; done
+    for recipe in pyreq tpv tpr tpd tpw tpp tpf tpy tpz tpu tpn; do CONAN_HOME="$home" conan export "$tq_src/$recipe" > /dev/null 2>&1; done
 }
 tq_step() {   # <home name> <store name> <package> — malf's step function over the fixture home; its output in $tq_tmp/out, its exit printed
     mkdir -p "$tq_tmp/scratch-$1"; printf '{"compiler": "fixture"}' > "$tq_tmp/scratch-$1/toolchain.json"
@@ -4966,6 +4968,12 @@ check "(h) RED — a build that runs a python tool from a built package leaves n
 tq_home h2
 check "(h′) RED — a third-party folder written after conan packaged it is refused by its own step, naming the new file, and its consumer is SKIPPED" \
       "rc=4 1" "$(tq_step h2 store-h2 ex_u) $(tq_has 'REFUSED tpw third-party-create: its folder .* was written after conan packaged it.*new written-at-use')"
+# (h″) a recipe with a finalize() method hands its consumers a folder derived from the immutable one
+# it packaged (meson's strips a line of its scripts there): the manifest is the immutable folder's,
+# and the record holds the derived folder the consumer's key names.
+tq_home h3
+check "(h″) RED — a finalized package is judged by the folder it packaged and recorded by the folder its consumers use" \
+      "rc=0 1 1" "$(tq_step h3 store-h3 ex_n) $(tq_has 'STORED tpn package') $(tq_has 'artefact_store: STORED ex_n package')"
 rm -rf "$tq_tmp"
 echo
 
