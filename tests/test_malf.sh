@@ -344,6 +344,14 @@ check "sbom_gen --selftest" \
 
 echo
 
+echo "[7i] store_replica carries its own refusal proof (selftest): every guard of the ghcr read replica fires against an in-process registry and API (DN-142.D6)"
+replica_selftest_output="$(timeout 120 python3 "$MALF_ROOT/store_replica.py" selftest 2>&1)"
+replica_selftest_status=$?
+check "store_replica selftest: 12 arms, every refusal fired and the round trip byte-equal" \
+      "ok" "$([[ $replica_selftest_status -eq 0 ]] && grep -q '^store_replica selftest: 12 arm(s), 0 failure(s)$' <<< "$replica_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$replica_selftest_output")")"
+
+echo
+
 echo "[7h] comment_contract_lint carries its own grammar proof (--selftest), post-format leg included"
 
 # The comment-grammar phase of `malf format` (ADR-26.D7). Its selftest falsifies every violation

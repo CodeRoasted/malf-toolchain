@@ -1,0 +1,559 @@
+#!/usr/bin/env python3
+"""The store's read replica on ghcr: the writer pushes a stored object by digest, a release job reads it back by digest.
+
+DN-142.D6 (the remote transport, ruled 2026-10-10, R4 and R5 measured): one PRIVATE ghcr package per
+source repository, `ghcr.io/coderoasted/store-<repository>`, written only by the writer account's
+token, read by that repository's `GITHUB_TOKEN` alone. An object is one OCI artifact manifest whose
+one layer is the object's bytes, tagged `sha256-<content digest>`, so a reader holding the content
+digest from a signed manifest slice needs no other name. Every byte is checked against a digest
+computed here: the object against its name in the local store before the push, the registry's
+manifest digest against the canonical manifest's own, an existing tag against the manifest this
+module would write, and a fetched layer against the digest asked for.
+
+THE PACKAGE GUARD, BEFORE AND AFTER EVERY WRITE (DN-142.D6: the writer sets and verifies
+`visibility: private`): the GitHub API must answer that the package is `private` and linked to no
+repository. A package that does not exist yet is created by a SENTINEL push first — an empty
+artifact carrying no product byte — and is then guarded before any object reaches it, because a
+package that came up `internal` or `public` would expose every byte pushed to it. No REST endpoint
+sets a container package's visibility, so a refusal names the settings page and writes nothing
+more; setting it by hand is the remedy, and the next run verifies it.
+
+    store_replica.py push <store dir> <repository> <object digest>...
+        the writer's act: each object of the local store, by its 64-hex name, to
+        ghcr.io/coderoasted/store-<repository>, the package guarded before and after; an object
+        already replicated is verified, never rewritten. Token: the file MALF_STORE_TOKEN_FILE
+        (the writer account's classic PAT, `write:packages`), never an argument or an echo.
+    store_replica.py fetch <repository> <object digest> <out file>
+        a reader's act: the object by its digest, written only after its SHA-256 is verified.
+        Token: GITHUB_TOKEN (the repository's own, `packages: read`).
+    store_replica.py selftest
+        every refusal against an in-process registry and API, and the round trip; no network
+
+Exit 0 done, 1 refused (the reason on stderr), 2 a usage error.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import http.server
+import json
+import os
+import re
+import sys
+import tempfile
+import threading
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable
+
+REGISTRY = "https://ghcr.io"
+API = "https://api.github.com"
+ORG = "coderoasted"
+PACKAGE_PREFIX = "store-"
+REPOSITORY_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+DIGEST_HEX = re.compile(r"^[0-9a-f]{64}$")
+OCI_MANIFEST = "application/vnd.oci.image.manifest.v1+json"
+OCI_EMPTY = "application/vnd.oci.empty.v1+json"
+OBJECT_TYPE = "application/vnd.coderoast.store.object.v1"
+SENTINEL_TYPE = "application/vnd.coderoast.store.sentinel.v1"
+SENTINEL_TAG = "store-sentinel"
+EMPTY_BYTES = b"{}"
+EMPTY_DIGEST = "sha256:" + hashlib.sha256(EMPTY_BYTES).hexdigest()
+CHUNK = 1 << 20
+TOKEN_FILE_ENV = "MALF_STORE_TOKEN_FILE"
+REGISTRY_USER_ENV = "MALF_STORE_REGISTRY_USER"
+REGISTRY_USER_DEFAULT = "coderoast-dev"
+
+
+class Refused(Exception):
+    """A check failed: nothing more is written, and the reason names what differed."""
+
+
+def canonical(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(CHUNK), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def package_of(repository: str) -> str:
+    if not REPOSITORY_NAME.match(repository):
+        raise Refused(f"{repository!r} is not a repository name")
+    return PACKAGE_PREFIX + repository
+
+
+def object_tag(hex_digest: str) -> str:
+    return f"sha256-{hex_digest}"
+
+
+def object_manifest(hex_digest: str, size: int, artifact: str = OBJECT_TYPE) -> bytes:
+    """The one manifest an object is stored under: canonical bytes, so equal objects give equal
+    manifest digests and a re-push is recognised as the same write."""
+    return canonical({
+        "schemaVersion": 2, "mediaType": OCI_MANIFEST, "artifactType": artifact,
+        "config": {"mediaType": OCI_EMPTY, "digest": EMPTY_DIGEST, "size": len(EMPTY_BYTES)},
+        "layers": [{"mediaType": artifact, "digest": f"sha256:{hex_digest}", "size": size}]})
+
+
+@dataclass
+class Response:
+    status: int
+    headers: dict[str, str]
+    body: bytes
+
+
+def _send(request: urllib.request.Request) -> Response:
+    """One HTTP exchange; a 4xx/5xx is a Response, never an exception, and redirects are not followed."""
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):  # noqa: ANN002, ANN003 — the handler's own signature
+            return None
+
+    opener = urllib.request.build_opener(NoRedirect)
+    try:
+        with opener.open(request, timeout=300) as answer:
+            return Response(answer.status, {k.lower(): v for k, v in answer.headers.items()}, answer.read())
+    except urllib.error.HTTPError as answer:
+        return Response(answer.code, {k.lower(): v for k, v in answer.headers.items()}, answer.read())
+
+
+@dataclass
+class Registry:
+    """An OCI distribution client for one repository path, Bearer-challenge auth when asked."""
+
+    base: str
+    name: str
+    credentials: tuple[str, str] | None = None
+    tokens: dict[str, str] = field(default_factory=dict)
+
+    def _authorization(self, challenge: str, actions: str) -> str:
+        fields = dict(re.findall(r'(\w+)="([^"]*)"', challenge))
+        scope = f"repository:{self.name}:{actions}"
+        if scope not in self.tokens:
+            query = urllib.parse.urlencode({"service": fields.get("service", ""), "scope": scope})
+            request = urllib.request.Request(f"{fields['realm']}?{query}")
+            if self.credentials:
+                import base64
+                pair = f"{self.credentials[0]}:{self.credentials[1]}".encode()
+                request.add_header("Authorization", "Basic " + base64.b64encode(pair).decode())
+            answer = _send(request)
+            if answer.status != 200:
+                raise Refused(f"the token endpoint refused {scope}: HTTP {answer.status}")
+            body = json.loads(answer.body)
+            self.tokens[scope] = body.get("token") or body.get("access_token") or ""
+        return f"Bearer {self.tokens[scope]}"
+
+    def call(self, method: str, path: str, actions: str, headers: dict[str, str] | None = None,
+             data: bytes | None = None, url: str | None = None) -> Response:
+        target = url or f"{self.base}/v2/{self.name}/{path}"
+        auth = None
+        for _attempt in range(2):
+            request = urllib.request.Request(target, data=data, method=method)
+            for key, value in (headers or {}).items():
+                request.add_header(key, value)
+            if auth:
+                request.add_header("Authorization", auth)
+            answer = _send(request)
+            challenge = answer.headers.get("www-authenticate", "")
+            if answer.status == 401 and challenge.lower().startswith("bearer") and auth is None:
+                auth = self._authorization(challenge, actions)
+                continue
+            return answer
+        return answer
+
+    def manifest_digest(self, reference: str) -> str | None:
+        """The digest the registry holds at a tag or digest, None when it holds nothing there."""
+        answer = self.call("HEAD", f"manifests/{reference}", "pull", {"Accept": OCI_MANIFEST})
+        if answer.status == 404:
+            return None
+        if answer.status != 200:
+            raise Refused(f"HEAD manifest {self.name}:{reference}: HTTP {answer.status}")
+        return answer.headers.get("docker-content-digest")
+
+    def push_blob(self, hex_digest: str, data: bytes) -> None:
+        if self.call("HEAD", f"blobs/sha256:{hex_digest}", "pull,push").status == 200:
+            return
+        start = self.call("POST", "blobs/uploads/", "pull,push", {"Content-Length": "0"}, b"")
+        if start.status != 202 or "location" not in start.headers:
+            raise Refused(f"blob upload start on {self.name}: HTTP {start.status}")
+        location = urllib.parse.urljoin(f"{self.base}/", start.headers["location"])
+        separator = "&" if "?" in location else "?"
+        done = self.call("PUT", "", "pull,push", {"Content-Type": "application/octet-stream",
+                                                   "Content-Length": str(len(data))}, data,
+                         url=f"{location}{separator}digest=sha256:{hex_digest}")
+        if done.status != 201:
+            raise Refused(f"blob upload of sha256:{hex_digest} on {self.name}: HTTP {done.status}")
+        answered = done.headers.get("docker-content-digest")
+        if answered and answered != f"sha256:{hex_digest}":
+            raise Refused(f"the registry stored blob {answered} for sha256:{hex_digest}")
+
+    def put_manifest(self, tag: str, body: bytes) -> str:
+        expected = "sha256:" + hashlib.sha256(body).hexdigest()
+        answer = self.call("PUT", f"manifests/{tag}", "pull,push", {"Content-Type": OCI_MANIFEST}, body)
+        if answer.status != 201:
+            raise Refused(f"manifest PUT {self.name}:{tag}: HTTP {answer.status} "
+                          f"{answer.body[:300].decode('utf-8', 'replace')}")
+        answered = answer.headers.get("docker-content-digest")
+        if answered != expected:
+            raise Refused(f"manifest {self.name}:{tag}: the registry answered {answered}, the bytes "
+                          f"written hash to {expected}")
+        return expected
+
+    def get_layer(self, hex_digest: str, out: Path) -> None:
+        """The object's bytes from its manifest's one layer, written to `out` only once verified."""
+        tag = object_tag(hex_digest)
+        answer = self.call("GET", f"manifests/{tag}", "pull", {"Accept": OCI_MANIFEST})
+        if answer.status != 200:
+            raise Refused(f"GET manifest {self.name}:{tag}: HTTP {answer.status}")
+        layers = json.loads(answer.body).get("layers", [])
+        if len(layers) != 1 or layers[0].get("digest") != f"sha256:{hex_digest}":
+            raise Refused(f"{self.name}:{tag} does not name sha256:{hex_digest} as its one layer")
+        blob = self.call("GET", f"blobs/sha256:{hex_digest}", "pull")
+        if blob.status in (301, 302, 303, 307, 308):
+            blob = _send(urllib.request.Request(blob.headers["location"]))
+        if blob.status != 200:
+            raise Refused(f"GET blob sha256:{hex_digest} on {self.name}: HTTP {blob.status}")
+        got = hashlib.sha256(blob.body).hexdigest()
+        if got != hex_digest:
+            raise Refused(f"the blob served for sha256:{hex_digest} hashes to sha256:{got}")
+        staged = out.with_name(f".{out.name}.partial")
+        staged.write_bytes(blob.body)
+        staged.replace(out)
+
+
+def github_guard(api: str, org: str, token: str) -> Callable[[str], dict | None]:
+    """The package's GitHub view: its JSON, or None when the API says it does not exist."""
+
+    def view(package: str) -> dict | None:
+        request = urllib.request.Request(f"{api}/orgs/{org}/packages/container/{package}")
+        request.add_header("Authorization", f"Bearer {token}")
+        request.add_header("Accept", "application/vnd.github+json")
+        answer = _send(request)
+        if answer.status == 404:
+            return None
+        if answer.status != 200:
+            raise Refused(f"the package API answered HTTP {answer.status} for {package}; its visibility "
+                          f"cannot be verified, so nothing is written")
+        return json.loads(answer.body)
+
+    return view
+
+
+def verify_private(view: Callable[[str], dict | None], org: str, package: str) -> None:
+    """Refuse unless the package exists, is private and is linked to no repository."""
+    seen = view(package)
+    settings = f"https://github.com/orgs/{org}/packages/container/{package}/settings"
+    if seen is None:
+        raise Refused(f"{package} does not exist after its sentinel push, so it cannot be verified")
+    if seen.get("visibility") != "private":
+        raise Refused(f"{package} is {seen.get('visibility')!r}, not 'private': set it in {settings} "
+                      f"(no API sets it); nothing more is pushed until a run verifies it")
+    if seen.get("repository"):
+        linked = seen["repository"].get("full_name", seen["repository"])
+        raise Refused(f"{package} is linked to {linked}: a linked package lets that repository's "
+                      f"workflows write it; unlink it in {settings}")
+
+
+def replicate(store: Path, registry: Registry, view: Callable[[str], dict | None], org: str,
+              package: str, digests: list[str], say: Callable[[str], None]) -> None:
+    """Push each named object of `store`, the package guarded before the first and after the last."""
+    for hex_digest in digests:
+        if not DIGEST_HEX.match(hex_digest):
+            raise Refused(f"{hex_digest!r} is not an object digest (64 hex)")
+    if view(package) is None:
+        registry.push_blob(EMPTY_DIGEST.split(":")[1], EMPTY_BYTES)
+        sentinel = canonical({
+            "schemaVersion": 2, "mediaType": OCI_MANIFEST, "artifactType": SENTINEL_TYPE,
+            "config": {"mediaType": OCI_EMPTY, "digest": EMPTY_DIGEST, "size": len(EMPTY_BYTES)},
+            "layers": [{"mediaType": OCI_EMPTY, "digest": EMPTY_DIGEST, "size": len(EMPTY_BYTES)}]})
+        registry.put_manifest(SENTINEL_TAG, sentinel)
+        say(f"store_replica: created {package} with an empty sentinel; guarding it before any object")
+    verify_private(view, org, package)
+    for hex_digest in digests:
+        source = store / "objects" / hex_digest
+        if not source.is_file():
+            raise Refused(f"no object {hex_digest} in {store / 'objects'}")
+        actual = sha256_file(source)
+        if actual != hex_digest:
+            raise Refused(f"the local object {source} hashes to {actual}, not its name")
+        manifest = object_manifest(hex_digest, source.stat().st_size)
+        expected = "sha256:" + hashlib.sha256(manifest).hexdigest()
+        held = registry.manifest_digest(object_tag(hex_digest))
+        if held is not None:
+            if held != expected:
+                raise Refused(f"{package}:{object_tag(hex_digest)} holds {held}, not the object's "
+                              f"manifest {expected}: an object's name is never rewritten")
+            say(f"store_replica: PRESENT {package} sha256:{hex_digest} (manifest {expected})")
+            continue
+        registry.push_blob(EMPTY_DIGEST.split(":")[1], EMPTY_BYTES)
+        registry.push_blob(hex_digest, source.read_bytes())
+        registry.put_manifest(object_tag(hex_digest), manifest)
+        if registry.manifest_digest(object_tag(hex_digest)) != expected:
+            raise Refused(f"{package}:{object_tag(hex_digest)} did not read back as {expected}")
+        say(f"store_replica: PUSHED {package} sha256:{hex_digest} (manifest {expected})")
+    verify_private(view, org, package)
+
+
+# ── the selftest: an in-process registry and API, every refusal fired ──────────────────────────
+
+
+@dataclass
+class Fake:
+    blobs: dict[str, bytes] = field(default_factory=dict)
+    manifests: dict[str, bytes] = field(default_factory=dict)
+    tags: dict[str, str] = field(default_factory=dict)
+    package: dict | None = None
+    created_visibility: str = "private"
+    lie_manifest_digest: bool = False
+    corrupt_blobs: bool = False
+    bearer: str = "fake-bearer"
+
+
+def _fake_server(fake: Fake) -> tuple[http.server.ThreadingHTTPServer, str]:
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args) -> None:  # noqa: ANN002 — silence the default access log
+            return
+
+        def _reply(self, status: int, body: bytes = b"", headers: dict[str, str] | None = None) -> None:
+            self.send_response(status)
+            for key, value in (headers or {}).items():
+                self.send_header(key, value)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+
+        def _authorized(self) -> bool:
+            if self.path.startswith("/token") or self.path.startswith("/orgs/"):
+                return True
+            if self.headers.get("Authorization") == f"Bearer {fake.bearer}":
+                return True
+            host = f"http://{self.headers['Host']}"
+            self._reply(401, b"", {"WWW-Authenticate":
+                                   f'Bearer realm="{host}/token",service="fake",scope="x"'})
+            return False
+
+        def _route(self) -> None:
+            if not self._authorized():
+                return
+            parsed = urllib.parse.urlparse(self.path)
+            parts = parsed.path.split("/")
+            if parsed.path.startswith("/token"):
+                self._reply(200, canonical({"token": fake.bearer}))
+                return
+            if parsed.path.startswith("/orgs/"):
+                if fake.package is None:
+                    self._reply(404, b'{"message":"Package not found."}')
+                else:
+                    self._reply(200, canonical(fake.package))
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            data = self.rfile.read(length) if length else b""
+            if "manifests" in parts:
+                reference = parts[-1]
+                if self.command == "PUT":
+                    digest = "sha256:" + hashlib.sha256(data).hexdigest()
+                    fake.manifests[digest] = data
+                    if not reference.startswith("sha256:"):
+                        fake.tags[reference] = digest
+                    if fake.package is None:
+                        fake.package = {"name": parts[3], "visibility": fake.created_visibility}
+                    answered = ("sha256:" + "0" * 64) if fake.lie_manifest_digest else digest
+                    self._reply(201, b"", {"Docker-Content-Digest": answered})
+                    return
+                digest = reference if reference.startswith("sha256:") else fake.tags.get(reference)
+                if digest is None or digest not in fake.manifests:
+                    self._reply(404)
+                    return
+                self._reply(200, fake.manifests[digest], {"Docker-Content-Digest": digest,
+                                                          "Content-Type": OCI_MANIFEST})
+                return
+            if "uploads" in parts:
+                if self.command == "POST":
+                    self._reply(202, b"", {"Location": f"/v2/{parts[2]}/{parts[3]}/blobs/uploads/u1"})
+                    return
+                digest = urllib.parse.parse_qs(parsed.query)["digest"][0]
+                if "sha256:" + hashlib.sha256(data).hexdigest() != digest:
+                    self._reply(400, b'{"errors":[{"code":"DIGEST_INVALID"}]}')
+                    return
+                fake.blobs[digest] = data
+                self._reply(201, b"", {"Docker-Content-Digest": digest})
+                return
+            if "blobs" in parts:
+                digest = parts[-1]
+                if digest not in fake.blobs:
+                    self._reply(404)
+                    return
+                body = fake.blobs[digest]
+                self._reply(200, body[:-1] + b"X" if fake.corrupt_blobs and body else body)
+                return
+            self._reply(404)
+
+        do_GET = do_HEAD = do_PUT = do_POST = _route
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_address[1]}"
+
+
+def selftest() -> int:
+    failures: list[str] = []
+    armed = [0]
+
+    def arm(label: str, run: Callable[[], None], refusal: str | None) -> None:
+        armed[0] += 1
+        try:
+            run()
+        except Refused as refused:
+            if refusal is None or refusal not in str(refused):
+                failures.append(f"{label}: refused with {refused!r}, want "
+                                f"{'success' if refusal is None else repr(refusal)}")
+            return
+        if refusal is not None:
+            failures.append(f"{label}: succeeded, want a refusal containing {refusal!r}")
+
+    with tempfile.TemporaryDirectory() as scratch:
+        store = Path(scratch) / "store"
+        (store / "objects").mkdir(parents=True)
+        payload = b"a stored object\n" * 64
+        good = hashlib.sha256(payload).hexdigest()
+        (store / "objects" / good).write_bytes(payload)
+        liar = hashlib.sha256(b"what the name claims").hexdigest()
+        (store / "objects" / liar).write_bytes(b"other bytes")
+
+        def scene(**knobs) -> tuple[Fake, Registry, Callable[[str], dict | None], list[str]]:
+            fake = Fake(**knobs)
+            server, base = _fake_server(fake)
+            scenes.append(server)
+            said: list[str] = []
+            return fake, Registry(base, f"{ORG}/store-probe", ("user", "token")), \
+                github_guard(base, ORG, "api-token"), said
+
+        scenes: list[http.server.ThreadingHTTPServer] = []
+        try:
+            fake, registry, view, said = scene()
+            arm("a new package: sentinel, guard, push, read back byte-equal",
+                lambda: replicate(store, registry, view, ORG, "store-probe", [good], said.append), None)
+            out = Path(scratch) / "fetched"
+            arm("the reader fetches the object by digest", lambda: registry.get_layer(good, out), None)
+            if not out.is_file() or out.read_bytes() != payload:
+                failures.append("the fetched bytes differ from the stored object")
+            if SENTINEL_TAG not in fake.tags or object_tag(good) not in fake.tags:
+                failures.append(f"the registry holds tags {sorted(fake.tags)}, want the sentinel and the object")
+            pushes = len(fake.manifests)
+            arm("a re-push of the same object is recognised and writes nothing",
+                lambda: replicate(store, registry, view, ORG, "store-probe", [good], said.append), None)
+            if len(fake.manifests) != pushes or not any("PRESENT" in line for line in said):
+                failures.append("a re-push wrote a manifest or did not report PRESENT")
+
+            fake.tags[object_tag(good)] = next(d for d, b in fake.manifests.items() if SENTINEL_TYPE in b.decode())
+            arm("a tag holding another manifest is refused, never rewritten",
+                lambda: replicate(store, registry, view, ORG, "store-probe", [good], said.append),
+                "never rewritten")
+
+            _fake, registry, view, said = scene()
+            arm("a local object that does not hash to its name is refused before any push",
+                lambda: replicate(store, registry, view, ORG, "store-probe", [liar], said.append),
+                "not its name")
+            arm("a name that is not 64 hex is refused",
+                lambda: replicate(store, registry, view, ORG, "store-probe", ["../x"], said.append),
+                "not an object digest")
+
+            fake, registry, view, said = scene(created_visibility="internal")
+            arm("a package that came up internal is refused BEFORE any object reaches it",
+                lambda: replicate(store, registry, view, ORG, "store-probe", [good], said.append),
+                "not 'private'")
+            if object_tag(good) in fake.tags:
+                failures.append("an object was pushed into a package that is not private")
+
+            fake, registry, view, said = scene()
+            fake.package = {"name": "store-probe", "visibility": "private",
+                            "repository": {"full_name": "CodeRoasted/coderoast-ipc"}}
+            arm("a package linked to a repository is refused", lambda: replicate(
+                store, registry, view, ORG, "store-probe", [good], said.append), "is linked to")
+
+            fake, registry, view, said = scene(lie_manifest_digest=True)
+            arm("a registry answering another manifest digest is refused",
+                lambda: replicate(store, registry, view, ORG, "store-probe", [good], said.append),
+                "the bytes written hash to")
+
+            fake, registry, view, said = scene()
+            replicate(store, registry, view, ORG, "store-probe", [good], said.append)
+            fake.corrupt_blobs = True
+            arm("a fetched blob whose bytes differ from its digest is refused, and nothing is written",
+                lambda: registry.get_layer(good, Path(scratch) / "corrupt"), "hashes to")
+            if (Path(scratch) / "corrupt").exists():
+                failures.append("a corrupt fetch left its bytes at the output path")
+            arm("a fetch of an object the package does not hold is refused",
+                lambda: registry.get_layer("f" * 64, Path(scratch) / "absent"), "HTTP 404")
+
+            def unreachable(_package: str) -> dict | None:
+                raise Refused("the package API answered HTTP 403 for store-probe; its visibility "
+                              "cannot be verified, so nothing is written")
+
+            _fake, registry, _view, said = scene()
+            arm("an API that cannot answer refuses the write",
+                lambda: replicate(store, registry, unreachable, ORG, "store-probe", [good], said.append),
+                "cannot be verified")
+        finally:
+            for server in scenes:
+                server.shutdown()
+
+    for failure in failures:
+        print(f"store_replica selftest FAILED: {failure}")
+    print(f"store_replica selftest: {armed[0]} arm(s), {len(failures)} failure(s)")
+    return 1 if failures else 0
+
+
+def _token(env: str, label: str) -> str:
+    if env == TOKEN_FILE_ENV:
+        path = os.environ.get(TOKEN_FILE_ENV)
+        if not path or not Path(path).is_file():
+            raise Refused(f"{TOKEN_FILE_ENV} names no file: the {label} reads its token from the writer "
+                          f"account's token file, never from an argument")
+        return Path(path).read_text().strip()
+    value = os.environ.get(env, "")
+    if not value:
+        raise Refused(f"{env} is unset: the {label} reads the repository's own token")
+    return value
+
+
+def main(argv: list[str]) -> int:
+    say = print
+    try:
+        if argv == ["selftest"]:
+            return selftest()
+        if len(argv) >= 4 and argv[0] == "push":
+            token = _token(TOKEN_FILE_ENV, "writer")
+            package = package_of(argv[2])
+            registry = Registry(REGISTRY, f"{ORG}/{package}",
+                                (os.environ.get(REGISTRY_USER_ENV, REGISTRY_USER_DEFAULT), token))
+            replicate(Path(argv[1]), registry, github_guard(API, ORG, token), ORG, package, argv[3:], say)
+            return 0
+        if len(argv) == 4 and argv[0] == "fetch":
+            if not DIGEST_HEX.match(argv[2]):
+                raise Refused(f"{argv[2]!r} is not an object digest (64 hex)")
+            token = _token("GITHUB_TOKEN", "reader")
+            package = package_of(argv[1])
+            registry = Registry(REGISTRY, f"{ORG}/{package}",
+                                (os.environ.get("GITHUB_ACTOR", "x-access-token"), token))
+            registry.get_layer(argv[2], Path(argv[3]))
+            say(f"store_replica: FETCHED {package} sha256:{argv[2]} -> {argv[3]}")
+            return 0
+    except Refused as refused:
+        print(f"store_replica: REFUSED — {refused}", file=sys.stderr)
+        return 1
+    print(__doc__, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
