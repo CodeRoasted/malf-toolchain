@@ -70,7 +70,8 @@ runs:
       # of every repository (W295's finding on the Linux runners). Only the five launchers reach
       # PATH, through a directory of their own, so the job's `python` is still the runner's; a pip
       # launcher names its venv's python.exe by absolute path, so a copy runs from anywhere. A
-      # conan version with no lock refuses: there is no unhashed fallback.
+      # conan version with no lock refuses: there is no unhashed fallback. `python -S` makes the
+      # venv without running the runner Python's .pth files (setup-build-env/tool-venv.sh says why).
       shell: pwsh
       env:
         CONAN_VERSION: ${{ inputs.conan-version }}
@@ -84,7 +85,7 @@ runs:
         $venv = Join-Path $env:RUNNER_TEMP 'proof-tools-venv'
         $bin = Join-Path $env:RUNNER_TEMP 'proof-tools-bin'
         Remove-Item -Recurse -Force -LiteralPath $venv, $bin -ErrorAction SilentlyContinue
-        python -m venv $venv
+        python -S -m venv $venv
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         $pipArgs = @('-m', 'pip', 'install', '--disable-pip-version-check', '--no-input', '--require-hashes', '--only-binary=:all:')
         foreach ($lock in $locks) { $pipArgs += @('-r', $lock) }

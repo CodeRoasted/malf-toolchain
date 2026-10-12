@@ -17,6 +17,9 @@
 # directory of their own, so the job's `python3` is still the runner's. A conan version with no
 # lock refuses: there is no unhashed fallback. CMake 4.3.x because the import-std gate UUID
 # 451f2fe2 lives only there.
+# The venv is made by `python3 -S`: the interpreter that makes it may itself be a runner's
+# persistent venv, whose site-packages' .pth files run at every start without -S (measured: a planted
+# .pth ran twice under `-m venv`, never under `-S -m venv`, and the venv made was based on /usr).
 set -euo pipefail
 
 version="${1:?usage: tool-venv.sh <conan version>}"
@@ -32,7 +35,7 @@ done
 venv="$RUNNER_TEMP/build-tools-venv"
 bin="$RUNNER_TEMP/build-tools-bin"
 rm -rf "$venv" "$bin"
-python3 -m venv "$venv"
+python3 -S -m venv "$venv"
 "$venv/bin/python" -m pip install --disable-pip-version-check --no-input \
     --require-hashes --only-binary=:all: -r "$cmake_lock" -r "$conan_lock"
 mkdir -p "$bin"

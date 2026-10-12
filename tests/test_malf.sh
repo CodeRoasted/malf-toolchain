@@ -5651,7 +5651,8 @@ mkdir -p "$tv_tmp/stub"
 cat > "$tv_tmp/stub/python3" <<'STUB'
 #!/bin/bash
 # note: the venv the stub makes holds a cmake that reports the version CMAKE_BANNER names
-if [[ "$1 $2" == "-m venv" ]]; then
+if [[ "$1 $2 $3" == "-S -m venv" ]]; then
+    shift
     mkdir -p "$3/bin"
     printf '#!/bin/bash\nif [[ "$1 $2" == "-m pip" ]]; then echo "$*" > "%s/pip.argv"; exit 0; fi\n' "$TV_LOG" > "$3/bin/python"
     printf '#!/bin/bash\necho "cmake version %s"\n' "$CMAKE_BANNER" > "$3/bin/cmake"
@@ -5719,6 +5720,8 @@ check "the detector reds a planted unhashed install, a backslash-continued one a
       ".github/actions/planted/action.yml .github/actions/planted/action.yml" "$(pl_unlocked "$pl_tmp" | tr '\n' ' ' | sed 's/ $//')"
 rm -rf "$pl_tmp"
 check "no malf action installs from PyPI without a hash lock" "" "$(pl_unlocked "$MALF_ROOT" | sort -u | tr '\n' ' ')"
+check "every venv a malf action or workflow makes is made by an interpreter started with -S, so no runner .pth file runs" \
+      "" "$(grep -rnE -- '-m venv' "$MALF_ROOT/.github" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' | grep -vE 'python3? -S -m venv' | cut -d: -f1 | sort -u | tr '\n' ' ')"
 check "no malf action pip-installs into a Python outside a job-scoped venv (no sudo pip, no --break-system-packages)" \
       "" "$(grep -rnE -- '--break-system-packages|sudo [^|;]*pip3? install|sudo [^|;]*-m pip' "$MALF_ROOT/.github/actions" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' | cut -d: -f1 | sort -u | tr '\n' ' ')"
 pl_bad=""
