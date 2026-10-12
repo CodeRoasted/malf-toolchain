@@ -206,7 +206,7 @@ jobs:
 
       - name: C++ modules conformance
         if: ${{ inputs.module-conformance }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-module-conformance@eedf9b9121e3e673ef9bf0c7d2b26aecbb9c7d01
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-module-conformance@63135130653742a4cb2b429c5c9b99e5cc3856d7
 
       # Last, because it provisions clang-21 to get a version-matched clang-format. On the
       # self-hosted fleet that provisioning is an idempotent no-op (the toolchain persists between
@@ -214,7 +214,7 @@ jobs:
       # above report first and a repo never pays for the toolchain to learn its workflows are broken.
       - name: C++ format conformance
         if: ${{ inputs.format-check }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-format-check@eedf9b9121e3e673ef9bf0c7d2b26aecbb9c7d01
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-format-check@63135130653742a4cb2b429c5c9b99e5cc3856d7
 
       # Cheap (no toolchain, no build — it reads text), but placed last on purpose: it is the
       # newest gate here, and a repo should learn its workflows, modules and formatting are sound
@@ -264,7 +264,7 @@ jobs:
 
       - name: Dead symbol in comment
         if: ${{ inputs.dead-symbol-check }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dead-symbol@eedf9b9121e3e673ef9bf0c7d2b26aecbb9c7d01
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dead-symbol@63135130653742a4cb2b429c5c9b99e5cc3856d7
         with:
           range: ${{ steps.dead-symbol-range.outputs.range }}
 
@@ -280,7 +280,7 @@ jobs:
       # comments are sound before it pays for a compiler.
       - name: C++ clang-tidy conformance
         if: ${{ !cancelled() && inputs.lint }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-lint-tidy@eedf9b9121e3e673ef9bf0c7d2b26aecbb9c7d01
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-lint-tidy@63135130653742a4cb2b429c5c9b99e5cc3856d7
         with:
           siblings: ${{ inputs.lint-siblings }}
           checkout-token: ${{ secrets.lint-checkout-token }}
@@ -309,4 +309,4 @@ jobs:
 
       - name: Save the conan cache clang-tidy's build env restored (third-party only)
         if: ${{ inputs.lint }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@eedf9b9121e3e673ef9bf0c7d2b26aecbb9c7d01
+        uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@63135130653742a4cb2b429c5c9b99e5cc3856d7
