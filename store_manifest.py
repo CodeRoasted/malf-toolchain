@@ -282,6 +282,7 @@ def build(store: Path, record_bytes: bytes, plan: dict) -> tuple[bytes, dict[str
                 wanted = {(row["package"], row["entry"]) for row in declared["executables"]}
                 if set(consumed) != wanted:
                     raise Refused(f"its image step consumed {sorted(consumed)}, and the plan declares {sorted(wanted)}")
+                carried_by_image = []
                 for (package, entry), row in sorted(consumed.items()):
                     package_output, executables = created(package)
                     held = {path: digest for path, _mode, digest in package_output["entries"]}
@@ -289,6 +290,11 @@ def build(store: Path, record_bytes: bytes, plan: dict) -> tuple[bytes, dict[str
                         raise Refused(f"its image step consumed {package} {entry} at {row.get('digest')}, and this "
                                       f"run's create stored {held.get(entry)}")
                     classified(package, executables, entry, image)
+                    build_id = (package_output.get("build_ids") or {}).get(entry)
+                    if not build_id:
+                        raise Refused(f"{package} records no GNU build-id for {entry} (DN-142.D15)")
+                    carried_by_image.append({"package": package, "entry": entry, "digest": held[entry],
+                                             "build_id": build_id})
                 archive = store / "objects" / output["archive"]
                 if not archive.is_file() or sha256_file(archive) != output["archive"] \
                         or not IMAGE_MANIFEST.match(output.get("manifest", "")):
@@ -296,7 +302,8 @@ def build(store: Path, record_bytes: bytes, plan: dict) -> tuple[bytes, dict[str
                                   f"name, or names no image manifest")
                 rows.append({"name": image, "kind": IMAGE_KIND, "source": repo,
                              "record": steps[f"{image}/{IMAGE_STEP}"]["key"],
-                             "object": output["archive"], "manifest": output["manifest"]})
+                             "object": output["archive"], "manifest": output["manifest"],
+                             "executables": carried_by_image})
             except Refused as refused:
                 findings.append(f"{repo}/{image}: {refused}")
         whole[repo] = {"visibility": visibility[repo], "assets": sorted(rows, key=lambda row: row["name"])}
@@ -453,8 +460,10 @@ def _fixture(root: Path) -> tuple[Path, bytes, dict, dict[str, Path]]:
         transports[name] = store / "objects" / transport
         entries = [[path, mode, sha256_bytes(data)] for path, (mode, data) in sorted(files.items())]
         content = sha256_bytes(canonical(entries))
+        build_ids = {path: sha256_bytes(data)[:40] for path, (mode, data) in files.items() if mode == "executable"}
         key = put({"step": {"kind": "conan-create", "package": name, "executables": executables}},
-                  {"package": {"content": content, "entries": entries, "transport": transport}})
+                  {"package": {"content": content, "entries": entries, "transport": transport,
+                               "build_ids": build_ids}})
         steps.append({"id": f"{name}/package", "key": key, "verdict": None})
         verdict = put({"step": {"kind": "test-verdict", "package": name}},
                       {"verdict": {"verdict": "pass", "judged": {name: content}}})
@@ -546,8 +555,12 @@ def selftest() -> int:
                                 f"private transport: {tool_row}")
             image_row = next((asset for asset in json.loads(slices["priv-repo"])["assets"]
                               if asset["name"] == "srv-image"), {})
-            if image_row.get("kind") != IMAGE_KIND or image_row.get("manifest") != "sha256:" + "d" * 64:
-                failures.append(f"the image is not an asset of the repository that declares it: {image_row}")
+            if image_row.get("kind") != IMAGE_KIND or image_row.get("manifest") != "sha256:" + "d" * 64 or \
+                    image_row.get("executables") != [{"package": "priv_server", "entry": "bin/server",
+                                                      "digest": sha256_bytes(b"\x7fELF server bytes"),
+                                                      "build_id": sha256_bytes(b"\x7fELF server bytes")[:40]}]:
+                failures.append(f"the image is not an asset of the repository that declares it, naming each "
+                                f"executable's digest and build-id: {image_row}")
 
         arm("a step-0 record that is not cuttable writes no manifest",
             lambda: build(store, canonical({**json.loads(record), "cuttable": False}), plan), "cuttable=False")

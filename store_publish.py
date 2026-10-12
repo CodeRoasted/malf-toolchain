@@ -32,6 +32,9 @@ or packs.
     store_publish.py image <repository> <visibility> <step-0 record digest> <allowed signers> <image> <tag>
         Token: GITHUB_TOKEN (`packages: write` on the image's package, which the repository's own
         store package grants it Read beside); prints the pushed `ghcr.io/coderoasted/<image>@sha256:…`
+    store_publish.py deployment <slice> <signature> <allowed signers> <repository> <image> <version>
+        what a deploy runs, from the Release's own signed slice: `image <manifest hex>`, then one
+        `executable <entry> <sha256> <build-id>` line per executable the image carries
     store_publish.py selftest
         the whole act against an in-process registry seeded by the writer's own functions
 
@@ -175,6 +178,27 @@ def publish_image(registry: store_replica.Registry, target: store_replica.Regist
             raise Refused(f"{target.name}:{tag} did not read back as {manifest}")
     say(f"store_publish: IMAGE {target.name}@{manifest} tagged {tag}")
     return manifest
+
+
+def deployment(slice_bytes: bytes, signature: Path, allowed: Path, repository: str, image: str,
+               version: str) -> dict:
+    """What a deploy of `image` at `version` runs, read from the Release's own signed slice: the
+    image's manifest digest and each executable it carries with its file digest and GNU build-id.
+    Refused unless the writer signed the slice for this repository and version (DN-142.D15)."""
+    with tempfile.TemporaryDirectory() as scratch:
+        (Path(scratch) / "slice.sig").write_bytes(signature.read_bytes())
+        try:
+            assets = store_manifest.verify(slice_bytes, Path(scratch) / "slice.sig", allowed, repository)
+        except store_manifest.Refused as refused:
+            raise Refused(str(refused)) from refused
+    body = json.loads(slice_bytes)
+    if body.get("version") != version:
+        raise Refused(f"the Release's slice is for version {body.get('version')!r}, and the deploy names {version!r}")
+    found = [asset for asset in assets if asset["kind"] == store_manifest.IMAGE_KIND and asset["name"] == image]
+    if len(found) != 1 or not found[0].get("executables"):
+        raise Refused(f"the slice of {repository} {version} holds {len(found)} image(s) named {image} with its "
+                      f"executables, not one")
+    return {"manifest": found[0]["manifest"], "executables": found[0]["executables"]}
 
 
 def check_release(out: Path, release: dict) -> None:
@@ -337,6 +361,25 @@ def selftest() -> int:
                 "does not verify")
             if "v9.9.7" in target_fake.tags:
                 failures.append("a refused image publication tagged the registry anyway")
+            private_path = root / "priv-repo-slice.json"
+            private_path.write_bytes(private)
+            private_signature = root / "priv-repo-slice.json.sig"
+            private_signature.write_bytes(signed(private, "writer"))
+            found = arm("a deploy reads the image's digest and its executables' identity from the Release's "
+                        "signed slice",
+                        lambda: deployment(private, private_signature, allowed, "priv-repo", "srv-image", "9.9.9"),
+                        None)
+            if found is not None and (found["manifest"] != image_manifest or
+                                      [row["entry"] for row in found["executables"]] != ["bin/server"]):
+                failures.append(f"the deployment read {found}")
+            arm("a deploy of another version than the slice's is refused",
+                lambda: deployment(private, private_signature, allowed, "priv-repo", "srv-image", "9.9.8"),
+                "the deploy names '9.9.8'")
+            other_signature = root / "priv-repo-slice.other.sig"
+            other_signature.write_bytes(signed(private, "other"))
+            arm("a slice the writer did not sign deploys nothing",
+                lambda: deployment(private, other_signature, allowed, "priv-repo", "srv-image", "9.9.9"),
+                "does not verify")
 
             _fake, registry = registry_with(pub, signed(pub, "other"))
             arm("a slice signed by any key but the writer's stages nothing",
@@ -376,6 +419,12 @@ def main(argv: list[str]) -> int:
         if len(argv) == 3 and argv[0] == "check-release":
             check_release(Path(argv[1]), json.loads(Path(argv[2]).read_text()))
             print(f"store_publish: the Release equals the slice ({argv[1]})")
+            return 0
+        if len(argv) == 7 and argv[0] == "deployment":
+            found = deployment(Path(argv[1]).read_bytes(), Path(argv[2]), Path(argv[3]), argv[4], argv[5], argv[6])
+            print(f"image {found['manifest'].removeprefix('sha256:')}")
+            for executable in found["executables"]:
+                print(f"executable {executable['entry']} {executable['digest']} {executable['build_id']}")
             return 0
         if len(argv) == 7 and argv[0] == "image":
             token = os.environ.get("GITHUB_TOKEN", "")
