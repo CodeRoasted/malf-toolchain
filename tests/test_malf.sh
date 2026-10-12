@@ -5644,6 +5644,57 @@ check "every pin in the lock carries at least one digest ($cl_pins pins)" "$cl_p
 check "conan itself is pinned at the default version" "1" "$(grep -c "^conan==$cl_default " "$cl_lock")"
 echo
 
+echo "[7q11a] every pip install in every malf action installs from a hash lock, never from whatever PyPI serves (N281)"
+# The property is the INSTALL, wherever an action spells it: a logical line (bash `\` and pwsh
+# backtick continuations joined, comment lines dropped) that invokes pip's install, as `pip install`
+# or as pwsh's argument array `'pip', 'install'`, carries `--require-hashes` and `--only-binary=:all:`.
+# Those two are sufficient: in hash mode pip refuses any requirement without a digest, a bare
+# `name==version` on the command line included, and refuses to build one from source. The detector
+# is proven on a planted action first, so a zero is a judgment and not a detector that sees nothing.
+pl_unlocked() {
+    local root="$1" file
+    while IFS= read -r file; do
+        awk -v f="${file#"$root"/}" '
+            /^[[:space:]]*#/ { next }
+            { line = (held == "" ? $0 : held " " $0); held = "" }
+            /(\\|`)[[:space:]]*$/ { sub(/(\\|`)[[:space:]]*$/, "", line); held = line; next }
+            line ~ /pip3?[[:space:]]+install|["\047]pip["\047],[[:space:]]*["\047]install["\047]/ \
+              && !(line ~ /--require-hashes/ && line ~ /--only-binary=:all:/) { print f }
+        ' "$file"
+    done < <(find "$root/.github/actions" -name 'action.yml' | sort)
+}
+pl_tmp="$(mktemp -d)"
+mkdir -p "$pl_tmp/.github/actions/planted"
+printf '%s\n' "runs:" "  steps:" "    - run: |" \
+    "        # pip install --require-hashes --only-binary=:all: -r lock.txt  (a comment, never judged)" \
+    "        python -m pip install --disable-pip-version-check \\" "          \"ninja>=1.12\"" \
+    "        \$a = @('-m', 'pip', 'install', '--require-hashes')" \
+    > "$pl_tmp/.github/actions/planted/action.yml"
+check "the detector reds a planted unhashed install, a backslash-continued one and a pwsh array one, never a comment" \
+      ".github/actions/planted/action.yml .github/actions/planted/action.yml" "$(pl_unlocked "$pl_tmp" | tr '\n' ' ' | sed 's/ $//')"
+rm -rf "$pl_tmp"
+check "no malf action installs from PyPI without a hash lock" "" "$(pl_unlocked "$MALF_ROOT" | sort -u | tr '\n' ' ')"
+pl_bad=""
+while IFS= read -r pl_lock; do
+    pl_rel="${pl_lock#"$MALF_ROOT"/}"
+    pl_bad+="$(grep -vE '^\s*(#|$)' "$pl_lock" | grep -vE '^\s+--hash=sha256:[0-9a-f]{64}( \\)?$' \
+               | grep -vE '^[a-z0-9._-]+==[0-9A-Za-z.+!-]+( ; [^\\]+)? \\$' | sed "s|^|$pl_rel: |" || true)"
+    pl_pins="$(grep -cE '^[a-z0-9._-]+==' "$pl_lock")"
+    pl_hashed="$(awk '/^[a-z0-9._-]+==/{getline; if ($0 ~ /--hash=sha256:/) n++} END{print n+0}' "$pl_lock")"
+    [[ "$pl_pins" -gt 0 && "$pl_pins" == "$pl_hashed" ]] || pl_bad+=" $pl_rel: $pl_hashed of $pl_pins pins hashed"
+done < <(find "$MALF_ROOT/.github/actions" -name '*.txt' | sort)
+check "every lock under .github/actions is \`name==version\` pins each carrying a sha256 digest, nothing else" "" "$pl_bad"
+pl_msvc="$MALF_ROOT/.github/actions/setup-proof-msvc/action.yml"
+pl_msvc_conan="$(awk '/^  conan-version:/{f=1} f && /default:/{gsub(/[^0-9.]/, "", $2); print $2; exit}' "$pl_msvc")"
+pl_missing=""
+for pl_name in $(grep -oE "'(cmake|ninja)-[0-9.]+\.txt'" "$pl_msvc" | tr -d "'") "conan-$pl_msvc_conan.txt"; do
+    [[ -f "$MALF_ROOT/.github/actions/setup-build-env/$pl_name" ]] || pl_missing+=" $pl_name"
+done
+check "setup-proof-msvc's cmake and ninja locks and its default conan ($pl_msvc_conan) lock are on disk" "" "$pl_missing"
+check "setup-proof-msvc installs into a job-scoped venv under RUNNER_TEMP, never the runner's own Python" \
+      "1 1" "$(grep -c "Join-Path \$env:RUNNER_TEMP 'proof-tools-venv'" "$pl_msvc") $(grep -c "& (Join-Path \$venv 'Scripts/python.exe') @pipArgs" "$pl_msvc")"
+echo
+
 echo "[7q11b] setup-build-env provisions patchelf where it is missing, and prints the one that runs (DN-142.D20 (3))"
 # Behavioural, over the action's committed first step: its `run:` script executed against stub
 # dpkg/sudo/cmake/patchelf on PATH, on a seat where every base package but patchelf is installed.

@@ -8,11 +8,12 @@ description: |
 
   ONE FORM FOR BOTH RUNNER KINDS. The org variable WINDOWS_RUNNER routes a private repository's
   Windows leg to our self-hosted Windows runners, which lack CMake, Ninja, Conan and zstd; the hosted
-  image has some of them. Every install here is pwsh and pip, and each is a no-op or a fresh install
-  on either kind. The cache steps are `bash`, which on a Windows runner is Git bash from
-  `C:\Program Files\Git\bin`: the self-hosted runners have it only through their job PATH (malf
-  runner/README.md, Windows runner). The runner itself is the CALLER's job-level `runs-on` — a
-  composite holds no runner, so this brick can never pin one.
+  image has some of them. Every install here is pwsh: CMake, Ninja and Conan from setup-build-env's
+  hash locks into a job-scoped venv, zstd fetched only where it is missing. The cache steps are
+  `bash`, which on a Windows runner is Git bash from `C:\Program Files\Git\bin`: the self-hosted
+  runners have it only through their job PATH (malf runner/README.md, Windows runner). The runner
+  itself is the CALLER's job-level `runs-on` — a composite holds no runner, so this brick can never
+  pin one.
 
   THE CACHE IS RESTORE-ONLY HERE. Save it with `conan-cache-save` as the job's LAST step, which drops
   the first-party packages first (ROADMAP N367). The restore and the save live under the caller's
@@ -60,29 +61,57 @@ runs:
         if ([version]$env:VCToolsVersion -lt [version]'14.52') { Write-Error "active toolset $env:VCToolsVersion < 14.52 (the fix floor)"; exit 1 }
         Write-Host "active VCToolsVersion: $env:VCToolsVersion"
 
-    - name: CMake 4.3.x + Ninja (pip; the import-std gate UUID 451f2fe2 lives only in 4.3.x)
-      shell: pwsh
-      run: |
-        python -m pip install --disable-pip-version-check "cmake==4.3.1" "ninja>=1.12"
-        $v = (cmake --version | Select-Object -First 1)
-        if ($v -notmatch ' 4\.3\.') { Write-Error "expected CMake 4.3.x (got: $v)"; exit 1 }
-        cmake --version; ninja --version
-
-    - name: Conan (pip)
+    - name: CMake 4.3.x, Ninja and Conan from their hash locks, into a job-scoped venv
+      # EVERY FILE PIP INSTALLS IS ONE OF THE DIGESTS THE LOCKS PIN (`--require-hashes`), AND NOTHING
+      # IS BUILT FROM SOURCE (`--only-binary=:all:`): the locks are setup-build-env's, where the Linux
+      # legs read theirs (ROADMAP N281). CMake 4.3.x because the import-std gate UUID 451f2fe2 lives
+      # only there. The venv lives in RUNNER_TEMP and dies with the job: an install into the runner's
+      # own Python would persist on a self-hosted Windows runner and be executed by every later job
+      # of every repository (W295's finding on the Linux runners). Only the five launchers reach
+      # PATH, through a directory of their own, so the job's `python` is still the runner's; a pip
+      # launcher names its venv's python.exe by absolute path, so a copy runs from anywhere. A
+      # conan version with no lock refuses: there is no unhashed fallback.
       shell: pwsh
       env:
         CONAN_VERSION: ${{ inputs.conan-version }}
       run: |
-        python -m pip install --disable-pip-version-check "conan==$env:CONAN_VERSION"
-        conan --version
+        $ErrorActionPreference = 'Stop'
+        $lockDir = Join-Path $env:GITHUB_ACTION_PATH '../setup-build-env'
+        $locks = @('cmake-4.3.1.txt', 'ninja-1.13.2.txt', "conan-$env:CONAN_VERSION.txt") | ForEach-Object { Join-Path $lockDir $_ }
+        foreach ($lock in $locks) {
+          if (-not (Test-Path -LiteralPath $lock)) { Write-Error "no hash lock at ${lock}: write it as setup-build-env/conan-2.28.1.txt's header says, never install unhashed"; exit 1 }
+        }
+        $venv = Join-Path $env:RUNNER_TEMP 'proof-tools-venv'
+        $bin = Join-Path $env:RUNNER_TEMP 'proof-tools-bin'
+        Remove-Item -Recurse -Force -LiteralPath $venv, $bin -ErrorAction SilentlyContinue
+        python -m venv $venv
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        $pipArgs = @('-m', 'pip', 'install', '--disable-pip-version-check', '--no-input', '--require-hashes', '--only-binary=:all:')
+        foreach ($lock in $locks) { $pipArgs += @('-r', $lock) }
+        & (Join-Path $venv 'Scripts/python.exe') @pipArgs
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        New-Item -ItemType Directory -Force -Path $bin | Out-Null
+        foreach ($tool in 'cmake', 'ctest', 'cpack', 'ninja', 'conan') {
+          Copy-Item -LiteralPath (Join-Path $venv "Scripts/$tool.exe") -Destination (Join-Path $bin "$tool.exe")
+        }
+        "$bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+        $v = (& (Join-Path $bin 'cmake.exe') --version | Select-Object -First 1)
+        if ($v -notmatch ' 4\.3\.') { Write-Error "expected CMake 4.3.x (got: $v)"; exit 1 }
+        & (Join-Path $bin 'cmake.exe') --version; & (Join-Path $bin 'ninja.exe') --version; & (Join-Path $bin 'conan.exe') --version
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-    - name: zstd (without it actions/cache falls back to MSYS2 tar -z, whose gzip child is absent, and the save fails)
+    - name: zstd, digest-pinned (without it actions/cache falls back to MSYS2 tar -z, whose gzip child is absent, and the save fails)
       shell: pwsh
       run: |
         if (Get-Command zstd -ErrorAction SilentlyContinue) { Write-Host "zstd present: $(zstd --version)"; exit 0 }
         $ver = '1.5.6'
         $zip = "$env:RUNNER_TEMP/zstd.zip"
         Invoke-WebRequest -Uri "https://github.com/facebook/zstd/releases/download/v$ver/zstd-v$ver-win64.zip" -OutFile $zip
+        # The release publishes no digest for this zip, so the pin is the bytes first fetched on
+        # 2026-10-12 (1708727 bytes; GitHub's asset record unchanged since 2024-03-29T07:13:12Z).
+        $want = '7b4eff6719990e38aca93a4844c2e86a1935090625c4611f7e89675e999c56cc'
+        $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+        if ($got -ne $want) { Write-Error "zstd-v$ver-win64.zip sha256 $got is not the pinned $want"; exit 1 }
         Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP/zstd" -Force
         $dir = (Get-ChildItem -Recurse "$env:RUNNER_TEMP/zstd" -Filter zstd.exe | Select-Object -First 1).DirectoryName
         if (-not $dir) { Write-Error 'zstd.exe not found in the downloaded archive'; exit 1 }

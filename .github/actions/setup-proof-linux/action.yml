@@ -84,7 +84,8 @@ runs:
         cmake_banner="$(cmake --version 2>/dev/null || true)"
         case "${cmake_banner%%$'\n'*}" in
           *" 4.3."*) ;;
-          *) sudo python3 -m pip install --break-system-packages "cmake==4.3.1"; hash -r ;;
+          *) sudo python3 -m pip install --break-system-packages --disable-pip-version-check --no-input \
+               --require-hashes --only-binary=:all: -r "$GITHUB_ACTION_PATH/../setup-build-env/cmake-4.3.1.txt"; hash -r ;;
         esac
         # CMake 4.3.x workspace-wide: the import-std experimental gate UUID 451f2fe2 lives only there.
         case "$(cmake --version | head -1)" in *" 4.3."*) cmake --version ;; *) echo "::error::expected CMake 4.3.x (got: $(cmake --version | head -1))"; exit 1 ;; esac
