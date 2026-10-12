@@ -292,6 +292,19 @@ winget install --id Python.Python.3.12   --source winget   # Python — REQUIRED
 Without `pwsh` the very first probe step fails with `pwsh: command not found`. setup-msvc1452
 installs the MSVC 14.52 toolset itself, so you do **not** pre-install Visual Studio.
 
+**Git bash must be on the job PATH.** Every Windows leg also runs `shell: bash` steps (the conan
+cache guard and its record, in `setup-proof-msvc`), and on Windows `bash` is Git bash,
+`C:\Program Files\Git\bin\bash.exe`. Git for Windows puts only `Git\cmd` on the machine PATH, so
+a runner whose job PATH is the machine PATH fails the first such step `bash: command not found`
+(insight-eidos `golden.yaml` runs 38219478792 and 38248751771, 2026-10-12; never WSL's bash). A
+job's PATH is the `PATH=` line of the runner directory's `.env`, written WHOLE by
+`isolate-runner-windows.ps1` (the runner's Python, its Scripts, then `Git\bin`, derived from the
+machine PATH's `git.exe`, then the machine PATH); the script refuses a Git install with no
+`bin\bash.exe`. **A runner registered or re-registered by hand must get the same line**, and a
+`.env` edit reaches jobs only after the service restarts. Measured green with `Git\bin` on that
+line: `golden.yaml` run 38261059985, `msvc-14.52 · O2-fast` on `malf-runner-win` running its `bash`
+steps as `C:\Program Files\Git\bin\bash.EXE`.
+
 ```powershell
 # ELEVATED PowerShell (Run as Administrator) — this installs a Windows SERVICE.
 pwsh -ExecutionPolicy Bypass -File malf\runner\install-runner.ps1     # registers "malf-runner-win" (label malf-windows)

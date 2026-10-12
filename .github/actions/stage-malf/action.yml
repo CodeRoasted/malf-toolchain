@@ -37,7 +37,7 @@ runs:
         cp -a "$root" "$DEST"
         echo "malf-toolchain staged from $root into $DEST"
 
-    # pwsh, never bash: on the self-hosted Windows runners `bash` resolves to WSL.
+    # pwsh on Windows: this copy then needs only the runner's default shell, never Git bash.
     - name: Copy malf-toolchain at this action's revision into the workspace (Windows)
       if: runner.os == 'Windows'
       shell: pwsh

@@ -8,10 +8,11 @@ description: |
 
   ONE FORM FOR BOTH RUNNER KINDS. The org variable WINDOWS_RUNNER routes a private repository's
   Windows leg to our self-hosted Windows runners, which lack CMake, Ninja, Conan and zstd; the hosted
-  image has some of them. Every install here is pwsh and pip, never `bash` (on the self-hosted host
-  `bash` resolves to WSL) and never conan-io/setup-conan (a bash action), and each is a no-op or a
-  fresh install on either kind. The runner itself is the CALLER's job-level `runs-on` — a composite
-  holds no runner, so this brick can never pin one.
+  image has some of them. Every install here is pwsh and pip, and each is a no-op or a fresh install
+  on either kind. The cache steps are `bash`, which on a Windows runner is Git bash from
+  `C:\Program Files\Git\bin`: the self-hosted runners have it only through their job PATH (malf
+  runner/README.md, Windows runner). The runner itself is the CALLER's job-level `runs-on` — a
+  composite holds no runner, so this brick can never pin one.
 
   THE CACHE IS RESTORE-ONLY HERE. Save it with `conan-cache-save` as the job's LAST step, which drops
   the first-party packages first (ROADMAP N367). The restore and the save live under the caller's
@@ -149,9 +150,10 @@ runs:
 
     - name: Register malf's recipe overlay as the first remote (DN-142.D17 (8))
       # The lock pins three overlay revisions; a home without the remote cannot resolve them. pwsh,
-      # never bash: on the self-hosted Windows runners `bash` resolves to WSL, so this leg cannot
-      # source malf. The ONE second spelling of `_malf_sync_overlay_remote` (malf/malf), held equal
-      # to it by tests/test_proof_bricks.sh: name, type, URL `<malf checkout>/overlay`, first.
+      # not the Linux brick's register-overlay.sh: that script sources malf, which no Windows leg
+      # has ever loaded under Git bash. The ONE second spelling of `_malf_sync_overlay_remote`
+      # (malf/malf), held equal to it by tests/test_proof_bricks.sh: name, type, URL
+      # `<malf checkout>/overlay`, first.
       shell: pwsh
       env:
         HOME_DIR: ${{ inputs.conan-home }}

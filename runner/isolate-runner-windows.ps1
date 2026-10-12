@@ -221,6 +221,21 @@ function Resolve-Machine([string]$exe) {
 foreach ($exe in 'pwsh.exe', 'git.exe') {
     if (-not (Resolve-Machine $exe)) { Refuse "$exe is not on the MACHINE path - the virtual account could not run it (install-runner.ps1 step 10-bis names the fix for pwsh)" }
 }
+# A job's `shell: bash` is Git bash, from Git\bin; Git for Windows puts only Git\cmd on the machine
+# PATH, and a job PATH without Git\bin fails every bash step `bash: command not found` (insight-eidos
+# golden.yaml run 38248751771, 2026-10-12). Git\bin is derived from git.exe, whichever of the two
+# directories the machine PATH resolves it from.
+function Resolve-GitBin([string]$gitExe) {
+    $bin = Join-Path (Split-Path -Parent (Split-Path -Parent $gitExe)) 'bin'
+    if (-not (Test-Path -LiteralPath (Join-Path $bin 'bash.exe') -PathType Leaf)) { Refuse "no bash.exe in $bin, beside $gitExe - every Windows leg's 'shell: bash' step runs Git bash from there" }
+    $bin
+}
+# PATH is written WHOLE because a .env value is not expanded: the runner's Python, then Git bash
+# ahead of the machine PATH, so no bash.exe on the machine PATH can shadow it.
+function Get-RunnerPath([string]$python, [string]$gitBin, [string]$machine) {
+    "$python;$(Join-Path $python 'Scripts');$gitBin;$machine"
+}
+$GitBin = Resolve-GitBin (Resolve-Machine 'git.exe')
 if ($machinePath -match '\\Users\\') { Refuse "the machine PATH names a directory under a user profile - the runner's PATH is built from it: $machinePath" }
 
 # The job workspace, where .runner says it is (relative to the runner directory unless rooted).
@@ -257,7 +272,7 @@ $aclPlan = if ($inst.DeskReads) { "SYSTEM and Administrators full, $Virtual modi
   Python            $PythonDir - NuGet python 3.12.10, SHA-256 + SHA-512 pinned, signer checked
   LOCALAPPDATA      $LocalAppData, holding a junction $MsvcName -> $MsvcSource
                     ($Virtual granted read+execute on that directory only)
-  runner .env       LOCALAPPDATA and PATH ($PythonDir, its Scripts, then the machine PATH)
+  runner .env       LOCALAPPDATA and PATH ($PythonDir, its Scripts, $GitBin, then the machine PATH)
   job workspace     $workPlan
                     (a pre-isolation folder keeps its creator's ACL; the virtual account could not delete one)
   registration      $registration
@@ -409,13 +424,12 @@ if (Test-Path -LiteralPath $WorkDir) {
     if ($workGrant.Count -eq 0) { Refuse "$WorkDir grants $Virtual nothing after the reset - a job could not clean its own workspace" }
     Say "$WorkDir owned by Administrators, every entry inheriting $RunnerDir's ACL"
 }
-# .env reaches every job through Runner.Listener (LoadAndSetEnv). PATH is written WHOLE because a
-# .env value is not expanded: the runner's Python first, then the machine PATH as of this run -
-# a later machine-PATH change reaches the runner by re-running this script, as it would only reach
-# a running service at its next start anyway.
+# .env reaches every job through Runner.Listener (LoadAndSetEnv), its PATH from Get-RunnerPath with
+# the machine PATH as of this run - a later machine-PATH change reaches the runner by re-running
+# this script, as it would only reach a running service at its next start anyway.
 $envOrig = Get-Content -Raw -LiteralPath (Join-Path $StateDir 'env.orig')
 $kept = @($envOrig -split "`r?`n" | Where-Object { $_ -and $_ -notmatch '^(LOCALAPPDATA|PATH)=' })
-$lines = $kept + @("LOCALAPPDATA=$LocalAppData", "PATH=$PythonDir;$(Join-Path $PythonDir 'Scripts');$machinePath")
+$lines = $kept + @("LOCALAPPDATA=$LocalAppData", "PATH=$(Get-RunnerPath $PythonDir $GitBin $machinePath)")
 Set-Content -LiteralPath (Join-Path $RunnerDir '.env') -Value ($lines -join "`r`n") -Encoding ASCII
 
 Step "6/6 log the service on as $Virtual and start it"

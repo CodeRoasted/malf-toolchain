@@ -10,8 +10,8 @@
 # through it, reports a folder it cannot list, and with a repair hands that folder alone to it and
 # then finds a junction inside; step 5 walks, re-owns then resets the job workspace AFTER the
 # runner directory's grant that reset inherits; the plan and the rollback's plan name the
-# workspace. What it cannot: icacls under elevation, which the script's -Apply run checks
-# itself (an explicit ACE left, or no grant to the virtual account, refuses).
+# workspace; the job PATH puts Git bash ahead of the machine PATH. What it cannot: icacls under
+# elevation, which the script's -Apply run checks itself (an explicit ACE left, or no grant to the virtual account, refuses).
 # Exit 0 green, 1 red.
 
 param(
@@ -119,6 +119,40 @@ $undo = Get-Content -Raw -LiteralPath $Rollback
 Check 'the rollback removes a runner with the token in the environment' 'True' "$($undo.Contains('$env:ACTIONS_RUNNER_INPUT_TOKEN = $token') -and $undo.Contains(`"@('remove')`"))"
 Check 'the install names the group and refuses a runner registered elsewhere' 'True' "$($text.Contains('-RunnerGroup $inst.Group') -and $text.Contains('if ($pool -ne $inst.Group)'))"
 Check 'a runner the desk does not read names three principals: every other explicit entry is removed, then checked' 'True' "$($text.Contains('$kept = @($SidSystem, $SidAdmins, $VirtualSid)') -and $text.Contains(`"'/remove', `"))"
+
+Write-Host '[6] the job PATH carries Git bash: a machine PATH holding only Git\cmd resolves no bash (golden.yaml run 38248751771)'
+$named = @{}
+foreach ($node in $ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                                 $node.Name -in 'Resolve-GitBin', 'Get-RunnerPath', 'Refuse' }, $true)) { $named[$node.Name] = $node }
+Check 'the script defines Resolve-GitBin, Get-RunnerPath and Refuse' 'True' "$($named.Count -eq 3)"
+if ($named.Count -eq 3) {
+    foreach ($node in $named.Values) { . ([scriptblock]::Create($node.Extent.Text)) }
+    $base = Join-Path ([IO.Path]::GetTempPath()) ('isolate-selftest-' + [guid]::NewGuid())
+    $cmd = Join-Path $base 'Git\cmd'
+    $bin = Join-Path $base 'Git\bin'
+    $system = Join-Path $base 'system32'
+    New-Item -ItemType Directory -Path $cmd, $bin, $system -Force | Out-Null
+    foreach ($file in (Join-Path $cmd 'git.exe'), (Join-Path $bin 'git.exe'), (Join-Path $bin 'bash.exe'), (Join-Path $system 'bash.exe')) { Set-Content -LiteralPath $file -Value 'x' }
+    try {
+        function Find-Bash([string]$path) {
+            foreach ($dir in ($path -split ';' | Where-Object { $_ })) { if (Test-Path -LiteralPath (Join-Path $dir 'bash.exe') -PathType Leaf) { return $dir } }
+            return '(none)'
+        }
+        Check 'the failure shape: a job PATH of Python and a machine PATH holding Git\cmd finds no bash' '(none)' (Find-Bash "C:\py;$cmd")
+        $machine = "$system;$cmd"
+        Check 'Git\bin derived from git.exe under Git\cmd' $bin (Resolve-GitBin (Join-Path $cmd 'git.exe'))
+        Check 'and from git.exe under Git\bin' $bin (Resolve-GitBin (Join-Path $bin 'git.exe'))
+        $runnerPath = Get-RunnerPath 'C:\py' $bin $machine
+        Check 'the runner PATH: Python, its Scripts, Git\bin, then the machine PATH' "C:\py;C:\py\Scripts;$bin;$machine" $runnerPath
+        Check 'a job resolves bash to Git bash, ahead of any bash.exe on the machine PATH' $bin (Find-Bash $runnerPath)
+        Remove-Item -LiteralPath (Join-Path $bin 'bash.exe')
+        $missing = try { Resolve-GitBin (Join-Path $cmd 'git.exe') | Out-Null; 'accepted' } catch { 'refused' }
+        Check 'a Git install with no bin\bash.exe is refused' 'refused' $missing
+    } finally {
+        Remove-Item -LiteralPath $base -Recurse -Force
+    }
+}
+Check 'the .env PATH is the one Get-RunnerPath composes' 'True' "$($text.Contains('"PATH=$(Get-RunnerPath $PythonDir $GitBin $machinePath)"'))"
 
 Write-Host "`nisolate-runner-windows selftest: $($script:pass) passed, $($script:fail) failed"
 if ($script:fail -gt 0) { exit 1 }
