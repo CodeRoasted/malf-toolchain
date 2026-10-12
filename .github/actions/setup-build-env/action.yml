@@ -1,9 +1,9 @@
 name: 'Setup CodeRoast build env'
 description: |
-  The shared C++ build environment every CodeRoast repo's CI uses, as ONE step: apt base +
-  the pinned CMake 4.3.x + Conan from a hash lock (no profile autodetect) + the conan dep-binary cache + the
-  canonical conan profile fetched from THIS toolchain repo (single source — no per-repo
-  vendored `linux-gcc16-release` copy).
+  The shared C++ build environment every CodeRoast repo's CI uses, as ONE step: apt base + CMake
+  4.3.x + Conan from their hash locks into a job-scoped venv (no profile autodetect) + the conan
+  dep-binary cache + the canonical conan profile fetched from THIS toolchain repo (single source —
+  no per-repo vendored `linux-gcc16-release` copy).
 
   Run AFTER `setup-gcc` (the profile pins CC/CXX=/opt/gcc-16.2/bin/...). This replaces the
   inlined 5-step block (Setup environment → Setup Conan → Cache → Setup Conan profile) that
@@ -47,7 +47,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: apt base + pinned CMake 4.3.x; export CONAN_HOME
+    - name: apt base; export CONAN_HOME
       shell: bash
       env:
         EXTRA_APT: ${{ inputs.extra-apt }}
@@ -59,13 +59,13 @@ runs:
         # CONAN_HOME owned here (single definition) — visible to every later step as $CONAN_HOME.
         # WHERE it is, and why a persistent one lives where it does, is conan-home.sh's header. The
         # job's token reaches conan-home.sh alone (it reads this job's runner group), and is unset
-        # before the apt and pip installs below run anything.
+        # before the apt install below runs anything.
         conan_home="$(GH_TOKEN="$JOB_TOKEN" bash "$ACTION_PATH/conan-home.sh" "$PERSISTENT")"
         unset JOB_TOKEN
         echo "CONAN_HOME=$conan_home" >> "$GITHUB_ENV"
         echo "CONAN_HOME=$conan_home (persistent: $PERSISTENT)"
         # Idempotent on a persistent (self-hosted) runner: apt state survives between jobs, so the
-        # apt/pip provision is pure waste AND needs sudo → a password prompt on a self-hosted box.
+        # apt provision is pure waste AND needs sudo → a password prompt on a self-hosted box.
         # Install only what's actually missing; on a hosted (ephemeral) runner everything is missing
         # so the full provision still runs.
         # patchelf is in the base because a published executable's package() runs it
@@ -83,53 +83,16 @@ runs:
           echo "apt base (+ extra: '${EXTRA_APT:-none}') already present — skipping apt (idempotent skip)"
         fi
         echo "patchelf: $(command -v patchelf) — $(patchelf --version)"
-        # Pin the dev-validated CMake 4.3.x workspace-wide (dev/CI parity). Repos that arm
-        # `import std` need CXX_MODULE_STD (experimental UUID 451f2fe2 — present only in CMake
-        # 4.3.x); Ubuntu Noble ships 3.28 without that gate. Install only if not already 4.3.x
-        # (the pip install needs sudo → skip it when the pin is already satisfied). Every file it installs is
-        # one of the digests cmake-4.3.1.txt pins, as for conan below.
-        case "$(cmake --version 2>/dev/null | head -1)" in
-          *" 4.3."*) ;;
-          *) sudo python3 -m pip install --break-system-packages --disable-pip-version-check --no-input \
-               --require-hashes --only-binary=:all: -r "$ACTION_PATH/cmake-4.3.1.txt"; hash -r ;;
-        esac
-        case "$(cmake --version | head -1)" in
-          *" 4.3."*) cmake --version ;;
-          *) echo "::error::expected CMake 4.3.x (got: $(cmake --version | head -1))"; exit 1 ;;
-        esac
 
-    - name: Install Conan ${{ inputs.conan-version }} from its hash lock, into a job-scoped venv
+    - name: CMake 4.3.x and Conan ${{ inputs.conan-version }} from their hash locks, into a job-scoped venv
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
         CONAN_VERSION: ${{ inputs.conan-version }}
-      # EVERY FILE PIP INSTALLS IS ONE OF THE DIGESTS `conan-<version>.txt` PINS (`--require-hashes`),
-      # AND NOTHING IS BUILT FROM SOURCE (`--only-binary=:all:`), so no unhashed build dependency is
-      # fetched either (W295, ROADMAP N281). This replaced conan-io/setup-conan, whose
-      # `pip install --upgrade pip` and `pip install conan==<v>` took whatever PyPI served, into
-      # whatever `python` came first on PATH — on a self-hosted runner that is the runner account's
-      # PERSISTENT venv, which every later job of every repository then executed, and which carried
-      # urllib3 2.6.3 (two HIGH advisories) and idna 3.11 because an installed conan never pulls its
-      # dependencies forward. The venv lives in RUNNER_TEMP and dies with the job; only `conan` is put
-      # on PATH, through a directory of its own, so the job's `python3` is still the runner's.
-      # A version with no lock refuses — there is no unhashed fallback.
-      run: |
-        set -euo pipefail
-        lock="$ACTION_PATH/conan-$CONAN_VERSION.txt"
-        if [ ! -f "$lock" ]; then
-          echo "::error::no hash lock for conan $CONAN_VERSION at $lock: write conan-$CONAN_VERSION.txt as conan-2.28.1.txt's header says, never install it unhashed"
-          exit 1
-        fi
-        venv="$RUNNER_TEMP/conan-venv"
-        bin="$RUNNER_TEMP/conan-bin"
-        rm -rf "$venv" "$bin"
-        python3 -m venv "$venv"
-        "$venv/bin/python" -m pip install --disable-pip-version-check --no-input \
-          --require-hashes --only-binary=:all: -r "$lock"
-        mkdir -p "$bin"
-        ln -s "$venv/bin/conan" "$bin/conan"
-        echo "$bin" >> "$GITHUB_PATH"
-        "$bin/conan" --version
+      # tool-venv.sh is the one install path of both (its header says why a venv, why the locks, and
+      # what it replaced). Repos that arm `import std` need CXX_MODULE_STD, the experimental gate
+      # UUID 451f2fe2 that only CMake 4.3.x carries; Ubuntu Noble ships 3.28 without it.
+      run: bash "$ACTION_PATH/tool-venv.sh" "$CONAN_VERSION"
 
     - name: Declare MALF_TOOLCHAIN_DIR (build-time codegen reachability, job-wide)
       shell: bash

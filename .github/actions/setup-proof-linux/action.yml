@@ -3,8 +3,8 @@ description: |
   The provisioning half of a RAW determinism leg on Linux — the brick every golden proof's Linux
   legs share (insight-canon, insight-metalog and insight-eidos call it; they keep only WHAT they
   build and prove). The pinned compiler of the leg (gcc-16.2 from our published asset, or clang-21 +
-  libc++-21), Ninja and CMake 4.3.x, Conan, the restore of a keyed conan cache, and the leg's conan
-  profiles staged from a malf-toolchain checkout.
+  libc++-21), Ninja, CMake 4.3.x and Conan from their hash locks into a job-scoped venv, the restore
+  of a keyed conan cache, and the leg's conan profiles staged from a malf-toolchain checkout.
 
   RAW, NOT THE CI COMPOSITE. A determinism leg must not inherit the CI wiring's assumptions
   (`coderoast-ci` exports the lockfile and the build env), or it could no longer tell "the build is
@@ -68,7 +68,7 @@ runs:
       if: inputs.leg == 'clang'
       uses: CodeRoasted/malf-toolchain/.github/actions/setup-clang21-libcxx@b605685e8ec2252aba2c25a0f27b35b2cb00ffa2
 
-    - name: Base — Ninja + CMake 4.3.x (+ the gcc-16.2 /opt wiring on the gcc leg), each guarded
+    - name: Base — Ninja (+ the gcc-16.2 /opt wiring on the gcc leg), each guarded
       shell: bash
       env:
         LEG: ${{ inputs.leg }}
@@ -81,14 +81,6 @@ runs:
             break
           fi
         done
-        cmake_banner="$(cmake --version 2>/dev/null || true)"
-        case "${cmake_banner%%$'\n'*}" in
-          *" 4.3."*) ;;
-          *) sudo python3 -m pip install --break-system-packages --disable-pip-version-check --no-input \
-               --require-hashes --only-binary=:all: -r "$GITHUB_ACTION_PATH/../setup-build-env/cmake-4.3.1.txt"; hash -r ;;
-        esac
-        # CMake 4.3.x workspace-wide: the import-std experimental gate UUID 451f2fe2 lives only there.
-        case "$(cmake --version | head -1)" in *" 4.3."*) cmake --version ;; *) echo "::error::expected CMake 4.3.x (got: $(cmake --version | head -1))"; exit 1 ;; esac
         if [ "$LEG" = "gcc" ] \
            && { [ "$(readlink -f "$(command -v gcc)")" != /opt/gcc-16.2/bin/gcc ] \
                 || [ "$(readlink -f "$(command -v g++)")" != /opt/gcc-16.2/bin/g++ ]; }; then
@@ -103,13 +95,17 @@ runs:
             || { echo "::error::bare g++ is not /opt/gcc-16.2/bin/g++"; exit 1; }
         fi
 
-    - name: Setup Conan
-      uses: conan-io/setup-conan@ed3942a6883243f4af84e13e49c972f9440fa1c2 # v1.4.0
-      with:
-        version: ${{ inputs.conan-version }}
-        home: ${{ inputs.conan-home }}
-        cache_packages: false
-        profile_detect: false
+    - name: CMake 4.3.x and Conan from their hash locks, into a job-scoped venv; CONAN_HOME is the leg's
+      # setup-build-env's tool-venv.sh, the one install path of both (its header says why); no
+      # profile is detected, the leg stages its own below.
+      shell: bash
+      env:
+        CONAN_VERSION: ${{ inputs.conan-version }}
+        HOME_DIR: ${{ inputs.conan-home }}
+      run: |
+        set -euo pipefail
+        echo "CONAN_HOME=$HOME_DIR" >> "$GITHUB_ENV"
+        bash "$GITHUB_ACTION_PATH/../setup-build-env/tool-venv.sh" "$CONAN_VERSION"
 
     - name: May this job touch an Actions cache? (never on the coderoast-release group)
       id: guard

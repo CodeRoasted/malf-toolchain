@@ -5639,10 +5639,46 @@ echo "[7q11] conan is installed from a hash lock, into a job-scoped venv, never 
 cl_action="$MALF_ROOT/.github/actions/setup-build-env/action.yml"
 cl_default="$(awk '/^  conan-version:/{f=1} f && /default:/{gsub(/[^0-9.]/, "", $2); print $2; exit}' "$cl_action")"
 cl_lock="$MALF_ROOT/.github/actions/setup-build-env/conan-$cl_default.txt"
-check "setup-build-env runs no third-party conan installer" \
-      "0" "$(grep -c 'uses: conan-io/setup-conan' "$cl_action")"
-check "the install is --require-hashes --only-binary=:all: from the lock the version names" \
-      "1 1" "$(grep -c -- '--require-hashes --only-binary=:all: -r "$lock"' "$cl_action") $(grep -c 'lock="$ACTION_PATH/conan-$CONAN_VERSION.txt"' "$cl_action")"
+cl_venv="$MALF_ROOT/.github/actions/setup-build-env/tool-venv.sh"
+check "no malf action runs a third-party conan installer" \
+      "" "$(grep -rl 'uses: conan-io/setup-conan' "$MALF_ROOT/.github/actions" | tr '\n' ' ')"
+check "the install is --require-hashes --only-binary=:all: from the cmake lock and the lock the conan version names" \
+      "1 1" "$(grep -c -- '--require-hashes --only-binary=:all: -r "$cmake_lock" -r "$conan_lock"' "$cl_venv") $(grep -c 'conan_lock="$here/conan-$version.txt"' "$cl_venv")"
+check "setup-build-env and setup-proof-linux install CMake and Conan through tool-venv.sh alone" \
+      "1 1" "$(grep -c 'bash "$ACTION_PATH/tool-venv.sh" "$CONAN_VERSION"' "$cl_action") $(grep -c 'bash "$GITHUB_ACTION_PATH/../setup-build-env/tool-venv.sh" "$CONAN_VERSION"' "$MALF_ROOT/.github/actions/setup-proof-linux/action.yml")"
+tv_tmp="$(mktemp -d)"
+mkdir -p "$tv_tmp/stub"
+cat > "$tv_tmp/stub/python3" <<'STUB'
+#!/bin/bash
+# note: the venv the stub makes holds a cmake that reports the version CMAKE_BANNER names
+if [[ "$1 $2" == "-m venv" ]]; then
+    mkdir -p "$3/bin"
+    printf '#!/bin/bash\nif [[ "$1 $2" == "-m pip" ]]; then echo "$*" > "%s/pip.argv"; exit 0; fi\n' "$TV_LOG" > "$3/bin/python"
+    printf '#!/bin/bash\necho "cmake version %s"\n' "$CMAKE_BANNER" > "$3/bin/cmake"
+    printf '#!/bin/bash\necho "Conan version 2.28.1"\n' > "$3/bin/conan"
+    : > "$3/bin/ctest"; : > "$3/bin/cpack"
+    chmod +x "$3/bin/"*
+    exit 0
+fi
+exit 9
+STUB
+chmod +x "$tv_tmp/stub/python3"
+tv_run() {
+    rm -rf "$tv_tmp/rt"
+    env PATH="$tv_tmp/stub:$PATH" TV_LOG="$tv_tmp" RUNNER_TEMP="$tv_tmp/rt" GITHUB_PATH="$tv_tmp/path" \
+        CMAKE_BANNER="$1" bash "$cl_venv" "$2" > "$tv_tmp/out" 2>&1
+}
+tv_run 4.3.1 "$cl_default"; tv_rc=$?
+check "tool-venv.sh installs both locks hashed into RUNNER_TEMP's venv and links the four launchers, and only that directory joins PATH" \
+      "rc=0 1 cmake conan cpack ctest $tv_tmp/rt/build-tools-bin" \
+      "rc=$tv_rc $(grep -c -- "--require-hashes --only-binary=:all: -r $MALF_ROOT/.github/actions/setup-build-env/cmake-4.3.1.txt -r $MALF_ROOT/.github/actions/setup-build-env/conan-$cl_default.txt" "$tv_tmp/pip.argv") $(ls "$tv_tmp/rt/build-tools-bin" | tr '\n' ' ')$(cat "$tv_tmp/path")"
+tv_run 3.28.3 "$cl_default"; tv_rc=$?
+check "a venv whose cmake is not 4.3.x refuses, naming what it got" \
+      "rc=1 1" "rc=$tv_rc $(grep -c 'expected CMake 4.3.x from cmake-4.3.1.txt (got: cmake version 3.28.3)' "$tv_tmp/out")"
+tv_run 4.3.1 9.9.9; tv_rc=$?
+check "a conan version with no lock refuses before any venv exists" \
+      "rc=1 1 no" "rc=$tv_rc $(grep -c 'no hash lock at .*conan-9.9.9.txt' "$tv_tmp/out") $([[ -e "$tv_tmp/rt/build-tools-venv" ]] && echo yes || echo no)"
+rm -rf "$tv_tmp"
 check "the default version ($cl_default) has its lock on disk" "yes" "$([[ -f "$cl_lock" ]] && echo yes || echo "no $cl_lock")"
 cl_bad="$(grep -vE '^\s*(#|$)' "$cl_lock" | grep -vE '^\s+--hash=sha256:[0-9a-f]{64}( \\)?$' \
           | grep -vE '^[a-z0-9._-]+==[0-9A-Za-z.+!-]+( ; [^\\]+)? \\$' || true)"
@@ -5683,6 +5719,8 @@ check "the detector reds a planted unhashed install, a backslash-continued one a
       ".github/actions/planted/action.yml .github/actions/planted/action.yml" "$(pl_unlocked "$pl_tmp" | tr '\n' ' ' | sed 's/ $//')"
 rm -rf "$pl_tmp"
 check "no malf action installs from PyPI without a hash lock" "" "$(pl_unlocked "$MALF_ROOT" | sort -u | tr '\n' ' ')"
+check "no malf action pip-installs into a Python outside a job-scoped venv (no sudo pip, no --break-system-packages)" \
+      "" "$(grep -rnE -- '--break-system-packages|sudo [^|;]*pip3? install|sudo [^|;]*-m pip' "$MALF_ROOT/.github/actions" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' | cut -d: -f1 | sort -u | tr '\n' ' ')"
 pl_bad=""
 while IFS= read -r pl_lock; do
     pl_rel="${pl_lock#"$MALF_ROOT"/}"
