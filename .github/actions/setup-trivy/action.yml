@@ -1,0 +1,29 @@
+name: 'Setup trivy (digest-pinned)'
+description: |
+  Put the one trivy release every CodeRoast SBOM gate runs on PATH, admitted by the SHA-256 of its
+  release tarball and never by a tag: malf's `trivy_pin.py` holds the version and the per-machine
+  digests, downloads, refuses bytes that hash otherwise, and checks the binary's own version line
+  (its header says why a tag is not enough, and how the pin was taken). Linux x86_64 and aarch64; any
+  other machine refuses. A refusal fails the step: a scanner that is absent and a scanner that finds
+  nothing are the same colour downstream.
+
+outputs:
+  trivy:
+    description: 'The absolute path of the admitted trivy binary.'
+    value: ${{ steps.fetch.outputs.trivy }}
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch trivy by digest (malf trivy_pin.py)
+      id: fetch
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        bin="$RUNNER_TEMP/trivy-bin"
+        trivy="$(python3 "$ACTION_PATH/../../../trivy_pin.py" fetch "$bin")"
+        echo "$bin" >> "$GITHUB_PATH"
+        echo "trivy=$trivy" >> "$GITHUB_OUTPUT"
+        "$trivy" --version

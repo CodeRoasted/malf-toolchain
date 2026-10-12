@@ -376,6 +376,15 @@ check "consumer_verdict selftest: 15 arms, every row red on its fixture and gree
 
 echo
 
+echo "[7j1c] trivy_pin admits the CVE scanner by its tarball digest, never by a tag (selftest), and setup-trivy is its one caller"
+trivy_selftest_output="$(timeout 60 python3 "$MALF_ROOT/trivy_pin.py" selftest 2>&1)"
+trivy_selftest_status=$?
+check "trivy_pin selftest: 8 arms, the pinned bytes admitted and every other byte, version, member count and machine refused" \
+      "ok" "$([[ $trivy_selftest_status -eq 0 ]] && grep -q '^trivy_pin selftest: 8 arm(s), 0 failure(s)$' <<< "$trivy_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$trivy_selftest_output")")"
+check "setup-trivy fetches through trivy_pin.py, and no malf action or workflow fetches trivy any other way" \
+      "1 " "$(grep -c 'trivy_pin.py" fetch' "$MALF_ROOT/.github/actions/setup-trivy/action.yml") $(grep -rlE 'aquasecurity/trivy|trivy/.*install\.sh' "$MALF_ROOT/.github" | tr '\n' ' ')"
+echo
+
 echo "[7h] comment_contract_lint carries its own grammar proof (--selftest), post-format leg included"
 
 # The comment-grammar phase of `malf format` (ADR-26.D7). Its selftest falsifies every violation
