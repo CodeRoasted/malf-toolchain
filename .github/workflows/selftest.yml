@@ -71,6 +71,10 @@ jobs:
         # Its own step until tests/test_malf.sh carries it.
         run: bash tests/test_global_conf.sh
 
+      - name: the store writer's public key, as the release job's verifier reads it (DN-142.D8, D9)
+        # Its own step until tests/test_malf.sh carries it.
+        run: bash tests/test_store_key.sh
+
       - name: store_publish selftest (a release job's fetch, verify and stage, against an in-process registry)
         # Its own step until tests/test_malf.sh carries it beside store_replica's and store_manifest's.
         run: timeout 120 python3 store_publish.py selftest
