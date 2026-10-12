@@ -15,9 +15,10 @@ accuracy is the ceiling on our CVE detection. A component the SBOM omits is a co
 scanner ever looks at.
 
 So the SBOM stops being a claim maintained beside the graph and becomes a projection of it.
-Pair it with ``malf lock``: lockfile pins the graph -> this derives the SBOM -> the weekly
-trivy gate scans it -> a CVE forces a deliberate ``malf lock --update``. Closed loop, no
-hand-maintenance anywhere in it.
+Pair it with ``malf lock``: lockfile pins the graph -> this derives the SBOM -> a CVE gate scans
+it -> a CVE forces a deliberate ``malf lock --update``. No hand-maintenance anywhere in it. The
+loop is only as closed as the scanner's reading of these components, and the CPE table below says
+which scanner reads what.
 
 Scope
 -----
@@ -36,9 +37,14 @@ import sys
 from pathlib import Path
 
 # ── CPE vendor table ────────────────────────────────────────────────────────────────────
-# trivy matches CVEs by PURL *and* CPE; for the C/C++ ecosystem CPE is what actually hits
-# NVD, so a wrong vendor string silently scans nothing. Curated, deliberately explicit, and
-# small enough to review. A package ABSENT here gets no CPE and is unconditionally REPORTED
+# A CPE is what a CPE-matching scanner (grype) resolves against NVD, so a wrong vendor string
+# silently scans nothing. trivy, the scanner insight-eidos's SBOM CVE gate runs, IGNORES the CPE: it
+# matches a pkg:conan component by its NAME against its conan advisory source alone. Measured
+# 2026-10-12, trivy 0.74.0 and grype 0.118.0 on one-component SBOMs: curl 7.80.0 named `curl` 0
+# findings under trivy, named `libcurl` 5, the CPE changing nothing; expat 2.4.1, libpq 13.0,
+# libpng 1.6.30 and boost 1.66.0, 0 each under trivy and 51, 71, 12 and 1 under grype by
+# cpe-match. So this table serves a CPE-matching scanner, which no gate runs yet. Curated,
+# deliberately explicit, and small enough to review. A package ABSENT here gets no CPE and is unconditionally REPORTED
 # on stderr (never silently dropped). Absence is a real state: several of these genuinely
 # have no NVD vendor entry, and inventing one would be worse than omitting it.
 # Curation pass 2026-07-29 against the live NVD CPE dictionary
@@ -89,8 +95,9 @@ def is_first_party(component_name: str) -> bool:
 def cpe_coverage(components: list[dict]) -> str:
     """The coderoast:cpe-coverage ratio, `<with-CPE>/<third-party-total>`.
 
-    trivy matches C/C++ components to NVD by CPE; a component without one is matched by PURL
-    alone and in practice scanned weakly or not at all. Without this declared ratio an SBOM
+    A CPE-matching scanner reads a C/C++ component against NVD by its CPE, and a component
+    without one is invisible to it (the CPE table's header says which scanner that is, and that
+    trivy is not one). Without this declared ratio an SBOM
     whose components are mostly CPE-less reads as green while being nearly blind — the
     workspace's signature defect shape. First-party components carry no CVE surface, so they
     are excluded from BOTH sides via `is_first_party`. The `malf sbom --check` byte-compare
