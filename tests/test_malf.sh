@@ -368,6 +368,14 @@ check "store_image selftest: 11 arms, every refusal fired, the staged context an
 
 echo
 
+echo "[7j1b] consumer_verdict carries its own refusal proof (selftest): every row reds on an executable built here or a fake container run, and a probe that cannot run is never a pass (N360 plan A2(d))"
+consumer_selftest_output="$(timeout 120 python3 "$MALF_ROOT/consumer_verdict.py" selftest 2>&1)"
+consumer_selftest_status=$?
+check "consumer_verdict selftest: 13 arms, every row red on its fixture and green on a C executable" \
+      "ok" "$([[ $consumer_selftest_status -eq 0 ]] && grep -q '^consumer_verdict selftest: 13 arm(s), 0 failure(s)$' <<< "$consumer_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$consumer_selftest_output")")"
+
+echo
+
 echo "[7h] comment_contract_lint carries its own grammar proof (--selftest), post-format leg included"
 
 # The comment-grammar phase of `malf format` (ADR-26.D7). Its selftest falsifies every violation

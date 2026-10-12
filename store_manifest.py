@@ -205,14 +205,18 @@ def build(store: Path, record_bytes: bytes, plan: dict) -> tuple[bytes, dict[str
         return json.loads(path.read_text())
 
     def evaluated(package: str, output: str, digest: str) -> None:
+        """The run's `<package>/<output>` verdict passed over `digest`. A test verdict keeps what it
+        judged in its output; a generalized verdict (DN-142.D19 (10)) in its key document."""
         step = steps.get(f"{package}/{output}")
         if step is None:
             raise Refused(f"{package}: no {output} verdict in this step-0 run")
-        body = stored(f"{package}/{output}")["outputs"][output]
+        built = stored(f"{package}/{output}")
+        body = built["outputs"][output]
+        judged = body.get("judged") or built["inputs"].get("judged") or {}
         if step.get("verdict") != "pass" or body.get("verdict") != "pass":
             raise Refused(f"{package}: its {output} verdict is {body.get('verdict')!r}, not pass")
-        if digest not in (body.get("judged") or {}).values():
-            raise Refused(f"{package}: its {output} verdict judged {sorted((body.get('judged') or {}).values())}, "
+        if digest not in judged.values():
+            raise Refused(f"{package}: its {output} verdict judged {sorted(judged.values())}, "
                           f"not the published digest {digest}")
 
     def created(package: str) -> tuple[dict, dict[str, str]]:
@@ -471,8 +475,9 @@ def _fixture(root: Path) -> tuple[Path, bytes, dict, dict[str, Path]]:
                 {"image": {"archive": sha256_bytes(archive), "manifest": "sha256:" + "d" * 64, "reproducible": False}})
     steps.append({"id": "srv-image/image", "key": image, "verdict": None})
     tool_entry = sha256_bytes(b"\x7fELF tool bytes")
-    consumer = put({"step": {"kind": "verdict", "package": "priv_tools", "id": "consumer"}},
-                   {"consumer": {"verdict": "pass", "judged": {"bin/tool": tool_entry}}})
+    consumer = put({"step": {"kind": "verdict", "id": "consumer", "subject": "priv_tools"},
+                    "judged": {"bin/tool": tool_entry}},
+                   {"consumer": {"verdict": "pass", "findings": sha256_bytes(canonical([]))}})
     steps.append({"id": "priv_tools/consumer", "key": consumer, "verdict": "pass"})
     record = canonical({"version": "9.9.9", "built": True, "cuttable": True, "steps": steps})
     plan = {"format": PLAN_FORMAT, "repositories": {
@@ -581,7 +586,7 @@ def selftest() -> int:
 
         store_b, record_b, plan_b, _ = _fixture(root / "b")
         rewrite(store_b, "priv_tools/consumer", record_b,
-                lambda body: body["outputs"]["consumer"]["judged"].__setitem__("bin/tool", "0" * 64))
+                lambda body: body["inputs"]["judged"].__setitem__("bin/tool", "0" * 64))
         arm("a verdict that judged another digest does not evaluate the published one",
             lambda: build(store_b, record_b, plan_b), "not the published digest")
         store_c, record_c, plan_c, _ = _fixture(root / "c")

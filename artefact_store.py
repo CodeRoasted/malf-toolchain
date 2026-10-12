@@ -1299,19 +1299,22 @@ def verdict_shape(document: dict, outputs: dict) -> list[str]:
     return wrong
 
 
-def judged_verdict(store: Path, document: dict, outputs: dict, objects: dict[str, Path]) -> int:
+def judged_verdict(store: Path, document: dict, outputs: dict, objects: dict[str, Path],
+                   name: str = "verdict") -> int:
     """Store or compare one generalized verdict: `outputs` holds the verdict, the findings as a list
     (kept as their digest), the entries and the record fragment; `objects` names the files kept as
-    the record's objects. post: exit 0 stored or matching, 1 a mismatch; a shape that is not the
-    kind's exits the process naming every defect (a refused record is never written)."""
+    the record's objects; `name` is the output's name, which the step-0 record's step id carries
+    (`<subject>/<name>`), so a release verdict over a package (`consumer`) never shares an id with
+    the package's test verdict. post: exit 0 stored or matching, 1 a mismatch; a shape that is not
+    the kind's exits the process naming every defect (a refused record is never written)."""
     wrong = verdict_shape(document, outputs)
     if wrong:
         sys.exit(f"artefact_store: REFUSED verdict {document.get('step', {}).get('id')}: "
                  + "; ".join(wrong))
     output = {"verdict": outputs["verdict"], "findings": key_of(sorted(outputs["findings"])),
               "entries": outputs["entries"], "record": outputs["record"]}
-    return LocalStore(store).commit(document, {"verdict": output},
-                                    {"verdict": ("objects", lambda: dict(objects))})
+    return LocalStore(store).commit(document, {name: output},
+                                    {name: ("objects", lambda: dict(objects))})
 
 
 def verdict_step(store: Path, predicate: str, malf_dir: Path, clang_format: Path,
