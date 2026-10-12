@@ -33,6 +33,7 @@ means a differing recipe and nothing else; step 0's B2 reads the code, never the
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import subprocess
@@ -111,6 +112,18 @@ def verify(home: Path, released: Path, scratch: Path) -> int:
     return EXIT_UNJUDGED if unjudged or not rows else EXIT_EQUAL
 
 
+def recipe_name(conanfile: Path) -> str | None:
+    """The literal `name` a recipe's class assigns, read by AST (no recipe is executed); None when
+    it assigns none."""
+    for node in ast.walk(ast.parse(conanfile.read_text(), filename=str(conanfile))):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(node.value, ast.Constant) \
+                and isinstance(node.value.value, str):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(getattr(target, "id", None) == "name" for target in targets):
+                return node.value.value
+    return None
+
+
 def recipes(workspace: Path) -> int:
     """Print every first-party recipe, whatever the spelling of its exports; the repositories are
     the workspace's DECLARED ones (scripts/workspace_layout.py), never whatever sits on the disk.
@@ -120,7 +133,14 @@ def recipes(workspace: Path) -> int:
     the population, naming it: skipping it would read green over recipes never judged. A
     repository the root `.gitignore` alone declares (`coderoast-corpora` today: no recipe, and a
     desk without access to the private warehouse does not hold it) is judged when present and
-    named as not swept when absent."""
+    named as not swept when absent.
+
+    A recipe is FIRST-PARTY when its name is in a namespace the workspace owns
+    (`owned_package_prefixes`, the declaration store-create classifies by); one outside them is
+    excused only when it sits under a root `VENDORED` declares for its repository (malf's
+    conan-center-index overlay, DN-142.D17 (8)), and is named on stderr as not judged. A recipe in
+    neither, or one with no literal name, refuses the population: it is neither judged nor
+    excused."""
     workspace = workspace.resolve()
     sys.path.insert(0, str(workspace / "scripts"))
     import workspace_layout
@@ -134,7 +154,11 @@ def recipes(workspace: Path) -> int:
     if absent:
         print(f"package_exports: not swept, declared by the root .gitignore alone and absent: "
               f"{', '.join(sorted(absent))}", file=sys.stderr)
+    owned = tuple(workspace_layout.owned_package_prefixes())
+    vendored_roots = {repository: tuple(root for root, _licence in roots)
+                      for repository, roots in workspace_layout.VENDORED.items()}
     found = 0
+    vendored: list[str] = []
     for name in declared:
         repo = workspace / name
         if name in absent:
@@ -145,8 +169,23 @@ def recipes(workspace: Path) -> int:
             if "test_package" in Path(relative).parts or recipe.name != "conanfile.py":
                 continue
             folder = Path(relative).parent.as_posix()
-            print(f"{name if folder == '.' else f'{name}/{folder}'}\t{recipe.parent}")
+            label = name if folder == "." else f"{name}/{folder}"
+            package = recipe_name(recipe)
+            if package is None:
+                raise HelperFailed(f"{label}: the recipe assigns no literal name, so it can be "
+                                   "classified neither first-party nor vendored")
+            if not package.startswith(owned):
+                if any(relative.startswith(root) for root in vendored_roots.get(name, ())):
+                    vendored.append(f"{package} ({label})")
+                    continue
+                raise HelperFailed(f"{label}: {package} is in no namespace the workspace owns "
+                                   f"({', '.join(owned)}) and under no vendored root it declares, "
+                                   "so it is neither judged nor excused")
+            print(f"{label}\t{recipe.parent}")
             found += 1
+    if vendored:
+        print(f"package_exports: not judged, vendored by workspace_layout.VENDORED: "
+              f"{', '.join(vendored)}", file=sys.stderr)
     if not found:
         raise HelperFailed(f"no first-party recipe under {workspace}")
     return EXIT_EQUAL

@@ -4558,7 +4558,7 @@ check "exports-verify: malf failing to derive the recipe list exits 3, naming th
 # the method, nothing — beside a test_package recipe, a file merely ending in conanfile.py and an
 # untracked recipe, none of which is a first-party recipe of the repository.
 ex_ws="$ex_tmp/pop-ws"; mkdir -p "$ex_ws/scripts" "$ex_ws/r"
-printf 'def declared_repos(root):\n    return ["opt", "r", "s"]\n\n\ndef required_repos(root):\n    return ["r", "s"]\n' \
+printf 'VENDORED = {"r": (("vendor/recipes/", "vendor/LICENSE"),)}\n\n\ndef owned_package_prefixes():\n    return ["pop"]\n\n\ndef declared_repos(root):\n    return ["opt", "r", "s"]\n\n\ndef required_repos(root):\n    return ["r", "s"]\n' \
     > "$ex_ws/scripts/workspace_layout.py"
 ex_pop() {   # <folder> <class body line> — a fixture recipe under the fixture repository
     mkdir -p "$ex_ws/r/$1"
@@ -4572,10 +4572,14 @@ ex_pop method '    def export_sources(self):
 ex_pop bare   ''
 ex_pop attr/test_package '    exports_sources = "src/*"'
 printf 'from conan import ConanFile\n' > "$ex_ws/r/method/legacy_conanfile.py"
+# A conan-center-index-layout recipe under the repository's DECLARED vendored root: its version is
+# the index's config.yml's, so `conan export` of its folder alone fails "didn't specify version".
+mkdir -p "$ex_ws/r/vendor/recipes/cci/all"
+printf 'from conan import ConanFile\n\n\nclass Cci(ConanFile):\n    name = "cci"\n' > "$ex_ws/r/vendor/recipes/cci/all/conanfile.py"
 git -C "$ex_ws/r" init -q && git -C "$ex_ws/r" add -A \
     && git -C "$ex_ws/r" -c user.name=t -c user.email=t@t commit -q -m fixture
 ex_pop untracked '    exports_sources = "src/*"'
-mkdir -p "$ex_ws/s"; printf 'from conan import ConanFile\n' > "$ex_ws/s/conanfile.py"
+mkdir -p "$ex_ws/s"; printf 'from conan import ConanFile\n\n\nclass S(ConanFile):\n    name = "pop_s"\n    version = "0.0.1"\n' > "$ex_ws/s/conanfile.py"
 git -C "$ex_ws/s" init -q && git -C "$ex_ws/s" add -A \
     && git -C "$ex_ws/s" -c user.name=t -c user.email=t@t commit -q -m fixture
 check "exports-verify's population is every tracked first-party recipe, whatever the spelling of its exports: the attribute, the annotated attribute, \`exports\`, the export_sources() method and a recipe exporting nothing — never a test_package, a *_conanfile.py or an untracked recipe" \
@@ -4590,6 +4594,19 @@ check "exports-verify's population is every tracked first-party recipe, whatever
 # named as not swept and the run goes on. `s` stays on disk, so the old skip reads exit 0 over it.
 check "exports-verify: a declared repository that is not a clone-manifest one and is absent is named as not swept, never silently" \
       "1" "$(grep -c '^package_exports: not swept, declared by the root .gitignore alone and absent: opt$' "$ex_tmp/pop.err")"
+# THE VENDORED OVERLAY (DN-142.D17 (8)): a recipe outside the owned namespaces is excused only under a
+# root VENDORED declares, named as not judged; one in neither, or one with no literal name, refuses.
+# Measured 2026-10-12: step 0's B2 reddened when exports-verify exported malf's overlay recipes.
+check "exports-verify: a vendored recipe under its declared root is no first-party recipe: never exported, named as not judged" \
+      "1" "$(grep -c '^package_exports: not judged, vendored by workspace_layout.VENDORED: cci (r/vendor/recipes/cci/all)$' "$ex_tmp/pop.err")"
+check "exports-verify over the workspace holding a vendored recipe gives a verdict on every first-party recipe (RED before: conan export of the vendored folder failed, exit 3)" \
+      "rc=0" "$(MALF_WORKSPACE_ROOT="$ex_ws" bash "$MALF_BIN" exports-verify > "$ex_tmp/ev.log" 2>&1; echo "rc=$?")"
+mkdir -p "$ex_ws/r/stray"; printf 'from conan import ConanFile\n\n\nclass Stray(ConanFile):\n    name = "stray"\n' > "$ex_ws/r/stray/conanfile.py"
+git -C "$ex_ws/r" add stray/conanfile.py && git -C "$ex_ws/r" -c user.name=t -c user.email=t@t commit -q -m stray
+check "exports-verify: a recipe in no owned namespace and under no vendored root REFUSES the population, exit 3, naming it" \
+      "rc=3 1" \
+      "$(python3 "$MALF_ROOT/package_exports.py" recipes "$ex_ws" > /dev/null 2>"$ex_tmp/stray.err"; echo -n "rc=$? "; grep -c 'r/stray: stray is in no namespace the workspace owns (pop) and under no vendored root it declares' "$ex_tmp/stray.err")"
+git -C "$ex_ws/r" rm -q stray/conanfile.py && git -C "$ex_ws/r" -c user.name=t -c user.email=t@t commit -q -m unstray
 mv "$ex_ws/r" "$ex_ws/r.away"
 check "exports-verify: a clone-manifest repository absent from the disk REFUSES the population, exit 3, naming it — never a green over recipes never judged" \
       "rc=3 1 0" \
