@@ -3357,6 +3357,21 @@ check "a published ELF stripped, without a runpath, with a build-id is STORED, a
       "rc=0 1 {\"bin/tool\": \"published\"}" "$(bi_declared "$bi_tmp/pub-clean" '{"bin/tool": "published"}') $(python3 -c "import json, glob; print(json.dumps(json.load(open(glob.glob('$bi_tmp/pstore/records/*.json')[0]))['inputs']['step']['executables']))")"
 check "the declaration is read from packages.yml at HEAD, never the disk: a working-tree edit is not seen" \
       "{\"bin/tool\": \"run-from-cache\"}" "$(rm -rf "$bi_tmp/decl"; mkdir -p "$bi_tmp/decl/pkg"; cd "$bi_tmp/decl" && git init -q && printf 'packages:\n  bi_tool:\n    path: pkg\n    executables: {bin/tool: run-from-cache}\n' > packages.yml && git add packages.yml && git -c user.email=t@t -c user.name=t commit -qm one && sed -i 's/run-from-cache/published/' packages.yml && python3 "$MALF_ROOT/artefact_store.py" executables "$bi_tmp/decl/pkg" bi_tool)"
+# THE SITE FORM (DN-142.D24 (2)): a `published` row may name where it is published; the row is read
+# whole, its sites are the publication plan's, and the create's key holds the class alone.
+check "the site form is read whole from packages.yml, and a row in neither form is refused naming it" \
+      "{\"bin/img\": {\"published\": {\"image\": \"srv\"}}, \"bin/sift\": {\"published\": {\"assets\": [{\"name\": \"sift-linux-x64\", \"repository\": \"sift-action\"}]}}, \"bin/tool\": \"run-from-cache\"}|rc=1 1" \
+      "$(rm -rf "$bi_tmp/sites"; mkdir -p "$bi_tmp/sites/pkg"; cd "$bi_tmp/sites" && git init -q && printf 'packages:\n  bi_tool:\n    path: pkg\n    executables:\n      bin/sift: {published: {assets: [{repository: sift-action, name: sift-linux-x64}]}}\n      bin/img: {published: {image: srv}}\n      bin/tool: run-from-cache\n  bi_bad:\n    path: pkg\n    executables: {bin/x: {publshed: {}}}\n' > packages.yml && git add packages.yml && git -c user.email=t@t -c user.name=t commit -qm sites && python3 "$MALF_ROOT/artefact_store.py" executables "$bi_tmp/sites/pkg" bi_tool)|$(out="$(python3 "$MALF_ROOT/artefact_store.py" executables "$bi_tmp/sites/pkg" bi_bad 2>&1)"; echo -n "rc=$? "; grep -c 'bin/x: {.publshed' <<< "$out")"
+bi_sited() {   # <asset name> -> the step's line, into one store kept across calls
+    printf '{"bin/tool": {"published": {"assets": [{"repository": "sift-action", "name": "%s"}]}}}' "$1" > "$bi_tmp/declared.json"
+    MALF_STEP_EXECUTABLES="$bi_tmp/declared.json" bi_step "$bi_tmp/pub-clean" "$bi_tmp/sstore" | tr -d '\n'
+}
+rm -rf "$bi_tmp/sstore"
+check "the create's key holds the CLASS only: a site-form row is keyed as published, and renaming its asset re-keys nothing (the second create MATCHES at the same key)" \
+      "rc=0|rc=0|1|{\"bin/tool\": \"published\"}" \
+      "$(bi_sited sift-linux-x64)|$(bi_sited sift-linux-x64-renamed)|$(grep -l '"kind": "conan-create"' "$bi_tmp/sstore/records/"*.json | wc -l | tr -d ' ')|$(python3 -c "import json, glob; print([json.dumps(b['inputs']['step']['executables']) for b in (json.load(open(f)) for f in glob.glob('$bi_tmp/sstore/records/*.json')) if b['inputs']['step']['kind'] == 'conan-create'][0])")"
+check "a conan-step handed a row in neither form REFUSES it, nothing stored" \
+      "rc=1 0 1" "$(bi_declared "$bi_tmp/pub-clean" '{"bin/tool": {"publshed": {}}}') $(grep -c 'REFUSED bi_tool: 1 declared executable(s) neither classed nor in the site form' "$bi_tmp/step.log")"
 check "a step packages.yml does not list (an umbrella recipe, coderoast_ipc's shape) reads as no declaration, {}, never an error that stops its record" \
       "rc=0 {}" "$(out="$(python3 "$MALF_ROOT/artefact_store.py" executables "$bi_tmp/decl/pkg" bi_umbrella 2>&1)"; echo "rc=$? $out")"
 check "an umbrella step that holds an executable is still REFUSED as unclassified: no declaration classifies nothing" \

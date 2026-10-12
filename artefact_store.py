@@ -124,7 +124,9 @@ its path); its rows are `[corpus-<leg>, test name, outcome]`, the outcome one of
 
 A step's EXECUTABLES (DN-142.D22) are classified by its package's `executables:` map in the
 recorded `packages.yml` (`published` or `run-from-cache`), which `malf store-create` hands over in a
-JSON file named by MALF_STEP_EXECUTABLES and which enters the create's key as `step.executables`
+JSON file named by MALF_STEP_EXECUTABLES and whose CLASS projection (DN-142.D24 (2): a `published`
+row may name its publication sites, `{published: {<site kind>: ...}}`, which never enter a key)
+enters the create's key as `step.executables`
 (`{}` when none, the meaning of an unset variable too). The store REFUSES, before the record, an
 executable entry the map does not name, a map key naming no executable entry, and a `published`
 ELF carrying a symbol table (`.symtab` or `.debug_*`), a runpath (DT_RPATH or DT_RUNPATH) or no
@@ -510,22 +512,41 @@ def executable_findings(entries: list[list[str]], files: dict[str, bytes],
     return findings
 
 
-def declared_executables(package_dir: Path, package: str) -> dict[str, str]:
+def executable_class(value: object) -> str | None:
+    """An `executables:` row's CLASS (DN-142.D24 (2)): the bare class, or `published` for the site
+    form `{published: {<site kind>: ...}}`, whose sites are the publication plan's and never a key
+    member; None for any other shape."""
+    if isinstance(value, str):
+        return value if value in EXECUTABLE_CLASSES else None
+    if isinstance(value, dict) and list(value) == ["published"] and isinstance(value["published"], dict):
+        return "published"
+    return None
+
+
+def executable_classes(declared: dict) -> dict[str, str]:
+    """The class projection `{entry: published | run-from-cache}` of a declaration, the only part
+    of it a create's key holds (DN-142.D24 (2)): renaming an asset or adding a site never re-keys."""
+    return {path: executable_class(value) for path, value in sorted(declared.items())}
+
+
+def declared_executables(package_dir: Path, package: str) -> dict:
     """The `executables:` map `package` declares in the `packages.yml` of the repository holding
     `package_dir`, read from its RECORDED commit's blob (HEAD), never the disk; `{}` when it declares
     none — and when the file names no entry for it at all, as for coderoast-ipc's umbrella recipe
     `coderoast_ipc`, a step of malf's walk that packages.yml does not list. That is safe by the
-    store's own rule: an executable the package holds is then unclassified, and refused.
-    Raises ValueError on a class outside EXECUTABLE_CLASSES."""
+    store's own rule: an executable the package holds is then unclassified, and refused. A row is
+    a bare class or the site form (DN-142.D24 (2)), returned whole.
+    Raises ValueError on a row that is neither."""
     import yaml
 
     top = Path(_run(["git", "-C", str(package_dir), "rev-parse", "--show-toplevel"]).strip())
     document = yaml.safe_load(_run(["git", "-C", str(top), "show", "HEAD:packages.yml"])) or {}
     entry = (document.get("packages") or {}).get(package) or {}
     declared = entry.get("executables") or {}
-    wrong = {path: kind for path, kind in declared.items() if kind not in EXECUTABLE_CLASSES}
+    wrong = {path: kind for path, kind in declared.items() if executable_class(kind) is None}
     if wrong:
-        raise ValueError(f"{package}: executables classed outside {', '.join(EXECUTABLE_CLASSES)}: "
+        raise ValueError(f"{package}: executables neither classed {' nor '.join(EXECUTABLE_CLASSES)} "
+                         f"nor in the site form {{published: {{<site kind>: ...}}}}: "
                          + ", ".join(f"{path}: {kind}" for path, kind in sorted(wrong.items())))
     return dict(sorted(declared.items()))
 
@@ -952,6 +973,12 @@ def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile:
                               sources, upstream, third_party)
     declared_path = os.environ.get(EXECUTABLES_ENV)
     declared = json.loads(Path(declared_path).read_text()) if declared_path else {}
+    declared = executable_classes(declared)
+    unclassed = sorted(path for path, kind in declared.items() if kind is None)
+    if unclassed:
+        print(f"artefact_store: REFUSED {package}: {len(unclassed)} declared executable(s) neither "
+              f"classed nor in the site form (DN-142.D24 (2)): " + ", ".join(unclassed), file=sys.stderr)
+        return 1
     document["step"]["executables"] = declared
     if _refuse_unrecorded(store, document) | _refuse_unheld_third_party(store, document, folders):
         return 1
