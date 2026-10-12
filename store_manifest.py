@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A cut's publication manifest and its signed per-repository slices: built by the writer, verified by every publish job.
+"""A cut's publication manifest and its signed per-repository slices: built and sealed by the writer, verified by every publish job.
 
 DN-142.D9: at the end of a green step 0 the writer lists, for every repository, each artefact it
 publishes by digest, and an artefact enters only if it is EVALUATED (DN-142.D7): its package's
@@ -9,21 +9,42 @@ receives its own SLICE, `{repository, the step-0 record's digest, the whole mani
 repository's assets}`, signed by the writer (DN-142.D8, `ssh-keygen -Y sign`, namespace
 `coderoast-store`), so a public Release never carries the private inventory. DN-142.D22 (3): the
 manifest and the `executables:` declarations agree in both directions — every executable an asset
-carries is classified `published`, and every `published` executable of the run is carried by an
-asset. N360 plan F9: a conan transport carries its recipe's SOURCES, so a transport whose source
-repository is private never reaches a public repository; a single entry (a binary) may.
+or an image carries is classified `published`, and every `published` executable of the run is
+carried by an asset or an image. N360 plan F9: a conan transport carries its recipe's SOURCES, so a
+transport whose source repository is private never reaches a public repository.
+
+AN ENTRY ASSET'S OBJECT IS THE ENTRY'S OWN BYTES, NEVER ITS PACKAGE'S TRANSPORT. The builder writes
+the one member into the store under its entry digest, verified, and the slice names that object.
+The transport would carry the package's sources into the destination repository's store package,
+which that repository's token reads: a public repository's slice would have handed a private
+package's sources to every job of it.
+
+AN IMAGE IS AN ASSET OF THE REPOSITORY THAT DECLARES IT (DN-142.D9; N360 plan C1): the plan names
+each image with its executables, and step 0's image step (`store_image.py`) stores the image as
+one OCI archive under a record `<image>/image` naming the entries it consumed. The builder admits
+the image only when that record consumed exactly the plan's executables at this run's entry
+digests, and counts each of them as carried.
 
 THE PLAN is the builder's declared input: which repository publishes what, under which name.
 
-    {"format": "coderoast.store.plan/1",
+    {"format": "coderoast.store.plan/2",
      "repositories": {<repo>: {"visibility": "public" | "private",
                                "assets": [{"name", "kind": "conan-transport", "package", "source"},
                                           {"name", "kind": "entry", "package", "source", "entry",
-                                           "verdicts": [<output>...]}]}}}
+                                           "verdicts": [<output>...]}],
+                               "images": {<image>: {"dockerfile", "runtime": [<library>...],
+                                                    "executables": [{"package", "entry", "source"}]}}}}}
 
     store_manifest.py build <store> <step-0 record> <plan.json> <out dir>
         <out dir>/manifest.json and <out dir>/slices/<repo>.json, canonical bytes; exit 1 naming
-        every asset refused (nothing is written then)
+        every asset refused (no manifest is written then; entry objects already verified stay
+        in the store, content-addressed)
+    store_manifest.py seal <store> <step-0 record> <plan.json> <private key> <out dir>
+        build, then sign the manifest and every slice, and keep the record, the manifest, each
+        slice and each signature in the store under one `manifest` record keyed by the step-0
+        record's digest; the slices and signatures stay in <out dir> for the replica
+    store_manifest.py signer <private key> <allowed signers>
+        exit 0 printing the key's public half only when it is the one writer key the file names
     store_manifest.py sign <file> <private key>
         <file>.sig, `ssh-keygen -Y sign -n coderoast-store`
     store_manifest.py verify <slice> <signature> <allowed signers> <repository>
@@ -44,6 +65,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -52,12 +74,19 @@ import tempfile
 from pathlib import Path
 from typing import Callable
 
-PLAN_FORMAT = "coderoast.store.plan/1"
-MANIFEST_FORMAT = "coderoast.store.manifest/1"
-SLICE_FORMAT = "coderoast.store.slice/1"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import artefact_store  # noqa: E402 — a sibling module, located from this file
+
+PLAN_FORMAT = "coderoast.store.plan/2"
+MANIFEST_FORMAT = "coderoast.store.manifest/2"
+SLICE_FORMAT = "coderoast.store.slice/2"
 NAMESPACE = "coderoast-store"
 WRITER_IDENTITY = "coderoast-store-writer"
 KINDS = ("conan-transport", "entry")
+IMAGE_KIND = "oci-image"
+IMAGE_STEP = "image"
+IMAGE_MANIFEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+RUNTIME_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
 VISIBILITIES = ("public", "private")
 REPOSITORY_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 ASSET_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
@@ -93,6 +122,7 @@ def _plan_findings(plan: dict) -> list[str]:
     if not isinstance(repositories, dict) or not repositories:
         return ["the plan names no repository"]
     names: set[str] = set()
+    images: set[str] = set()
     for repo, body in sorted(repositories.items()):
         if not REPOSITORY_NAME.match(repo):
             found.append(f"{repo!r} is not a repository name")
@@ -111,11 +141,49 @@ def _plan_findings(plan: dict) -> list[str]:
                 found.append(f"{where}: its source repository {asset.get('source')!r} is not in the plan")
             if asset.get("kind") == "entry" and not asset.get("entry"):
                 found.append(f"{where}: an entry asset names no entry")
+        for image, declared in sorted((body.get("images") or {}).items()):
+            where = f"{repo}: image {image!r}"
+            if not ASSET_NAME.match(image) or image in images or (repo, image) in names:
+                found.append(f"{where}: not an image name, or named twice")
+            images.add(image)
+            if not isinstance(declared.get("dockerfile"), str) or not declared["dockerfile"] \
+                    or declared["dockerfile"].startswith("/") or ".." in declared["dockerfile"].split("/"):
+                found.append(f"{where}: its dockerfile {declared.get('dockerfile')!r} is not a path in its repository")
+            if any(not RUNTIME_NAME.match(str(name)) for name in declared.get("runtime") or []):
+                found.append(f"{where}: a runtime library is a file name, not {declared.get('runtime')!r}")
+            carried = declared.get("executables") or []
+            if not carried:
+                found.append(f"{where}: it carries no executable")
+            for executable in carried:
+                if set(executable) != {"package", "entry", "source"} or executable["source"] not in repositories:
+                    found.append(f"{where}: an executable is {{package, entry, source}} from a plan "
+                                 f"repository, not {executable!r}")
     return found
 
 
+def hold(store: Path, digest: str, data: bytes) -> None:
+    """`data` kept as the store's object `digest`, create-only; refused when it does not hash to
+    it, or when an object already there under that name does not."""
+    if sha256_bytes(data) != digest:
+        raise Refused(f"bytes meant for object {digest} hash to {sha256_bytes(data)}")
+    target = store / "objects" / digest
+    if target.exists():
+        if sha256_file(target) != digest:
+            raise Refused(f"the store's object {digest} does not hash to its name")
+        return
+    staged = target.with_name(f".{digest}.{os.getpid()}.partial")
+    staged.write_bytes(data)
+    try:
+        os.link(staged, target)
+    except FileExistsError:
+        pass
+    finally:
+        staged.unlink()
+
+
 def build(store: Path, record_bytes: bytes, plan: dict) -> tuple[bytes, dict[str, bytes]]:
-    """(the whole manifest, {repo: slice}) as canonical bytes, or Refused naming every finding."""
+    """(the whole manifest, {repo: slice}) as canonical bytes, or Refused naming every finding.
+    Each entry asset's bytes are kept in the store under their entry digest on the way."""
     findings = _plan_findings(plan)
     if findings:
         raise Refused("; ".join(findings))
@@ -147,9 +215,26 @@ def build(store: Path, record_bytes: bytes, plan: dict) -> tuple[bytes, dict[str
             raise Refused(f"{package}: its {output} verdict judged {sorted((body.get('judged') or {}).values())}, "
                           f"not the published digest {digest}")
 
+    def created(package: str) -> tuple[dict, dict[str, str]]:
+        """The package's stored output, once its transport object is whole and its test verdicts
+        (and its corpus verdict, where it has one) passed over its content; its executable classes."""
+        package_record = stored(f"{package}/package")
+        output = package_record["outputs"]["package"]
+        object_path = store / "objects" / output["transport"]
+        if not object_path.is_file() or sha256_file(object_path) != output["transport"]:
+            raise Refused(f"{package}: the store's object {output['transport']} is absent or does not hash to its name")
+        evaluated(package, "verdict", output["content"])
+        if f"{package}/corpus" in steps:
+            evaluated(package, "corpus", output["content"])
+        return output, package_record["inputs"]["step"].get("executables", {})
+
+    def classified(package: str, executables: dict[str, str], member: str, carrier: str) -> None:
+        if executables.get(member) != "published":
+            raise Refused(f"{package}: {carrier} carries {member}, classified "
+                          f"{executables.get(member, 'nowhere')!r}, not 'published' (DN-142.D22 (3))")
+        carried.add((package, member))
+
     visibility = {repo: body["visibility"] for repo, body in plan["repositories"].items()}
-    published_of: dict[str, dict[str, str]] = {}
-    entries_of: dict[str, list[list[str]]] = {}
     carried: set[tuple[str, str]] = set()
     whole: dict[str, dict] = {}
     for repo, body in sorted(plan["repositories"].items()):
@@ -157,44 +242,59 @@ def build(store: Path, record_bytes: bytes, plan: dict) -> tuple[bytes, dict[str
         for asset in body.get("assets", []):
             package = asset["package"]
             try:
-                package_record = stored(f"{package}/package")
-                output = package_record["outputs"]["package"]
-                executables = package_record["inputs"]["step"].get("executables", {})
-                entries = output["entries"]
-                transport = output["transport"]
-                object_path = store / "objects" / transport
-                if not object_path.is_file() or sha256_file(object_path) != transport:
-                    raise Refused(f"{package}: the store's object {transport} is absent or does not hash to its name")
-                evaluated(package, "verdict", output["content"])
-                if f"{package}/corpus" in steps:
-                    evaluated(package, "corpus", output["content"])
+                output, executables = created(package)
                 row = {"name": asset["name"], "kind": asset["kind"], "package": package,
                        "source": asset["source"], "record": steps[f"{package}/package"]["key"],
-                       "object": transport, "content": output["content"]}
+                       "object": output["transport"], "content": output["content"]}
                 if asset["kind"] == "conan-transport":
                     if visibility[repo] == "public" and visibility[asset["source"]] == "private":
                         raise Refused(f"{package}'s transport carries the sources of the PRIVATE "
                                       f"{asset['source']}, and {repo} is public")
-                    members = [path for path, mode, _digest in entries if mode == "executable"]
+                    members = [path for path, mode, _digest in output["entries"] if mode == "executable"]
                 else:
-                    held = {path: digest for path, _mode, digest in entries}
+                    held = {path: digest for path, _mode, digest in output["entries"]}
                     if asset["entry"] not in held:
                         raise Refused(f"{package} holds no entry {asset['entry']}")
-                    row.update(entry=asset["entry"], entry_digest=held[asset["entry"]])
+                    with tempfile.TemporaryDirectory() as scratch:
+                        member = Path(scratch) / "entry"
+                        extract(store / "objects" / output["transport"], asset["entry"], held[asset["entry"]], member)
+                        hold(store, held[asset["entry"]], member.read_bytes())
+                    row.update(object=held[asset["entry"]], entry=asset["entry"], entry_digest=held[asset["entry"]])
                     members = [asset["entry"]]
                 for output_name in asset.get("verdicts", []):
-                    evaluated(package, output_name,
-                              row.get("entry_digest") or output["content"])
+                    evaluated(package, output_name, row.get("entry_digest") or output["content"])
                 for member in members:
-                    if executables.get(member) != "published":
-                        raise Refused(f"{package}: {asset['name']} carries {member}, classified "
-                                      f"{executables.get(member, 'nowhere')!r}, not 'published' (DN-142.D22 (3))")
-                    carried.add((package, member))
-                published_of[package] = executables
-                entries_of[package] = entries
+                    classified(package, executables, member, asset["name"])
                 rows.append(row)
             except Refused as refused:
                 findings.append(f"{repo}/{asset['name']}: {refused}")
+        for image, declared in sorted((body.get("images") or {}).items()):
+            try:
+                built = stored(f"{image}/{IMAGE_STEP}")
+                document, output = built["inputs"], built["outputs"][IMAGE_STEP]
+                if document["step"].get("repository") != repo:
+                    raise Refused(f"its image step built it for {document['step'].get('repository')!r}")
+                consumed = {(row["package"], row["entry"]): row for row in document.get("executables", [])}
+                wanted = {(row["package"], row["entry"]) for row in declared["executables"]}
+                if set(consumed) != wanted:
+                    raise Refused(f"its image step consumed {sorted(consumed)}, and the plan declares {sorted(wanted)}")
+                for (package, entry), row in sorted(consumed.items()):
+                    package_output, executables = created(package)
+                    held = {path: digest for path, _mode, digest in package_output["entries"]}
+                    if row.get("digest") != held.get(entry) or row.get("record") != steps[f"{package}/package"]["key"]:
+                        raise Refused(f"its image step consumed {package} {entry} at {row.get('digest')}, and this "
+                                      f"run's create stored {held.get(entry)}")
+                    classified(package, executables, entry, image)
+                archive = store / "objects" / output["archive"]
+                if not archive.is_file() or sha256_file(archive) != output["archive"] \
+                        or not IMAGE_MANIFEST.match(output.get("manifest", "")):
+                    raise Refused(f"the store's archive {output['archive']} is absent, does not hash to its "
+                                  f"name, or names no image manifest")
+                rows.append({"name": image, "kind": IMAGE_KIND, "source": repo,
+                             "record": steps[f"{image}/{IMAGE_STEP}"]["key"],
+                             "object": output["archive"], "manifest": output["manifest"]})
+            except Refused as refused:
+                findings.append(f"{repo}/{image}: {refused}")
         whole[repo] = {"visibility": visibility[repo], "assets": sorted(rows, key=lambda row: row["name"])}
     for step_id in sorted(steps):
         package, _slash, output = step_id.partition("/")
@@ -203,8 +303,8 @@ def build(store: Path, record_bytes: bytes, plan: dict) -> tuple[bytes, dict[str
         declared = stored(step_id)["inputs"]["step"].get("executables", {})
         for member, kind in sorted(declared.items()):
             if kind == "published" and (package, member) not in carried:
-                findings.append(f"{package}: {member} is classified 'published' and no asset of this "
-                                f"manifest carries it (DN-142.D22 (3))")
+                findings.append(f"{package}: {member} is classified 'published' and no asset or image of "
+                                f"this manifest carries it (DN-142.D22 (3))")
     if findings:
         raise Refused("; ".join(findings))
     manifest = canonical({"format": MANIFEST_FORMAT, "version": record.get("version"),
@@ -229,6 +329,51 @@ def sign(path: Path, key: Path) -> Path:
     return signature
 
 
+def signer(key: Path, allowed: Path) -> str:
+    """The writer key's public half, once it is the one key `allowed` names for the writer identity
+    and namespace: a seal is signed only by the key every publish job verifies against."""
+    derived = subprocess.run(["ssh-keygen", "-y", "-f", str(key)], capture_output=True, text=True,
+                             check=False, stdin=subprocess.DEVNULL)
+    if derived.returncode != 0:
+        raise Refused(f"ssh-keygen cannot read the signing key {key} (a key with a passphrase is never "
+                      f"used here): {derived.stderr.strip()[-300:]}")
+    public = derived.stdout.split()[:2]
+    lines = [line.split() for line in allowed.read_text().splitlines() if line.strip()]
+    if len(lines) != 1 or lines[0][:4] != [WRITER_IDENTITY, f'namespaces="{NAMESPACE}"', *public]:
+        raise Refused(f"the signing key's public half {' '.join(public)[:60]}... is not the one writer key "
+                      f"{allowed} names for {WRITER_IDENTITY}")
+    return " ".join(public)
+
+
+def seal(store: Path, record_bytes: bytes, plan: dict, key: Path, out: Path) -> dict:
+    """Build the manifest, sign it and every slice, and keep the step-0 record, the manifest, each
+    slice and each signature in the store under one `manifest` record keyed by the record's digest.
+    `out` is created here and receives the signed files the replica pushes; the seal's summary."""
+    if out.exists():
+        raise Refused(f"{out} exists: a seal writes its signatures once, into a directory of its own")
+    manifest, slices = build(store, record_bytes, plan)
+    out.mkdir(parents=True)
+    (out / "slices").mkdir()
+    (out / "manifest.json").write_bytes(manifest)
+    signed = {"manifest": (out / "manifest.json", sign(out / "manifest.json", key))}
+    for repo, body in sorted(slices.items()):
+        path = out / "slices" / f"{repo}.json"
+        path.write_bytes(body)
+        signed[repo] = (path, sign(path, key))
+    record_digest = sha256_bytes(record_bytes)
+    hold(store, record_digest, record_bytes)
+    held = {}
+    for name, (path, signature) in signed.items():
+        for kept in (path, signature):
+            hold(store, sha256_file(kept), kept.read_bytes())
+        held[name] = {"object": sha256_file(path), "signature": sha256_file(signature)}
+    summary = {"record": record_digest, "manifest": held.pop("manifest"), "slices": held}
+    document = {"step": {"kind": "manifest", "subject": "step0"}, "step0_record": record_digest}
+    if artefact_store.LocalStore(store).commit(document, {"manifest": dict(summary)}, {}) != 0:
+        raise Refused(f"the store already holds another seal of step-0 record {record_digest}")
+    return summary
+
+
 def verify(slice_bytes: bytes, signature: Path, allowed: Path, repository: str) -> list[dict]:
     """The slice's assets, only once its signature, its repository and its F9 rule hold."""
     done = subprocess.run(["ssh-keygen", "-Y", "verify", "-f", str(allowed), "-I", WRITER_IDENTITY,
@@ -243,10 +388,16 @@ def verify(slice_bytes: bytes, signature: Path, allowed: Path, repository: str) 
     if body.get("repository") != repository:
         raise Refused(f"the slice is {body.get('repository')!r}'s, not {repository!r}'s")
     for asset in body.get("assets", []):
+        if asset.get("kind") not in (*KINDS, IMAGE_KIND):
+            raise Refused(f"{asset.get('name')}: kind {asset.get('kind')!r} is not one of "
+                          f"{', '.join((*KINDS, IMAGE_KIND))}")
         if not DIGEST_HEX.match(asset.get("object", "")):
             raise Refused(f"{asset.get('name')}: {asset.get('object')!r} is not an object digest")
-        if asset.get("kind") == "entry" and not DIGEST_HEX.match(asset.get("entry_digest", "")):
-            raise Refused(f"{asset.get('name')}: no entry digest")
+        if asset.get("kind") == "entry" and asset.get("entry_digest") != asset["object"]:
+            raise Refused(f"{asset.get('name')}: an entry asset's object is the entry's own bytes, and "
+                          f"{asset['object']} is not its entry digest {asset.get('entry_digest')!r}")
+        if asset.get("kind") == IMAGE_KIND and not IMAGE_MANIFEST.match(asset.get("manifest", "")):
+            raise Refused(f"{asset.get('name')}: an image asset names no image manifest digest")
         if (body.get("visibility") == "public" and asset.get("kind") == "conan-transport"
                 and asset.get("source") != repository):
             raise Refused(f"{asset.get('name')}: a transport from {asset.get('source')} in the public "
@@ -255,10 +406,11 @@ def verify(slice_bytes: bytes, signature: Path, allowed: Path, repository: str) 
 
 
 def extract(archive: Path, entry: str, digest: str, out: Path) -> None:
-    """The one package member `<…>/p/<entry>` of a `conan cache save` archive, verified."""
+    """The one package member `b/<storage folder>/p/<entry>` of a `conan cache save` archive (the
+    layout artefact_store.transport_files reads), verified."""
     with tarfile.open(archive, "r:*") as bundle:
         members = [member for member in bundle.getmembers()
-                   if member.isfile() and re.fullmatch(rf"[^/]+/p/{re.escape(entry)}", member.name)]
+                   if member.isfile() and re.fullmatch(rf"b/[^/]+/p/{re.escape(entry)}", member.name)]
         if len(members) != 1:
             raise Refused(f"{archive.name} holds {len(members)} package member(s) {entry}, not one")
         data = bundle.extractfile(members[0]).read()
@@ -289,7 +441,7 @@ def _fixture(root: Path) -> tuple[Path, bytes, dict, dict[str, Path]]:
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w:gz") as bundle:
             for path, (_mode, data) in files.items():
-                info = tarfile.TarInfo(f"{name[:5]}0123/p/{path}")
+                info = tarfile.TarInfo(f"b/{name[:5]}0123/p/{path}")
                 info.size = len(data)
                 bundle.addfile(info, io.BytesIO(data))
         transport = sha256_bytes(buffer.getvalue())
@@ -308,6 +460,16 @@ def _fixture(root: Path) -> tuple[Path, bytes, dict, dict[str, Path]]:
     package("priv_tools", {"bin/tool": ("executable", b"\x7fELF tool bytes"),
                            "conaninfo.txt": ("file", b"[settings]\n")}, {"bin/tool": "published"})
     package("priv_cache", {"bin/det": ("executable", b"\x7fELF det bytes")}, {"bin/det": "run-from-cache"})
+    package("priv_server", {"bin/server": ("executable", b"\x7fELF server bytes")}, {"bin/server": "published"})
+    server_key = next(step["key"] for step in steps if step["id"] == "priv_server/package")
+    archive = b"an OCI archive's bytes"
+    (store / "objects" / sha256_bytes(archive)).write_bytes(archive)
+    image = put({"step": {"kind": "image", "subject": "srv-image", "repository": "priv-repo", "reproducible": False},
+                 "run": "fixture-run",
+                 "executables": [{"package": "priv_server", "entry": "bin/server",
+                                  "digest": sha256_bytes(b"\x7fELF server bytes"), "record": server_key}]},
+                {"image": {"archive": sha256_bytes(archive), "manifest": "sha256:" + "d" * 64, "reproducible": False}})
+    steps.append({"id": "srv-image/image", "key": image, "verdict": None})
     tool_entry = sha256_bytes(b"\x7fELF tool bytes")
     consumer = put({"step": {"kind": "verdict", "package": "priv_tools", "id": "consumer"}},
                    {"consumer": {"verdict": "pass", "judged": {"bin/tool": tool_entry}}})
@@ -320,7 +482,10 @@ def _fixture(root: Path) -> tuple[Path, bytes, dict, dict[str, Path]]:
              "entry": "bin/tool", "verdicts": ["consumer"]}]},
         "priv-repo": {"visibility": "private", "assets": [
             {"name": "priv_tools-9.9.9.tgz", "kind": "conan-transport", "package": "priv_tools",
-             "source": "priv-repo"}]}}}
+             "source": "priv-repo"}],
+            "images": {"srv-image": {"dockerfile": "docker/Dockerfile", "runtime": ["libstdc++.so.6"],
+                                     "executables": [{"package": "priv_server", "entry": "bin/server",
+                                                      "source": "priv-repo"}]}}}}}
     return store, record, plan, transports
 
 
@@ -367,6 +532,17 @@ def selftest() -> int:
                 failures.append("the public slice carries the private repository's asset")
             if b"priv_cache" in slices["pub-repo"]:
                 failures.append("the public slice names a package it does not publish")
+            tool_row = next((asset for asset in pub["assets"] if asset["name"] == "tool-linux-x64"), {})
+            tool_digest = sha256_bytes(b"\x7fELF tool bytes")
+            if tool_row.get("object") != tool_digest or \
+                    (store / "objects" / tool_digest).read_bytes() != b"\x7fELF tool bytes" or \
+                    transports["priv_tools"].name.encode() in slices["pub-repo"]:
+                failures.append(f"the public entry asset does not name the entry's own bytes, or names the "
+                                f"private transport: {tool_row}")
+            image_row = next((asset for asset in json.loads(slices["priv-repo"])["assets"]
+                              if asset["name"] == "srv-image"), {})
+            if image_row.get("kind") != IMAGE_KIND or image_row.get("manifest") != "sha256:" + "d" * 64:
+                failures.append(f"the image is not an asset of the repository that declares it: {image_row}")
 
         arm("a step-0 record that is not cuttable writes no manifest",
             lambda: build(store, canonical({**json.loads(record), "cuttable": False}), plan), "cuttable=False")
@@ -385,7 +561,19 @@ def selftest() -> int:
         arm("a published executable no asset carries is refused (DN-142.D22 (3), direction 2)",
             lambda: build(store, record, edited(plan, lambda p: (
                 p["repositories"]["priv-repo"].__setitem__("assets", []),
-                p["repositories"]["pub-repo"]["assets"].pop()))), "no asset of this manifest carries it")
+                p["repositories"]["pub-repo"]["assets"].pop()))), "no asset or image of this manifest carries it")
+        arm("a published executable whose image the plan drops is refused (DN-142.D22 (3), direction 2)",
+            lambda: build(store, record, edited(plan, lambda p: p["repositories"]["priv-repo"].pop("images"))),
+            "priv_server: bin/server is classified 'published' and no asset or image")
+        arm("an image step 0 did not build is refused",
+            lambda: build(store, canonical({**json.loads(record), "steps": [
+                step for step in json.loads(record)["steps"] if step["id"] != "srv-image/image"]}), plan),
+            "step 0 ran no step srv-image/image")
+        arm("an image that consumed an executable the plan does not declare is refused",
+            lambda: build(store, record, edited(plan, lambda p: p["repositories"]["priv-repo"]["images"]["srv-image"]
+                                                ["executables"].append({"package": "priv_tools", "entry": "bin/tool",
+                                                                        "source": "priv-repo"}))),
+            "its image step consumed")
         arm("an entry asset whose named verdict does not exist is refused",
             lambda: build(store, record, edited(plan, lambda p: p["repositories"]["pub-repo"]["assets"][1]
                                                 .__setitem__("verdicts", ["consumer", "container"]))),
@@ -401,6 +589,11 @@ def selftest() -> int:
                 lambda body: body["outputs"]["verdict"].__setitem__("verdict", "fail"))
         arm("a package whose test verdict failed is not published",
             lambda: build(store_c, record_c, plan_c), "its verdict verdict is 'fail'")
+        store_e, record_e, plan_e, _ = _fixture(root / "e")
+        rewrite(store_e, "srv-image/image", record_e,
+                lambda body: body["inputs"]["executables"][0].__setitem__("digest", "0" * 64))
+        arm("an image whose step consumed another digest than this run's create stored is refused",
+            lambda: build(store_e, record_e, plan_e), "and this run's create stored")
         store_d, record_d, plan_d, transports_d = _fixture(root / "d")
         transports_d["pub_lib"].write_bytes(b"tampered")
         arm("a transport object that does not hash to its name is refused",
@@ -442,6 +635,37 @@ def selftest() -> int:
             arm("even a writer-signed public slice may not carry another repository's transport",
                 lambda: verify(canonical(smuggled), smuggled_signature, allowed, "pub-repo"),
                 "a transport from priv-repo in the public")
+            wrapped = json.loads(slices["pub-repo"])
+            next(asset for asset in wrapped["assets"] if asset["kind"] == "entry")["object"] = \
+                transports["priv_tools"].name
+            wrapped_path = root / "wrapped.json"
+            wrapped_path.write_bytes(canonical(wrapped))
+            wrapped_signature = sign(wrapped_path, keys / "writer")
+            arm("even a writer-signed slice may not ship an entry inside its package's transport",
+                lambda: verify(canonical(wrapped), wrapped_signature, allowed, "pub-repo"),
+                "is not its entry digest")
+
+        arm("the writer key the allowed-signers file names is the signer",
+            lambda: signer(keys / "writer", allowed), None)
+        arm("any other key is refused as the signer before anything is signed",
+            lambda: signer(keys / "other", allowed), "is not the one writer key")
+        store_s, record_s, plan_s, _ = _fixture(root / "s")
+        sealed = arm("the seal signs the manifest and every slice and keeps them under one manifest record",
+                     lambda: seal(store_s, record_s, plan_s, keys / "writer", root / "seal-1"), None)
+        if sealed:
+            kept = json.loads(next(path.read_text() for path in (store_s / "records").glob("*.json")
+                                   if json.loads(path.read_text())["inputs"]["step"]["kind"] == "manifest"))
+            if kept["outputs"]["manifest"] != sealed or sorted(sealed["slices"]) != ["priv-repo", "pub-repo"] or \
+                    (store_s / "objects" / sealed["record"]).read_bytes() != record_s:
+                failures.append(f"the seal's record does not keep the record, manifest and slices: {kept}")
+            for repo in ("priv-repo", "pub-repo"):
+                arm(f"the sealed {repo} slice verifies under the writer key",
+                    lambda repo=repo: verify((root / "seal-1" / "slices" / f"{repo}.json").read_bytes(),
+                                             root / "seal-1" / "slices" / f"{repo}.json.sig", allowed, repo), None)
+        arm("sealing the same record again keeps the same seal, never a second one",
+            lambda: seal(store_s, record_s, plan_s, keys / "writer", root / "seal-2"), None)
+        arm("a seal over an output directory that exists is refused",
+            lambda: seal(store_s, record_s, plan_s, keys / "writer", root / "seal-1"), "exists")
 
         tool = sha256_bytes(b"\x7fELF tool bytes")
         out = root / "tool-linux-x64"
@@ -475,6 +699,15 @@ def main(argv: list[str]) -> int:
             for repo, body in slices.items():
                 (out / "slices" / f"{repo}.json").write_bytes(body)
             print(f"store_manifest: manifest {sha256_bytes(manifest)}, {len(slices)} slice(s) in {out}")
+            return 0
+        if len(argv) == 6 and argv[0] == "seal":
+            summary = seal(Path(argv[1]), Path(argv[2]).read_bytes(), json.loads(Path(argv[3]).read_text()),
+                           Path(argv[4]), Path(argv[5]))
+            print(f"store_manifest: SEALED record {summary['record']} manifest {summary['manifest']['object']} "
+                  + " ".join(f"{repo}={held['object']}" for repo, held in sorted(summary["slices"].items())))
+            return 0
+        if len(argv) == 3 and argv[0] == "signer":
+            print(f"store_manifest: SIGNER {signer(Path(argv[1]), Path(argv[2]))}")
             return 0
         if len(argv) == 3 and argv[0] == "sign":
             print(sign(Path(argv[1]), Path(argv[2])))

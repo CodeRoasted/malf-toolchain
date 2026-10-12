@@ -272,6 +272,19 @@ jobs:
                      f"both the JSON literal `true` — attests (DN-108.D14). Read the failing stage in the "
                      f"record and re-run step 0 in {record_repo}.")
 
+          # A RECORD NO WRITER SEALED PUBLISHES NOTHING (ROADMAP N360, DN-142.D9): a tag copies its
+          # repository's writer-signed slice of THIS record from the store's read replica, and a
+          # run on an account without the writer's key (a desk run, or a step 0 whose credentials
+          # were not named) wrote none. Refused here, before any tag-time job reads a slice that
+          # does not exist.
+          publication = record.get("publication")
+          seal = publication.get("seal") if isinstance(publication, dict) else None
+          if seal != "writer":
+              refuse(f"the build record for {version} was not sealed by the store writer (publication.seal "
+                     f"is {seal!r}): its manifest was never signed or replicated, so no slice exists for "
+                     f"this tag to publish. Re-run .github/workflows/pharos-build.yml in {record_repo} with "
+                     f"version={version} on the release runner, where the writer's key is named.")
+
           repos = record.get("repos")
           if not isinstance(repos, dict):
               refuse(f"the build record for {version} carries no `repos` object, so it names no SHA for "

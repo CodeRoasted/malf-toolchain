@@ -1493,6 +1493,10 @@ def _unit(output: dict) -> str:
 
 
 def _described(output: dict) -> str:
+    if "slices" in output:
+        return f"manifest {output['manifest']['object']} over {len(output['slices'])} slice(s)"
+    if "archive" in output:
+        return f"image manifest {output['manifest']} archive {output['archive']}"
     if "content" in output:
         return f"content {output['content']} ({output['alias']})"
     if "verdict" in output and "tests" in output:

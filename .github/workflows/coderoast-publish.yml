@@ -1,29 +1,26 @@
 name: CodeRoast publish
 
 # A RELEASE IS A PUBLICATION (DN-142.D9; N360 plan B1): the tag attaches the bytes step 0 built,
-# judged and stored, by digest, and builds nothing. Two jobs, the second `needs:` the first:
-#   attest  — the tagged commit is the commit the step-0 record judged (coderoast-attest.yml,
-#             unchanged); it hands on `record-sha256`, the digest of the record it attested.
-#   publish — store_publish.py reads THIS repository's slice for that record from its private ghcr
-#             store package (`store-<repository>`, read with the job's own GITHUB_TOKEN, granted
-#             Read on that one package, DN-142.D6 R5), verifies the writer's signature against
-#             `keys/store-writer.allowed_signers` at this workflow's own revision, refuses a slice
-#             that names any other step-0 record or another visibility than the repository's
-#             own now (DN-142.D24), fetches every object by its digest, extracts each single-file
-#             asset and checks its digest, then attaches the staged files and the signed slice to
-#             the Release, and reads the Release back: its assets equal the staged files, both
-#             ways. A slice, an object or an entry that does not verify stages nothing, and the
-#             Release is not created.
+# judged and stored, by digest, and builds nothing. The caller's `attest` job (coderoast-attest.yml,
+# the first job of every release workflow, pin_coherence INV-22) proves the tagged commit is the
+# commit the step-0 record judged and hands on `record-sha256`, the digest of the record it attested;
+# this workflow's one job, `publish`, takes that digest as its input:
+#   store_publish.py reads THIS repository's slice for that record from its private ghcr store
+#   package (`store-<repository>`, read with the job's own GITHUB_TOKEN, granted Read on that one
+#   package, DN-142.D6 R5), verifies the writer's signature against
+#   `keys/store-writer.allowed_signers` at this workflow's own revision, refuses a slice that names
+#   any other step-0 record or another visibility than the repository's own now (DN-142.D24),
+#   fetches every object by its digest (a single-file asset's object is that file's own bytes, never
+#   its package's transport, so no private package's sources reach this repository's store
+#   package), then attaches the staged files and the signed slice to the Release, and reads the
+#   Release back: its assets equal the staged files, both ways. A slice or an object that does not
+#   verify stages nothing, and the Release is not created. An image the slice lists is no Release
+#   file: `coderoast-publish-image.yml` pushes it.
 #
 # NOTHING HERE CHECKS OUT THE CALLER'S SOURCE, PROVISIONS A TOOLCHAIN, COMPILES, TESTS OR PACKS:
 # stage-malf copies this revision's own tree (the tools and the writer's public key), and the only
 # other commands are the publication itself. `--verify-tag` keeps the Release command from ever
 # minting a tag; the tag is the Founder's act (ADR-2.D1).
-#
-# NOT YET CALLED: the release workflows move onto it repository by repository (N360 plan B2), and
-# it cannot publish until the writer has replicated a cut (store_replica.py push, push-slice) and
-# its public key is committed here. Until then a run refuses at the slice, which is the intended
-# failure: no slice, no Release.
 
 on:
   workflow_call:
@@ -33,21 +30,13 @@ on:
         type: string
         required: false
         default: 'ubuntu-latest'
-    secrets:
-      BUILD_RECORD_READ_TOKEN:
-        description: 'Passed to attest unchanged: fine-grained PAT, CodeRoasted/coderoast alone, Actions read-only.'
-        required: false
+      record-sha256:
+        description: 'The digest of the step-0 record the caller''s attest job attested (its `record-sha256` output).'
+        type: string
+        required: true
 
 jobs:
-  attest:
-    uses: CodeRoasted/malf-toolchain/.github/workflows/coderoast-attest.yml@3ae9b86b2d70d34d3a38f50fd45e8cf2626a69b3
-    with:
-      runs-on: ${{ inputs.runs-on }}
-    secrets:
-      BUILD_RECORD_READ_TOKEN: ${{ secrets.BUILD_RECORD_READ_TOKEN }}
-
   publish:
-    needs: attest
     runs-on: ${{ inputs.runs-on }}
     permissions:
       contents: write   # create the Release (never the tag: --verify-tag) and upload its assets
@@ -61,7 +50,7 @@ jobs:
       - name: Fetch, verify and stage this repository's slice of the attested record (GATING)
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          RECORD: ${{ needs.attest.outputs.record-sha256 }}
+          RECORD: ${{ inputs.record-sha256 }}
           # The second producer of the repository's visibility (DN-142.D24): step 0 read it from the
           # API into the slice, and the job's own event context says what it is now.
           VISIBILITY: ${{ github.event.repository.visibility }}
@@ -74,7 +63,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
-          RECORD: ${{ needs.attest.outputs.record-sha256 }}
+          RECORD: ${{ inputs.record-sha256 }}
         run: |
           set -euo pipefail
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::tag '$TAG' is not vMAJOR.MINOR.PATCH"; exit 1; }

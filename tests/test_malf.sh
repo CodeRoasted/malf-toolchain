@@ -352,11 +352,19 @@ check "store_replica selftest: 12 arms, every refusal fired and the round trip b
 
 echo
 
-echo "[7j] store_manifest carries its own refusal proof (selftest): a manifest admits only evaluated digests, a slice verifies only under the writer's key, and DN-142.D22 (3) binds both directions"
+echo "[7j] store_manifest carries its own refusal proof (selftest): a manifest admits only evaluated digests, an entry ships as its own bytes and an image as the archive its step stored, a slice verifies only under the writer's key, the seal is kept once, and DN-142.D22 (3) binds both directions"
 manifest_selftest_output="$(timeout 120 python3 "$MALF_ROOT/store_manifest.py" selftest 2>&1)"
 manifest_selftest_status=$?
-check "store_manifest selftest: 18 arms, every refusal fired, the green manifest, slices, signature and extraction intact" \
-      "ok" "$([[ $manifest_selftest_status -eq 0 ]] && grep -q '^store_manifest selftest: 18 arm(s), 0 failure(s)$' <<< "$manifest_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$manifest_selftest_output")")"
+check "store_manifest selftest: 30 arms, every refusal fired, the green manifest, slices, seal, signature and extraction intact" \
+      "ok" "$([[ $manifest_selftest_status -eq 0 ]] && grep -q '^store_manifest selftest: 30 arm(s), 0 failure(s)$' <<< "$manifest_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$manifest_selftest_output")")"
+
+echo
+
+echo "[7j1] store_image carries its own refusal proof (selftest): an image is built from this run's stored entries and a resolved runtime, judged as one linux/amd64 OCI image, and stored once per run (DN-142.D9)"
+image_selftest_output="$(timeout 120 python3 "$MALF_ROOT/store_image.py" selftest 2>&1)"
+image_selftest_status=$?
+check "store_image selftest: 11 arms, every refusal fired, the staged context and the stored record intact" \
+      "ok" "$([[ $image_selftest_status -eq 0 ]] && grep -q '^store_image selftest: 11 arm(s), 0 failure(s)$' <<< "$image_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$image_selftest_output")")"
 
 echo
 

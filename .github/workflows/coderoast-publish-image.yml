@@ -1,0 +1,65 @@
+name: CodeRoast publish image
+
+# AN IMAGE IS PUBLISHED AS IT WAS STORED (DN-142.D9; N360 plan C1): step 0 built it once from
+# stored bytes (store_image.py) and stored its OCI archive; the tag COPIES that archive to
+# ghcr.io/coderoasted/<image> by digest and builds nothing. The caller's `attest` job hands on
+# `record-sha256`, the digest of the record it attested, and the caller names the image its
+# repository's packages.yml declares under `images:` (pin_coherence holds the two equal):
+#   store_publish.py image reads the repository's slice of that record from its store package,
+#   verifies the writer's signature at this workflow's own revision, the record and the
+#   repository's visibility now, fetches the image's archive by its object digest, judges it
+#   (one linux/amd64 image whose manifest digest is the slice's), pushes every blob and the
+#   manifest verbatim, so the registry's digest is the one step 0 stored, and tags it with the
+#   release tag. A tag already naming another digest is refused, never moved.
+#
+# ITS OWN WORKFLOW, NOT A JOB OF coderoast-publish.yml, BECAUSE OF ONE PERMISSION: pushing the image
+# needs `packages: write`, and a called workflow's permissions must be granted by every caller. In
+# the publish workflow that grant would reach every releasing repository, public ones included, for
+# a write only the image's repository makes. The token cannot write a store package (DN-142.D6 R4:
+# a `packages: write` token's manifest PUT on a store package was refused, measured 2026-10-11),
+# and the image's package is linked to its repository by the Dockerfile's source label.
+#
+# NOTHING HERE CHECKS OUT THE CALLER'S SOURCE, PROVISIONS A TOOLCHAIN, BUILDS OR PACKS: no docker,
+# no buildx; the push is store_publish.py's own registry client.
+
+on:
+  workflow_call:
+    inputs:
+      record-sha256:
+        description: 'The digest of the step-0 record the caller''s attest job attested (its `record-sha256` output).'
+        type: string
+        required: true
+      image:
+        description: 'The image to publish: a name the repository declares under `images:` in its packages.yml.'
+        type: string
+        required: true
+      runs-on:
+        description: 'Runner label. Callers omit it (hosted ubuntu-latest): the job reads a registry and the GitHub API.'
+        type: string
+        required: false
+        default: 'ubuntu-latest'
+
+jobs:
+  publish-image:
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: read
+      packages: write   # the image's own package; the store package is read with the same token, which no store package grants more
+    steps:
+      - name: Stage malf-toolchain at this workflow's revision (the tools and the writer's public key)
+        uses: CodeRoasted/malf-toolchain/.github/actions/stage-malf@3ae9b86b2d70d34d3a38f50fd45e8cf2626a69b3
+        with:
+          path: .malf
+
+      - name: Fetch, verify and push the stored image, tagged with the release tag (GATING)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RECORD: ${{ inputs.record-sha256 }}
+          IMAGE: ${{ inputs.image }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          VISIBILITY: ${{ github.event.repository.visibility }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::tag '$TAG' is not vMAJOR.MINOR.PATCH"; exit 1; }
+          python3 .malf/store_publish.py image "${GITHUB_REPOSITORY#*/}" "$VISIBILITY" "$RECORD" \
+            .malf/keys/store-writer.allowed_signers "$IMAGE" "$TAG"

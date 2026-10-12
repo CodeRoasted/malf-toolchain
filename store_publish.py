@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A release job's whole act on the store: fetch this repository's signed slice and every object it names, verify, stage.
+"""A release job's whole act on the store: fetch this repository's signed slice and every object it names, verify, stage or push.
 
 DN-142.D9: a tag publishes; it builds nothing. `coderoast-publish.yml` runs this after `attest`
 proved the tagged commit is the one the step-0 record judged, and hands it that record's digest:
@@ -10,11 +10,18 @@ proved the tagged commit is the one the step-0 record judged, and hands it that 
    as is one whose visibility (read from GitHub at step 0) differs from this repository's own now
    (DN-142.D24: two producers of the one fact that decides whether sources may cross);
 3. each object it lists is fetched by its content digest and verified;
-4. a `conan-transport` asset is staged as is, an `entry` asset is extracted from its transport
-   and verified against the slice's entry digest, its `.sha256` file written FROM that digest;
+4. a `conan-transport` asset is staged as is, an `entry` asset (the entry's own bytes, its object
+   named by its entry digest, store_manifest.verify) with its `.sha256` file written FROM that
+   digest; an `oci-image` asset is never a Release file: `image` publishes it;
 5. the slice and its signature are staged beside them, so the Release carries its own evidence;
 6. after the upload, the Release's asset names must equal the staged files, both ways (check-release).
-Nothing reaches the output directory unverified, and nothing here compiles, tests or packs.
+`image` (`coderoast-publish-image.yml`, N360 plan C1) reads the same verified slice, fetches the
+image's OCI archive by its object digest, judges it (store_image.judge_archive: one linux/amd64
+image whose manifest digest is the slice's), pushes every blob and the manifest verbatim to
+ghcr.io/coderoasted/<image>, so the registry's digest is the one step 0 stored, and tags it with
+the release tag, never moving a tag that already names another digest.
+Nothing reaches the output directory or the registry unverified, and nothing here compiles, tests
+or packs.
 
     store_publish.py stage <repository> <visibility> <step-0 record digest> <allowed signers> <out dir>
         Token: GITHUB_TOKEN (the repository's own, `packages: read`); <visibility> is the job's own
@@ -22,10 +29,13 @@ Nothing reaches the output directory unverified, and nothing here compiles, test
     store_publish.py check-release <out dir> <release.json>
         the reading after the publish (DN-142.D24 (3)): the Release's asset names, from
         `gh release view --json assets`, equal the staged files, both ways
+    store_publish.py image <repository> <visibility> <step-0 record digest> <allowed signers> <image> <tag>
+        Token: GITHUB_TOKEN (`packages: write` on the image's package, which the repository's own
+        store package grants it Read beside); prints the pushed `ghcr.io/coderoasted/<image>@sha256:…`
     store_publish.py selftest
         the whole act against an in-process registry seeded by the writer's own functions
 
-Exit 0 staged, 1 refused, 2 a usage error.
+Exit 0 staged or pushed, 1 refused, 2 a usage error.
 """
 
 from __future__ import annotations
@@ -33,64 +43,85 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
+import tarfile
 import tempfile
 from pathlib import Path
 from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import store_image  # noqa: E402 — a sibling module, located from this file
 import store_manifest  # noqa: E402 — a sibling module, located from this file
 import store_replica  # noqa: E402 — a sibling module, located from this file
+
+TAG = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
 
 
 class Refused(Exception):
     """A check failed; the message names what differed."""
 
 
-def stage(registry: store_replica.Registry, repository: str, visibility: str, record_hex: str,
-          allowed: Path, out: Path, say: Callable[[str], None]) -> list[str]:
-    """Stage every asset of this repository's slice into `out`; the staged file names."""
+def verified_slice(registry: store_replica.Registry, repository: str, visibility: str, record_hex: str,
+                   allowed: Path) -> tuple[dict, list[dict], bytes, bytes]:
+    """(the slice, its assets, its bytes, its signature), once the signature verifies for this
+    repository under the writer's key and the slice names the attested record and this
+    repository's visibility now."""
     if not store_replica.DIGEST_HEX.match(record_hex):
         raise Refused(f"{record_hex!r} is not a step-0 record digest (64 hex)")
     try:
         slice_bytes, signature = registry.get_slice(record_hex)
     except store_replica.Refused as refused:
         raise Refused(str(refused)) from refused
+    with tempfile.TemporaryDirectory() as scratch:
+        (Path(scratch) / "slice.sig").write_bytes(signature)
+        try:
+            assets = store_manifest.verify(slice_bytes, Path(scratch) / "slice.sig", allowed, repository)
+        except store_manifest.Refused as refused:
+            raise Refused(str(refused)) from refused
+    body = json.loads(slice_bytes)
+    if body.get("step0_record") != record_hex:
+        raise Refused(f"the slice names step-0 record {body.get('step0_record')}, and attest attested "
+                      f"{record_hex}")
+    if body.get("visibility") != visibility:
+        raise Refused(f"the slice was built for a {body.get('visibility')} {repository}, and the "
+                      f"repository is {visibility} now")
+    return body, assets, slice_bytes, signature
+
+
+def fetched(registry: store_replica.Registry, asset: dict, work: Path) -> Path:
+    """The asset's object, fetched by its digest and verified, under `work`."""
+    path = work / asset["object"]
+    if not path.exists():
+        try:
+            registry.get_layer(asset["object"], path)
+        except store_replica.Refused as refused:
+            raise Refused(f"{asset['name']}: {refused}") from refused
+    return path
+
+
+def stage(registry: store_replica.Registry, repository: str, visibility: str, record_hex: str,
+          allowed: Path, out: Path, say: Callable[[str], None]) -> list[str]:
+    """Stage every Release asset of this repository's slice into `out`; the staged file names."""
+    body, assets, slice_bytes, signature = verified_slice(registry, repository, visibility, record_hex, allowed)
     out.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as scratch:
         work = Path(scratch)
-        (work / "slice.sig").write_bytes(signature)
-        try:
-            assets = store_manifest.verify(slice_bytes, work / "slice.sig", allowed, repository)
-        except store_manifest.Refused as refused:
-            raise Refused(str(refused)) from refused
-        body = json.loads(slice_bytes)
-        if body.get("step0_record") != record_hex:
-            raise Refused(f"the slice names step-0 record {body.get('step0_record')}, and attest attested "
-                          f"{record_hex}")
-        if body.get("visibility") != visibility:
-            raise Refused(f"the slice was built for a {body.get('visibility')} {repository}, and the "
-                          f"repository is {visibility} now")
         staged: list[str] = []
         for asset in assets:
             name = asset["name"]
+            if asset["kind"] == store_manifest.IMAGE_KIND:
+                say(f"store_publish: IMAGE {name} is published by `store_publish.py image`, never as a Release file")
+                continue
             if (out / name).exists() or name in staged:
                 raise Refused(f"{name} is staged twice")
-            fetched = work / asset["object"]
-            if not fetched.exists():
-                try:
-                    registry.get_layer(asset["object"], fetched)
-                except store_replica.Refused as refused:
-                    raise Refused(f"{name}: {refused}") from refused
+            object_path = fetched(registry, asset, work)
             if asset["kind"] == "conan-transport":
-                (out / name).write_bytes(fetched.read_bytes())
+                (out / name).write_bytes(object_path.read_bytes())
                 staged.append(name)
             else:
-                try:
-                    store_manifest.extract(fetched, asset["entry"], asset["entry_digest"], out / name)
-                except store_manifest.Refused as refused:
-                    raise Refused(f"{name}: {refused}") from refused
+                (out / name).write_bytes(object_path.read_bytes())
                 (out / name).chmod(0o755)
                 (out / f"{name}.sha256").write_text(f"{asset['entry_digest']}  {name}\n")
                 staged += [name, f"{name}.sha256"]
@@ -100,6 +131,50 @@ def stage(registry: store_replica.Registry, repository: str, visibility: str, re
         (out / f"{evidence}.sig").write_bytes(signature)
         staged += [evidence, f"{evidence}.sig"]
     return staged
+
+
+def publish_image(registry: store_replica.Registry, target: store_replica.Registry, repository: str,
+                  visibility: str, record_hex: str, allowed: Path, image: str, tag: str,
+                  say: Callable[[str], None]) -> str:
+    """Push the slice's image `image` verbatim to `target` and tag it `tag`; its manifest digest."""
+    if not TAG.match(tag):
+        raise Refused(f"{tag!r} is not a release tag vMAJOR.MINOR.PATCH")
+    _body, assets, _slice, _signature = verified_slice(registry, repository, visibility, record_hex, allowed)
+    found = [asset for asset in assets if asset["kind"] == store_manifest.IMAGE_KIND and asset["name"] == image]
+    if len(found) != 1:
+        raise Refused(f"the slice of {repository} holds {len(found)} image(s) named {image}, not one")
+    asset = found[0]
+    with tempfile.TemporaryDirectory() as scratch:
+        archive = fetched(registry, asset, Path(scratch))
+        try:
+            manifest, _entries = store_image.judge_archive(archive)
+        except store_image.Refused as refused:
+            raise Refused(f"{image}: {refused}") from refused
+        if manifest != asset["manifest"]:
+            raise Refused(f"{image}: the archive's manifest is {manifest}, and the slice names {asset['manifest']}")
+        held = target.manifest_digest(tag)
+        if held is not None and held != manifest:
+            raise Refused(f"{target.name}:{tag} already names {held}: a release tag is never moved")
+        with tarfile.open(archive, "r:*") as bundle:
+            blobs = {member.name.rsplit("/", 1)[-1]: bundle.extractfile(member).read()
+                     for member in bundle.getmembers() if member.isfile() and member.name.startswith("blobs/sha256/")}
+        body = blobs[manifest.removeprefix("sha256:")]
+        named = json.loads(body)
+        for digest in [named["config"]["digest"], *(layer["digest"] for layer in named["layers"])]:
+            hex_digest = digest.removeprefix("sha256:")
+            try:
+                target.push_blob(hex_digest, blobs[hex_digest])
+            except store_replica.Refused as refused:
+                raise Refused(f"{image}: {refused}") from refused
+        if held is None:
+            try:
+                target.put_manifest(tag, body)
+            except store_replica.Refused as refused:
+                raise Refused(f"{image}: {refused}") from refused
+        if target.manifest_digest(tag) != manifest:
+            raise Refused(f"{target.name}:{tag} did not read back as {manifest}")
+    say(f"store_publish: IMAGE {target.name}@{manifest} tagged {tag}")
+    return manifest
 
 
 def check_release(out: Path, release: dict) -> None:
@@ -133,6 +208,20 @@ def selftest() -> int:
     with tempfile.TemporaryDirectory() as scratch:
         root = Path(scratch)
         store, record, plan, _transports = store_manifest._fixture(root / "fixture")
+        context = root / "image-context"
+        (context / store_image.STAGING / "bin").mkdir(parents=True)
+        (context / "Dockerfile").write_text("FROM scratch\n")
+        (context / store_image.STAGING / "bin" / "server").write_bytes(b"\x7fELF server bytes")
+        archive = root / "image.oci.tar"
+        store_image._layout()(context, "Dockerfile", archive)
+        image_manifest, _entries = store_image.judge_archive(archive)
+        archive_digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        (store / "objects" / archive_digest).write_bytes(archive.read_bytes())
+        image_key = next(step["key"] for step in json.loads(record)["steps"] if step["id"] == "srv-image/image")
+        image_record = store / "records" / f"{image_key}.json"
+        rewritten = json.loads(image_record.read_text())
+        rewritten["outputs"]["image"].update(archive=archive_digest, manifest=image_manifest)
+        image_record.write_text(json.dumps(rewritten))
         manifest, slices = store_manifest.build(store, record, plan)
         record_hex = hashlib.sha256(record).hexdigest()
         keys = root / "keys"
@@ -209,6 +298,46 @@ def selftest() -> int:
                 lambda: stage(registry, "priv-repo", "private", record_hex, allowed, root / "o3", quiet),
                 "not 'priv-repo''s")
 
+            private = slices["priv-repo"]
+            _fake, registry = registry_with(private, signed(private, "writer"))
+            staged_private = arm("an image asset is never staged as a Release file: `image` publishes it",
+                                 lambda: stage(registry, "priv-repo", "private", record_hex, allowed, root / "o9",
+                                               quiet), None)
+            if staged_private is not None and "srv-image" in staged_private:
+                failures.append(f"the image was staged as a Release file: {staged_private}")
+            target_fake = store_replica.Fake()
+            target_server, target_base = store_replica._fake_server(target_fake)
+            servers.append(target_server)
+            target = store_replica.Registry(target_base, "coderoasted/srv-image", ("user", "token"))
+            pushed = arm("the slice's image is pushed verbatim and tagged: the registry's digest is the one "
+                         "step 0 stored",
+                         lambda: publish_image(registry, target, "priv-repo", "private", record_hex, allowed,
+                                               "srv-image", "v9.9.9", quiet), None)
+            if pushed != image_manifest or target_fake.tags.get("v9.9.9") != image_manifest:
+                failures.append(f"the pushed image is {pushed}, tagged {target_fake.tags.get('v9.9.9')}, "
+                                f"want {image_manifest}")
+            arm("publishing the same image under the same tag again is idempotent",
+                lambda: publish_image(registry, target, "priv-repo", "private", record_hex, allowed,
+                                      "srv-image", "v9.9.9", quiet), None)
+            other = b'{"schemaVersion":2,"note":"another image"}'
+            target_fake.manifests["sha256:" + hashlib.sha256(other).hexdigest()] = other
+            target_fake.tags["v9.9.8"] = "sha256:" + hashlib.sha256(other).hexdigest()
+            arm("a release tag already naming another image is never moved",
+                lambda: publish_image(registry, target, "priv-repo", "private", record_hex, allowed,
+                                      "srv-image", "v9.9.8", quiet), "a release tag is never moved")
+            arm("an image the slice does not hold is refused",
+                lambda: publish_image(registry, target, "priv-repo", "private", record_hex, allowed,
+                                      "other-image", "v9.9.9", quiet), "holds 0 image(s) named other-image")
+            arm("a tag that is not a release tag is refused",
+                lambda: publish_image(registry, target, "priv-repo", "private", record_hex, allowed,
+                                      "srv-image", "latest", quiet), "is not a release tag")
+            arm("an image of a slice signed by another key is refused before any push",
+                lambda: publish_image(registry_with(private, signed(private, "other"))[1], target, "priv-repo",
+                                      "private", record_hex, allowed, "srv-image", "v9.9.7", quiet),
+                "does not verify")
+            if "v9.9.7" in target_fake.tags:
+                failures.append("a refused image publication tagged the registry anyway")
+
             _fake, registry = registry_with(pub, signed(pub, "other"))
             arm("a slice signed by any key but the writer's stages nothing",
                 lambda: stage(registry, "pub-repo", "public", record_hex, allowed, root / "o4", quiet), "does not verify")
@@ -247,6 +376,18 @@ def main(argv: list[str]) -> int:
         if len(argv) == 3 and argv[0] == "check-release":
             check_release(Path(argv[1]), json.loads(Path(argv[2]).read_text()))
             print(f"store_publish: the Release equals the slice ({argv[1]})")
+            return 0
+        if len(argv) == 7 and argv[0] == "image":
+            token = os.environ.get("GITHUB_TOKEN", "")
+            if not token:
+                raise Refused("GITHUB_TOKEN is unset: a publish job pushes with its repository's own token")
+            actor = os.environ.get("GITHUB_ACTOR", "x-access-token")
+            registry = store_replica.Registry(store_replica.REGISTRY,
+                                              f"{store_replica.ORG}/{store_replica.package_of(argv[1])}",
+                                              (actor, token))
+            target = store_replica.Registry(store_replica.REGISTRY, f"{store_replica.ORG}/{argv[5]}", (actor, token))
+            manifest = publish_image(registry, target, argv[1], argv[2], argv[3], Path(argv[4]), argv[5], argv[6], print)
+            print(f"store_publish: PUBLISHED ghcr.io/{store_replica.ORG}/{argv[5]}@{manifest}")
             return 0
         if len(argv) == 6 and argv[0] == "stage":
             token = os.environ.get("GITHUB_TOKEN", "")
