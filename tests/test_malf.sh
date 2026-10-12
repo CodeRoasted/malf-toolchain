@@ -5227,6 +5227,15 @@ print("|".join(" ".join(sorted(str(p.relative_to(folder)) for p in Path(folder).
 rm -rf "$ov_tmp"
 echo
 
+echo "[7q7q] the writer's profile layer holds a [buildenv] alone, never a package-id input, so a consumer of the writer's binaries computes the writer's package ids (DN-142.D17 (8))"
+# Measured 2026-10-12: with `openssl/*:no_zlib=True` in the layer's [options], step 0's server smoke
+# resolved coderoast_auth at dddb2086 against the stored 3396d296 and rebuilt it.
+check "config/writer.profile declares no section but [buildenv]: the writer layer must never move a package id, so store-create's keys and a consumer's resolve agree by construction" \
+      "[buildenv]" "$(grep -E '^\[[a-z_]+\]' "$MALF_ROOT/config/writer.profile" | sort -u | paste -sd' ')"
+check "the option the writer used to carry lives in the shared profile every consumer resolves with" \
+      "1" "$(grep -c '^openssl/\*:no_zlib=True$' "$MALF_ROOT/profiles/linux-gcc16-release")"
+echo
+
 echo "[7q7i] every ship-leg act resolves against malf/conan.lock, strictly: never the home's own revision, never a requirement the lock does not name (W486 G2)"
 # note: measured 2026-10-10, the first DN-142.D16 store-create resolved with no lockfile and took the
 # home's own boost recipe revision, cmake, hiredis and libpq where malf/conan.lock names others. The

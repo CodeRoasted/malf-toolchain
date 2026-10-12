@@ -31,6 +31,16 @@ compiler.cppstd=gnu23
 compiler.libcxx=libstdc++11
 os=Linux
 
+[options]
+# openssl's version string carries its compile line, and with zlib that line names zlib's package
+# folder (`-I<home>/p/b/zlib<drawn>/p/include`), linked into every consumer of libcrypto. TLS
+# compression is off in every client here (and broken by CRIME), so openssl is built without zlib:
+# the recipe's own option, nothing forked (DN-142.D17 (8), measured 2026-10-11). It lives HERE and
+# never in malf's writer layer: an option is a package-id input, so the writer and every consumer of
+# its binaries must compute the same ids, or a consumer misses each binary and rebuilds it (measured
+# 2026-10-12: step 0's server smoke rebuilt coderoast_auth, `dddb2086` against the stored `3396d296`).
+openssl/*:no_zlib=True
+
 [buildenv]
 CC=/opt/gcc-16.2/bin/gcc
 CXX=/opt/gcc-16.2/bin/g++

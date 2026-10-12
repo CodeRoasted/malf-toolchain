@@ -5,13 +5,9 @@
 # (MALF_REAL_CC, MALF_REAL_CXX, read from the profile's own CC and CXX). Not a package-id input: a
 # [buildenv] never is. Its content and the wrapper's enter every key through `definition` (malf's
 # tree), and the rendered layer through `profile`.
-[options]
-# openssl's version string carries its compile line, and with zlib that line names zlib's package
-# folder (`-I<home>/p/b/zlib<drawn>/p/include`), linked into every consumer of libcrypto. TLS
-# compression is off in every client here (and broken by CRIME), so the writer's openssl is built
-# without zlib: the recipe's own option, nothing forked (DN-142.D17 (8), measured 2026-10-11).
-openssl/*:no_zlib=True
-
+# It holds a [buildenv] ALONE, never an option, a setting or a package-id conf: the writer layer
+# must never move a package id, so store-create's keys and a consumer's resolve agree by
+# construction (an option here made step 0's server smoke rebuild coderoast_auth, 2026-10-12).
 [buildenv]
 CC=malf-cc
 CXX=malf-c++
