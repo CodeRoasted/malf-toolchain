@@ -15,12 +15,21 @@ passed, so a probe that could not run is a fail, never a pass:
   glibc-floor         the highest GLIBC_ version need is at most the consumer baseline's ceiling
                       (the row names the measured floor);
   consumer-container  in the pinned consumer container, with no network and a read-only root,
-                      `--help` runs and a two-log diff names the one added error line as a change
-                      and the shared one as none (CONTENT, not a non-empty report);
+                      the executable hashes to the judged entry's digest, `--help` runs and a
+                      two-log diff names the one added error line as a change and the shared one
+                      as none (CONTENT, not a non-empty report);
   container-glibc     the container's own glibc is the ceiling: the two constants name one consumer
                       baseline, so moving one without the other reds instead of drifting.
 Every ELF reading is Python over the bytes (PT_DYNAMIC, the dynamic string table, the version
 needs), never `readelf | grep`, so no pipe can turn a hit into a miss.
+
+THE BYTES REACH THE CONTAINER AS A TAR ON ITS STDIN, NEVER A BIND MOUNT. A bind mount's source is
+resolved in dockerd's mount namespace, not the caller's: on the release runner the runner and its
+rootless dockerd each hold a PRIVATE /tmp (malf runner/isolate-runner-wsl.sh, sandbox_lines), so a
+mount of the scratch directory showed the container an empty directory dockerd made in its own
+/tmp, and the row read `exit 127: sh: 1: ./sift: not found` (step 0 run 38296956741). The stream
+goes through the daemon's API, so the container reads what the caller holds in any namespace, and
+the in-container digest check reds a container that ran anything else.
 
 THE CONSUMER BASELINE IS THE PRODUCT'S DECLARATION, read at the commit step 0 recorded from
 `<package path>/consumer/` of the package's repository: `baseline.json` (`container`, an image
@@ -39,11 +48,14 @@ Exit 0 pass, 1 fail or refused, 2 a usage error.
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import re
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,8 +77,10 @@ DT_VERNEED, DT_VERNEEDNUM = 0x6FFFFFFE, 0x6FFFFFFF
 GLIBC_NEED = re.compile(r"^GLIBC_(\d+(?:\.\d+)*)$")
 CONTAINER_REF = re.compile(r"^[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$")
 DOCKER_UNREACHABLE = 125
+WORK_MOUNT = "/w"
+WORK_HEADROOM = 1 << 20
 
-Runner = Callable[[list[str]], "tuple[int, str, str]"]
+Runner = Callable[[list[str], bytes], "tuple[int, str, str]"]
 
 
 class Refused(Exception):
@@ -177,20 +191,33 @@ def byte_rows(data: bytes, ceiling: str) -> list[list[str]]:
     return rows
 
 
-def docker_runner(argv: list[str]) -> tuple[int, str, str]:
+def docker_runner(argv: list[str], stdin: bytes) -> tuple[int, str, str]:
     try:
-        done = subprocess.run(argv, capture_output=True, text=True, check=False, stdin=subprocess.DEVNULL)
+        done = subprocess.run(argv, capture_output=True, input=stdin, check=False)
     except FileNotFoundError as missing:
         return DOCKER_UNREACHABLE, "", str(missing)
-    return done.returncode, done.stdout, done.stderr
+    return (done.returncode, done.stdout.decode(errors="replace"), done.stderr.decode(errors="replace"))
 
 
-def container_rows(work: Path, executable: str, baseline: dict, runner: Runner) -> list[list[str]]:
+def work_stream(work: Path) -> bytes:
+    """Every file of `work` as an uncompressed tar, modes kept, owned by root."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as bundle:
+        for path in sorted(work.iterdir()):
+            info = bundle.gettarinfo(str(path), arcname=path.name)
+            info.uid = info.gid = 0
+            info.uname = info.gname = "root"
+            with path.open("rb") as handle:
+                bundle.addfile(info, handle)
+    return buffer.getvalue()
+
+
+def container_rows(work: Path, executable: str, digest: str, baseline: dict, runner: Runner) -> list[list[str]]:
     """Rows E and the consistency arm, each `[row, outcome, detail]`; a docker that cannot run the
     image is NOT JUDGED, never passed."""
     image, smoke = baseline["container"], baseline["smoke"]
     rows = []
-    code, out, err = runner(["docker", "run", "--rm", "--network", "none", image, "ldd", "--version"])
+    code, out, err = runner(["docker", "run", "--rm", "--network", "none", image, "ldd", "--version"], b"")
     if code == DOCKER_UNREACHABLE:
         rows.append(["container-glibc", NOT_JUDGED, f"docker could not run {image}: {err.strip()[-200:]}"])
     else:
@@ -198,10 +225,13 @@ def container_rows(work: Path, executable: str, baseline: dict, runner: Runner) 
         found = first[-1] if first else ""
         rows.append(["container-glibc", PASSED if code == 0 and found == baseline["glibc_ceiling"] else FAILED,
                      f"the container's glibc is {found or 'unread'}, the ceiling {baseline['glibc_ceiling']}"])
-    script = (f"./{executable} --help >/dev/null && ./{executable} {smoke['baseline']} {smoke['changed']} "
+    stream = work_stream(work)
+    script = (f"tar -x -f - && echo '{digest}  {executable}' | sha256sum -c --quiet - && "
+              f"./{executable} --help >/dev/null && ./{executable} {smoke['baseline']} {smoke['changed']} "
               f"--format json -o /tmp/report.json --transport none >/dev/null && cat /tmp/report.json")
-    code, out, err = runner(["docker", "run", "--rm", "--network", "none", "--read-only", "--tmpfs", "/tmp",
-                             "-v", f"{work}:/w:ro", "-w", "/w", image, "sh", "-c", script])
+    code, out, err = runner(["docker", "run", "-i", "--rm", "--network", "none", "--read-only", "--tmpfs", "/tmp",
+                             "--tmpfs", f"{WORK_MOUNT}:rw,exec,size={2 * len(stream) + WORK_HEADROOM}",
+                             "-w", WORK_MOUNT, image, "sh", "-c", script], stream)
     if code == DOCKER_UNREACHABLE:
         rows.append(["consumer-container", NOT_JUDGED, f"docker could not run {image}: {err.strip()[-200:]}"])
         return rows
@@ -271,7 +301,7 @@ def judge(store: Path, steps: list[dict], package: str, entry: str, repository: 
     (work / executable).chmod(0o755)
     baseline, tree = baseline_at(repository, commit, package_path, work)
     rows = byte_rows((work / executable).read_bytes(), baseline["glibc_ceiling"]) + \
-        container_rows(work, executable, baseline, runner)
+        container_rows(work, executable, held[entry], baseline, runner)
     rows.sort(key=lambda row: ROWS.index(row[0]))
     verdict = "pass" if all(row[1] == PASSED for row in rows) else "fail"
     definition = artefact_store.definition_member(Path(__file__).resolve().parent)
@@ -348,32 +378,64 @@ def selftest() -> int:
                               "added": "ERROR disk full node-7", "unchanged": "ERROR conn refused db-1"}}
         report = json.dumps({"ranked_changes": [{"summary": 'New error pattern: "ERROR disk full node-7"'}]})
 
+        work = root / "work"
+        work.mkdir()
+        for name, data in (("sift", green), ("base.log", b"ERROR conn refused db-1\n"),
+                           ("changed.log", b"ERROR conn refused db-1\nERROR disk full node-7\n")):
+            (work / name).write_bytes(data)
+        (work / "sift").chmod(0o755)
+        digest = hashlib.sha256(green).hexdigest()
+
         def fake(ldd: tuple[int, str] = (0, "ldd (Ubuntu GLIBC 2.39-0ubuntu8.6) 2.39\n"),
                  smoke: tuple[int, str] = (0, report)) -> Runner:
-            def run(argv: list[str]) -> tuple[int, str, str]:
-                return (ldd[0], ldd[1], "") if "ldd" in argv else (smoke[0], smoke[1], "boom" if smoke[0] else "")
+            """A daemon in a mount namespace of its own (the release runner's private /tmp): a bind
+            mount shows the container an empty directory, so /w holds only what the stdin stream
+            carries, and the script's digest check runs over those bytes."""
+            def run(argv: list[str], stdin: bytes) -> tuple[int, str, str]:
+                if "ldd" in argv:
+                    return ldd[0], ldd[1], ""
+                held: dict[str, bytes] = {}
+                if stdin and "-i" in argv:
+                    with tarfile.open(fileobj=io.BytesIO(stdin)) as bundle:
+                        held = {member.name: bundle.extractfile(member).read()
+                                for member in bundle.getmembers() if member.isfile() and member.mode & 0o100}
+                if "sift" not in held:
+                    return 127, "", "sh: 1: ./sift: not found"
+                want = re.search(r"echo '([0-9a-f]{64})  sift'", argv[-1])
+                if not want or hashlib.sha256(held["sift"]).hexdigest() != want.group(1):
+                    return 1, "", "sha256sum: WARNING: 1 computed checksum did NOT match"
+                return smoke[0], smoke[1], "boom" if smoke[0] else ""
             return run
 
         arm("the pinned container runs the two-log diff naming the added line once and the shared one never, "
             "and its glibc is the ceiling",
-            outcomes(container_rows(root, "sift", baseline, fake())),
+            outcomes(container_rows(work, "sift", digest, baseline, fake())),
             {"container-glibc": PASSED, "consumer-container": PASSED})
+        arm("CONTROL: over that daemon a bind mount of the work directory finds no executable, the release "
+            "runner's red (step 0 run 38296956741: `exit 127: sh: 1: ./sift: not found`)",
+            fake()(["docker", "run", "--rm", "-v", f"{work}:{WORK_MOUNT}:ro", "-w", WORK_MOUNT,
+                    baseline["container"], "sh", "-c", f"echo '{digest}  sift' | sha256sum -c - && ./sift --help"],
+                   b"")[0], 127)
+        arm("RED: a container holding other bytes than the judged entry reds row E",
+            outcomes(container_rows(work, "sift", "0" * 64, baseline, fake()))["consumer-container"], FAILED)
         arm("RED: an executable exiting 1 in the container reds row E",
-            outcomes(container_rows(root, "sift", baseline, fake(smoke=(1, ""))))["consumer-container"], FAILED)
+            outcomes(container_rows(work, "sift", digest, baseline, fake(smoke=(1, ""))))["consumer-container"],
+            FAILED)
         arm("NOT JUDGED: a docker that cannot run the image is never a pass",
-            set(outcomes(container_rows(root, "sift", baseline,
+            set(outcomes(container_rows(work, "sift", digest, baseline,
                                         fake(ldd=(DOCKER_UNREACHABLE, ""), smoke=(DOCKER_UNREACHABLE, "")))).values()),
             {NOT_JUDGED})
         arm("RED: a report that does not name the added line reds row E (the content, not a non-empty file)",
-            outcomes(container_rows(root, "sift", baseline,
+            outcomes(container_rows(work, "sift", digest, baseline,
                                     fake(smoke=(0, json.dumps({"ranked_changes": [{"summary": "x"}]})))))
             ["consumer-container"], FAILED)
         arm("RED: a report that names the shared line as a change reds row E",
-            outcomes(container_rows(root, "sift", baseline, fake(smoke=(0, json.dumps({"ranked_changes": [
+            outcomes(container_rows(work, "sift", digest, baseline, fake(smoke=(0, json.dumps({"ranked_changes": [
                 {"summary": "ERROR disk full node-7"}, {"summary": "ERROR conn refused db-1"}]})))))
             ["consumer-container"], FAILED)
         arm("RED: a ceiling the container's glibc is not reds the consistency row",
-            outcomes(container_rows(root, "sift", {**baseline, "glibc_ceiling": "2.40"}, fake()))["container-glibc"],
+            outcomes(container_rows(work, "sift", digest, {**baseline, "glibc_ceiling": "2.40"},
+                                    fake()))["container-glibc"],
             FAILED)
 
     for failure in failures:
