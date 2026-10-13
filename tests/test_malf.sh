@@ -355,8 +355,8 @@ echo
 echo "[7j] store_manifest carries its own refusal proof (selftest): a manifest admits only evaluated digests, an entry ships as its own bytes and an image as the archive its step stored, a slice verifies only under the writer's key, the seal is kept once, and DN-142.D22 (3) binds both directions"
 manifest_selftest_output="$(timeout 120 python3 "$MALF_ROOT/store_manifest.py" selftest 2>&1)"
 manifest_selftest_status=$?
-check "store_manifest selftest: 30 arms, every refusal fired, the green manifest, slices, seal, signature and extraction intact" \
-      "ok" "$([[ $manifest_selftest_status -eq 0 ]] && grep -q '^store_manifest selftest: 30 arm(s), 0 failure(s)$' <<< "$manifest_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$manifest_selftest_output")")"
+check "store_manifest selftest: 37 arms, every refusal fired, the green manifest, slices, seal, signature and extraction intact" \
+      "ok" "$([[ $manifest_selftest_status -eq 0 ]] && grep -q '^store_manifest selftest: 37 arm(s), 0 failure(s)$' <<< "$manifest_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$manifest_selftest_output")")"
 
 echo
 
