@@ -14,8 +14,8 @@
         "lz4/1.10.0#982d9b673900f665a1da109e09c17cab%1775037240.923",
         "logcraft_core/1.10.7",
         "libpqxx/8.0.1#02ecdb931a0cee3aef41661c542ca6e1%1775511214.571",
-        "libpq/17.11#492684c71526baac9592d864d9770bd9%1791747276.5098517",
-        "libcurl/8.20.0#c1405e2f51cb706737fda1943725c5bb%1791753692.7236695",
+        "libpq/17.11#492684c71526baac9592d864d9770bd9%1791792729.2583876",
+        "libcurl/8.22.0#58488ad978224809c9bec7df8661b071%1791872076.1343722",
         "jsoncpp/1.9.5#9415a4cf4d2e8965408f3a01a8339b48%1726135495.806",
         "insight_sift/1.10.7",
         "insight_semantic_test_frameworks/1.10.7",
@@ -32,7 +32,7 @@
         "gtest/1.17.0#43201cc96e5d35332662ce8890cceb27%1786446850.202",
         "glaze/7.4.0#00d1e516eee87ae8861a81a9f0a65056%1777279425.34",
         "fmt/12.1.0#6baf0fb8351783472b94ee6e36232391%1785754553.994",
-        "drogon/1.9.13#28d7de5b5b7090fc47654c94e3b288dd%1791747276.6792922",
+        "drogon/1.9.13#28d7de5b5b7090fc47654c94e3b288dd%1791792995.8298743",
         "coderoast_server_logging/1.10.7",
         "coderoast_server_catalogs/1.10.7",
         "coderoast_ipc_producer/1.10.7",
@@ -67,7 +67,7 @@
         "bison/3.8.2#c3490cbe0078b6fd3eb4cf5ed64144dc%1755688988.644",
         "b2/5.5.3#043a75bcbb090e3f81f7ac849850d0ca%1784261134.143",
         "automake/1.16.5#b91b7c384c3deaa9d535be02da14d04f%1755524470.56",
-        "autoconf/2.71#090ba6aae96c3237c4758fd35ef8e807%1791747276.3265083"
+        "autoconf/2.71#090ba6aae96c3237c4758fd35ef8e807%1791792719.610626"
     ],
     "python_requires": [],
     "overrides": {
