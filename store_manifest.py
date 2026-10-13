@@ -31,37 +31,58 @@ one OCI archive under a record `<image>/image` naming the entries it consumed. T
 the image only when that record consumed exactly the plan's executables at this run's entry
 digests, and counts each of them as carried.
 
+AN OBJECT IS A MEMBER OF A STEP'S OUTPUT (DN-142.D25 (1)): a published byte that is no executable,
+resolved the one way every row is, step id -> the record this step-0 run stored -> the output's
+`objects` member -> bytes whole in the store. Three producers, one row: a TRACKED file (the keyed
+step `<package>/tracked`, which judges nothing), a VERDICT's output (admitted only when that record's
+verdict is `pass`, the record then its one verdict), and a HOSTED output, the ingestion record
+`<repository>/ingest.<workflow stem>` B5 wrote (DN-142.D25 (3)), re-checked here: its step names the
+row's owner, workflow and artifact, its title names THIS step-0 run (the record's `step0_run`), its
+printed and writer-recomputed digests are the object, and it carries its dated exception. Every row
+of every kind lists `verdicts`, the key of every verdict record the builder checked for it.
+
+A DESTINATION SLICE (`coderoast.store.destination-slice/1`, DN-142.D25 (2)) is what a FOREIGN
+Release receives: `{format, owner, destination, tag, version, step0_record, manifest, assets}`, its
+rows the owner's rows for that destination PROJECTED to `{name, kind, object, record, verdicts}`, so
+a public Release gets the proof of its own assets and none of the private inventory around them.
+The writer signs it at the one seal, it is kept as an object, and the owner's slice binds it and its
+signature by digest under `destinations: {<repository>: {tag, visibility, slice, signature}}`. Its
+format is its own, so a destination slice never verifies as an owner slice, nor the reverse. A
+repository that owns no row is no slice's repository: the seal never creates a store package for a
+repository that is a destination only.
+
 THE PLAN is the builder's declared input: which repository publishes what, under which name.
 
     {"format": "coderoast.store.plan/3",
      "visibility": {<repo>: "public" | "private", ... every owner and every destination},
      "repositories": {<owner>: {"assets": [{"name", "kind": "conan-transport", "package", "destination"},
                                            {"name", "kind": "entry", "package", "entry", "destination",
-                                            "verdicts": [<output>...]}],
+                                            "verdicts": [<output>...]},
+                                           {"name", "kind": "object", "step", "member", "destination",
+                                            "verdicts": [], "artifact" (an ingested row only)}],
                                 "destinations": {<foreign repo>: {"tag"}},
                                 "images": {<image>: {"dockerfile", "runtime": [<library>...],
                                                      "executables": [{"package", "entry", "source"}]}}}}}
 
-An `object` row (DN-142.D25 (1)) is not a kind this builder admits yet: the deriver emits one only
-for a declared object, and no repository declares one before its producing step exists.
-
     store_manifest.py build <store> <step-0 record> <plan.json> <out dir>
-        <out dir>/manifest.json and <out dir>/slices/<repo>.json, canonical bytes; exit 1 naming
-        every asset refused (no manifest is written then; entry objects already verified stay
-        in the store, content-addressed)
+        <out dir>/manifest.json, <out dir>/slices/<repo>.json and
+        <out dir>/destinations/<owner>.<destination>.json, canonical bytes, UNSIGNED (a binding's
+        `signature` is null until the seal); exit 1 naming every asset refused (no manifest is
+        written then; entry objects already verified stay in the store, content-addressed)
     store_manifest.py seal <store> <step-0 record> <plan.json> <private key> <out dir>
-        build, then sign the manifest and every slice, and keep the record, the manifest, each
-        slice and each signature in the store under one `manifest` record keyed by the step-0
-        record's digest; the slices and signatures stay in <out dir> for the replica
+        build, signing every destination slice before the owner slice that binds it, then the
+        manifest and every slice; keep the record, the manifest, each slice and each signature in
+        the store under one `manifest` record keyed by the step-0 record's digest; the slices,
+        destination slices and signatures stay in <out dir> for the replica
     store_manifest.py signer <private key> <allowed signers>
         exit 0 printing the key's public half only when it is the one writer key the file names
     store_manifest.py sign <file> <private key>
         <file>.sig, `ssh-keygen -Y sign -n coderoast-store`
     store_manifest.py verify <slice> <signature> <allowed signers> <repository>
         exit 0 and one line per asset, `<kind> <name> <object> <entry> <entry digest>` ("-" when
-        absent), only when the signature verifies for the writer identity, the slice names
-        <repository>, every row names its destination, a foreign one declared by the slice, and no
-        transport has a foreign destination
+        absent), only when the signature verifies for the writer identity, the slice is an OWNER
+        slice naming <repository>, every row names its destination, a foreign one bound by the
+        slice, and no transport has a foreign destination
     store_manifest.py extract <transport archive> <entry> <entry digest> <out file>
         the one package member `<entry>`, written only when exactly one matches and it hashes to
         <entry digest>
@@ -91,9 +112,12 @@ import artefact_store  # noqa: E402 — a sibling module, located from this file
 PLAN_FORMAT = "coderoast.store.plan/3"
 MANIFEST_FORMAT = "coderoast.store.manifest/3"
 SLICE_FORMAT = "coderoast.store.slice/3"
+DESTINATION_FORMAT = "coderoast.store.destination-slice/1"
 NAMESPACE = "coderoast-store"
 WRITER_IDENTITY = "coderoast-store-writer"
-KINDS = ("conan-transport", "entry")
+KINDS = ("conan-transport", "entry", "object")
+PROJECTED = ("name", "kind", "object", "record", "verdicts")
+BINDING = {"tag", "visibility", "slice", "signature"}
 IMAGE_KIND = "oci-image"
 IMAGE_STEP = "image"
 IMAGE_MANIFEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -176,6 +200,8 @@ def _plan_findings(plan: dict, version: object) -> list[str]:
                              f"own Release, never {destination}'s (N360 plan F9, DN-142.D25 (2))")
             if asset.get("kind") == "entry" and not asset.get("entry"):
                 found.append(f"{where}: an entry asset names no entry")
+            if asset.get("kind") == "object":
+                found += [f"{where}: {defect}" for defect in _object_row_defects(repo, asset)]
             named.setdefault((destination, asset.get("name")), []).append(repo)
             tag = own_tag(version) if destination == repo else foreign[destination]["tag"]
             claimed.setdefault((destination, tag), set()).add(repo)
@@ -197,6 +223,12 @@ def _plan_findings(plan: dict, version: object) -> list[str]:
                 if set(executable) != {"package", "entry", "source"} or executable["source"] not in visibility:
                     found.append(f"{where}: an executable is {{package, entry, source}} from a plan "
                                  f"repository, not {executable!r}")
+        if not body.get("assets") and not body.get("images"):
+            aimed = sorted(owner for owner, other in repositories.items()
+                           if repo in (other.get("destinations") or {}))
+            found.append(f"{repo}: it owns no row and no image"
+                         + (f", and it is a destination only (of {', '.join(aimed)})" if aimed else "")
+                         + ": the seal never creates a store package nobody publishes from (DN-142.D25 (2))")
     for (destination, name), owners in sorted(named.items(), key=str):
         if len(owners) > 1:
             found.append(f"{destination}: asset {name!r} has {len(owners)} rows ({', '.join(owners)}): one "
@@ -206,6 +238,46 @@ def _plan_findings(plan: dict, version: object) -> list[str]:
             found.append(f"the {destination} Release {tag} has {len(owners)} owners, {', '.join(sorted(owners))}: "
                          f"one destination Release has one owner per cut (DN-142.D25 (2))")
     return found
+
+
+def ingested_step(step_id: str) -> bool:
+    """Whether `step_id` is an ingestion record's, `<repository>/ingest.<workflow stem>`."""
+    return step_id.partition("/")[2].startswith(f"{artefact_store.INGEST_OUTPUT}.")
+
+
+def output_of(step_id: str) -> str:
+    """The output a step's objects ride: the id's tail up to its first `.` (`tracked`, `ingest`,
+    or a verdict's own output name)."""
+    return step_id.partition("/")[2].partition(".")[0]
+
+
+def _object_row_defects(owner: str, asset: dict) -> list[str]:
+    """Every way an `object` plan row misses its shape (DN-142.D25 (1)); empty when it has it."""
+    step = str(asset.get("step", ""))
+    member = asset.get("member")
+    found = []
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*", step):
+        found.append(f"an object row names its producing step `<subject>/<output>`, not {step!r}")
+    if artefact_store.member_defect(member):
+        found.append(f"its member {artefact_store.member_defect(member)}")
+    if asset.get("verdicts"):
+        found.append(f"an object row names no verdict: a verdict output's own record is its judgment, "
+                     f"not {asset['verdicts']!r}")
+    if ingested_step(step):
+        if step.partition("/")[0] != owner:
+            found.append(f"its ingestion step {step} is another repository's: a hosted output is "
+                         f"ingested by the repository that declares it")
+        if not ASSET_NAME.match(str(asset.get("artifact", ""))):
+            found.append("an ingested row names the artifact its record must have read")
+    elif "artifact" in asset:
+        found.append("only an ingested row names an artifact")
+    return found
+
+
+def project(rows: list[dict], destination: str) -> list[dict]:
+    """The owner's rows for `destination`, PROJECTED to what a destination Release may learn."""
+    return sorted(({field: row[field] for field in PROJECTED} for row in rows if row["destination"] == destination),
+                  key=lambda row: row["name"])
 
 
 def hold(store: Path, digest: str, data: bytes) -> None:
@@ -228,9 +300,16 @@ def hold(store: Path, digest: str, data: bytes) -> None:
         staged.unlink()
 
 
-def build(store: Path, record_bytes: bytes, plan: dict) -> tuple[bytes, dict[str, bytes]]:
-    """(the whole manifest, {repo: slice}) as canonical bytes, or Refused naming every finding.
-    Each entry asset's bytes are kept in the store under their entry digest on the way."""
+Signer = Callable[[str, bytes], bytes]
+
+
+def build(store: Path, record_bytes: bytes, plan: dict, sign_with: Signer | None = None
+          ) -> tuple[bytes, dict[str, bytes], dict[tuple[str, str], tuple[bytes, bytes | None]]]:
+    """(the whole manifest, {owner: slice}, {(owner, destination): (destination slice, its
+    signature)}) as canonical bytes, or Refused naming every finding. `sign_with(label, body)` signs
+    each destination slice before the owner slice that binds it; without one (a provisional
+    judgment) every binding's `signature` is null. Each entry asset's bytes are kept in the store
+    under their entry digest on the way."""
     record = json.loads(record_bytes)
     findings = _plan_findings(plan, record.get("version"))
     if findings:
@@ -251,9 +330,10 @@ def build(store: Path, record_bytes: bytes, plan: dict) -> tuple[bytes, dict[str
             raise Refused(f"the store holds no record {step['key']} for {step_id}")
         return json.loads(path.read_text())
 
-    def evaluated(package: str, output: str, digest: str) -> None:
-        """The run's `<package>/<output>` verdict passed over `digest`. A test verdict keeps what it
-        judged in its output; a generalized verdict (DN-142.D19 (10)) in its key document."""
+    def evaluated(package: str, output: str, digest: str) -> str:
+        """The key of the run's `<package>/<output>` verdict, once it passed over `digest`. A test
+        verdict keeps what it judged in its output; a generalized verdict (DN-142.D19 (10)) in its
+        key document."""
         step = steps.get(f"{package}/{output}")
         if step is None:
             raise Refused(f"{package}: no {output} verdict in this step-0 run")
@@ -265,19 +345,21 @@ def build(store: Path, record_bytes: bytes, plan: dict) -> tuple[bytes, dict[str
         if digest not in judged.values():
             raise Refused(f"{package}: its {output} verdict judged {sorted(judged.values())}, "
                           f"not the published digest {digest}")
+        return step["key"]
 
-    def created(package: str) -> tuple[dict, dict[str, str]]:
+    def created(package: str) -> tuple[dict, dict[str, str], list[str]]:
         """The package's stored output, once its transport object is whole and its test verdicts
-        (and its corpus verdict, where it has one) passed over its content; its executable classes."""
+        (and its corpus verdict, where it has one) passed over its content; its executable classes;
+        the keys of those verdicts."""
         package_record = stored(f"{package}/package")
         output = package_record["outputs"]["package"]
         object_path = store / "objects" / output["transport"]
         if not object_path.is_file() or sha256_file(object_path) != output["transport"]:
             raise Refused(f"{package}: the store's object {output['transport']} is absent or does not hash to its name")
-        evaluated(package, "verdict", output["content"])
+        verdicts = [evaluated(package, "verdict", output["content"])]
         if f"{package}/corpus" in steps:
-            evaluated(package, "corpus", output["content"])
-        return output, package_record["inputs"]["step"].get("executables", {})
+            verdicts.append(evaluated(package, "corpus", output["content"]))
+        return output, package_record["inputs"]["step"].get("executables", {}), verdicts
 
     def classified(package: str, executables: dict[str, str], member: str, carrier: str) -> None:
         if executables.get(member) != "published":
@@ -285,15 +367,63 @@ def build(store: Path, record_bytes: bytes, plan: dict) -> tuple[bytes, dict[str
                           f"{executables.get(member, 'nowhere')!r}, not 'published' (DN-142.D22 (3))")
         carried.add((package, member))
 
+    def produced(owner: str, asset: dict) -> dict:
+        """An object row, once its producing record holds the member whole and admits it."""
+        step_id = asset["step"]
+        built = stored(step_id)
+        step = steps[step_id]
+        output = output_of(step_id)
+        try:
+            digest = artefact_store.output_object(store, step["key"], output, asset["member"])
+        except artefact_store.Refused as refused:
+            raise Refused(str(refused)) from refused
+        kind = built["inputs"]["step"].get("kind")
+        body = built["outputs"][output]
+        verdicts: list[str] = []
+        if ingested_step(step_id):
+            ingestion(owner, asset, built, body, digest)
+        elif kind != artefact_store.TRACKED_KIND:
+            if step.get("verdict") != "pass" or body.get("verdict") != "pass":
+                raise Refused(f"its producing record {step_id} is a {kind} whose verdict is "
+                              f"{body.get('verdict')!r}, not pass (DN-142.D7)")
+            verdicts = [step["key"]]
+        return {"name": asset["name"], "kind": "object", "destination": asset["destination"], "step": step_id,
+                "record": step["key"], "object": digest, "verdicts": verdicts}
+
+    def ingestion(owner: str, asset: dict, built: dict, body: dict, digest: str) -> None:
+        """An ingestion record re-checked against the row and this run (DN-142.D25 (3)): two
+        producers of what B5 saw never diverge silently."""
+        document = built["inputs"]["step"]
+        if document.get("kind") != artefact_store.INGEST_KIND or document.get("repository") != owner or \
+                artefact_store.ingest_step_id(owner, str(document.get("workflow"))) != asset["step"] or \
+                document.get("artefact") != asset["artifact"]:
+            raise Refused(f"its record is the {document.get('kind')} of {document.get('repository')} "
+                          f"{document.get('workflow')} artifact {document.get('artefact')}, not {owner}'s "
+                          f"{asset['step']} artifact {asset['artifact']}")
+        titled = artefact_store.STEP0_RUN.findall(str(body.get("title")))
+        if record.get("step0_run") is None or titled != [str(record["step0_run"])]:
+            raise Refused(f"its ingestion's title {body.get('title')!r} names step 0 run(s) {titled or 'none'}, "
+                          f"and this record is run {record.get('step0_run')}: run X's outputs never enter "
+                          f"run Y (DN-142.D25 (3))")
+        producers = body.get("producers") or {}
+        if producers.get("printed") != digest or producers.get("writer_recomputed") != digest:
+            raise Refused(f"its ingestion's producers {producers} do not all name the object {digest}")
+        defect = artefact_store.exception_defect(body.get("exception"))
+        if defect:
+            raise Refused(f"its ingestion: {defect}")
+
     visibility = plan["visibility"]
     carried: set[tuple[str, str]] = set()
     whole: dict[str, dict] = {}
     for repo, body in sorted(plan["repositories"].items()):
         rows = []
         for asset in body.get("assets", []):
-            package = asset["package"]
             try:
-                output, executables = created(package)
+                if asset["kind"] == "object":
+                    rows.append(produced(repo, asset))
+                    continue
+                package = asset["package"]
+                output, executables, verdicts = created(package)
                 row = {"name": asset["name"], "kind": asset["kind"], "package": package,
                        "destination": asset["destination"], "record": steps[f"{package}/package"]["key"],
                        "object": output["transport"], "content": output["content"]}
@@ -310,10 +440,10 @@ def build(store: Path, record_bytes: bytes, plan: dict) -> tuple[bytes, dict[str
                     row.update(object=held[asset["entry"]], entry=asset["entry"], entry_digest=held[asset["entry"]])
                     members = [asset["entry"]]
                 for output_name in asset.get("verdicts", []):
-                    evaluated(package, output_name, row.get("entry_digest") or output["content"])
+                    verdicts.append(evaluated(package, output_name, row.get("entry_digest") or output["content"]))
                 for member in members:
                     classified(package, executables, member, asset["name"])
-                rows.append(row)
+                rows.append({**row, "verdicts": verdicts})
             except Refused as refused:
                 findings.append(f"{repo}/{asset['name']}: {refused}")
         for image, declared in sorted((body.get("images") or {}).items()):
@@ -326,9 +456,10 @@ def build(store: Path, record_bytes: bytes, plan: dict) -> tuple[bytes, dict[str
                 wanted = {(row["package"], row["entry"]) for row in declared["executables"]}
                 if set(consumed) != wanted:
                     raise Refused(f"its image step consumed {sorted(consumed)}, and the plan declares {sorted(wanted)}")
-                carried_by_image = []
+                carried_by_image, verdicts = [], set()
                 for (package, entry), row in sorted(consumed.items()):
-                    package_output, executables = created(package)
+                    package_output, executables, judged_by = created(package)
+                    verdicts.update(judged_by)
                     held = {path: digest for path, _mode, digest in package_output["entries"]}
                     if row.get("digest") != held.get(entry) or row.get("record") != steps[f"{package}/package"]["key"]:
                         raise Refused(f"its image step consumed {package} {entry} at {row.get('digest')}, and this "
@@ -347,7 +478,7 @@ def build(store: Path, record_bytes: bytes, plan: dict) -> tuple[bytes, dict[str
                 rows.append({"name": image, "kind": IMAGE_KIND, "destination": repo,
                              "record": steps[f"{image}/{IMAGE_STEP}"]["key"],
                              "object": output["archive"], "manifest": output["manifest"],
-                             "executables": carried_by_image})
+                             "executables": carried_by_image, "verdicts": sorted(verdicts)})
             except Refused as refused:
                 findings.append(f"{repo}/{image}: {refused}")
         whole[repo] = {"visibility": visibility[repo], "assets": sorted(rows, key=lambda row: row["name"]),
@@ -363,14 +494,28 @@ def build(store: Path, record_bytes: bytes, plan: dict) -> tuple[bytes, dict[str
                                 f"this manifest carries it (DN-142.D22 (3))")
     if findings:
         raise Refused("; ".join(findings))
+    record_digest = sha256_bytes(record_bytes)
     manifest = canonical({"format": MANIFEST_FORMAT, "version": record.get("version"),
-                          "step0_record": sha256_bytes(record_bytes), "repositories": whole})
-    slices = {repo: canonical({"format": SLICE_FORMAT, "repository": repo, "version": record.get("version"),
-                               "visibility": body["visibility"], "step0_record": sha256_bytes(record_bytes),
-                               "manifest": sha256_bytes(manifest), "assets": body["assets"],
-                               "destinations": body["destinations"]})
-              for repo, body in whole.items()}
-    return manifest, slices
+                          "step0_record": record_digest, "repositories": whole})
+    destination_slices: dict[tuple[str, str], tuple[bytes, bytes | None]] = {}
+    slices = {}
+    for repo, body in whole.items():
+        bound = {}
+        for destination, declared in body["destinations"].items():
+            projected = canonical({"format": DESTINATION_FORMAT, "owner": repo, "destination": destination,
+                                   "tag": declared["tag"], "version": record.get("version"),
+                                   "step0_record": record_digest, "manifest": sha256_bytes(manifest),
+                                   "assets": project(body["assets"], destination)})
+            signature = sign_with(f"{repo}.{destination}", projected) if sign_with is not None else None
+            destination_slices[(repo, destination)] = (projected, signature)
+            bound[destination] = {"tag": declared["tag"], "visibility": visibility[destination],
+                                  "slice": sha256_bytes(projected),
+                                  "signature": sha256_bytes(signature) if signature is not None else None}
+        slices[repo] = canonical({"format": SLICE_FORMAT, "repository": repo, "version": record.get("version"),
+                                  "visibility": body["visibility"], "step0_record": record_digest,
+                                  "manifest": sha256_bytes(manifest), "assets": body["assets"],
+                                  "destinations": bound})
+    return manifest, slices, destination_slices
 
 
 def sign(path: Path, key: Path) -> Path:
@@ -403,14 +548,23 @@ def signer(key: Path, allowed: Path) -> str:
 
 
 def seal(store: Path, record_bytes: bytes, plan: dict, key: Path, out: Path) -> dict:
-    """Build the manifest, sign it and every slice, and keep the step-0 record, the manifest, each
-    slice and each signature in the store under one `manifest` record keyed by the record's digest.
-    `out` is created here and receives the signed files the replica pushes; the seal's summary."""
+    """Build the manifest, signing each destination slice before the owner slice that binds it,
+    then sign the manifest and every slice, and keep the step-0 record, the manifest, each slice,
+    each destination slice and each signature in the store under one `manifest` record keyed by
+    the record's digest. `out` is created here and receives the signed files the replica pushes;
+    the seal's summary."""
     if out.exists():
         raise Refused(f"{out} exists: a seal writes its signatures once, into a directory of its own")
-    manifest, slices = build(store, record_bytes, plan)
     out.mkdir(parents=True)
     (out / "slices").mkdir()
+    (out / "destinations").mkdir()
+
+    def signed_destination(label: str, body: bytes) -> bytes:
+        path = out / "destinations" / f"{label}.json"
+        path.write_bytes(body)
+        return sign(path, key).read_bytes()
+
+    manifest, slices, destination_slices = build(store, record_bytes, plan, signed_destination)
     (out / "manifest.json").write_bytes(manifest)
     signed = {"manifest": (out / "manifest.json", sign(out / "manifest.json", key))}
     for repo, body in sorted(slices.items()):
@@ -424,45 +578,98 @@ def seal(store: Path, record_bytes: bytes, plan: dict, key: Path, out: Path) -> 
         for kept in (path, signature):
             hold(store, sha256_file(kept), kept.read_bytes())
         held[name] = {"object": sha256_file(path), "signature": sha256_file(signature)}
-    summary = {"record": record_digest, "manifest": held.pop("manifest"), "slices": held}
+    destinations = {}
+    for (repo, destination), (body, signature) in sorted(destination_slices.items()):
+        hold(store, sha256_bytes(body), body)
+        hold(store, sha256_bytes(signature), signature)
+        destinations[f"{repo}.{destination}"] = {"object": sha256_bytes(body), "signature": sha256_bytes(signature)}
+    summary = {"record": record_digest, "manifest": held.pop("manifest"), "slices": held,
+               "destinations": destinations}
     document = {"step": {"kind": "manifest", "subject": "step0"}, "step0_record": record_digest}
     if artefact_store.LocalStore(store).commit(document, {"manifest": dict(summary)}, {}) != 0:
         raise Refused(f"the store already holds another seal of step-0 record {record_digest}")
     return summary
 
 
-def verify(slice_bytes: bytes, signature: Path, allowed: Path, repository: str) -> list[dict]:
-    """The slice's assets, only once its signature, its repository and its destinations hold."""
+def _signed(slice_bytes: bytes, signature: Path, allowed: Path, what: str) -> dict:
+    """The body of `slice_bytes`, once the writer's signature over it verifies."""
     done = subprocess.run(["ssh-keygen", "-Y", "verify", "-f", str(allowed), "-I", WRITER_IDENTITY,
                            "-n", NAMESPACE, "-s", str(signature)],
                           input=slice_bytes, capture_output=True, check=False)
     if done.returncode != 0:
-        raise Refused(f"the slice's signature does not verify for {WRITER_IDENTITY}: "
+        raise Refused(f"the {what}'s signature does not verify for {WRITER_IDENTITY}: "
                       f"{done.stderr.decode('utf-8', 'replace').strip()[-300:]}")
-    body = json.loads(slice_bytes)
+    return json.loads(slice_bytes)
+
+
+def verify(slice_bytes: bytes, signature: Path, allowed: Path, repository: str) -> list[dict]:
+    """The OWNER slice's assets, only once its signature, its format, its repository, its rows and
+    the destinations it binds hold."""
+    body = _signed(slice_bytes, signature, allowed, "slice")
     if body.get("format") != SLICE_FORMAT:
-        raise Refused(f"the slice's format is {body.get('format')!r}, not {SLICE_FORMAT!r}")
+        raise Refused(f"the slice's format is {body.get('format')!r}, not {SLICE_FORMAT!r}: a destination "
+                      f"slice never verifies as an owner slice (DN-142.D25 (2))")
     if body.get("repository") != repository:
         raise Refused(f"the slice is {body.get('repository')!r}'s, not {repository!r}'s")
+    bound = body.get("destinations") or {}
+    for destination, binding in sorted(bound.items()):
+        if destination == repository or not isinstance(binding, dict) or set(binding) != BINDING \
+                or binding["visibility"] not in VISIBILITIES or not TAG_NAME.match(str(binding["tag"])) \
+                or not all(DIGEST_HEX.match(str(binding[field])) for field in ("slice", "signature")):
+            raise Refused(f"destination {destination}: the slice binds {binding!r}, not a foreign "
+                          f"{{tag, visibility, slice, signature}} with both digests")
     for asset in body.get("assets", []):
         if asset.get("kind") not in (*KINDS, IMAGE_KIND):
             raise Refused(f"{asset.get('name')}: kind {asset.get('kind')!r} is not one of "
                           f"{', '.join((*KINDS, IMAGE_KIND))}")
-        if not DIGEST_HEX.match(asset.get("object", "")):
-            raise Refused(f"{asset.get('name')}: {asset.get('object')!r} is not an object digest")
+        if not DIGEST_HEX.match(asset.get("object", "")) or not DIGEST_HEX.match(str(asset.get("record", ""))):
+            raise Refused(f"{asset.get('name')}: {asset.get('object')!r} or its record {asset.get('record')!r} is "
+                          f"not a digest")
+        if not isinstance(asset.get("verdicts"), list) or not all(DIGEST_HEX.match(str(key)) for key in asset["verdicts"]):
+            raise Refused(f"{asset.get('name')}: its verdicts {asset.get('verdicts')!r} are not record keys")
         if asset.get("kind") == "entry" and asset.get("entry_digest") != asset["object"]:
             raise Refused(f"{asset.get('name')}: an entry asset's object is the entry's own bytes, and "
                           f"{asset['object']} is not its entry digest {asset.get('entry_digest')!r}")
         if asset.get("kind") == IMAGE_KIND and not IMAGE_MANIFEST.match(asset.get("manifest", "")):
             raise Refused(f"{asset.get('name')}: an image asset names no image manifest digest")
         destination = asset.get("destination")
-        if destination != repository and destination not in (body.get("destinations") or {}):
+        if destination != repository and destination not in bound:
             raise Refused(f"{asset.get('name')}: its destination {destination!r} is neither {repository} nor a "
                           f"destination its slice declares")
         if asset.get("kind") == "conan-transport" and destination != repository:
             raise Refused(f"{asset.get('name')}: a transport of {repository} aimed at {destination}'s Release "
                           f"(N360 plan F9, DN-142.D25 (2))")
     return body.get("assets", [])
+
+
+def verify_destination(destination_bytes: bytes, signature: Path, allowed: Path, owner: dict,
+                       destination: str) -> list[dict]:
+    """The destination slice's rows, only once the writer signed it, it is the very slice the
+    verified owner slice `owner` binds for `destination`, it names the owner slice's record,
+    manifest, version and tag, and its rows are the PROJECTION of the owner's rows for that
+    destination (DN-142.D25 (2), the publish job's step 1)."""
+    binding = (owner.get("destinations") or {}).get(destination)
+    if binding is None:
+        raise Refused(f"the owner slice of {owner.get('repository')} binds no destination {destination}")
+    if sha256_bytes(destination_bytes) != binding["slice"]:
+        raise Refused(f"the destination slice hashes to {sha256_bytes(destination_bytes)}, and the owner slice "
+                      f"binds {binding['slice']}")
+    body = _signed(destination_bytes, signature, allowed, "destination slice")
+    if body.get("format") != DESTINATION_FORMAT:
+        raise Refused(f"the destination slice's format is {body.get('format')!r}, not {DESTINATION_FORMAT!r}: "
+                      f"an owner slice never verifies as a destination slice (DN-142.D25 (2))")
+    want = {"owner": owner.get("repository"), "destination": destination, "tag": binding["tag"],
+            "version": owner.get("version"), "step0_record": owner.get("step0_record"),
+            "manifest": owner.get("manifest")}
+    differs = sorted(field for field, value in want.items() if body.get(field) != value)
+    if differs:
+        raise Refused(f"the destination slice differs from its owner slice on {', '.join(differs)}")
+    projected = project(owner.get("assets", []), destination)
+    if body.get("assets") != projected:
+        raise Refused(f"the destination slice's rows {[row.get('name') for row in body.get('assets', [])]} are "
+                      f"not the projection of the owner slice's rows for {destination} "
+                      f"{[row['name'] for row in projected]}, field for field")
+    return body["assets"]
 
 
 def extract(archive: Path, entry: str, digest: str, out: Path) -> None:
@@ -537,7 +744,32 @@ def _fixture(root: Path) -> tuple[Path, bytes, dict, dict[str, Path]]:
                     "judged": {"bin/tool": tool_entry}},
                    {"consumer": {"verdict": "pass", "findings": sha256_bytes(canonical([]))}})
     steps.append({"id": "priv_tools/consumer", "key": consumer, "verdict": "pass"})
-    record = canonical({"version": "9.9.9", "built": True, "cuttable": True, "steps": steps})
+
+    def held(data: bytes) -> str:
+        (store / "objects" / sha256_bytes(data)).write_bytes(data)
+        return sha256_bytes(data)
+
+    tracked = put({"step": {"kind": "tracked", "repository": "priv-repo", "package": "priv_tools"},
+                   "files": [["sbom.json", "e" * 40]]},
+                  {"tracked": {"objects": {"sbom.json": held(b'{"bom": 1}\n')}}})
+    steps.append({"id": "priv_tools/tracked", "key": tracked, "verdict": None})
+    bench = put({"step": {"kind": "verdict", "id": "bench", "subject": "priv_tools"}, "judged": {"bin/tool": tool_entry}},
+                {"bench": {"verdict": "pass", "objects": {"bench.json": held(b'{"ns": 7}\n')}}})
+    steps.append({"id": "priv_tools/bench", "key": bench, "verdict": "pass"})
+    windows = held(b"MZ windows bytes")
+    ingested = put({"step": {"kind": "ingest", "repository": "priv-repo", "artefact": "win-x64",
+                             "workflow": ".github/workflows/win.yml", "job": "build"},
+                    "run": {"id": 31, "attempt": 1}, "judged": {"priv-repo": "f" * 40}},
+                   {"ingest": {"objects": {"win.exe": windows},
+                               "producers": {"printed": windows, "github_artifact_digest": "sha256:" + "a" * 64,
+                                             "writer_recomputed": windows},
+                               "seat": {"runner": "GitHub Actions 3", "labels": ["windows-2025"], "run": 31,
+                                        "job": "build"},
+                               "title": "Win — step 0 run 777 — priv-repo=" + "f" * 40,
+                               "exception": {"since": "2026-10-13", "discharge": "a Windows seat"},
+                               "head_sha": "f" * 40, "inputs_key": "b" * 64}})
+    steps.append({"id": "priv-repo/ingest.win", "key": ingested, "verdict": None})
+    record = canonical({"version": "9.9.9", "built": True, "cuttable": True, "step0_run": "777", "steps": steps})
     plan = {"format": PLAN_FORMAT, "visibility": {"pub-repo": "public", "priv-repo": "private"}, "repositories": {
         "pub-repo": {"assets": [
             {"name": "pub_lib-9.9.9.tgz", "kind": "conan-transport", "package": "pub_lib",
@@ -546,7 +778,13 @@ def _fixture(root: Path) -> tuple[Path, bytes, dict, dict[str, Path]]:
             {"name": "priv_tools-9.9.9.tgz", "kind": "conan-transport", "package": "priv_tools",
              "destination": "priv-repo"},
             {"name": "tool-linux-x64", "kind": "entry", "package": "priv_tools", "entry": "bin/tool",
-             "destination": "pub-repo", "verdicts": ["consumer"]}],
+             "destination": "pub-repo", "verdicts": ["consumer"]},
+            {"name": "sbom.json", "kind": "object", "step": "priv_tools/tracked", "member": "sbom.json",
+             "destination": "priv-repo", "verdicts": []},
+            {"name": "bench.json", "kind": "object", "step": "priv_tools/bench", "member": "bench.json",
+             "destination": "priv-repo", "verdicts": []},
+            {"name": "win.exe", "kind": "object", "step": "priv-repo/ingest.win", "member": "win.exe",
+             "destination": "pub-repo", "verdicts": [], "artifact": "win-x64"}],
             "destinations": {"pub-repo": {"tag": "engine-v9.9.9"}},
             "images": {"srv-image": {"dockerfile": "docker/Dockerfile", "runtime": ["libstdc++.so.6"],
                                      "executables": [{"package": "priv_server", "entry": "bin/server",
@@ -589,7 +827,7 @@ def selftest() -> int:
         built = arm("a green record and a valid plan build a manifest and one slice per repository",
                     lambda: build(store, record, plan), None)
         if built:
-            manifest, slices = built
+            manifest, slices, destination_slices = built
             pub = json.loads(slices["pub-repo"])
             if sorted(slices) != ["priv-repo", "pub-repo"] or pub["manifest"] != sha256_bytes(manifest):
                 failures.append("the slices do not name the whole manifest's digest, or a repository is missing")
@@ -600,8 +838,10 @@ def selftest() -> int:
                 failures.append("the public slice names a package it does not publish")
             tool_row = next((asset for asset in priv["assets"] if asset["name"] == "tool-linux-x64"), {})
             tool_digest = sha256_bytes(b"\x7fELF tool bytes")
+            projected = destination_slices.get(("priv-repo", "pub-repo"), (b"{}", None))[0]
             if tool_row.get("object") != tool_digest or tool_row.get("destination") != "pub-repo" or \
-                    priv["destinations"] != {"pub-repo": {"tag": "engine-v9.9.9"}} or \
+                    priv["destinations"] != {"pub-repo": {"tag": "engine-v9.9.9", "visibility": "public",
+                                                          "slice": sha256_bytes(projected), "signature": None}} or \
                     (store / "objects" / tool_digest).read_bytes() != b"\x7fELF tool bytes":
                 failures.append(f"the entry row is not its OWNER's, destined to pub-repo by the slice's "
                                 f"destinations, naming the entry's own bytes (DN-142.D25 (2)): {tool_row}, "
@@ -614,6 +854,30 @@ def selftest() -> int:
                                                       "build_id": sha256_bytes(b"\x7fELF server bytes")[:40]}]:
                 failures.append(f"the image is not an asset of the repository that declares it, naming each "
                                 f"executable's digest and build-id: {image_row}")
+            keys = {step["id"]: step["key"] for step in json.loads(record)["steps"]}
+            rows = {asset["name"]: asset for asset in priv["assets"]}
+            want_verdicts = {"priv_tools-9.9.9.tgz": [keys["priv_tools/verdict"]],
+                             "tool-linux-x64": [keys["priv_tools/verdict"], keys["priv_tools/consumer"]],
+                             "srv-image": [keys["priv_server/verdict"]], "sbom.json": [],
+                             "bench.json": [keys["priv_tools/bench"]], "win.exe": []}
+            if {name: row.get("verdicts") for name, row in rows.items()} != want_verdicts:
+                failures.append(f"every row lists the verdict records the builder checked for it: "
+                                f"{ {name: row.get('verdicts') for name, row in rows.items()} }")
+            objects = {name: (row["step"], row["record"], row["object"]) for name, row in rows.items()
+                       if row["kind"] == "object"}
+            if objects != {"sbom.json": ("priv_tools/tracked", keys["priv_tools/tracked"], sha256_bytes(b'{"bom": 1}\n')),
+                           "bench.json": ("priv_tools/bench", keys["priv_tools/bench"], sha256_bytes(b'{"ns": 7}\n')),
+                           "win.exe": ("priv-repo/ingest.win", keys["priv-repo/ingest.win"],
+                                       sha256_bytes(b"MZ windows bytes"))}:
+                failures.append(f"each object row names its producing step, record and object: {objects}")
+            destination = json.loads(projected)
+            if sorted(destination_slices) != [("priv-repo", "pub-repo")] or \
+                    destination.get("format") != DESTINATION_FORMAT or \
+                    [row["name"] for row in destination.get("assets", [])] != ["tool-linux-x64", "win.exe"] or \
+                    any(set(row) != set(PROJECTED) for row in destination.get("assets", [])) or \
+                    b"priv_tools" in projected or destination.get("manifest") != sha256_bytes(manifest):
+                failures.append(f"the destination slice is not the owner's rows for pub-repo projected to "
+                                f"{PROJECTED}, naming the manifest: {destination}")
 
         arm("a step-0 record that is not cuttable writes no manifest",
             lambda: build(store, canonical({**json.loads(record), "cuttable": False}), plan), "cuttable=False")
@@ -664,6 +928,27 @@ def selftest() -> int:
             lambda: build(store, record, edited(plan, lambda p: p["repositories"]["priv-repo"]["assets"][1]
                                                 .__setitem__("verdicts", ["consumer", "container"]))),
             "no container verdict")
+        arm("RED: an object row whose producing step this run never ran is refused",
+            lambda: build(store, record, edited(plan, lambda p: p["repositories"]["priv-repo"]["assets"][2]
+                                                .__setitem__("step", "priv_tools/absent"))),
+            "step 0 ran no step priv_tools/absent")
+        arm("RED: an object row naming a verdict is refused: the producing record is its judgment",
+            lambda: build(store, record, edited(plan, lambda p: p["repositories"]["priv-repo"]["assets"][3]
+                                                .__setitem__("verdicts", ["consumer"]))), "names no verdict")
+        arm("RED: an ingested row of another repository's ingestion step is refused",
+            lambda: build(store, record, edited(plan, lambda p: p["repositories"]["priv-repo"]["assets"][4]
+                                                .__setitem__("step", "pub-repo/ingest.win"))),
+            "is another repository's")
+        arm("RED: an ingested row whose record read another artifact is refused",
+            lambda: build(store, record, edited(plan, lambda p: p["repositories"]["priv-repo"]["assets"][4]
+                                                .__setitem__("artifact", "linux-x64"))),
+            "not priv-repo's priv-repo/ingest.win artifact linux-x64")
+        arm("RED: a step-0 record naming no run admits no ingested row",
+            lambda: build(store, canonical({**json.loads(record), "step0_run": None}), plan),
+            "never enter run Y")
+        arm("RED: a repository that owns no row is a destination only, and gets no store package",
+            lambda: build(store, record, edited(plan, lambda p: p["repositories"].__setitem__("pub-repo", {"assets": []}))),
+            "pub-repo: it owns no row and no image, and it is a destination only (of priv-repo)")
 
         store_b, record_b, plan_b, _ = _fixture(root / "b")
         rewrite(store_b, "priv_tools/consumer", record_b,
@@ -680,6 +965,25 @@ def selftest() -> int:
                 lambda body: body["inputs"]["executables"][0].__setitem__("digest", "0" * 64))
         arm("an image whose step consumed another digest than this run's create stored is refused",
             lambda: build(store_e, record_e, plan_e), "and this run's create stored")
+        store_f, record_f, plan_f, _ = _fixture(root / "f")
+        rewrite(store_f, "priv_tools/bench", record_f,
+                lambda body: body["outputs"]["bench"].__setitem__("verdict", "fail"))
+        arm("RED: an object whose producing verdict failed is refused",
+            lambda: build(store_f, record_f, plan_f), "whose verdict is 'fail', not pass")
+        store_g, record_g, plan_g, _ = _fixture(root / "g")
+        rewrite(store_g, "priv-repo/ingest.win", record_g,
+                lambda body: body["outputs"]["ingest"].__setitem__("title", "Win — step 0 run 776 — x"))
+        arm("RED: an ingested row whose title names another step-0 run is refused",
+            lambda: build(store_g, record_g, plan_g), "names step 0 run(s) ['776'], and this record is run 777")
+        store_h, record_h, plan_h, _ = _fixture(root / "h")
+        (store_h / "records" / f"{dict((s['id'], s['key']) for s in json.loads(record_h)['steps'])['priv_tools/tracked']}.json").unlink()
+        arm("RED: an object row whose producing record the store does not hold is refused",
+            lambda: build(store_h, record_h, plan_h), "the store holds no record")
+        store_i, record_i, plan_i, _ = _fixture(root / "i")
+        rewrite(store_i, "priv-repo/ingest.win", record_i,
+                lambda body: body["outputs"]["ingest"]["producers"].__setitem__("printed", "0" * 64))
+        arm("RED: an ingestion whose record names another printed digest than its object is refused",
+            lambda: build(store_i, record_i, plan_i), "do not all name the object")
         store_d, record_d, plan_d, transports_d = _fixture(root / "d")
         transports_d["pub_lib"].write_bytes(b"tampered")
         arm("a transport object that does not hash to its name is refused",
@@ -693,8 +997,15 @@ def selftest() -> int:
         allowed = keys / "allowed_signers"
         allowed.write_text(f'{WRITER_IDENTITY} namespaces="{NAMESPACE}" '
                            f"{(keys / 'writer.pub').read_text().strip()}\n")
+        def writer_signed(label: str, body: bytes) -> bytes:
+            path = root / f"destination-{label}.json"
+            path.write_bytes(body)
+            return sign(path, keys / "writer").read_bytes()
+
+        built = arm("a build handed the writer's signer signs each destination slice and binds both digests",
+                    lambda: build(store, record, plan, writer_signed), None)
         if built:
-            _manifest, slices = built
+            _manifest, slices, destination_slices = built
             slice_path = root / "pub-repo.json"
             slice_path.write_bytes(slices["pub-repo"])
             signature = sign(slice_path, keys / "writer")
@@ -708,9 +1019,49 @@ def selftest() -> int:
             assets = arm("the owner's slice verifies with its foreign row and the destination it declares",
                          lambda: verify(slices["priv-repo"], priv_signature, allowed, "priv-repo"), None)
             if assets is not None and [(asset["name"], asset["destination"]) for asset in assets] != [
-                    ("priv_tools-9.9.9.tgz", "priv-repo"), ("srv-image", "priv-repo"),
-                    ("tool-linux-x64", "pub-repo")]:
+                    ("bench.json", "priv-repo"), ("priv_tools-9.9.9.tgz", "priv-repo"), ("sbom.json", "priv-repo"),
+                    ("srv-image", "priv-repo"), ("tool-linux-x64", "pub-repo"), ("win.exe", "pub-repo")]:
                 failures.append(f"the verified owner slice lists {assets}")
+            owner = json.loads(slices["priv-repo"])
+            projected, projected_signature = destination_slices[("priv-repo", "pub-repo")]
+            projected_path = root / "projected.json"
+            projected_path.write_bytes(projected)
+            (root / "projected.json.sig").write_bytes(projected_signature)
+            rows = arm("the destination slice the owner slice binds verifies: its rows are the projection",
+                       lambda: verify_destination(projected, root / "projected.json.sig", allowed, owner, "pub-repo"),
+                       None)
+            if rows is not None and [row["name"] for row in rows] != ["tool-linux-x64", "win.exe"]:
+                failures.append(f"the verified destination slice lists {rows}")
+            arm("RED: a destination slice offered as an owner slice is refused",
+                lambda: verify(projected, root / "projected.json.sig", allowed, "priv-repo"),
+                "a destination slice never verifies as an owner slice")
+            arm("RED: an owner slice offered as a destination slice is refused",
+                lambda: verify_destination(slices["priv-repo"], priv_signature, allowed,
+                                           {**owner, "destinations": {"pub-repo": {
+                                               **owner["destinations"]["pub-repo"],
+                                               "slice": sha256_bytes(slices["priv-repo"])}}}, "pub-repo"),
+                "an owner slice never verifies as a destination slice")
+            narrowed = json.loads(projected)
+            narrowed["assets"] = narrowed["assets"][:1]
+            narrowed_path = root / "narrowed.json"
+            narrowed_path.write_bytes(canonical(narrowed))
+            narrowed_signature = sign(narrowed_path, keys / "writer")
+            arm("RED: a writer-signed destination slice whose rows are not the owner's projection is refused",
+                lambda: verify_destination(canonical(narrowed), narrowed_signature, allowed,
+                                           {**owner, "destinations": {"pub-repo": {
+                                               **owner["destinations"]["pub-repo"],
+                                               "slice": sha256_bytes(canonical(narrowed))}}}, "pub-repo"),
+                "not the projection of the owner slice's rows for pub-repo")
+            arm("RED: a destination slice the owner slice does not bind by digest is refused",
+                lambda: verify_destination(canonical(narrowed), narrowed_signature, allowed, owner, "pub-repo"),
+                "and the owner slice binds")
+            unbound = json.loads(slices["priv-repo"])
+            unbound["destinations"]["pub-repo"]["signature"] = None
+            unbound_path = root / "unbound.json"
+            unbound_path.write_bytes(canonical(unbound))
+            unbound_signature = sign(unbound_path, keys / "writer")
+            arm("RED: an owner slice binding an unsigned destination slice is refused",
+                lambda: verify(canonical(unbound), unbound_signature, allowed, "priv-repo"), "with both digests")
             arm("one flipped byte fails the signature",
                 lambda: verify(slices["pub-repo"].replace(b"9.9.9", b"9.9.8", 1), signature, allowed, "pub-repo"),
                 "does not verify")
@@ -723,7 +1074,7 @@ def selftest() -> int:
                 lambda: verify(slices["pub-repo"], forged_signature, allowed, "pub-repo"), "does not verify")
             smuggled = json.loads(slices["priv-repo"])
             smuggled["assets"].append({"name": "x.tgz", "kind": "conan-transport", "destination": "pub-repo",
-                                       "object": "a" * 64})
+                                       "object": "a" * 64, "record": "b" * 64, "verdicts": []})
             smuggled_path = root / "smuggled.json"
             smuggled_path.write_bytes(canonical(smuggled))
             smuggled_signature = sign(smuggled_path, keys / "writer")
@@ -732,7 +1083,7 @@ def selftest() -> int:
                 "a transport of priv-repo aimed at pub-repo's Release")
             stray = json.loads(slices["pub-repo"])
             stray["assets"].append({"name": "y", "kind": "entry", "destination": "priv-repo", "object": "a" * 64,
-                                    "entry_digest": "a" * 64})
+                                    "entry_digest": "a" * 64, "record": "b" * 64, "verdicts": []})
             stray_path = root / "stray.json"
             stray_path.write_bytes(canonical(stray))
             stray_signature = sign(stray_path, keys / "writer")
@@ -760,14 +1111,32 @@ def selftest() -> int:
             kept = json.loads(next(path.read_text() for path in (store_s / "records").glob("*.json")
                                    if json.loads(path.read_text())["inputs"]["step"]["kind"] == "manifest"))
             if kept["outputs"]["manifest"] != sealed or sorted(sealed["slices"]) != ["priv-repo", "pub-repo"] or \
-                    (store_s / "objects" / sealed["record"]).read_bytes() != record_s:
-                failures.append(f"the seal's record does not keep the record, manifest and slices: {kept}")
+                    (store_s / "objects" / sealed["record"]).read_bytes() != record_s or \
+                    sorted(sealed["destinations"]) != ["priv-repo.pub-repo"] or not all(
+                        (store_s / "objects" / held).is_file() for held in sealed["destinations"]["priv-repo.pub-repo"].values()):
+                failures.append(f"the seal's record does not keep the record, manifest, slices and destination "
+                                f"slices: {kept}")
+            sealed_owner = json.loads((root / "seal-1" / "slices" / "priv-repo.json").read_bytes())
+            if sealed_owner["destinations"]["pub-repo"]["slice"] != sealed["destinations"]["priv-repo.pub-repo"]["object"] \
+                    or sealed_owner["destinations"]["pub-repo"]["signature"] != \
+                    sealed["destinations"]["priv-repo.pub-repo"]["signature"]:
+                failures.append("the sealed owner slice does not bind the destination slice the seal signed and kept")
+            arm("the sealed destination slice verifies against the sealed owner slice",
+                lambda: verify_destination((root / "seal-1" / "destinations" / "priv-repo.pub-repo.json").read_bytes(),
+                                           root / "seal-1" / "destinations" / "priv-repo.pub-repo.json.sig",
+                                           allowed, sealed_owner, "pub-repo"), None)
             for repo in ("priv-repo", "pub-repo"):
                 arm(f"the sealed {repo} slice verifies under the writer key",
                     lambda repo=repo: verify((root / "seal-1" / "slices" / f"{repo}.json").read_bytes(),
                                              root / "seal-1" / "slices" / f"{repo}.json.sig", allowed, repo), None)
         arm("sealing the same record again keeps the same seal, never a second one",
             lambda: seal(store_s, record_s, plan_s, keys / "writer", root / "seal-2"), None)
+        store_t, record_t, plan_t, _ = _fixture(root / "t")
+        arm("RED: a seal that would push to a destination-only package is refused, nothing written",
+            lambda: seal(store_t, record_t, edited(plan_t, lambda p: p["repositories"].__setitem__(
+                "pub-repo", {"assets": []})), keys / "writer", root / "seal-3"), "is a destination only")
+        if (root / "seal-3" / "slices" / "pub-repo.json").exists():
+            failures.append("a refused seal wrote a slice for a destination-only repository")
         arm("a seal over an output directory that exists is refused",
             lambda: seal(store_s, record_s, plan_s, keys / "writer", root / "seal-1"), "exists")
 
@@ -795,20 +1164,25 @@ def main(argv: list[str]) -> int:
         if argv == ["selftest"]:
             return selftest()
         if len(argv) == 5 and argv[0] == "build":
-            manifest, slices = build(Path(argv[1]), Path(argv[2]).read_bytes(),
-                                     json.loads(Path(argv[3]).read_text()))
+            manifest, slices, destination_slices = build(Path(argv[1]), Path(argv[2]).read_bytes(),
+                                                         json.loads(Path(argv[3]).read_text()))
             out = Path(argv[4])
             (out / "slices").mkdir(parents=True, exist_ok=True)
+            (out / "destinations").mkdir(exist_ok=True)
             (out / "manifest.json").write_bytes(manifest)
             for repo, body in slices.items():
                 (out / "slices" / f"{repo}.json").write_bytes(body)
-            print(f"store_manifest: manifest {sha256_bytes(manifest)}, {len(slices)} slice(s) in {out}")
+            for (repo, destination), (body, _unsigned) in destination_slices.items():
+                (out / "destinations" / f"{repo}.{destination}.json").write_bytes(body)
+            print(f"store_manifest: manifest {sha256_bytes(manifest)}, {len(slices)} slice(s) and "
+                  f"{len(destination_slices)} destination slice(s) in {out}, unsigned")
             return 0
         if len(argv) == 6 and argv[0] == "seal":
             summary = seal(Path(argv[1]), Path(argv[2]).read_bytes(), json.loads(Path(argv[3]).read_text()),
                            Path(argv[4]), Path(argv[5]))
             print(f"store_manifest: SEALED record {summary['record']} manifest {summary['manifest']['object']} "
-                  + " ".join(f"{repo}={held['object']}" for repo, held in sorted(summary["slices"].items())))
+                  + " ".join(f"{repo}={held['object']}" for repo, held in sorted(summary["slices"].items()))
+                  + "".join(f" {pair}={held['object']}" for pair, held in sorted(summary["destinations"].items())))
             return 0
         if len(argv) == 3 and argv[0] == "signer":
             print(f"store_manifest: SIGNER {signer(Path(argv[1]), Path(argv[2]))}")

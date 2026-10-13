@@ -12,10 +12,21 @@ proved the tagged commit is the one the step-0 record judged, and hands it that 
 3. each object it lists is fetched by its content digest and verified;
 4. a `conan-transport` asset is staged as is, an `entry` asset (the entry's own bytes, its object
    named by its entry digest, store_manifest.verify) with its `.sha256` file written FROM that
-   digest; an `oci-image` asset is never a Release file: `image` publishes it; a row whose
-   DESTINATION is another repository's Release (DN-142.D25 (2)) is never staged on this one;
+   digest, an `object` asset as is and with no sidecar (the signed slice is its evidence); an
+   `oci-image` asset is never a Release file: `image` publishes it; a row whose DESTINATION is
+   another repository's Release (DN-142.D25 (2)) is never staged on this one;
 5. the slice and its signature are staged beside them, so the Release carries its own evidence;
 6. after the upload, the Release's asset names must equal the staged files, both ways (check-release).
+`stage-destinations` is the same act for every FOREIGN Release the slice binds (DN-142.D25 (2)):
+the destination slice and its signature are fetched by the digests the verified owner slice names,
+verified (store_manifest.verify_destination: the writer's signature, the owner slice's record,
+manifest, version and tag, its rows the projection of the owner's rows for that destination), each
+object fetched and verified, and the files staged under `<out dir>/<destination>/` with the
+destination slice and its signature; `<out dir>/destinations.tsv` lists `<destination> <tag>
+<visibility>` for the workflow, which mints and reads back the annotated tag, creates the Release
+`--verify-tag --latest=false` and attaches them with the DESTINATION credential only, then reads the
+Release back (check-destination: its assets equal the staged files both ways, and it is not
+`Latest`) and the destination's visibility (equal to the one step 0 read).
 `image` (`coderoast-publish-image.yml`, N360 plan C1) reads the same verified slice, fetches the
 image's OCI archive by its object digest, judges it (store_image.judge_archive: one linux/amd64
 image whose manifest digest is the slice's), pushes every blob and the manifest verbatim to
@@ -30,6 +41,11 @@ or packs.
     store_publish.py check-release <out dir> <release.json>
         the reading after the publish (DN-142.D24 (3)): the Release's asset names, from
         `gh release view --json assets`, equal the staged files, both ways
+    store_publish.py stage-destinations <repository> <visibility> <step-0 record digest> <allowed signers> <out dir>
+        Token: GITHUB_TOKEN (the OWNER's, `packages: read`): every destination Release the owner
+        slice binds, staged and listed in <out dir>/destinations.tsv
+    store_publish.py check-destination <out dir>/<destination> <release.json> <releases.json> <tag>
+        check-release, and `gh release list --json tagName,isLatest` lists <tag> once, not Latest
     store_publish.py image <repository> <visibility> <step-0 record digest> <allowed signers> <image> <tag>
         Token: GITHUB_TOKEN (`packages: write` on the image's package, which the repository's own
         store package grants it Read beside); prints the pushed `ghcr.io/coderoasted/<image>@sha256:…`
@@ -105,6 +121,19 @@ def fetched(registry: store_replica.Registry, asset: dict, work: Path) -> Path:
     return path
 
 
+def placed(registry: store_replica.Registry, asset: dict, work: Path, out: Path) -> list[str]:
+    """One Release row's files written into `out` from its verified object: a transport and an
+    object as they are, an entry executable with its `.sha256` written FROM its digest."""
+    name = asset["name"]
+    data = fetched(registry, asset, work).read_bytes()
+    (out / name).write_bytes(data)
+    if asset["kind"] != "entry":
+        return [name]
+    (out / name).chmod(0o755)
+    (out / f"{name}.sha256").write_text(f"{asset['object']}  {name}\n")
+    return [name, f"{name}.sha256"]
+
+
 def stage(registry: store_replica.Registry, repository: str, visibility: str, record_hex: str,
           allowed: Path, out: Path, say: Callable[[str], None]) -> list[str]:
     """Stage every Release asset of this repository's slice into `out`; the staged file names."""
@@ -125,21 +154,53 @@ def stage(registry: store_replica.Registry, repository: str, visibility: str, re
                 continue
             if (out / name).exists() or name in staged:
                 raise Refused(f"{name} is staged twice")
-            object_path = fetched(registry, asset, work)
-            if asset["kind"] == "conan-transport":
-                (out / name).write_bytes(object_path.read_bytes())
-                staged.append(name)
-            else:
-                (out / name).write_bytes(object_path.read_bytes())
-                (out / name).chmod(0o755)
-                (out / f"{name}.sha256").write_text(f"{asset['entry_digest']}  {name}\n")
-                staged += [name, f"{name}.sha256"]
+            staged += placed(registry, asset, work, out)
             say(f"store_publish: STAGED {name} ({asset['kind']}, object {asset['object']})")
         evidence = f"{repository}-{body.get('version')}.slice.json"
         (out / evidence).write_bytes(slice_bytes)
         (out / f"{evidence}.sig").write_bytes(signature)
         staged += [evidence, f"{evidence}.sig"]
     return staged
+
+
+def stage_destinations(registry: store_replica.Registry, repository: str, visibility: str, record_hex: str,
+                       allowed: Path, out: Path, say: Callable[[str], None]) -> list[tuple[str, str, str, list[str]]]:
+    """Stage every FOREIGN Release the owner slice binds under `out/<destination>/`, read from the
+    OWNER's store package (DN-142.D25 (2)); (destination, tag, visibility, staged files) each."""
+    body, _assets, _slice, _signature = verified_slice(registry, repository, visibility, record_hex, allowed)
+    out.mkdir(parents=True, exist_ok=True)
+    done = []
+    with tempfile.TemporaryDirectory() as scratch:
+        work = Path(scratch)
+        for destination, binding in sorted((body.get("destinations") or {}).items()):
+            held = {}
+            for field in ("slice", "signature"):
+                held[field] = work / f"{destination}.{field}"
+                try:
+                    registry.get_layer(binding[field], held[field])
+                except store_replica.Refused as refused:
+                    raise Refused(f"the destination slice of {destination}: {refused}") from refused
+            try:
+                rows = store_manifest.verify_destination(held["slice"].read_bytes(), held["signature"], allowed,
+                                                         body, destination)
+            except store_manifest.Refused as refused:
+                raise Refused(f"{destination}: {refused}") from refused
+            target = out / destination
+            target.mkdir()
+            staged: list[str] = []
+            for row in rows:
+                if row["name"] in staged:
+                    raise Refused(f"{destination}: {row['name']} is staged twice")
+                staged += placed(registry, row, work, target)
+                say(f"store_publish: STAGED {destination}/{row['name']} ({row['kind']}, object {row['object']})")
+            evidence = f"{destination}-{binding['tag']}.slice.json"
+            (target / evidence).write_bytes(held["slice"].read_bytes())
+            (target / f"{evidence}.sig").write_bytes(held["signature"].read_bytes())
+            staged += [evidence, f"{evidence}.sig"]
+            done.append((destination, binding["tag"], binding["visibility"], staged))
+    (out / "destinations.tsv").write_text("".join(f"{destination}\t{tag}\t{seen}\n"
+                                                  for destination, tag, seen, _staged in done))
+    return done
 
 
 def publish_image(registry: store_replica.Registry, target: store_replica.Registry, repository: str,
@@ -217,6 +278,17 @@ def check_release(out: Path, release: dict) -> None:
                       f"{sorted(attached - staged)}, staged and not attached {sorted(staged - attached)}")
 
 
+def check_destination(out: Path, release: dict, releases: list[dict], tag: str) -> None:
+    """The destination Release holds exactly its staged files, and it never wears the Latest badge:
+    a foreign Release is an asset host, and its repository's own line owns the badge. `releases` is
+    `gh release list --json tagName,isLatest` (`gh release view` carries no isLatest)."""
+    check_release(out, release)
+    listed = [row.get("isLatest") for row in releases if row.get("tagName") == tag]
+    if listed != [False]:
+        raise Refused(f"the destination Release {tag} is listed with isLatest {listed}, not once and False: a "
+                      f"foreign Release is created --latest=false and never claims its repository's badge")
+
+
 def selftest() -> int:
     failures: list[str] = []
     armed = [0]
@@ -252,13 +324,6 @@ def selftest() -> int:
         rewritten = json.loads(image_record.read_text())
         rewritten["outputs"]["image"].update(archive=archive_digest, manifest=image_manifest)
         image_record.write_text(json.dumps(rewritten))
-        manifest, slices = store_manifest.build(store, record, plan)
-        owned = json.loads(json.dumps(plan))
-        owned["repositories"]["priv-repo"].pop("destinations")
-        next(row for row in owned["repositories"]["priv-repo"]["assets"]
-             if row["name"] == "tool-linux-x64")["destination"] = "priv-repo"
-        _owned_manifest, owned_slices = store_manifest.build(store, record, owned)
-        record_hex = hashlib.sha256(record).hexdigest()
         keys = root / "keys"
         keys.mkdir()
         for name in ("writer", "other"):
@@ -267,6 +332,23 @@ def selftest() -> int:
         allowed = keys / "allowed_signers"
         allowed.write_text(f'{store_manifest.WRITER_IDENTITY} namespaces="{store_manifest.NAMESPACE}" '
                            f"{(keys / 'writer.pub').read_text().strip()}\n")
+
+        def destination_signed(label: str, body: bytes) -> bytes:
+            """The seal's act on a destination slice: signed by the writer, both kept as objects."""
+            path = root / f"destination-{label}.json"
+            path.write_bytes(body)
+            signature = store_manifest.sign(path, keys / "writer").read_bytes()
+            for held in (body, signature):
+                store_manifest.hold(store, hashlib.sha256(held).hexdigest(), held)
+            return signature
+
+        manifest, slices, destination_slices = store_manifest.build(store, record, plan, destination_signed)
+        owned = json.loads(json.dumps(plan))
+        owned["repositories"]["priv-repo"].pop("destinations")
+        for row in owned["repositories"]["priv-repo"]["assets"]:
+            row["destination"] = "priv-repo"
+        _owned_manifest, owned_slices, _none = store_manifest.build(store, record, owned)
+        record_hex = hashlib.sha256(record).hexdigest()
 
         signings = [0]
 
@@ -285,7 +367,10 @@ def selftest() -> int:
             servers.append(server)
             registry = store_replica.Registry(base, "coderoasted/store-pub-repo", ("user", "token"))
             view = store_replica.github_guard(base, "coderoasted", "api-token")
-            objects = sorted({asset["object"] for asset in json.loads(slice_bytes)["assets"]})
+            body = json.loads(slice_bytes)
+            objects = sorted({asset["object"] for asset in body["assets"]} |
+                             {binding[field] for binding in (body.get("destinations") or {}).values()
+                              for field in ("slice", "signature")})
             store_replica.replicate(store, registry, view, "coderoasted", "store-pub-repo", objects, quiet)
             store_replica.replicate_slice(registry, view, "coderoasted", "store-pub-repo", record_tag,
                                           slice_bytes, signature, quiet)
@@ -306,14 +391,17 @@ def selftest() -> int:
             staged_owned = arm("an entry destined to its owner's own Release is staged with its .sha256",
                                lambda: stage(owned_registry, "priv-repo", "private", record_hex, allowed,
                                              owned_out, quiet), None)
-            want_owned = ["priv_tools-9.9.9.tgz", "tool-linux-x64", "tool-linux-x64.sha256",
-                          "priv-repo-9.9.9.slice.json", "priv-repo-9.9.9.slice.json.sig"]
+            want_owned = ["bench.json", "priv_tools-9.9.9.tgz", "sbom.json", "tool-linux-x64", "tool-linux-x64.sha256",
+                          "win.exe", "priv-repo-9.9.9.slice.json", "priv-repo-9.9.9.slice.json.sig"]
             if staged_owned != want_owned:
                 failures.append(f"staged {staged_owned}, want {want_owned}")
             elif (owned_out / "tool-linux-x64").read_bytes() != b"\x7fELF tool bytes" or \
                     not (owned_out / "tool-linux-x64.sha256").read_text().startswith(
                         hashlib.sha256(b"\x7fELF tool bytes").hexdigest()):
                 failures.append("the staged entry or its .sha256 differs from the slice")
+            elif (owned_out / "win.exe").read_bytes() != b"MZ windows bytes" or \
+                    (owned_out / "sbom.json").read_bytes() != b'{"bom": 1}\n':
+                failures.append("a staged object's bytes differ from the store's")
             twice = root / "signed-twice"
             twice.write_bytes(pub)
             store_manifest.sign(twice, keys / "writer")
@@ -349,11 +437,44 @@ def selftest() -> int:
                                  "the owner's Release",
                                  lambda: stage(registry, "priv-repo", "private", record_hex, allowed, root / "o9",
                                                said.append), None)
-            if staged_private != ["priv_tools-9.9.9.tgz", "priv-repo-9.9.9.slice.json",
-                                  "priv-repo-9.9.9.slice.json.sig"] or not any(
-                    line.startswith("store_publish: FOREIGN tool-linux-x64 belongs on pub-repo's engine-v9.9.9")
-                    for line in said):
+            if staged_private != ["bench.json", "priv_tools-9.9.9.tgz", "sbom.json", "priv-repo-9.9.9.slice.json",
+                                  "priv-repo-9.9.9.slice.json.sig"] or not all(any(
+                    line.startswith(f"store_publish: FOREIGN {name} belongs on pub-repo's engine-v9.9.9")
+                    for line in said) for name in ("tool-linux-x64", "win.exe")):
                 failures.append(f"the owner staged {staged_private}, saying {said}")
+            elsewhere = root / "destinations"
+            placed_rows = arm("the owner stages each destination Release it binds from its OWN store package: the "
+                              "projected rows, verified, with the destination slice and its signature",
+                              lambda: stage_destinations(registry, "priv-repo", "private", record_hex, allowed,
+                                                         elsewhere, quiet), None)
+            want_destination = ["tool-linux-x64", "tool-linux-x64.sha256", "win.exe",
+                                "pub-repo-engine-v9.9.9.slice.json", "pub-repo-engine-v9.9.9.slice.json.sig"]
+            if placed_rows != [("pub-repo", "engine-v9.9.9", "public", want_destination)] or \
+                    (elsewhere / "destinations.tsv").read_text() != "pub-repo\tengine-v9.9.9\tpublic\n" or \
+                    (elsewhere / "pub-repo" / "pub-repo-engine-v9.9.9.slice.json").read_bytes() != \
+                    destination_slices[("priv-repo", "pub-repo")][0]:
+                failures.append(f"the destination staging is {placed_rows}")
+            else:
+                listed = {"assets": [{"name": name} for name in want_destination]}
+                releases = [{"tagName": "v2.0.0", "isLatest": True}, {"tagName": "engine-v9.9.9", "isLatest": False}]
+                arm("the destination Release read back equals its slice and is not Latest",
+                    lambda: check_destination(elsewhere / "pub-repo", listed, releases, "engine-v9.9.9"), None)
+                arm("RED: one extra asset on the destination Release reds its after-reading",
+                    lambda: check_destination(elsewhere / "pub-repo", {"assets": listed["assets"] + [
+                        {"name": "sift-extra"}]}, releases, "engine-v9.9.9"), "attached and never staged ['sift-extra']")
+                arm("RED: a destination Release wearing the Latest badge reds its after-reading",
+                    lambda: check_destination(elsewhere / "pub-repo", listed,
+                                              [{"tagName": "engine-v9.9.9", "isLatest": True}], "engine-v9.9.9"),
+                    "never claims its repository's badge")
+            corrupt, corrupt_registry = registry_with(private, signed(private, "writer"))
+            bound = json.loads(private)["destinations"]["pub-repo"]["slice"]
+            corrupt.blobs[f"sha256:{bound}"] = corrupt.blobs[f"sha256:{bound}"].replace(b"tool-linux-x64", b"tool-linux-x65")
+            arm("RED: a destination slice whose served bytes differ from the digest the owner slice binds is "
+                "refused before anything is staged",
+                lambda: stage_destinations(corrupt_registry, "priv-repo", "private", record_hex, allowed,
+                                           root / "corrupt", quiet), "the destination slice of pub-repo")
+            if (root / "corrupt" / "pub-repo").exists():
+                failures.append("a refused destination staging left a directory behind")
             target_fake = store_replica.Fake()
             target_server, target_base = store_replica._fake_server(target_fake)
             servers.append(target_server)
@@ -445,6 +566,11 @@ def main(argv: list[str]) -> int:
             check_release(Path(argv[1]), json.loads(Path(argv[2]).read_text()))
             print(f"store_publish: the Release equals the slice ({argv[1]})")
             return 0
+        if len(argv) == 5 and argv[0] == "check-destination":
+            check_destination(Path(argv[1]), json.loads(Path(argv[2]).read_text()),
+                              json.loads(Path(argv[3]).read_text()), argv[4])
+            print(f"store_publish: the destination Release equals its slice and is not Latest ({argv[1]})")
+            return 0
         if len(argv) == 7 and argv[0] == "deployment":
             found = deployment(Path(argv[1]).read_bytes(), Path(argv[2]), Path(argv[3]), argv[4], argv[5], argv[6])
             print(f"image {found['manifest'].removeprefix('sha256:')}")
@@ -463,15 +589,20 @@ def main(argv: list[str]) -> int:
             manifest = publish_image(registry, target, argv[1], argv[2], argv[3], Path(argv[4]), argv[5], argv[6], print)
             print(f"store_publish: PUBLISHED ghcr.io/{store_replica.ORG}/{argv[5]}@{manifest}")
             return 0
-        if len(argv) == 6 and argv[0] == "stage":
+        if len(argv) == 6 and argv[0] in ("stage", "stage-destinations"):
             token = os.environ.get("GITHUB_TOKEN", "")
             if not token:
                 raise Refused("GITHUB_TOKEN is unset: a publish job reads its repository's own store package")
             package = store_replica.package_of(argv[1])
             registry = store_replica.Registry(store_replica.REGISTRY, f"{store_replica.ORG}/{package}",
                                               (os.environ.get("GITHUB_ACTOR", "x-access-token"), token))
-            for name in stage(registry, argv[1], argv[2], argv[3], Path(argv[4]), Path(argv[5]), print):
-                print(f"store_publish: ASSET {name}")
+            if argv[0] == "stage":
+                for name in stage(registry, argv[1], argv[2], argv[3], Path(argv[4]), Path(argv[5]), print):
+                    print(f"store_publish: ASSET {name}")
+                return 0
+            for destination, tag, seen, names in stage_destinations(registry, argv[1], argv[2], argv[3],
+                                                                     Path(argv[4]), Path(argv[5]), print):
+                print(f"store_publish: DESTINATION {destination} {tag} ({seen}): {' '.join(names)}")
             return 0
     except (Refused, store_replica.Refused) as refused:
         print(f"store_publish: REFUSED — {refused}", file=sys.stderr)

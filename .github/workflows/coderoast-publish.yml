@@ -17,6 +17,19 @@ name: CodeRoast publish
 #   verify stages nothing, and the Release is not created. An image the slice lists is no Release
 #   file: `coderoast-publish-image.yml` pushes it.
 #
+# A ROW DESTINED TO A FOREIGN RELEASE (DN-142.D25 (2)) is published by its OWNER's job, from the
+# owner's store package: `stage-destinations` fetches the destination slice and its signature by the
+# digests the verified owner slice binds, verifies them (the writer's signature; the owner slice's
+# record, manifest, version and tag; its rows the projection of the owner's rows), fetches every
+# object, and stages them. The publication into the destination runs with the DESTINATION credential
+# only (`destination-token`, `contents: write` on that one repository; the job's own token never
+# writes there and the destination token never reads the store): mint the annotated tag at the
+# destination's default head if missing and read it back as an annotated object (ADR-2.D1), create
+# the Release `--verify-tag --latest=false`, attach, then read it back — its assets equal the
+# destination slice's files both ways, it is not Latest, and the destination's visibility is the one
+# step 0 read (two producers of one fact). An owner slice binding no destination skips this, by its
+# own content, never by a flag.
+#
 # NOTHING HERE CHECKS OUT THE CALLER'S SOURCE, PROVISIONS A TOOLCHAIN, COMPILES, TESTS OR PACKS:
 # stage-malf copies this revision's own tree (the tools and the writer's public key), and the only
 # other commands are the publication itself. `--verify-tag` keeps the Release command from ever
@@ -34,6 +47,10 @@ on:
         description: 'The digest of the step-0 record the caller''s attest job attested (its `record-sha256` output).'
         type: string
         required: true
+    secrets:
+      destination-token:
+        description: 'The OWNER repository''s secret with `contents: write` on the one foreign repository its slice binds (DN-142.D25 (2)); required exactly when the slice binds a destination.'
+        required: false
 
 jobs:
   publish:
@@ -81,3 +98,51 @@ jobs:
           set -euo pipefail
           gh release view "$TAG" --json assets > "$RUNNER_TEMP/release.json"
           python3 .malf/store_publish.py check-release "$RUNNER_TEMP/assets" "$RUNNER_TEMP/release.json"
+
+      - name: Fetch, verify and stage every destination Release the slice binds (GATING)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RECORD: ${{ inputs.record-sha256 }}
+          VISIBILITY: ${{ github.event.repository.visibility }}
+        run: |
+          set -euo pipefail
+          python3 .malf/store_publish.py stage-destinations "${GITHUB_REPOSITORY#*/}" "$VISIBILITY" "$RECORD" \
+            .malf/keys/store-writer.allowed_signers "$RUNNER_TEMP/destinations"
+
+      - name: Publish each destination Release with the destination credential, then read it back (GATING)
+        env:
+          GH_TOKEN: ${{ secrets.destination-token }}
+          OWNER: ${{ github.repository }}
+          RECORD: ${{ inputs.record-sha256 }}
+        run: |
+          set -euo pipefail
+          listed="$RUNNER_TEMP/destinations/destinations.tsv"
+          if [ ! -s "$listed" ]; then
+            echo "the slice binds no destination Release"
+            exit 0
+          fi
+          [ -n "$GH_TOKEN" ] || { echo "::error::the slice binds a destination Release and the caller passed no destination-token"; exit 1; }
+          while IFS=$'\t' read -r destination tag visibility; do
+            repo="CodeRoasted/$destination"
+            seen="$(gh api "repos/$repo" --jq .visibility)"
+            [ "$seen" = "$visibility" ] || { echo "::error::$repo is $seen now, and step 0 read it $visibility"; exit 1; }
+            if ! gh api "repos/$repo/git/ref/tags/$tag" >/dev/null 2>&1; then
+              default="$(gh api "repos/$repo" --jq .default_branch)"
+              head="$(gh api "repos/$repo/commits/$default" --jq .sha)"
+              object="$(gh api "repos/$repo/git/tags" -f tag="$tag" -f type=commit -f object="$head" \
+                          -f message="Assets of $OWNER, published from the CodeRoast store by digest (step-0 record sha256 $RECORD)." \
+                          --jq .sha)"
+              gh api "repos/$repo/git/refs" -f ref="refs/tags/$tag" -f sha="$object" >/dev/null
+            fi
+            if ! kind="$(gh api "repos/$repo/git/ref/tags/$tag" --jq .object.type 2>/dev/null)"; then
+              kind=MISSING
+            fi
+            [ "$kind" = "tag" ] || { echo "::error::refs/tags/$tag on $repo is '$kind', not an annotated tag (ADR-2.D1)"; exit 1; }
+            gh release create "$tag" --repo "$repo" --verify-tag --latest=false --title "$tag" \
+              --notes "Assets of $OWNER, published from the CodeRoast store by digest: the bytes step 0 judged in the run whose record has sha256 $RECORD. The attached destination slice and its signature list every asset's digest." \
+              "$RUNNER_TEMP/destinations/$destination"/*
+            gh release view "$tag" --repo "$repo" --json assets > "$RUNNER_TEMP/destination-release.json"
+            gh release list --repo "$repo" --limit 1000 --json tagName,isLatest > "$RUNNER_TEMP/destination-releases.json"
+            python3 .malf/store_publish.py check-destination "$RUNNER_TEMP/destinations/$destination" \
+              "$RUNNER_TEMP/destination-release.json" "$RUNNER_TEMP/destination-releases.json" "$tag"
+          done < "$listed"
