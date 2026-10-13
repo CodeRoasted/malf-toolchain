@@ -10,14 +10,20 @@ repository's assets}`, signed by the writer (DN-142.D8, `ssh-keygen -Y sign`, na
 `coderoast-store`), so a public Release never carries the private inventory. DN-142.D22 (3): the
 manifest and the `executables:` declarations agree in both directions — every executable an asset
 or an image carries is classified `published`, and every `published` executable of the run is
-carried by an asset or an image. N360 plan F9: a conan transport carries its recipe's SOURCES, so a
-transport whose source repository is private never reaches a public repository.
+carried by an asset or an image.
+
+A ROW BELONGS TO THE SLICE OF THE REPOSITORY THAT DECLARES IT, ITS OWNER (DN-142.D25 (2)): the
+repository whose tag runs the publish job and whose store package holds the bytes. Where the row is
+published is its DESTINATION, a field of the row: the owner's own Release, or a FOREIGN Release
+the owner's plan entry declares under `destinations` with its tag. The structural refusals, here
+and again in the deriver: a `conan-transport` row never has a foreign destination (N360 plan F9: a
+transport carries its recipe's SOURCES, so it reaches only its own repository's Release, whose
+visibility is its own); one (destination, name) pair has one row; one destination Release
+(destination, tag) has one owner, the owner's own Release being `v<version>`.
 
 AN ENTRY ASSET'S OBJECT IS THE ENTRY'S OWN BYTES, NEVER ITS PACKAGE'S TRANSPORT. The builder writes
-the one member into the store under its entry digest, verified, and the slice names that object.
-The transport would carry the package's sources into the destination repository's store package,
-which that repository's token reads: a public repository's slice would have handed a private
-package's sources to every job of it.
+the one member into the store under its entry digest, verified, and the slice names that object:
+a public destination receives the executable, never the private package's sources around it.
 
 AN IMAGE IS AN ASSET OF THE REPOSITORY THAT DECLARES IT (DN-142.D9; N360 plan C1): the plan names
 each image with its executables, and step 0's image step (`store_image.py`) stores the image as
@@ -27,13 +33,17 @@ digests, and counts each of them as carried.
 
 THE PLAN is the builder's declared input: which repository publishes what, under which name.
 
-    {"format": "coderoast.store.plan/2",
-     "repositories": {<repo>: {"visibility": "public" | "private",
-                               "assets": [{"name", "kind": "conan-transport", "package", "source"},
-                                          {"name", "kind": "entry", "package", "source", "entry",
-                                           "verdicts": [<output>...]}],
-                               "images": {<image>: {"dockerfile", "runtime": [<library>...],
-                                                    "executables": [{"package", "entry", "source"}]}}}}}
+    {"format": "coderoast.store.plan/3",
+     "visibility": {<repo>: "public" | "private", ... every owner and every destination},
+     "repositories": {<owner>: {"assets": [{"name", "kind": "conan-transport", "package", "destination"},
+                                           {"name", "kind": "entry", "package", "entry", "destination",
+                                            "verdicts": [<output>...]}],
+                                "destinations": {<foreign repo>: {"tag"}},
+                                "images": {<image>: {"dockerfile", "runtime": [<library>...],
+                                                     "executables": [{"package", "entry", "source"}]}}}}}
+
+An `object` row (DN-142.D25 (1)) is not a kind this builder admits yet: the deriver emits one only
+for a declared object, and no repository declares one before its producing step exists.
 
     store_manifest.py build <store> <step-0 record> <plan.json> <out dir>
         <out dir>/manifest.json and <out dir>/slices/<repo>.json, canonical bytes; exit 1 naming
@@ -50,7 +60,8 @@ THE PLAN is the builder's declared input: which repository publishes what, under
     store_manifest.py verify <slice> <signature> <allowed signers> <repository>
         exit 0 and one line per asset, `<kind> <name> <object> <entry> <entry digest>` ("-" when
         absent), only when the signature verifies for the writer identity, the slice names
-        <repository>, and a public slice carries no private-source transport
+        <repository>, every row names its destination, a foreign one declared by the slice, and no
+        transport has a foreign destination
     store_manifest.py extract <transport archive> <entry> <entry digest> <out file>
         the one package member `<entry>`, written only when exactly one matches and it hashes to
         <entry digest>
@@ -77,9 +88,9 @@ from typing import Callable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import artefact_store  # noqa: E402 — a sibling module, located from this file
 
-PLAN_FORMAT = "coderoast.store.plan/2"
-MANIFEST_FORMAT = "coderoast.store.manifest/2"
-SLICE_FORMAT = "coderoast.store.slice/2"
+PLAN_FORMAT = "coderoast.store.plan/3"
+MANIFEST_FORMAT = "coderoast.store.manifest/3"
+SLICE_FORMAT = "coderoast.store.slice/3"
 NAMESPACE = "coderoast-store"
 WRITER_IDENTITY = "coderoast-store-writer"
 KINDS = ("conan-transport", "entry")
@@ -90,6 +101,7 @@ RUNTIME_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
 VISIBILITIES = ("public", "private")
 REPOSITORY_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 ASSET_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
+TAG_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 DIGEST_HEX = re.compile(r"^[0-9a-f]{64}$")
 CHUNK = 1 << 20
 
@@ -114,38 +126,65 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _plan_findings(plan: dict) -> list[str]:
+def own_tag(version: object) -> str:
+    """The tag an owner's own Release publishes under: the cut's."""
+    return f"v{version}"
+
+
+def _plan_findings(plan: dict, version: object) -> list[str]:
     found = []
     if plan.get("format") != PLAN_FORMAT:
         return [f"the plan's format is {plan.get('format')!r}, not {PLAN_FORMAT!r}"]
     repositories = plan.get("repositories")
     if not isinstance(repositories, dict) or not repositories:
         return ["the plan names no repository"]
-    names: set[str] = set()
+    visibility = plan.get("visibility")
+    if not isinstance(visibility, dict):
+        return ["the plan carries no top-level visibility map"]
+    for repo, seen in sorted(visibility.items()):
+        if not REPOSITORY_NAME.match(repo) or seen not in VISIBILITIES:
+            found.append(f"{repo!r}: visibility {seen!r} is not public or private")
+    named: dict[tuple[str, str], list[str]] = {}
+    claimed: dict[tuple[str, str], set[str]] = {}
     images: set[str] = set()
     for repo, body in sorted(repositories.items()):
         if not REPOSITORY_NAME.match(repo):
             found.append(f"{repo!r} is not a repository name")
-        if body.get("visibility") not in VISIBILITIES:
-            found.append(f"{repo}: visibility {body.get('visibility')!r} is not public or private")
+        if repo not in visibility:
+            found.append(f"{repo}: the plan states no visibility for it")
+        foreign = body.get("destinations") or {}
+        for destination, declared in sorted(foreign.items()):
+            if destination == repo or destination not in visibility or not isinstance(declared, dict) \
+                    or set(declared) != {"tag"} or not TAG_NAME.match(str(declared["tag"])):
+                found.append(f"{repo}: destination {destination!r} is not a foreign repository of the plan "
+                             f"with a {{tag}}: {declared!r}")
         for asset in body.get("assets", []):
             where = f"{repo}: asset {asset.get('name')!r}"
+            destination = asset.get("destination")
             if asset.get("kind") not in KINDS:
                 found.append(f"{where}: kind {asset.get('kind')!r} is not one of {', '.join(KINDS)}")
             if not ASSET_NAME.match(str(asset.get("name", ""))):
                 found.append(f"{where}: not an asset file name")
-            if (repo, asset.get("name")) in names:
-                found.append(f"{where}: named twice")
-            names.add((repo, asset.get("name")))
-            if asset.get("source") not in repositories:
-                found.append(f"{where}: its source repository {asset.get('source')!r} is not in the plan")
+            if "source" in asset:
+                found.append(f"{where}: a row's source is its owner, never a field of it (DN-142.D25 (2))")
+            if destination != repo and destination not in foreign:
+                found.append(f"{where}: its destination {destination!r} is neither {repo} nor a destination "
+                             f"{repo} declares")
+                continue
+            if asset.get("kind") == "conan-transport" and destination != repo:
+                found.append(f"{where}: a transport carries {repo}'s sources, so it is published on {repo}'s "
+                             f"own Release, never {destination}'s (N360 plan F9, DN-142.D25 (2))")
             if asset.get("kind") == "entry" and not asset.get("entry"):
                 found.append(f"{where}: an entry asset names no entry")
+            named.setdefault((destination, asset.get("name")), []).append(repo)
+            tag = own_tag(version) if destination == repo else foreign[destination]["tag"]
+            claimed.setdefault((destination, tag), set()).add(repo)
         for image, declared in sorted((body.get("images") or {}).items()):
             where = f"{repo}: image {image!r}"
-            if not ASSET_NAME.match(image) or image in images or (repo, image) in names:
+            if not ASSET_NAME.match(image) or image in images or (repo, image) in named:
                 found.append(f"{where}: not an image name, or named twice")
             images.add(image)
+            claimed.setdefault((repo, own_tag(version)), set()).add(repo)
             if not isinstance(declared.get("dockerfile"), str) or not declared["dockerfile"] \
                     or declared["dockerfile"].startswith("/") or ".." in declared["dockerfile"].split("/"):
                 found.append(f"{where}: its dockerfile {declared.get('dockerfile')!r} is not a path in its repository")
@@ -155,9 +194,17 @@ def _plan_findings(plan: dict) -> list[str]:
             if not carried:
                 found.append(f"{where}: it carries no executable")
             for executable in carried:
-                if set(executable) != {"package", "entry", "source"} or executable["source"] not in repositories:
+                if set(executable) != {"package", "entry", "source"} or executable["source"] not in visibility:
                     found.append(f"{where}: an executable is {{package, entry, source}} from a plan "
                                  f"repository, not {executable!r}")
+    for (destination, name), owners in sorted(named.items(), key=str):
+        if len(owners) > 1:
+            found.append(f"{destination}: asset {name!r} has {len(owners)} rows ({', '.join(owners)}): one "
+                         f"(destination, name) pair has one row")
+    for (destination, tag), owners in sorted(claimed.items()):
+        if len(owners) > 1:
+            found.append(f"the {destination} Release {tag} has {len(owners)} owners, {', '.join(sorted(owners))}: "
+                         f"one destination Release has one owner per cut (DN-142.D25 (2))")
     return found
 
 
@@ -184,10 +231,10 @@ def hold(store: Path, digest: str, data: bytes) -> None:
 def build(store: Path, record_bytes: bytes, plan: dict) -> tuple[bytes, dict[str, bytes]]:
     """(the whole manifest, {repo: slice}) as canonical bytes, or Refused naming every finding.
     Each entry asset's bytes are kept in the store under their entry digest on the way."""
-    findings = _plan_findings(plan)
+    record = json.loads(record_bytes)
+    findings = _plan_findings(plan, record.get("version"))
     if findings:
         raise Refused("; ".join(findings))
-    record = json.loads(record_bytes)
     if not (record.get("built") is True and record.get("cuttable") is True):
         raise Refused(f"the step-0 record is built={record.get('built')} cuttable={record.get('cuttable')}: "
                       f"a manifest is written only after a green step 0")
@@ -238,7 +285,7 @@ def build(store: Path, record_bytes: bytes, plan: dict) -> tuple[bytes, dict[str
                           f"{executables.get(member, 'nowhere')!r}, not 'published' (DN-142.D22 (3))")
         carried.add((package, member))
 
-    visibility = {repo: body["visibility"] for repo, body in plan["repositories"].items()}
+    visibility = plan["visibility"]
     carried: set[tuple[str, str]] = set()
     whole: dict[str, dict] = {}
     for repo, body in sorted(plan["repositories"].items()):
@@ -248,12 +295,9 @@ def build(store: Path, record_bytes: bytes, plan: dict) -> tuple[bytes, dict[str
             try:
                 output, executables = created(package)
                 row = {"name": asset["name"], "kind": asset["kind"], "package": package,
-                       "source": asset["source"], "record": steps[f"{package}/package"]["key"],
+                       "destination": asset["destination"], "record": steps[f"{package}/package"]["key"],
                        "object": output["transport"], "content": output["content"]}
                 if asset["kind"] == "conan-transport":
-                    if visibility[repo] == "public" and visibility[asset["source"]] == "private":
-                        raise Refused(f"{package}'s transport carries the sources of the PRIVATE "
-                                      f"{asset['source']}, and {repo} is public")
                     members = [path for path, mode, _digest in output["entries"] if mode == "executable"]
                 else:
                     held = {path: digest for path, _mode, digest in output["entries"]}
@@ -300,13 +344,14 @@ def build(store: Path, record_bytes: bytes, plan: dict) -> tuple[bytes, dict[str
                         or not IMAGE_MANIFEST.match(output.get("manifest", "")):
                     raise Refused(f"the store's archive {output['archive']} is absent, does not hash to its "
                                   f"name, or names no image manifest")
-                rows.append({"name": image, "kind": IMAGE_KIND, "source": repo,
+                rows.append({"name": image, "kind": IMAGE_KIND, "destination": repo,
                              "record": steps[f"{image}/{IMAGE_STEP}"]["key"],
                              "object": output["archive"], "manifest": output["manifest"],
                              "executables": carried_by_image})
             except Refused as refused:
                 findings.append(f"{repo}/{image}: {refused}")
-        whole[repo] = {"visibility": visibility[repo], "assets": sorted(rows, key=lambda row: row["name"])}
+        whole[repo] = {"visibility": visibility[repo], "assets": sorted(rows, key=lambda row: row["name"]),
+                       "destinations": dict(sorted((body.get("destinations") or {}).items()))}
     for step_id in sorted(steps):
         package, _slash, output = step_id.partition("/")
         if output != "package":
@@ -322,7 +367,8 @@ def build(store: Path, record_bytes: bytes, plan: dict) -> tuple[bytes, dict[str
                           "step0_record": sha256_bytes(record_bytes), "repositories": whole})
     slices = {repo: canonical({"format": SLICE_FORMAT, "repository": repo, "version": record.get("version"),
                                "visibility": body["visibility"], "step0_record": sha256_bytes(record_bytes),
-                               "manifest": sha256_bytes(manifest), "assets": body["assets"]})
+                               "manifest": sha256_bytes(manifest), "assets": body["assets"],
+                               "destinations": body["destinations"]})
               for repo, body in whole.items()}
     return manifest, slices
 
@@ -386,7 +432,7 @@ def seal(store: Path, record_bytes: bytes, plan: dict, key: Path, out: Path) -> 
 
 
 def verify(slice_bytes: bytes, signature: Path, allowed: Path, repository: str) -> list[dict]:
-    """The slice's assets, only once its signature, its repository and its F9 rule hold."""
+    """The slice's assets, only once its signature, its repository and its destinations hold."""
     done = subprocess.run(["ssh-keygen", "-Y", "verify", "-f", str(allowed), "-I", WRITER_IDENTITY,
                            "-n", NAMESPACE, "-s", str(signature)],
                           input=slice_bytes, capture_output=True, check=False)
@@ -409,10 +455,13 @@ def verify(slice_bytes: bytes, signature: Path, allowed: Path, repository: str) 
                           f"{asset['object']} is not its entry digest {asset.get('entry_digest')!r}")
         if asset.get("kind") == IMAGE_KIND and not IMAGE_MANIFEST.match(asset.get("manifest", "")):
             raise Refused(f"{asset.get('name')}: an image asset names no image manifest digest")
-        if (body.get("visibility") == "public" and asset.get("kind") == "conan-transport"
-                and asset.get("source") != repository):
-            raise Refused(f"{asset.get('name')}: a transport from {asset.get('source')} in the public "
-                          f"{repository}'s slice")
+        destination = asset.get("destination")
+        if destination != repository and destination not in (body.get("destinations") or {}):
+            raise Refused(f"{asset.get('name')}: its destination {destination!r} is neither {repository} nor a "
+                          f"destination its slice declares")
+        if asset.get("kind") == "conan-transport" and destination != repository:
+            raise Refused(f"{asset.get('name')}: a transport of {repository} aimed at {destination}'s Release "
+                          f"(N360 plan F9, DN-142.D25 (2))")
     return body.get("assets", [])
 
 
@@ -489,14 +538,16 @@ def _fixture(root: Path) -> tuple[Path, bytes, dict, dict[str, Path]]:
                    {"consumer": {"verdict": "pass", "findings": sha256_bytes(canonical([]))}})
     steps.append({"id": "priv_tools/consumer", "key": consumer, "verdict": "pass"})
     record = canonical({"version": "9.9.9", "built": True, "cuttable": True, "steps": steps})
-    plan = {"format": PLAN_FORMAT, "repositories": {
-        "pub-repo": {"visibility": "public", "assets": [
-            {"name": "pub_lib-9.9.9.tgz", "kind": "conan-transport", "package": "pub_lib", "source": "pub-repo"},
-            {"name": "tool-linux-x64", "kind": "entry", "package": "priv_tools", "source": "priv-repo",
-             "entry": "bin/tool", "verdicts": ["consumer"]}]},
-        "priv-repo": {"visibility": "private", "assets": [
+    plan = {"format": PLAN_FORMAT, "visibility": {"pub-repo": "public", "priv-repo": "private"}, "repositories": {
+        "pub-repo": {"assets": [
+            {"name": "pub_lib-9.9.9.tgz", "kind": "conan-transport", "package": "pub_lib",
+             "destination": "pub-repo"}]},
+        "priv-repo": {"assets": [
             {"name": "priv_tools-9.9.9.tgz", "kind": "conan-transport", "package": "priv_tools",
-             "source": "priv-repo"}],
+             "destination": "priv-repo"},
+            {"name": "tool-linux-x64", "kind": "entry", "package": "priv_tools", "entry": "bin/tool",
+             "destination": "pub-repo", "verdicts": ["consumer"]}],
+            "destinations": {"pub-repo": {"tag": "engine-v9.9.9"}},
             "images": {"srv-image": {"dockerfile": "docker/Dockerfile", "runtime": ["libstdc++.so.6"],
                                      "executables": [{"package": "priv_server", "entry": "bin/server",
                                                       "source": "priv-repo"}]}}}}}
@@ -542,17 +593,19 @@ def selftest() -> int:
             pub = json.loads(slices["pub-repo"])
             if sorted(slices) != ["priv-repo", "pub-repo"] or pub["manifest"] != sha256_bytes(manifest):
                 failures.append("the slices do not name the whole manifest's digest, or a repository is missing")
-            if any("priv_tools-9.9.9.tgz" == asset["name"] for asset in pub["assets"]):
-                failures.append("the public slice carries the private repository's asset")
-            if b"priv_cache" in slices["pub-repo"]:
+            priv = json.loads(slices["priv-repo"])
+            if [asset["name"] for asset in pub["assets"]] != ["pub_lib-9.9.9.tgz"] or pub["destinations"]:
+                failures.append(f"the public slice carries a row another repository declares: {pub['assets']}")
+            if b"priv_cache" in slices["pub-repo"] or b"priv_tools" in slices["pub-repo"]:
                 failures.append("the public slice names a package it does not publish")
-            tool_row = next((asset for asset in pub["assets"] if asset["name"] == "tool-linux-x64"), {})
+            tool_row = next((asset for asset in priv["assets"] if asset["name"] == "tool-linux-x64"), {})
             tool_digest = sha256_bytes(b"\x7fELF tool bytes")
-            if tool_row.get("object") != tool_digest or \
-                    (store / "objects" / tool_digest).read_bytes() != b"\x7fELF tool bytes" or \
-                    transports["priv_tools"].name.encode() in slices["pub-repo"]:
-                failures.append(f"the public entry asset does not name the entry's own bytes, or names the "
-                                f"private transport: {tool_row}")
+            if tool_row.get("object") != tool_digest or tool_row.get("destination") != "pub-repo" or \
+                    priv["destinations"] != {"pub-repo": {"tag": "engine-v9.9.9"}} or \
+                    (store / "objects" / tool_digest).read_bytes() != b"\x7fELF tool bytes":
+                failures.append(f"the entry row is not its OWNER's, destined to pub-repo by the slice's "
+                                f"destinations, naming the entry's own bytes (DN-142.D25 (2)): {tool_row}, "
+                                f"{priv['destinations']}")
             image_row = next((asset for asset in json.loads(slices["priv-repo"])["assets"]
                               if asset["name"] == "srv-image"), {})
             if image_row.get("kind") != IMAGE_KIND or image_row.get("manifest") != "sha256:" + "d" * 64 or \
@@ -564,22 +617,37 @@ def selftest() -> int:
 
         arm("a step-0 record that is not cuttable writes no manifest",
             lambda: build(store, canonical({**json.loads(record), "cuttable": False}), plan), "cuttable=False")
-        arm("a private source's transport aimed at a public repository is refused (N360 plan F9)",
-            lambda: build(store, record, edited(plan, lambda p: p["repositories"]["pub-repo"]["assets"].append(
-                {"name": "priv_tools-9.9.9.tgz", "kind": "conan-transport", "package": "priv_tools",
-                 "source": "priv-repo"}))), "carries the sources of the PRIVATE")
+        arm("a transport aimed at a foreign destination is refused (N360 plan F9, DN-142.D25 (2))",
+            lambda: build(store, record, edited(plan, lambda p: p["repositories"]["priv-repo"]["assets"].append(
+                {"name": "x.tgz", "kind": "conan-transport", "package": "priv_tools",
+                 "destination": "pub-repo"}))), "a transport carries priv-repo's sources")
+        arm("a row aimed at a foreign destination its owner does not declare is refused",
+            lambda: build(store, record, edited(plan, lambda p: p["repositories"]["priv-repo"].pop("destinations"))),
+            "its destination 'pub-repo' is neither priv-repo nor a destination priv-repo declares")
+        arm("a row still carrying a `source` is refused: the owner is the source",
+            lambda: build(store, record, edited(plan, lambda p: p["repositories"]["pub-repo"]["assets"][0]
+                                                .__setitem__("source", "pub-repo"))), "never a field of it")
+        arm("one (destination, name) pair with two rows is refused",
+            lambda: build(store, record, edited(plan, lambda p: p["repositories"]["priv-repo"]["assets"].append(
+                {"name": "pub_lib-9.9.9.tgz", "kind": "entry", "package": "priv_tools", "entry": "bin/tool",
+                 "destination": "pub-repo"}))), "has 2 rows (priv-repo, pub-repo)")
+        arm("two owners on one destination Release are refused: a foreign tag that is the destination's own",
+            lambda: build(store, record, edited(plan, lambda p: p["repositories"]["priv-repo"]["destinations"]
+                                                ["pub-repo"].__setitem__("tag", "v9.9.9"))),
+            "the pub-repo Release v9.9.9 has 2 owners, priv-repo, pub-repo")
+        arm("a plan with no top-level visibility is refused",
+            lambda: build(store, record, edited(plan, lambda p: p.pop("visibility"))), "no top-level visibility")
         arm("an asset whose package step 0 never ran is refused",
             lambda: build(store, record, edited(plan, lambda p: p["repositories"]["priv-repo"]["assets"].append(
-                {"name": "ghost.tgz", "kind": "conan-transport", "package": "ghost", "source": "priv-repo"}))),
+                {"name": "ghost.tgz", "kind": "conan-transport", "package": "ghost", "destination": "priv-repo"}))),
             "step 0 ran no step ghost/package")
         arm("an entry classified run-from-cache cannot be published (DN-142.D22 (3), direction 1)",
             lambda: build(store, record, edited(plan, lambda p: p["repositories"]["priv-repo"]["assets"].append(
-                {"name": "det", "kind": "entry", "package": "priv_cache", "source": "priv-repo",
+                {"name": "det", "kind": "entry", "package": "priv_cache", "destination": "priv-repo",
                  "entry": "bin/det"}))), "not 'published'")
         arm("a published executable no asset carries is refused (DN-142.D22 (3), direction 2)",
-            lambda: build(store, record, edited(plan, lambda p: (
-                p["repositories"]["priv-repo"].__setitem__("assets", []),
-                p["repositories"]["pub-repo"]["assets"].pop()))), "no asset or image of this manifest carries it")
+            lambda: build(store, record, edited(plan, lambda p: p["repositories"]["priv-repo"].__setitem__(
+                "assets", []))), "no asset or image of this manifest carries it")
         arm("a published executable whose image the plan drops is refused (DN-142.D22 (3), direction 2)",
             lambda: build(store, record, edited(plan, lambda p: p["repositories"]["priv-repo"].pop("images"))),
             "priv_server: bin/server is classified 'published' and no asset or image")
@@ -593,7 +661,7 @@ def selftest() -> int:
                                                                         "source": "priv-repo"}))),
             "its image step consumed")
         arm("an entry asset whose named verdict does not exist is refused",
-            lambda: build(store, record, edited(plan, lambda p: p["repositories"]["pub-repo"]["assets"][1]
+            lambda: build(store, record, edited(plan, lambda p: p["repositories"]["priv-repo"]["assets"][1]
                                                 .__setitem__("verdicts", ["consumer", "container"]))),
             "no container verdict")
 
@@ -632,8 +700,17 @@ def selftest() -> int:
             signature = sign(slice_path, keys / "writer")
             assets = arm("the writer's signature verifies and the slice's assets come back",
                          lambda: verify(slices["pub-repo"], signature, allowed, "pub-repo"), None)
-            if assets is not None and [asset["name"] for asset in assets] != ["pub_lib-9.9.9.tgz", "tool-linux-x64"]:
+            if assets is not None and [asset["name"] for asset in assets] != ["pub_lib-9.9.9.tgz"]:
                 failures.append(f"the verified slice lists {[asset['name'] for asset in assets]}")
+            priv_path = root / "priv-repo.json"
+            priv_path.write_bytes(slices["priv-repo"])
+            priv_signature = sign(priv_path, keys / "writer")
+            assets = arm("the owner's slice verifies with its foreign row and the destination it declares",
+                         lambda: verify(slices["priv-repo"], priv_signature, allowed, "priv-repo"), None)
+            if assets is not None and [(asset["name"], asset["destination"]) for asset in assets] != [
+                    ("priv_tools-9.9.9.tgz", "priv-repo"), ("srv-image", "priv-repo"),
+                    ("tool-linux-x64", "pub-repo")]:
+                failures.append(f"the verified owner slice lists {assets}")
             arm("one flipped byte fails the signature",
                 lambda: verify(slices["pub-repo"].replace(b"9.9.9", b"9.9.8", 1), signature, allowed, "pub-repo"),
                 "does not verify")
@@ -644,23 +721,32 @@ def selftest() -> int:
             forged_signature = sign(forged, keys / "other")
             arm("a slice signed by any key but the writer's is refused",
                 lambda: verify(slices["pub-repo"], forged_signature, allowed, "pub-repo"), "does not verify")
-            smuggled = json.loads(slices["pub-repo"])
-            smuggled["assets"].append({"name": "x.tgz", "kind": "conan-transport", "source": "priv-repo",
+            smuggled = json.loads(slices["priv-repo"])
+            smuggled["assets"].append({"name": "x.tgz", "kind": "conan-transport", "destination": "pub-repo",
                                        "object": "a" * 64})
             smuggled_path = root / "smuggled.json"
             smuggled_path.write_bytes(canonical(smuggled))
             smuggled_signature = sign(smuggled_path, keys / "writer")
-            arm("even a writer-signed public slice may not carry another repository's transport",
-                lambda: verify(canonical(smuggled), smuggled_signature, allowed, "pub-repo"),
-                "a transport from priv-repo in the public")
-            wrapped = json.loads(slices["pub-repo"])
+            arm("even a writer-signed slice may not aim its transport at a foreign Release",
+                lambda: verify(canonical(smuggled), smuggled_signature, allowed, "priv-repo"),
+                "a transport of priv-repo aimed at pub-repo's Release")
+            stray = json.loads(slices["pub-repo"])
+            stray["assets"].append({"name": "y", "kind": "entry", "destination": "priv-repo", "object": "a" * 64,
+                                    "entry_digest": "a" * 64})
+            stray_path = root / "stray.json"
+            stray_path.write_bytes(canonical(stray))
+            stray_signature = sign(stray_path, keys / "writer")
+            arm("even a writer-signed slice may not name a destination it does not declare",
+                lambda: verify(canonical(stray), stray_signature, allowed, "pub-repo"),
+                "is neither pub-repo nor a destination its slice declares")
+            wrapped = json.loads(slices["priv-repo"])
             next(asset for asset in wrapped["assets"] if asset["kind"] == "entry")["object"] = \
                 transports["priv_tools"].name
             wrapped_path = root / "wrapped.json"
             wrapped_path.write_bytes(canonical(wrapped))
             wrapped_signature = sign(wrapped_path, keys / "writer")
             arm("even a writer-signed slice may not ship an entry inside its package's transport",
-                lambda: verify(canonical(wrapped), wrapped_signature, allowed, "pub-repo"),
+                lambda: verify(canonical(wrapped), wrapped_signature, allowed, "priv-repo"),
                 "is not its entry digest")
 
         arm("the writer key the allowed-signers file names is the signer",

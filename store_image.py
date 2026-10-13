@@ -315,8 +315,8 @@ def _fixture(root: Path) -> tuple[Path, dict, list[dict], Path, str, str]:
     cxx.write_text(f"#!/bin/sh\ncase \"$1\" in -print-file-name=libstdc++.so.6) echo {runtime.parent}/libstdc++.so.6;;"
                    f" *) echo \"$1\" | sed 's/-print-file-name=//';; esac\n")
     cxx.chmod(0o755)
-    plan = {"format": store_manifest.PLAN_FORMAT, "repositories": {"server-repo": {
-        "visibility": "private", "assets": [],
+    plan = {"format": store_manifest.PLAN_FORMAT, "visibility": {"server-repo": "private"},
+            "repositories": {"server-repo": {"assets": [],
         "images": {"server-image": {"dockerfile": "docker/Dockerfile", "runtime": ["libstdc++.so.6"],
                                     "executables": [{"package": "server_pkg", "entry": "bin/server",
                                                      "source": "server-repo"}]}}}}}

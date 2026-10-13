@@ -12,7 +12,8 @@ proved the tagged commit is the one the step-0 record judged, and hands it that 
 3. each object it lists is fetched by its content digest and verified;
 4. a `conan-transport` asset is staged as is, an `entry` asset (the entry's own bytes, its object
    named by its entry digest, store_manifest.verify) with its `.sha256` file written FROM that
-   digest; an `oci-image` asset is never a Release file: `image` publishes it;
+   digest; an `oci-image` asset is never a Release file: `image` publishes it; a row whose
+   DESTINATION is another repository's Release (DN-142.D25 (2)) is never staged on this one;
 5. the slice and its signature are staged beside them, so the Release carries its own evidence;
 6. after the upload, the Release's asset names must equal the staged files, both ways (check-release).
 `image` (`coderoast-publish-image.yml`, N360 plan C1) reads the same verified slice, fetches the
@@ -116,6 +117,11 @@ def stage(registry: store_replica.Registry, repository: str, visibility: str, re
             name = asset["name"]
             if asset["kind"] == store_manifest.IMAGE_KIND:
                 say(f"store_publish: IMAGE {name} is published by `store_publish.py image`, never as a Release file")
+                continue
+            if asset["destination"] != repository:
+                say(f"store_publish: FOREIGN {name} belongs on {asset['destination']}'s "
+                    f"{body['destinations'][asset['destination']]['tag']} Release, never on {repository}'s "
+                    f"(DN-142.D25 (2))")
                 continue
             if (out / name).exists() or name in staged:
                 raise Refused(f"{name} is staged twice")
@@ -247,6 +253,11 @@ def selftest() -> int:
         rewritten["outputs"]["image"].update(archive=archive_digest, manifest=image_manifest)
         image_record.write_text(json.dumps(rewritten))
         manifest, slices = store_manifest.build(store, record, plan)
+        owned = json.loads(json.dumps(plan))
+        owned["repositories"]["priv-repo"].pop("destinations")
+        next(row for row in owned["repositories"]["priv-repo"]["assets"]
+             if row["name"] == "tool-linux-x64")["destination"] = "priv-repo"
+        _owned_manifest, owned_slices = store_manifest.build(store, record, owned)
         record_hex = hashlib.sha256(record).hexdigest()
         keys = root / "keys"
         keys.mkdir()
@@ -286,12 +297,21 @@ def selftest() -> int:
             out = root / "out"
             staged = arm("the slice of the attested record stages every asset, verified",
                          lambda: stage(registry, "pub-repo", "public", record_hex, allowed, out, quiet), None)
-            want = ["pub_lib-9.9.9.tgz", "tool-linux-x64", "tool-linux-x64.sha256",
-                    "pub-repo-9.9.9.slice.json", "pub-repo-9.9.9.slice.json.sig"]
+            want = ["pub_lib-9.9.9.tgz", "pub-repo-9.9.9.slice.json", "pub-repo-9.9.9.slice.json.sig"]
             if staged != want:
-                failures.append(f"staged {staged}, want {want}")
-            elif (out / "tool-linux-x64").read_bytes() != b"\x7fELF tool bytes" or \
-                    not (out / "tool-linux-x64.sha256").read_text().startswith(
+                failures.append(f"staged {staged}, want {want}: the destination stages only the rows it owns")
+            owned_private = owned_slices["priv-repo"]
+            _fake, owned_registry = registry_with(owned_private, signed(owned_private, "writer"))
+            owned_out = root / "owned"
+            staged_owned = arm("an entry destined to its owner's own Release is staged with its .sha256",
+                               lambda: stage(owned_registry, "priv-repo", "private", record_hex, allowed,
+                                             owned_out, quiet), None)
+            want_owned = ["priv_tools-9.9.9.tgz", "tool-linux-x64", "tool-linux-x64.sha256",
+                          "priv-repo-9.9.9.slice.json", "priv-repo-9.9.9.slice.json.sig"]
+            if staged_owned != want_owned:
+                failures.append(f"staged {staged_owned}, want {want_owned}")
+            elif (owned_out / "tool-linux-x64").read_bytes() != b"\x7fELF tool bytes" or \
+                    not (owned_out / "tool-linux-x64.sha256").read_text().startswith(
                         hashlib.sha256(b"\x7fELF tool bytes").hexdigest()):
                 failures.append("the staged entry or its .sha256 differs from the slice")
             twice = root / "signed-twice"
@@ -324,11 +344,16 @@ def selftest() -> int:
 
             private = slices["priv-repo"]
             _fake, registry = registry_with(private, signed(private, "writer"))
-            staged_private = arm("an image asset is never staged as a Release file: `image` publishes it",
+            said: list[str] = []
+            staged_private = arm("an image asset and a row destined to a foreign Release are never staged on "
+                                 "the owner's Release",
                                  lambda: stage(registry, "priv-repo", "private", record_hex, allowed, root / "o9",
-                                               quiet), None)
-            if staged_private is not None and "srv-image" in staged_private:
-                failures.append(f"the image was staged as a Release file: {staged_private}")
+                                               said.append), None)
+            if staged_private != ["priv_tools-9.9.9.tgz", "priv-repo-9.9.9.slice.json",
+                                  "priv-repo-9.9.9.slice.json.sig"] or not any(
+                    line.startswith("store_publish: FOREIGN tool-linux-x64 belongs on pub-repo's engine-v9.9.9")
+                    for line in said):
+                failures.append(f"the owner staged {staged_private}, saying {said}")
             target_fake = store_replica.Fake()
             target_server, target_base = store_replica._fake_server(target_fake)
             servers.append(target_server)
