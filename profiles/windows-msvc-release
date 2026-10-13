@@ -36,6 +36,20 @@ os=Windows
 # It changes openssl's package id on this profile alone, so openssl rebuilds once per Windows conan
 # home; insight-eidos's sift-windows.yml reds a release asset whose OPENSSLDIR is outside C:\Program Files.
 openssl/*:openssldir=C:\Program Files\Common Files\SSL
+# OPENSSL LOADS NO DLL AT ALL: no-dso (CWE-427, W499). libcrypto also compiles in ENGINESDIR and
+# MODULESDIR, where a provider or engine named without a path is loaded from, and the recipe pins
+# `--prefix=/`, so both come out DRIVE-RELATIVE: `\lib\engines-3` and `\lib\ossl-modules`, which
+# resolve to `C:\lib\...` from a process on C:, a folder any standard user can create (read off
+# `engine-v1.10.6`'s sift-windows-x64.exe). The recipe has no option for either directory, so they
+# cannot be moved without forking it; no-dso removes the loader they feed instead. OpenSSL's
+# Configure then defines DSO_NONE, every DSO_load fails with DSO_R_UNSUPPORTED, and module and
+# dynamic-engine are disabled with it: no provider or engine DLL loads from those directories, from
+# OPENSSL_MODULES or OPENSSL_ENGINES, or from an absolute path in a config. sift needs none of that:
+# it uses the built-in default provider (TLS through libcurl, SHA-256) and links openssl statically.
+# The two strings stay in the binary as text; insight-eidos's sift-windows.yml gate reads that the
+# loader is the NULL one, and reds a binary carrying the win32 loader with either directory outside
+# C:\Program Files. Windows-only, like openssldir: no Linux package id moves.
+openssl/*:no_dso=True
 
 [conf]
 # Ninja is mandatory for import std (CMake supports CXX_MODULE_STD only under Ninja, never the
