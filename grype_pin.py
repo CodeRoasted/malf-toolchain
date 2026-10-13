@@ -59,6 +59,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Callable
@@ -81,6 +82,12 @@ MEMBER = "grype"
 DB_DIR = "db"
 TIMEOUT_SECONDS = 600
 HASH_CHUNK = 1 << 20
+# WHY A USER-AGENT OF ITS OWN (measured 2026-10-13, step 0 run 38382029677 stage B1b: `HTTP Error
+# 403: Forbidden` in 13 s). The Cloudflare front of grype.anchore.io refuses urllib's default
+# `Python-urllib/3.x` — `latest.json` and the pinned archive both answer 403 to it and 200 to any
+# other agent string, the same request byte for byte otherwise — while GitHub serves the tarball to
+# either. The desk run of 2026-10-13 had fetched the archive by other means, so it never met it.
+USER_AGENT = f"malf-toolchain-grype-pin/{VERSION}"
 # The pinned build stays the scanned build: no update, no age refusal (a pinned build ages by
 # design), no network call about the application's own version.
 ENVIRONMENT = {"GRYPE_DB_AUTO_UPDATE": "false", "GRYPE_DB_VALIDATE_AGE": "false",
@@ -94,13 +101,21 @@ class Refused(Exception):
     """A check failed; the message names what differed."""
 
 
+def request_for(url: str) -> urllib.request.Request:
+    """post: a GET of `url` carrying `USER_AGENT`, never urllib's default agent."""
+    return urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+
+
 def http_download(url: str, target: Path) -> None:
     """post: `target` holds the bytes `url` served, streamed (the database is ~190 MB)."""
     partial = target.with_name(target.name + ".part")
-    with urllib.request.urlopen(url, timeout=TIMEOUT_SECONDS) as response, \
-            partial.open("wb") as out:
-        while chunk := response.read(HASH_CHUNK):
-            out.write(chunk)
+    try:
+        with urllib.request.urlopen(request_for(url), timeout=TIMEOUT_SECONDS) as response, \
+                partial.open("wb") as out:
+            while chunk := response.read(HASH_CHUNK):
+                out.write(chunk)
+    except urllib.error.URLError as failed:
+        raise Refused(f"GET {url} failed: {failed}") from failed
     partial.replace(target)
 
 
@@ -280,6 +295,10 @@ def selftest() -> int:
         arm("amd64 and arm64 spell the two pinned machines",
             lambda: (asset_for("amd64")[0], asset_for("arm64")[0]),
             f"('grype_{VERSION}_linux_amd64.tar.gz', 'grype_{VERSION}_linux_arm64.tar.gz')")
+        arm("a download names this tool as its agent, never urllib's default (403 at grype.anchore.io)",
+            lambda: (request_for(f"{DATABASES}/{DB_ARCHIVE}").get_header("User-agent"),
+                     "Python-urllib" in (request_for(DATABASES).get_header("User-agent") or "")),
+            f"returned ('{USER_AGENT}', False)")
         arm("every pinned digest is a SHA-256",
             lambda: all(len(digest) == 64 and int(digest, 16) >= 0
                         for digest in [*(d for _n, d in ASSETS.values()), DB_SHA256]),

@@ -602,17 +602,35 @@ print(get("name")+"/"+get("version"))' "$conanfile"
 # owns why that is wider than what the target links); `all` = every workspace
 # recipe (what `editables sync` re-registers); `members` = every recipe under a
 # dir, topo-sorted member-to-member (the no-arg multi-package sweep order).
-_malf_workspace_dep_entries() {
-    local target="$1"
-    python3 "$MALF_DIR/malf_graph.py" deps "$MALF_WORKSPACE_ROOT" "$target"
+#
+# A QUERY RUNS IN THIS SHELL AND ITS ROWS ARE READ BACK THROUGH `_malf_graph_rows`. Every caller
+# used to read the query straight from a process substitution, which drops the producer's exit
+# status: when malf_graph refused a graph (a package declared twice under the root — measured
+# 2026-10-13, a stale checkout beside a fresh one on malf-runner), the caller read an EMPTY graph,
+# took it as "no workspace dependency", and the build went on without one.
+# post: MALF_GRAPH_ROWS holds the query's rows; a query malf_graph refuses EXITS malf.
+_malf_graph_query() {   # <mode> <arg>...
+    MALF_GRAPH_ROWS="$(python3 "$MALF_DIR/malf_graph.py" "$@")" || {
+        echo "malf: malf_graph.py $1 refused the workspace graph (above), and nothing is built over a graph it refused" >&2
+        exit 1
+    }
+}
+
+# post: prints MALF_GRAPH_ROWS one row per line, and nothing at all when the query had no row.
+_malf_graph_rows() {
+    if [[ -n "$MALF_GRAPH_ROWS" ]]; then printf '%s\n' "$MALF_GRAPH_ROWS"; fi
+}
+
+_malf_workspace_dep_entries() {   # <target>
+    _malf_graph_query deps "$MALF_WORKSPACE_ROOT" "$1"
 }
 
 _malf_workspace_packages() {
-    python3 "$MALF_DIR/malf_graph.py" all "$MALF_WORKSPACE_ROOT"
+    _malf_graph_query all "$MALF_WORKSPACE_ROOT"
 }
 
-_malf_member_packages() {
-    python3 "$MALF_DIR/malf_graph.py" members "$1"
+_malf_member_packages() {   # <dir>
+    _malf_graph_query members "$1"
 }
 
 _malf_resolve_dir() {
@@ -685,9 +703,10 @@ _malf_resolve_target_or_sweep() {
         MALF_TARGET="$root"; return 0
     fi
     local members=() entry ref dir
+    _malf_member_packages "$root"
     while IFS=$'\t' read -r ref dir; do
         [[ -n "$ref" && -n "$dir" ]] && members+=("$dir")
-    done < <(_malf_member_packages "$root")
+    done < <(_malf_graph_rows)
     if [[ ${#members[@]} -eq 0 ]]; then
         if [[ -f "$root/conanfile.py" ]]; then
             # A recipe malf_graph could not parse a ref from — let the single-target
@@ -920,7 +939,8 @@ _malf_run_repo_inventory() {       # <build|test> <repo>
                       --workspace "$MALF_WORKSPACE_ROOT" --repo "$repo")" || return 1
     while IFS= read -r toolchain_dir; do
         [[ -n "$toolchain_dir" && "$MALF_AUTO_WORKSPACE_DEPS" != "0" ]] || continue
-        mapfile -t entries < <(_malf_workspace_dep_entries "$toolchain_dir")
+        _malf_workspace_dep_entries "$toolchain_dir"
+        mapfile -t entries < <(_malf_graph_rows)
         _malf_register_dep_entries "${entries[@]}"
     done <<< "$toolchains"
     python3 "$MALF_DIR/build_inventory.py" build \
@@ -1237,7 +1257,8 @@ _malf_bootstrap_workspace_deps() {
     fi
 
     local entries=()
-    mapfile -t entries < <(_malf_workspace_dep_entries "$target")
+    _malf_workspace_dep_entries "$target"
+    mapfile -t entries < <(_malf_graph_rows)
     if [[ ${#entries[@]} -eq 0 ]]; then
         return 0
     fi
@@ -3705,9 +3726,10 @@ cmd_compile_commands() {
     rm -f "$build_root/compile_commands.json"
 
     local members=() _ref _dir
+    _malf_member_packages "$CWD"
     while IFS=$'\t' read -r _ref _dir; do
         [[ -n "$_ref" && -n "$_dir" ]] && members+=("$_dir")
-    done < <(_malf_member_packages "$CWD")
+    done < <(_malf_graph_rows)
     if [[ ${#members[@]} -eq 0 ]]; then
         echo "malf commands: no conanfile.py found under $CWD" >&2; exit 1
     fi
@@ -3806,12 +3828,13 @@ cmd_compile_commands() {
         # put it back. Guarded on MALF_AUTO_WORKSPACE_DEPS because with the bootstrap disabled
         # nothing was demoted and a re-assert would be a configure paid for no reason.
         local _dep_ref _dep_dir _dep_build
+        _malf_workspace_dep_entries "$subdir"
         while IFS=$'\t' read -r _dep_ref _dep_dir; do
             [[ -n "$_dep_dir" ]] || continue
             _dep_build="$(_malf_editable_build_dir "$_dep_dir")"
             [[ -d "$_dep_build" ]] && db_dirs+=("$_dep_build")
             [[ "$MALF_AUTO_WORKSPACE_DEPS" == "0" ]] || demoted_by_bootstrap["$_dep_dir"]=1
-        done < <(_malf_workspace_dep_entries "$subdir")
+        done < <(_malf_graph_rows)
 
         # test_package (if any) -> its own compile_commands.json. DELIBERATELY ABOVE the
         # member_has_preset gate below: its inputs are the synthetic consumer's own toolchain and
@@ -4230,7 +4253,8 @@ _malf_editables_sync() {
     # EVERY keyed cache at once (the per-build path only refreshes the active one).
     # Registration alone fixes resolution — editables build on demand.
     local entries=()
-    mapfile -t entries < <(_malf_workspace_packages)
+    _malf_workspace_packages
+    mapfile -t entries < <(_malf_graph_rows)
     if [[ ${#entries[@]} -eq 0 ]]; then
         echo "malf editables sync: no workspace packages found under $MALF_WORKSPACE_ROOT" >&2
         exit 1
@@ -4357,6 +4381,7 @@ cmd_lock() {
     echo "=== malf lock: accumulating every root under ${#profiles[@]} profile(s)${update:+ (--update: resolving ranges from REMOTES)} ==="
     # Reuse the SAME enumeration `editables sync` uses — a second recipe-discovery path here
     # would drift from it the first time a package is added.
+    _malf_workspace_packages
     while IFS= read -r root; do
         local root_fail=()
         for profile in "${profiles[@]}"; do
@@ -4371,7 +4396,7 @@ cmd_lock() {
             fail=$((fail + 1)); failed+=("${root#"$MALF_WORKSPACE_ROOT"/} (${root_fail[*]})")
             printf '  FAIL  %s (%s)\n' "${root#"$MALF_WORKSPACE_ROOT"/}" "${root_fail[*]}"
         fi
-    done < <(_malf_workspace_packages | cut -f2)
+    done < <(_malf_graph_rows | cut -f2)
 
     # A root that fails to resolve is NOT a partial success: its third-party edges would be
     # silently absent from the lockfile, and an absent entry resolves freely — the exact drift
@@ -4542,16 +4567,18 @@ PY
 
 # CWD + every member package dir under it — where package-anchored build trees
 # (and the repo root's merged clangd DB) live. `clean build` and `run` walk these.
+# pre: `_malf_member_packages "$CWD"` ran in the calling shell, so a refused graph has already exited.
 _malf_build_tree_roots() {
     echo "$CWD"
     local _ref _dir
     while IFS=$'\t' read -r _ref _dir; do
-        [[ -n "$_dir" && "$_dir" != "$CWD" ]] && echo "$_dir"
-    done < <(_malf_member_packages "$CWD")
+        if [[ -n "$_dir" && "$_dir" != "$CWD" ]]; then echo "$_dir"; fi
+    done < <(_malf_graph_rows)
 }
 
 _malf_clean_build_trees() {
     local dir
+    _malf_member_packages "$CWD"
     while IFS= read -r dir; do
         rm -rf "$dir"/build "$dir"/build-*
     done < <(_malf_build_tree_roots)
@@ -4599,6 +4626,7 @@ cmd_run() {
     [[ -n "$exe_name" ]] || { echo "malf run: specify an executable name" >&2; exit 1; }
     local found="" dir tree listed
     local -a trees
+    _malf_member_packages "$CWD"
     while IFS= read -r dir; do
         # Only the trees that EXIST are handed to find. `find <dir>/build <dir>/build-*` exits 1
         # on whichever of the two is absent — in the usual layout one of them is — so under

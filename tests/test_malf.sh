@@ -388,8 +388,8 @@ echo
 echo "[7j1d] grype_pin admits the second CVE scanner AND its vulnerability database build by digest, never by a tag or 'latest' (selftest)"
 grype_selftest_output="$(timeout 60 python3 "$MALF_ROOT/grype_pin.py" selftest 2>&1)"
 grype_selftest_status=$?
-check "grype_pin selftest: 11 arms, the pinned binary and database admitted, a kept copy reused, and every other byte, version, import, member count and machine refused" \
-      "ok" "$([[ $grype_selftest_status -eq 0 ]] && grep -q '^grype_pin selftest: 11 arm(s), 0 failure(s)$' <<< "$grype_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$grype_selftest_output")")"
+check "grype_pin selftest: 12 arms, the pinned binary and database admitted, a kept copy reused, every other byte, version, import, member count and machine refused, and a download naming its own agent (urllib's default is refused 403 at grype.anchore.io)" \
+      "ok" "$([[ $grype_selftest_status -eq 0 ]] && grep -q '^grype_pin selftest: 12 arm(s), 0 failure(s)$' <<< "$grype_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$grype_selftest_output")")"
 echo
 
 echo "[7h] comment_contract_lint carries its own grammar proof (--selftest), post-format leg included"
@@ -1424,7 +1424,68 @@ python3 "$GRAPH_PY" deps "$graph_tmp/ws" "$graph_tmp/ws/target" 1 >/dev/null 2>&
 check "deps — the retired include_test_requires argument is REFUSED (exit 2), not ignored" \
       "2" "$?"
 
+# (e) A PACKAGE DECLARED TWICE IS REFUSED, NEVER PICKED. The scan was last-writer-wins in path
+# order, so a stale copy of a package whose path sorted later silently replaced the real one —
+# measured 2026-10-13 on malf-runner, where insight-eidos's golden legs walked a root still holding
+# another workflow's day-old checkout of the same repository and built its `llm/` (libcurl 8.20.0)
+# beside a fresh `insight-eidos/`. The fixture is that shape: the real `probe_dep` at `dep/`, a
+# stale copy under `zz-stale/dep/` (sorting after it, as `llm/` sorts after `insight-eidos/`).
+write_probe_recipe zz-stale/dep probe_dep "" ""
+dup_out="$(python3 "$GRAPH_PY" deps "$graph_tmp/ws" "$graph_tmp/ws/target" 2>&1)"
+dup_rc=$?
+check "deps — a package declared twice under the root is REFUSED (exit 1), naming both copies" \
+      "rc=1 both-named" \
+      "rc=$dup_rc $(grep -q "declared twice" <<< "$dup_out" && grep -q "/ws/dep" <<< "$dup_out" \
+               && grep -q "/ws/zz-stale/dep" <<< "$dup_out" && echo both-named || echo "MISSING: $dup_out")"
+# ANTI-VACUITY: delete the refusal in a copy and re-run the identical probe — it must resolve the
+# STALE copy, which is the measured failure; if it ever does not, the fixture stopped reproducing it.
+dup_mutant="$graph_tmp/malf_graph_lastwins.py"
+dup_mutation="$(python3 - "$GRAPH_PY" "$dup_mutant" <<'PY'
+import re, sys
+src = open(sys.argv[1]).read()
+block = re.compile(r"        if name in seen:\n            raise SystemExit\(\n(?:                .*\n)+?        seen\[name\] = conanfile\.parent\.resolve\(\)\n")
+print(len(block.findall(src)))
+open(sys.argv[2], "w").write(block.sub("", src))
+PY
+)"
+check "deps — the last-writer-wins mutation applied to exactly one site (arming proof)" \
+      "1" "$dup_mutation"
+check "deps — without the refusal the walk binds the STALE copy (proves the arm above can fail)" \
+      "$graph_tmp/ws/zz-stale/dep" \
+      "$(python3 "$dup_mutant" deps "$graph_tmp/ws" "$graph_tmp/ws/target" 2>&1 | awk -F'\t' '$1=="probe_dep/1.0"{print $2}')"
+
 rm -rf "$graph_tmp"
+
+echo "[7k2] a graph malf_graph refuses STOPS malf — no conan call is made over it"
+
+# Every caller used to read the graph from a process substitution, which drops the producer's exit
+# status: the refusal in [7k] (e) printed, the caller read an EMPTY dependency list, and `malf build`
+# went on to `conan install` the target with no workspace dependency registered (measured on the
+# pre-fix script with this fixture: the refusal printed, then `conan install … --lockfile-partial`).
+# The conan and cmake stubs record every call, so "nothing ran over the refused graph" is read from
+# the record, never inferred from the exit status alone.
+rg_tmp="$(mktemp -d)"
+mkdir -p "$rg_tmp/bin"
+for rg_tool in conan cmake; do
+    printf '#!/usr/bin/env bash\necho "%s $*" >> "%s/calls"\nexit 0\n' "$rg_tool" "$rg_tmp" > "$rg_tmp/bin/$rg_tool"
+    chmod +x "$rg_tmp/bin/$rg_tool"
+done
+rg_pkg() {   # <subdir> <name> [<requires>]
+    mkdir -p "$rg_tmp/ws/$1"
+    printf 'from conan import ConanFile\nclass C(ConanFile):\n    name = "%s"\n    version = "1.0"\n' "$2" > "$rg_tmp/ws/$1/conanfile.py"
+    if [[ -n "${3:-}" ]]; then printf '    requires = "%s"\n' "$3" >> "$rg_tmp/ws/$1/conanfile.py"; fi
+    : > "$rg_tmp/ws/$1/CMakeLists.txt"
+}
+rg_pkg app rg_app rg_dep/1.0; rg_pkg dep rg_dep; rg_pkg zz-stale/dep rg_dep
+rg_out="$(cd "$rg_tmp/ws/app" && PATH="$rg_tmp/bin:$PATH" MALF_WORKSPACE_ROOT="$rg_tmp/ws" CONAN_HOME="$rg_tmp/home" \
+    MALF_SKIP_INVENTORY=1 MALF_PROFILE_NAME="" timeout --kill-after=5 60 bash "$MALF_BIN" build 2>&1)"
+rg_rc=$?
+check "malf build over a package declared twice exits 1 and says the graph was refused" \
+      "rc=1 refused=1" \
+      "rc=$rg_rc refused=$(grep -c 'refused the workspace graph' <<< "$rg_out" || true)"
+check "…and makes no conan install over it (the stub's call record holds none)" \
+      "0" "$({ cat "$rg_tmp/calls" 2>/dev/null || true; } | grep -c '^conan install' || true)"
+rm -rf "$rg_tmp"
 
 echo "[7l] lint exclusion — ONE authoring, and the two legs agree on a tree where they did not"
 
@@ -5408,7 +5469,7 @@ CONAN_HOME="$lk_home" conan export "$lk_tmp/wintool" > /dev/null 2>&1
 lk_run() {
     CONAN_HOME="$lk_home" bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e
         MALF_DIR="$2"; MALF_WORKSPACE_ROOT="$3"; MALF_PROFILE="$2/profiles/lk-linux"
-        _malf_workspace_packages() { printf "lk_root\t%s\n" "$MALF_WORKSPACE_ROOT/lk_root"; }
+        _malf_workspace_packages() { MALF_GRAPH_ROWS="$(printf "lk_root\t%s" "$MALF_WORKSPACE_ROOT/lk_root")"; }
         cmd_sbom() { :; }
         cmd_lock' _ "$MALF_BIN" "$lk_tmp/malf" "$lk_tmp/ws" > "$lk_tmp/lock.log" 2>&1
     printf 'rc=%s' "$?"
