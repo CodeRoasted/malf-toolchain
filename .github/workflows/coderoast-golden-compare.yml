@@ -2,8 +2,8 @@ name: CodeRoast golden compare
 
 # The determinism golden's verdict, as a reusable workflow: download every leg's
 # `golden-digest-*` artifact of THIS run, require them byte-identical through the
-# `coderoast-golden-compare` action, and upload the agreed digest as `determinism-golden` — the
-# artifact `coderoast-attach-golden.yml` publishes. One body for every engine's `golden.yaml`
+# `coderoast-golden-compare` action, and upload the agreed digest and its sha256 as
+# `determinism-golden` — the artifact `coderoast-attach-golden.yml` publishes and step 0 ingests. One body for every engine's `golden.yaml`
 # (canon, metalog, eidos) instead of one copy each. The proof legs that produce the digests stay
 # in the callers: each engine proves a different harness.
 #
@@ -99,9 +99,19 @@ jobs:
           GOLDEN: ${{ github.workspace }}/determinism-golden.txt
           SPEC_ROOT: ${{ github.workspace }}/_spec
 
-      - name: Upload the validated golden (the Release attaches it)
+      # THE JOB'S OWN READING OF THE BYTES RIDES INSIDE THE ARTIFACT, as a file and never as a job
+      # output (the secret masker can drop an output silently): step 0 ingests this artifact only
+      # when three producers agree — this sha256, GitHub's artifact digest, and its own
+      # recomputation (the N360 plan's item A4, DN-142.D20 (2)).
+      - name: Write the golden's sha256 beside it
+        shell: bash
+        run: sha256sum determinism-golden.txt | tee determinism-golden.txt.sha256
+
+      - name: Upload the validated golden and its sha256 (the Release attaches the golden)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: determinism-golden
-          path: determinism-golden.txt
+          path: |
+            determinism-golden.txt
+            determinism-golden.txt.sha256
           if-no-files-found: error

@@ -385,6 +385,13 @@ check "setup-trivy fetches through trivy_pin.py, and no malf action or workflow 
       "1 " "$(grep -c 'trivy_pin.py" fetch' "$MALF_ROOT/.github/actions/setup-trivy/action.yml") $(grep -rlE 'aquasecurity/trivy|trivy/.*install\.sh' "$MALF_ROOT/.github" | tr '\n' ' ')"
 echo
 
+echo "[7j1d] grype_pin admits the second CVE scanner AND its vulnerability database build by digest, never by a tag or 'latest' (selftest)"
+grype_selftest_output="$(timeout 60 python3 "$MALF_ROOT/grype_pin.py" selftest 2>&1)"
+grype_selftest_status=$?
+check "grype_pin selftest: 11 arms, the pinned binary and database admitted, a kept copy reused, and every other byte, version, import, member count and machine refused" \
+      "ok" "$([[ $grype_selftest_status -eq 0 ]] && grep -q '^grype_pin selftest: 11 arm(s), 0 failure(s)$' <<< "$grype_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$grype_selftest_output")")"
+echo
+
 echo "[7h] comment_contract_lint carries its own grammar proof (--selftest), post-format leg included"
 
 # The comment-grammar phase of `malf format` (ADR-26.D7). Its selftest falsifies every violation
