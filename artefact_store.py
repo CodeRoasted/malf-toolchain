@@ -83,10 +83,12 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
         refusing a member that is no blob there, or a package declaring no tracked object
     artefact_store.py ingest <store> <step-0 run id> <reading.json>  < <the object's bytes>
         THE ONE INGESTION WRITE (DN-142.D20 (2), DN-142.D25 (3)), B5's alone: the bytes on stdin
-        and what B5 read about them, `{repository, workflow, artefact, member, job, run: {id,
+        and what B5 read about them, `{repository, workflow, artefact, member, class, job, run: {id,
         attempt}, judged, workflow_blob, head_sha, title, seat: {runner, labels}, producers:
         {printed, github_artifact_digest}, exception: {since, discharge}}`, become an object and the
-        record of `<repository>/ingest.<workflow stem>`; exit 0 stored, matching, or diverging
+        record of `<repository>/ingest.<workflow stem>`, `class` (`executable` or `object`) the
+        `ingest:` row's declaration, refused when the bytes contradict it (DN-142.D25 (4) A); exit 0
+        stored, matching, or diverging
         from an earlier run at an equal `inputs_key` (written under `divergences/`, never a red),
         1 refused with nothing stored
     artefact_store.py parameters <profile|-> <argv>...
@@ -1830,8 +1832,12 @@ GITHUB_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 STEP0_RUN = re.compile(r"\bstep 0 run (\d+)\b")
 EXCEPTION_KEYS = {"since", "discharge"}
 SEAT_KEYS = {"runner", "labels"}
-READING_KEYS = {"repository", "workflow", "artefact", "member", "job", "run", "judged", "workflow_blob",
-                "head_sha", "title", "seat", "producers", "exception"}
+READING_KEYS = {"repository", "workflow", "artefact", "member", "class", "job", "run", "judged",
+                "workflow_blob", "head_sha", "title", "seat", "producers", "exception"}
+# DN-142.D25 (4), ruling A: a published row's kind follows its BYTES. The `ingest:` row declares its
+# member under exactly one of `executable:` or `object:`, and the write refuses a declaration the
+# bytes contradict, so the class has two producers: the declaration and the bytes.
+INGEST_CLASSES = ("executable", "object")
 
 
 class Refused(ValueError):
@@ -1974,6 +1980,8 @@ def _reading_defects(reading: dict, step0_run: str) -> list[str]:
         wrong.append("its repository, artefact or member is not a file name")
     if not isinstance(reading["workflow"], str) or not WORKFLOW_PATH.match(reading["workflow"]):
         wrong.append(f"its workflow {reading['workflow']!r} is not .github/workflows/<file>.yml")
+    if reading["class"] not in INGEST_CLASSES:
+        wrong.append(f"its class {reading['class']!r} is not one of {' or '.join(INGEST_CLASSES)}")
     if not isinstance(reading["job"], str) or not reading["job"].strip():
         wrong.append("it names no producing job")
     run = reading["run"]
@@ -2003,18 +2011,34 @@ def _reading_defects(reading: dict, step0_run: str) -> list[str]:
     return wrong
 
 
+def bytes_class(data: bytes) -> str:
+    """`executable` for a PE executable or a linked ELF file (an executable or a shared object),
+    `object` for any other bytes: the class a published row's bytes give it (DN-142.D25 (4) A)."""
+    if pe_executable(data):
+        return "executable"
+    try:
+        linked = elf_build_id(data) is not None
+    except NoBuildId:
+        linked = True
+    return "executable" if linked else "object"
+
+
 def ingest(store: Path, step0_run: str, reading: dict, body: bytes, malf_dir: Path) -> str:
     """THE ONE INGESTION WRITE (DN-142.D20 (2), DN-142.D25 (3)): `body`, the bytes B5 verified, and
     `reading`, what it read about them, become an object and the record of the step
     `<repository>/ingest.<workflow stem>`. Its key document is `{step: {kind: ingest, repository,
-    artefact, workflow, job}, run: {id, attempt}, judged, definition: {workflow: <blob>, malf, ...}}`
+    artefact, workflow, job, class}, run: {id, attempt}, judged, definition: {workflow: <blob>, malf,
+    ...}}`
     — the run IS in it, a declared exception to DN-142.D2: an ingestion is an observation, never
     reused. Its output `{ingest: {objects: {<member>: <sha256>}, producers: {printed,
     github_artifact_digest, writer_recomputed}, seat: {runner, labels, run, job}, head_sha, title,
-    exception, inputs_key}}`, `inputs_key` the key of the same document without its run.
+    exception, inputs_key, class}}`, `inputs_key` the key of the same document without its run, and
+    `class` the declared class the bytes agreed with (DN-142.D25 (4) A).
     post: the record key. Raises Refused, storing nothing, on a reading off the shape, a title naming
-    another step-0 run, a printed digest that is not the bytes', or an executable not in the
-    published form (DN-142.D22 (4)); and on other outputs at the same run's key. Another run at an
+    another step-0 run, a printed digest that is not the bytes', a declared class the bytes
+    contradict (an `executable` that is neither a PE executable nor a linked ELF, an `object` that is
+    either), or an executable not in the published form (DN-142.D22 (4)); and on other outputs at the
+    same run's key. Another run at an
     equal `inputs_key` with other bytes is a DIVERGENCE: written under `divergences/`, printed, and
     never a refusal, while the dated exception stands — MSVC output is not shown deterministic."""
     if not re.fullmatch(r"\d+", step0_run):
@@ -2025,14 +2049,19 @@ def ingest(store: Path, step0_run: str, reading: dict, body: bytes, malf_dir: Pa
         wrong.append(f"the printed digest {reading['producers']['printed']} is not the bytes' "
                      f"{recomputed}: three producers agree or nothing counts")
     step_id = ingest_step_id(str(reading.get("repository")), str(reading.get("workflow")))
-    if not wrong:
+    if not wrong and bytes_class(body) != reading["class"]:
+        wrong.append(f"{reading['member']}: declared {reading['class']}, but its bytes are "
+                     + ("a PE executable or a linked ELF file" if reading["class"] == "object"
+                        else "neither a PE executable nor a linked ELF file")
+                     + ": a row's kind follows its bytes (DN-142.D25 (4) A)")
+    if not wrong and reading["class"] == "executable":
         wrong += [f"{reading['member']}: {defect}" for defect in ingested_defects(body)]
     if wrong:
         raise Refused(f"ingestion {step_id}: " + "; ".join(wrong))
     definition = definition_member(malf_dir, parameter_document(INGEST_ARGV, None))
     document = {"step": {"kind": INGEST_KIND, "repository": reading["repository"],
                          "artefact": reading["artefact"], "workflow": reading["workflow"],
-                         "job": reading["job"]},
+                         "job": reading["job"], "class": reading["class"]},
                 "run": reading["run"], "judged": reading["judged"],
                 "definition": {**definition, "workflow": reading["workflow_blob"]}}
     inputs_key = key_of({member: value for member, value in document.items() if member != "run"})
@@ -2040,7 +2069,7 @@ def ingest(store: Path, step0_run: str, reading: dict, body: bytes, malf_dir: Pa
               "producers": {**reading["producers"], "writer_recomputed": recomputed},
               "seat": {**reading["seat"], "run": reading["run"], "job": reading["job"]},
               "head_sha": reading["head_sha"], "title": reading["title"],
-              "exception": reading["exception"], "inputs_key": inputs_key}
+              "exception": reading["exception"], "inputs_key": inputs_key, "class": reading["class"]}
     local = LocalStore(store)
     local.put_bytes(body)
     key = key_of(document)
@@ -2137,7 +2166,7 @@ def selftest() -> int:
     def reading(body: bytes, run_id: int = 7, **change) -> dict:
         digest = hashlib.sha256(body).hexdigest()
         base = {"repository": "eidos", "workflow": ".github/workflows/sift-windows.yml",
-                "artefact": "sift-windows-x64", "member": "sift.exe", "job": "build",
+                "artefact": "sift-windows-x64", "member": "sift.exe", "class": "executable", "job": "build",
                 "run": {"id": run_id, "attempt": 1}, "judged": {"eidos": "a" * 40, "canon": "b" * 40},
                 "workflow_blob": "c" * 40, "head_sha": "d" * 40,
                 "title": "Sift Windows — step 0 run 900 — eidos=dd canon=bb",
@@ -2220,13 +2249,13 @@ def selftest() -> int:
             expect("the document is D20 (2)'s, the run in it", (body["inputs"]["step"], body["inputs"]["run"],
                    sorted(body["inputs"]["definition"])),
                    ({"kind": "ingest", "repository": "eidos", "artefact": "sift-windows-x64",
-                     "workflow": ".github/workflows/sift-windows.yml", "job": "build"},
+                     "workflow": ".github/workflows/sift-windows.yml", "job": "build", "class": "executable"},
                     {"id": 7, "attempt": 1}, ["malf", "parameters", "workflow"]))
             expect("the output carries the objects, the three producers, the seat, head_sha, title, "
                    "exception and inputs_key", (held[OBJECTS_FIELD], held["producers"]["writer_recomputed"],
                    held["seat"]["run"], sorted(held)),
                    ({"sift.exe": digest}, digest, {"id": 7, "attempt": 1},
-                    ["exception", "head_sha", "inputs_key", "objects", "producers", "seat", "title"]))
+                    ["class", "exception", "head_sha", "inputs_key", "objects", "producers", "seat", "title"]))
             expect("inputs_key is the key of the document without its run",
                    held["inputs_key"], key_of({k: v for k, v in body["inputs"].items() if k != "run"}))
             resolved, _out = arm("the ingested object resolves step -> record -> output -> member",
@@ -2264,8 +2293,28 @@ def selftest() -> int:
             "holding its own repository")
         expect("a refused ingestion stores nothing", (listing(store, "records"), listing(store, "objects")), before)
         dll = _pe_fixture(symbols=40, dll=True)
-        arm("a PE DLL is no executable, so the published predicates do not select it",
-            lambda: ingest(store, "900", reading(dll, artefact="lib-x64", member="lib.dll"), dll, malf_dir), None)
+        arm("a PE DLL is no executable, so it is an object and the published predicates do not select it",
+            lambda: ingest(store, "900", reading(dll, artefact="lib-x64", member="lib.dll", **{"class": "object"}),
+                           dll, malf_dir), None)
+        arm("RED: a PE executable declared an object is refused: a row's kind follows its bytes",
+            lambda: ingest(store, "900", reading(clean, run_id=111, **{"class": "object"}), clean, malf_dir),
+            "sift.exe: declared object, but its bytes are a PE executable or a linked ELF file")
+        text = b"a golden digest, no executable\n"
+        arm("RED: a text file declared an executable is refused",
+            lambda: ingest(store, "900", reading(text, run_id=112, artefact="golden", member="golden.txt"),
+                           text, malf_dir),
+            "golden.txt: declared executable, but its bytes are neither a PE executable nor a linked ELF file")
+        arm("RED: a class that is neither is refused",
+            lambda: ingest(store, "900", reading(clean, run_id=113, **{"class": "entry"}), clean, malf_dir),
+            "its class 'entry' is not one of executable or object")
+        golden, _out = arm("a text file declared an object is stored, its class in its key and its output",
+                           lambda: ingest(store, "900", reading(text, run_id=114, artefact="golden",
+                                                                member="golden.txt", **{"class": "object"}),
+                                          text, malf_dir), None)
+        if golden:
+            held = json.loads((store / "records" / f"{golden}.json").read_text())
+            expect("the declared class is in the key document and in the output",
+                   (held["inputs"]["step"]["class"], held["outputs"][INGEST_OUTPUT]["class"]), ("object", "object"))
         expect("the real-binary shape: no defect on a PE with only a POGO entry",
                pe_published_defects(clean), [])
         _same, printed = arm("a second run at the same inputs with the same bytes is no divergence",
