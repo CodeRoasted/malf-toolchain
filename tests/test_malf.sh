@@ -363,8 +363,8 @@ echo
 echo "[7j0] artefact_store's object producers carry their own refusal proof (selftest): the objects convention resolves step -> record -> output -> member, the tracked step is keyed on blob ids at a commit, and the ingestion write refuses a printed digest that is not the bytes, a record without its seat or dated exception, a PE carrying a symbol table or a CodeView entry, and records a divergence at an equal inputs_key, never a red (DN-142.D20 (2), DN-142.D25)"
 objects_selftest_output="$(timeout 120 python3 "$MALF_ROOT/artefact_store.py" selftest 2>&1)"
 objects_selftest_status=$?
-check "artefact_store selftest: 42 arms, every refusal fired, the ingestion record and its class, the tracked record, the divergence event, the bench verdict, the test_package member and the restore intact" \
-      "ok" "$([[ $objects_selftest_status -eq 0 ]] && grep -q '^artefact_store selftest: 42 arm(s), 0 failure(s)$' <<< "$objects_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$objects_selftest_output")")"
+check "artefact_store selftest: 43 arms, every refusal fired, the ingestion record and its class, the tracked record, the divergence event, the bench verdict, the test_package member and the restore intact" \
+      "ok" "$([[ $objects_selftest_status -eq 0 ]] && grep -q '^artefact_store selftest: 43 arm(s), 0 failure(s)$' <<< "$objects_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$objects_selftest_output")")"
 
 echo
 

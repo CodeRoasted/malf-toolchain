@@ -5694,8 +5694,11 @@ _malf_store_create_step() {   # <name> <path> <prefixes> <graph> <log> <test fol
 # tracks under <recipe>/test_package, at their working-tree bytes (DN-142.D4 (b)'s rule for exports),
 # copied ONCE per step into <copy>; the key hashes that copy and the create reads it through
 # `--test-folder=<copy>/test_package`, so an untracked file is never read and an edit after the copy
-# reaches neither. A recipe tracking no test folder has none (`none`, the member null, no flag); one
-# whose test folder exists on disk with nothing tracked is refused, since the create would read it.
+# reaches neither. The tracked paths are listed, NUL-separated, in <copy>/tracked: the create builds
+# its test_package INSIDE the folder it reads, so the key hashes those paths and never the build's
+# own files, and after the create the same paths must hold the same bytes. A recipe tracking no test
+# folder has none (`none`, the member null, no flag); one whose test folder exists on disk with
+# nothing tracked is refused, since the create would read it.
 # post: _MALF_TEST_FOLDER holds the copy's test folder or `none`; non-zero naming the refusal.
 _malf_store_test_folder() {   # <recipe path> <copy>
     local path="$1" copy="$2" listed
@@ -5709,6 +5712,7 @@ _malf_store_test_folder() {   # <recipe path> <copy>
     fi
     rm -rf "$copy" && mkdir -p "$copy" \
         && (cd "$path" && git ls-files -z -- test_package | xargs -0 cp --parents -P --preserve=mode -t "$copy") \
+        && (cd "$path/test_package" && git ls-files -z) > "$copy/tracked" \
         || { echo "malf store-create: the tracked test folder of $path could not be copied to $copy" >&2; return 1; }
     _MALF_TEST_FOLDER="$copy/test_package"
 }

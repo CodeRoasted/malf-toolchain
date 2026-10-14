@@ -862,16 +862,30 @@ def _step_inputs(home: Path, graph_json: Path, package: str, prefixes: tuple[str
 TEST_FOLDER_ENV = "MALF_STEP_TEST_FOLDER"
 
 
+TRACKED_LIST = "tracked"
+
+
 def test_package_member() -> str | None:
-    """DN-142.D26's `test_package` member: the tree digest of the copy of the create's tracked test
-    folder MALF_STEP_TEST_FOLDER names, which the create reads; None for `none` (no test folder, or a
-    `conan build`, which runs none). raises Refused when the variable is unset: an absent member is
-    never read as null."""
+    """DN-142.D26's `test_package` member: the tree digest of the TRACKED files of the copy of the
+    create's test folder MALF_STEP_TEST_FOLDER names, which the create reads; the paths are the ones
+    `<copy>/tracked` lists (NUL-separated, relative to the folder), because the create builds its
+    test_package inside that folder and its build files are no input. None for `none` (no test
+    folder, or a `conan build`, which runs none). raises Refused when the variable is unset (an absent
+    member is never read as null) or a listed path is gone (the create removed an input it read)."""
     named = os.environ.get(TEST_FOLDER_ENV)
     if named is None:
         raise Refused(f"{TEST_FOLDER_ENV} names neither the copy of the step's test folder nor `none`, "
                       "and a step's test_package member is never assumed null (DN-142.D26)")
-    return None if named == "none" else tree_digest(Path(named))[0]
+    if named == "none":
+        return None
+    folder = Path(named)
+    listed = {path for path in (folder.parent / TRACKED_LIST).read_bytes().decode().split("\0") if path}
+    entries = [entry for entry in tree_entries(folder, exclude_root_manifest=False) if entry[0] in listed]
+    missing = sorted(listed - {entry[0] for entry in entries})
+    if missing:
+        raise Refused(f"the test folder {folder} no longer holds {len(missing)} tracked file(s) its key "
+                      "names: " + ", ".join(missing[:NAMED_FILES]))
+    return hashlib.sha256(canonical_json(entries)).hexdigest()
 
 
 def _step_document(kind: str, package: str, profile: str, home: Path, malf_dir: Path,
@@ -2911,12 +2925,21 @@ def selftest() -> int:
         folder.mkdir()
         (folder / "conanfile.py").write_text("from conan import ConanFile\n")
         (folder / "test.cpp").write_text("TEST(Tt, Holds) {}\n")
+        (Path(scratch) / TRACKED_LIST).write_bytes(b"conanfile.py\0test.cpp\0")
         named = handed(None, test_package_member, **{TEST_FOLDER_ENV: str(folder)})
         expect("the member is the copy's tree digest", named, tree_digest(folder)[0])
+        (folder / "build" / "Release").mkdir(parents=True)
+        (folder / "build" / "Release" / "test_package").write_text("the create's own build output")
+        expect("RED: the files the create builds inside its test folder do not move the member",
+               handed(None, test_package_member, **{TEST_FOLDER_ENV: str(folder)}), named)
         (folder / "test.cpp").write_text("TEST(Tt, Holds) {};\n")
         expect("RED: a one-byte edit of a test source moves the member",
                handed(None, test_package_member, **{TEST_FOLDER_ENV: str(folder)}) != named, True)
         expect("`none` is null", handed(None, test_package_member, **{TEST_FOLDER_ENV: "none"}), None)
+        (Path(scratch) / TRACKED_LIST).write_bytes(b"conanfile.py\0test.cpp\0gone.cpp\0")
+        arm("RED: a tracked path gone from the folder is refused",
+            lambda: handed(None, test_package_member, **{TEST_FOLDER_ENV: str(folder)}), "no longer holds 1")
+        (Path(scratch) / TRACKED_LIST).write_bytes(b"conanfile.py\0test.cpp\0")
         saved = os.environ.pop(TEST_FOLDER_ENV, None)
         try:
             arm("RED: an unnamed test folder is refused, never read as null", test_package_member,
