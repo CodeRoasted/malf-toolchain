@@ -22,11 +22,15 @@ Root CLAUDE.md owns malf *usage*; this file is for working ON the tooling.
 - PUBLIC and consumed **pinned**: sibling repos take actions and profiles
   straight from this repo (`uses: CodeRoasted/malf-toolchain/...@<40-hex-sha>`),
   and every such ref — theirs AND this repo's own self-references — is a commit
-  SHA, never `@main`. So a change here does NOT reach a consumer by itself:
-  landing one means re-pinning the self-references (one commit per nesting
-  layer, after the change, never in the same commit) and then bumping the
-  consumers. The superproject's `pin_coherence` check module (`./pharos check
-  --module pin_coherence`) INV-17 owns the rule and reds on a lapse. Treat every edit as a cross-repo change.
+  SHA, never `@main`. So a change here does NOT reach a consumer by itself, and
+  it is not meant to: **the reach is re-pinned ONCE PER CUT, never after a malf
+  commit** (the Founder, 2026-10-14). Commit to `main` and stop; the cut's one
+  re-pin (the superproject's `OPS-1.S15` layering rule: the self-references one
+  commit per nesting layer, then the consumers) carries every commit since the
+  last one, and step 0 reds at the cut until it has (`pin_coherence` INV-17 (g),
+  `OPS-1.S3`). Re-pin between cuts only on a stated need, a consumer change that
+  needs malf code the pin lacks, and name that need in the re-pin's message.
+  Treat every edit as a cross-repo change all the same: it ships at the next cut.
 - `profiles/` and `config/` are single-source by design — never fork a per-repo
   copy; repos symlink or fetch them.
 - The toolchain contracts (which compiler legs exist, why, their fix floors)
