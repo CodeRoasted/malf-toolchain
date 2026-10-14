@@ -363,8 +363,8 @@ echo
 echo "[7j0] artefact_store's object producers carry their own refusal proof (selftest): the objects convention resolves step -> record -> output -> member, the tracked step is keyed on blob ids at a commit, and the ingestion write refuses a printed digest that is not the bytes, a record without its seat or dated exception, a PE carrying a symbol table or a CodeView entry, and records a divergence at an equal inputs_key, never a red (DN-142.D20 (2), DN-142.D25)"
 objects_selftest_output="$(timeout 120 python3 "$MALF_ROOT/artefact_store.py" selftest 2>&1)"
 objects_selftest_status=$?
-check "artefact_store selftest: 31 arms, every refusal fired, the ingestion record and its class, the tracked record and the divergence event intact" \
-      "ok" "$([[ $objects_selftest_status -eq 0 ]] && grep -q '^artefact_store selftest: 31 arm(s), 0 failure(s)$' <<< "$objects_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$objects_selftest_output")")"
+check "artefact_store selftest: 39 arms, every refusal fired, the ingestion record and its class, the tracked record, the divergence event and the bench verdict intact" \
+      "ok" "$([[ $objects_selftest_status -eq 0 ]] && grep -q '^artefact_store selftest: 39 arm(s), 0 failure(s)$' <<< "$objects_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$objects_selftest_output")")"
 
 echo
 
@@ -3233,6 +3233,24 @@ check "the act never conan-creates a step it marked build: the create branch is 
       "1 1 0 1" "$(grep -c 'if \[\[ "$kind" == "build" \]\]; then' "$MALF_BIN") $(awk '/^_malf_store_run_step\(\)/,/^}/' "$MALF_BIN" | grep -c '^ *if ! _malf_store_create_step ') $(awk '/^(cmd_store_create|_malf_store_run_step)\(\)/,/^}/' "$MALF_BIN" | grep -cE '^ *(if ! )?conan create ') $(awk '/^cmd_store_create\(\)/,/^}/' "$MALF_BIN" | grep -c '^ *_malf_store_run_step ')"
 check "store-build REFUSES a package that is stored, naming store-create, before conan is ever called" \
       "rc=2 1 none" "$(sf_malf store-build rel_pkg) $([[ -s "$cs_tmp/sf-conan.log" ]] && echo called || echo none)"
+
+# A bench walk runs its benchmarks only while it holds the machine's build slot (DN-142.D25 (5) call
+# E), and refuses before any step otherwise: no file, a slot nobody holds, a slot held under another
+# token. Each refusal comes before the walk reads a profile, so no conan home is ever touched.
+bw_tmp="$(mktemp -d)"
+printf '{"packages": ["logcraft_core"]}\n' > "$bw_tmp/bench.json"
+bw() {   # <MALF_BENCH> <token>
+    MALF_STORE_DIR="$bw_tmp/store" MALF_BUILD_SLOT_DIR="$bw_tmp/slot" MALF_BENCH="$1" \
+        MALF_BENCH_SLOT_TOKEN="$2" bash "$MALF_BIN" store-create 2>&1; echo "rc=$?"
+}
+bw_free="$(bw "$bw_tmp/bench.json" "")"
+MALF_BUILD_SLOT_DIR="$bw_tmp/slot" MALF_BUILD_SLOT_ANCHOR="$$" bash "$MALF_BIN" slot acquire --label bench-test > /dev/null 2>&1
+bw_other="$(bw "$bw_tmp/bench.json" "0123456789abcdef0123456789abcdef")"
+check "a bench walk refuses a MALF_BENCH naming no file, a slot nobody holds, and a slot held under another token" \
+      "rc=2 rc=2 rc=2 1 1" \
+      "$(bw "$bw_tmp/absent.json" "" | tail -1) $(tail -1 <<< "$bw_free") $(tail -1 <<< "$bw_other") $(grep -c 'is free, not held under MALF_BENCH_SLOT_TOKEN' <<< "$bw_free") $(grep -c 'is held, not held under MALF_BENCH_SLOT_TOKEN' <<< "$bw_other")"
+check "a bench walk that holds the slot hands every create the bench document and the deadlock watchdog" \
+      "1 1" "$(awk '/^_malf_store_bench_args\(\)/,/^}/' "$MALF_BIN" | grep -c 'user.malf:bench=\$MALF_BENCH') $(awk '/^_malf_store_bench_args\(\)/,/^}/' "$MALF_BIN" | grep -c 'user.malf:bench_watchdog=\$MALF_DIR/.github/actions/measure-benchmark/bench_watchdog.sh')"
 
 # The CI module script bypasses malf and reads the one selection too (DN-142.D5 (5)): it asks the
 # helper's desk-args for its ctest argv and spells no label of its own.

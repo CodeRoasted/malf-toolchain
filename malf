@@ -5325,6 +5325,8 @@ cmd_store_create() {
     for arg in "$@"; do [[ "$arg" != -* ]] || _malf_refuse_option store-create "$arg"; done
     local store
     store="$(_malf_store_root store-create)" || return 2
+    local -a bench_args=()
+    mapfile -t bench_args < <(_malf_store_bench_args) && [[ "${bench_args[0]:-}" != REFUSED ]] || return 2
     _malf_apply_profile "${MALF_CUT_VERIFY_PROFILE:-linux-gcc16-release}"
     _malf_store_parameters "$MALF_PROFILE_NAME" malf store-create || return 2
     local cut_home="${MALF_CUT_VERIFY_CONAN_HOME:-$MALF_CONAN_HOME_BASE/cut-verify}"
@@ -5376,6 +5378,10 @@ cmd_store_create() {
         corpus_args=("$MALF_CORPUS_GATES")
         echo "=== malf store-create: the corpus gates of $MALF_CORPUS_GATES run in the creates it names ==="
     fi
+    if [[ ${#bench_args[@]} -gt 0 ]]; then
+        _MALF_WRITER_ARGS+=("${bench_args[@]}")
+        echo "=== malf store-create: the benchmarks of the packages $MALF_BENCH names run in their creates, under the build slot ==="
+    fi
 
     local name path deps kind dep blocked rc=0 total=0 run_at step_rc
     local -a failed=() skipped=()
@@ -5413,6 +5419,31 @@ cmd_store_create() {
     fi
     echo "malf store-create: all $total step(s) built, tested and recorded"
     rm -rf "$scratch"
+}
+
+# THE BENCHMARKS (DN-142.D25 (5) calls D and E): MALF_BENCH, when set, names the parameter document
+# step 0's Pharos writes, `{"packages": [...]}`. Every create then carries `-c user.malf:bench=<document>`
+# and the deadlock watchdog's path, so each package the document names runs its benchmarks inside its
+# create (malf_recipe_tests.py) and artefact_store.py records them as the verdict `<package>/bench`. A
+# benchmark measured beside another build is noise, so the walk runs them only while it holds the
+# machine's build slot: MALF_BENCH_SLOT_TOKEN must be the token of the slot as held now. Step 0 runs its
+# acts and this walk its steps in sequence, so nothing of step 0's own runs beside a bench.
+# post: the create arguments, one per line (none when MALF_BENCH is unset); a single `REFUSED` line,
+#       the cause on stderr, when MALF_BENCH names no file or the slot is not held under that token.
+_malf_store_bench_args() {
+    [[ -n "${MALF_BENCH:-}" ]] || return 0
+    if [[ ! -f "$MALF_BENCH" ]]; then
+        echo "malf store-create: MALF_BENCH='$MALF_BENCH' names no file" >&2
+        echo REFUSED; return 0
+    fi
+    _malf_slot_read
+    if [[ "$_MALF_SLOT_STATE" != held || -z "${MALF_BENCH_SLOT_TOKEN:-}" \
+          || "$_MALF_SLOT_TOKEN" != "$MALF_BENCH_SLOT_TOKEN" ]]; then
+        echo "malf store-create: MALF_BENCH names benchmarks to run, and the build slot at $MALF_BUILD_SLOT_DIR is $_MALF_SLOT_STATE, not held under MALF_BENCH_SLOT_TOKEN — a benchmark measured beside another build is noise (DN-142.D25 (5) call E); run it from the walk that holds the slot" >&2
+        echo REFUSED; return 0
+    fi
+    printf '%s\n' -c "user.malf:bench=$MALF_BENCH" \
+        -c "user.malf:bench_watchdog=$MALF_DIR/.github/actions/measure-benchmark/bench_watchdog.sh"
 }
 
 # ONE STEP OF THE WALK, run in the walking shell (its CPU is this shell's reaped children): the

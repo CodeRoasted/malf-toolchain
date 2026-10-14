@@ -1291,10 +1291,14 @@ def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile:
     declared = _helper().read_declarations(_cache_path(home, recipe, "export_source"))
     judged = max(stored, verdict_record(store, key_of(document), package, package_id, profile,
                                         malf_dir, results, {package: content}, declared))
-    if corpus_gates is None:
+    if corpus_gates is not None:
+        judged = max(judged, corpus_record(store, key_of(document), package, package_id, profile,
+                                           malf_dir, results, {package: content}, corpus_gates))
+    bench = os.environ.get(BENCH_ENV)
+    if not bench:
         return judged
-    return max(judged, corpus_record(store, key_of(document), package, package_id, profile,
-                                     malf_dir, results, {package: content}, corpus_gates))
+    return max(judged, bench_record(store, key_of(document), package, package_id, profile, malf_dir,
+                                    results, {package: content}, Path(bench)))
 
 
 def build_step(store: Path, home: Path, graph_json: Path, package: str, profile: str,
@@ -1486,6 +1490,96 @@ def corpus_record(store: Path, build_key: str, package: str, package_id: str, pr
               + ", ".join(f"{row[0]} {row[1]} {row[2]}" for row in bad[:NAMED_FILES])
               + (", ..." if len(bad) > NAMED_FILES else ""))
     return stored
+
+
+# THE BENCH VERDICT (DN-142.D25 (5) calls D and E): a timing verdict run INSIDE the create of the
+# package that builds the benchmark, under the `user.malf:bench` conf step 0 sets, and recorded as a
+# generalized verdict of its own, `<package>/bench`. Its key is the build key, the helper that ran the
+# selection, the predicate and the runner it measured on; its objects are the google-benchmark JSONs,
+# one per executable, never compared (DN-142.D7: a timing verdict compares its verdict, never its
+# number). The predicate admits a run only when every executable exited 0 under the watchdog and
+# measured with CPU frequency scaling off. Anything else judged nothing: it is refused, never stored,
+# and runs again (DN-142.D19 (8)). Exclusivity is the caller's (`malf store-create` refuses a bench
+# walk without the machine's build slot).
+BENCH_ENV = "MALF_BENCH"
+BENCH_OUTPUT = "bench"
+BENCH_PREDICATE = "malf_recipe_tests.run_benches"
+
+
+def bench_runner() -> dict[str, object]:
+    """The `context.runner` a bench verdict declares it reads: the host, its CPU model and count."""
+    model = ""
+    cpuinfo = Path("/proc/cpuinfo")
+    if cpuinfo.is_file():
+        model = next((line.split(":", 1)[1].strip() for line in cpuinfo.read_text().splitlines()
+                      if line.startswith("model name")), "")
+    return {"host": socket.gethostname(), "cpu": model, "cpus": os.cpu_count()}
+
+
+def bench_judgment(sidecar: dict, outputs: Path) -> tuple[dict[str, Path], list[str]]:
+    """({member: JSON file}, why the run judged nothing) of one create's bench sidecar."""
+    executables = sidecar.get("executables") or []
+    if not executables:
+        return {}, ["the create built no benchmark executable"]
+    objects, unjudged = {}, []
+    for ran in executables:
+        name, status = ran.get("name"), ran.get("exit")
+        produced = outputs / f"{name}.json"
+        if status != 0:
+            unjudged.append(f"{name} exited {status} under the watchdog"
+                            + (" (presumed hung: its thread dump is in the create's log)" if status == 124 else ""))
+            continue
+        try:
+            body = json.loads(produced.read_text())
+        except (OSError, ValueError) as unread:
+            unjudged.append(f"{name} wrote no readable JSON at {produced}: {unread}")
+            continue
+        if body.get("context", {}).get("cpu_scaling_enabled") is not False:
+            unjudged.append(f"{name} measured with CPU frequency scaling "
+                            f"{body.get('context', {}).get('cpu_scaling_enabled')!r}, not off")
+            continue
+        if not body.get("benchmarks"):
+            unjudged.append(f"{name} measured no benchmark")
+            continue
+        objects[f"{name}.json"] = produced
+    return objects, unjudged
+
+
+def bench_record(store: Path, build_key: str, package: str, package_id: str, profile: str,
+                 malf_dir: Path, results: Path, judged: dict[str, str], document_path: Path) -> int:
+    """Store or compare one step's bench verdict when the bench document names the package; exit 0
+    when it names none. post: exit 0 stored or matching; 1 when the run judged nothing (each cause
+    printed, no record written) or differs at an equal key."""
+    if package not in json.loads(document_path.read_text()).get("packages", []):
+        return 0
+    sidecar_path = results / package / f"{package_id}.bench.json"
+    if not sidecar_path.is_file():
+        print(f"artefact_store: UNJUDGED {package} {BENCH_OUTPUT}: the create wrote no bench sidecar "
+              f"at {sidecar_path}, so no benchmark ran")
+        return 1
+    sidecar = json.loads(sidecar_path.read_text())
+    objects, unjudged = bench_judgment(sidecar, results / package / f"{package_id}.bench")
+    if unjudged:
+        print(f"artefact_store: UNJUDGED {package} {BENCH_OUTPUT}: " + "; ".join(unjudged))
+        return 1
+    selection = selection_member(malf_dir)
+    document = {
+        "step": {"kind": "verdict", "id": f"{package}/{BENCH_OUTPUT}", "subject": package,
+                 "predicate": {"id": BENCH_PREDICATE, "version": selection["helper"]},
+                 "params": {"repetitions": sidecar.get("repetitions"), "timeout": sidecar.get("timeout"),
+                            "executables": sorted(objects)}},
+        "build": build_key,
+        "definition": {"profile": profile},
+        "judged": judged,
+        "data": {},
+        "toolchain": {},
+        "system": "",
+        "context": {"runner": bench_runner()},
+    }
+    return judged_verdict(store, document,
+                          {"verdict": "pass", "findings": [],
+                           "entries": [[member] for member in sorted(objects)], "record": {}},
+                          objects, name=BENCH_OUTPUT)
 
 
 def _transport_build_ids(transport: Path) -> dict[str, dict]:
@@ -2397,6 +2491,65 @@ def selftest() -> int:
             target.write_bytes(b"tampered")
             arm("RED: an object whose bytes no longer hash to its name is refused",
                 lambda: output_object(tstore, tracked, TRACKED_OUTPUT, "sbom.cdx.json"), "does not hold")
+
+    with tempfile.TemporaryDirectory(prefix="artefact_store.selftest.") as scratch:
+        bstore, results, build_key = Path(scratch) / "store", Path(scratch) / "results", "b" * 64
+        named = Path(scratch) / "bench.json"
+        named.write_text(json.dumps({"packages": ["logcraft_core"]}))
+        package_dir = results / "logcraft_core"
+        outputs = package_dir / "pid.bench"
+        outputs.mkdir(parents=True)
+
+        def bench_run(executables: list[dict], scaling: object = False, real_time: float = 9.1) -> None:
+            (package_dir / "pid.bench.json").write_text(json.dumps(
+                {"repetitions": 5, "timeout": 1200, "executables": executables}))
+            for ran in executables:
+                (outputs / f"{ran['name']}.json").write_text(json.dumps(
+                    {"context": {"cpu_scaling_enabled": scaling, "load_avg": [12.6]},
+                     "benchmarks": [{"name": "BM_Replay/real_time_median", "real_time": real_time}]}))
+
+        def bench(package: str = "logcraft_core") -> int:
+            return bench_record(bstore, build_key, package, "pid", "linux-gcc16-release", malf_dir, results,
+                                {package: "c" * 64}, named)
+
+        ok = [{"name": "logcraft_core_bench", "exit": 0}]
+        bench_run(ok)
+        rc, printed = arm("a bench run that every executable passed is stored as the verdict `bench`", bench, None)
+        key = next(iter(listing(bstore, "records")), "").removesuffix(".json")
+        expect("stored once, its verdict pass, its line read by step 0",
+               (rc, len(listing(bstore, "records")), f"STORED logcraft_core {BENCH_OUTPUT} key {key} verdict pass" in printed),
+               (0, 1, True))
+        if key:
+            body = json.loads((bstore / "records" / f"{key}.json").read_text())
+            expect("the key names the build, the predicate and the runner it measured on",
+                   (body["inputs"]["build"], body["inputs"]["step"]["predicate"]["id"],
+                    sorted(body["inputs"]["context"]["runner"])),
+                   (build_key, BENCH_PREDICATE, ["cpu", "cpus", "host"]))
+            resolved, _out = arm("the benchmark JSON resolves step -> record -> output -> member",
+                                 lambda: output_object(bstore, key, BENCH_OUTPUT, "logcraft_core_bench.json"), None)
+            expect("the object is the JSON the run wrote", resolved,
+                   file_sha256(outputs / "logcraft_core_bench.json"))
+        bench_run(ok, real_time=11.7)
+        rc, printed = arm("other numbers at an equal key MATCH: a timing verdict compares its verdict, never its number",
+                          bench, None)
+        expect("matched, still one record", (rc, "MATCH" in printed, len(listing(bstore, "records"))), (0, True, 1))
+        for label, executables, scaling, cause in (
+                ("RED: a run measured with CPU frequency scaling on judged nothing", ok, True, "scaling True, not off"),
+                ("RED: a hung executable the watchdog killed judged nothing",
+                 [{"name": "logcraft_core_bench", "exit": 124}], False, "presumed hung"),
+                ("RED: a create that built no benchmark executable judged nothing", [], False,
+                 "built no benchmark executable")):
+            bench_run(executables, scaling=scaling)
+            rc, printed = arm(label, bench, None)
+            expect(f"{label}: refused, nothing stored", (rc, f"UNJUDGED logcraft_core {BENCH_OUTPUT}" in printed,
+                                                        cause in printed, len(listing(bstore, "records"))),
+                   (1, True, True, 1))
+        (package_dir / "pid.bench.json").unlink()
+        rc, printed = arm("RED: a named package whose create wrote no sidecar judged nothing", bench, None)
+        expect("no sidecar: refused", (rc, "no bench sidecar" in printed), (1, True))
+        rc, _out = arm("a package the bench document does not name has no bench verdict",
+                       lambda: bench("coderoast_ipc_core"), None)
+        expect("unnamed: nothing to judge, nothing stored", (rc, len(listing(bstore, "records"))), (0, 1))
 
     for failure in failures:
         print(f"artefact_store selftest FAILED: {failure}")

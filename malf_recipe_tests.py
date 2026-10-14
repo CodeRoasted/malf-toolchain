@@ -47,6 +47,16 @@ leg's sidecar `<package id>.corpus-<leg>.json`, with the run's exit status. A re
 never raised: the package was judged by its default selection, and the corpus verdict is a record of
 its own. The document is written by step 0's Pharos; its paths never enter a key.
 
+THE BENCHMARKS (DN-142.D25 (5) calls D and E). When the conf `user.malf:bench` names a parameter
+document whose `packages` list holds the package, `run_tests` runs every benchmark executable the
+build produced, after the tests and the corpus legs, each alone under the deadlock watchdog the conf
+`user.malf:bench_watchdog` names, at BENCH_REPETITIONS repetitions with aggregates only, its stdin the
+null device. Each writes its google-benchmark JSON to `<package id>.bench/<executable>.json`, and the
+sidecar `<package id>.bench.json` holds `{repetitions, timeout, executables: [{name, exit}]}`. Nothing
+is raised and nothing is written under the build or package folders: the bench is a verdict record of
+its own (artefact_store's `bench_record`), and the package a create with the conf stores is the one a
+create without it stores. A `user.*` conf is never a package-id input.
+
 WHAT THE DEFAULT RUN ALSO RECORDS. `<package id>.corpus-listed.json`, every `corpus`-labelled test
 name of the tree, listed and never run, so the corpus label closes against the registry from the
 records alone.
@@ -80,6 +90,14 @@ from pathlib import Path
 
 CORPUS_LABEL = "corpus"
 CORPUS_GATES_CONF = "user.malf:corpus_gates"
+BENCH_CONF = "user.malf:bench"
+BENCH_WATCHDOG_CONF = "user.malf:bench_watchdog"
+# note: the measurement the release's measure-benchmark action took, moved into the create unchanged
+BENCH_REPETITIONS = 5
+BENCH_TIMEOUT_SECONDS = 1200
+# note: the depth `malf bench` searches a build tree for its executables, `find -maxdepth 3`
+BENCH_SEARCH_DEPTH = 3
+BENCH_SUFFIX = ".bench"
 # DN-142.D23: the declaration file of a package's skips, relative to its source root, and its row.
 DECLARED_SKIPS = "tests/declared_skips.json"
 SKIP_OUTCOMES = ("skipped", "disabled")
@@ -411,6 +429,67 @@ def run_tests(conanfile) -> None:
     conanfile.run(ctest_command(arguments, junit), env=["conanbuild", "conanrun"])
     _judge_run(conanfile, junit, "build", str(conanfile.source_folder))
     run_corpus_legs(conanfile, build_dir, results, package_id)
+    run_benches(conanfile, build_dir, results, package_id)
+
+
+def bench_executables(build_dir: str) -> list[Path]:
+    """Every benchmark executable of a build tree, sorted: a file within BENCH_SEARCH_DEPTH levels
+    whose name holds `bench`, executable, and neither a script nor a library (`malf bench`'s
+    discovery)."""
+    root = Path(build_dir)
+    found = []
+    for directory, subdirectories, files in os.walk(root):
+        depth = len(Path(directory).relative_to(root).parts)
+        if depth + 1 >= BENCH_SEARCH_DEPTH:
+            subdirectories[:] = []
+        for name in files:
+            path = Path(directory) / name
+            if "bench" in name and not name.endswith((".sh", ".so", ".a")) and os.access(path, os.X_OK):
+                found.append(path)
+    return sorted(found)
+
+
+def bench_packages(conanfile) -> list[str]:
+    """The packages the `user.malf:bench` document names; [] when the conf is unset."""
+    document_path = conanfile.conf.get(BENCH_CONF)
+    if not document_path:
+        return []
+    return list(json.loads(Path(document_path).read_text()).get("packages", []))
+
+
+def run_benches(conanfile, build_dir: str, results: str, package_id: str) -> None:
+    """The benchmarks of a package the `user.malf:bench` document names, each its own run under the
+    watchdog; an exit is recorded in the sidecar, never raised (DN-142.D25 (5) call D).
+
+    post: `<package id>.bench.json` holds `{repetitions, timeout, executables: [{name, exit}]}` and
+        each run that exited wrote `<package id>.bench/<name>.json`; nothing is written elsewhere
+    """
+    from conan.errors import ConanException
+    from conan.tools.build import cmd_args_to_string
+
+    if conanfile.name not in bench_packages(conanfile):
+        return
+    watchdog = conanfile.conf.get(BENCH_WATCHDOG_CONF)
+    if not watchdog or not Path(watchdog).is_file():
+        raise ConanException(f"malf: {conanfile.name}: {BENCH_CONF} names this package and "
+                             f"{BENCH_WATCHDOG_CONF} names no watchdog script ({watchdog!r}), so a "
+                             "hung benchmark would hold the walk to the runner's limit")
+    outputs = Path(_junit(results, conanfile.name, f"{package_id}{BENCH_SUFFIX}"))
+    outputs.mkdir(parents=True, exist_ok=True)
+    ran = []
+    for executable in bench_executables(build_dir):
+        out = outputs / f"{executable.name}.json"
+        command = cmd_args_to_string([
+            "bash", watchdog, str(BENCH_TIMEOUT_SECONDS), "--", str(executable),
+            f"--benchmark_out={out}", "--benchmark_out_format=json",
+            f"--benchmark_repetitions={BENCH_REPETITIONS}", "--benchmark_report_aggregates_only=true"])
+        conanfile.output.info(f"malf: benchmark {executable.name} of {conanfile.name}, JSON to {out}")
+        status = conanfile.run(f"{command} < {os.devnull}", env=["conanbuild", "conanrun"],
+                               ignore_errors=True)
+        ran.append({"name": executable.name, "exit": status})
+    Path(_junit(results, conanfile.name, f"{package_id}{BENCH_SUFFIX}.json")).write_text(
+        json.dumps({"repetitions": BENCH_REPETITIONS, "timeout": BENCH_TIMEOUT_SECONDS,
+                    "executables": ran}, indent=1, sort_keys=True) + "\n")
 
 
 def run_corpus_legs(conanfile, build_dir: str, results: str, package_id: str) -> None:
