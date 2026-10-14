@@ -3229,8 +3229,8 @@ check "the walk keeps malf's order, marks the stored: false step build and every
 check "named packages select their closure in walk order; a name that is no step refuses, naming it" \
       "$(printf 'a_core\t/w/a\t\tcreate|b_lib\t/w/b\ta_core\tcreate|d_app\t/w/d\tb_lib\tcreate')|malf store-create: no step of malf's walk is named zz_none" \
       "$(sf_walk d_app)|$(sf_walk zz_none)"
-check "the act never conan-creates a step it marked build: the create branch is the only create, and a build step goes to store-build's one function" \
-      "1 1 0 1" "$(grep -c 'if \[\[ "$kind" == "build" \]\]; then' "$MALF_BIN") $(awk '/^_malf_store_run_step\(\)/,/^}/' "$MALF_BIN" | grep -c '^ *if ! _malf_store_create_step ') $(awk '/^(cmd_store_create|_malf_store_run_step)\(\)/,/^}/' "$MALF_BIN" | grep -cE '^ *(if ! )?conan create ') $(awk '/^cmd_store_create\(\)/,/^}/' "$MALF_BIN" | grep -c '^ *_malf_store_run_step ')"
+check "the act never conan-creates a step it marked build: the create branch is the only create, in the step's own home, and a build step goes to store-build's one function" \
+      "1 1 0 1" "$(grep -c 'if \[\[ "$kind" == "build" \]\]; then' "$MALF_BIN") $(awk '/^_malf_store_create_in\(\)/,/^}/' "$MALF_BIN" | grep -c '^ *if ! CONAN_HOME="$step_home" _malf_store_create_step ') $(awk '/^(cmd_store_create|_malf_store_run_step|_malf_store_create_in)\(\)/,/^}/' "$MALF_BIN" | grep -cE '^ *(if ! )?conan create ') $(awk '/^cmd_store_create\(\)/,/^}/' "$MALF_BIN" | grep -c '^ *_malf_store_run_step ')"
 check "store-build REFUSES a package that is stored, naming store-create, before conan is ever called" \
       "rc=2 1 none" "$(sf_malf store-build rel_pkg) $([[ -s "$cs_tmp/sf-conan.log" ]] && echo called || echo none)"
 
@@ -5072,8 +5072,8 @@ for ref, body in json.load(sys.stdin)["Local Cache"].items():
         for pid, package in recipe["packages"].items():
             for prev in package["revisions"]:
                 print(f"{ref}#{rrev}:{pid}#{prev}")')")")"
-check "(d) RED — a binary restored from another home is rebuilt by its own step: the record holds the writer's build, never the restored one, and the no-remote consumer links exactly that content" \
-      "rc=0 1 written-in-y differs-from-restored consumer-links-it" \
+check "(d) RED — a binary restored from another home is rebuilt by its own step: the record holds the writer's build in its phase home, restored from the store into the walk's home, never the foreign one, and the no-remote consumer links exactly that content" \
+      "rc=0 1 built-in-its-phase-home-restored-into-y differs-from-restored consumer-links-it" \
       "$(tq_step y store-d ex_d) $(tq_has 'PLAN third-party-create tpd/0.1: .* is present at content') $(python3 -c 'import json, sys
 from pathlib import Path
 tp, consumer = json.loads(sys.argv[1]), json.loads(sys.argv[2])
@@ -5082,9 +5082,10 @@ sys.path.insert(0, sys.argv[5])
 import artefact_store
 recorded = [library for library in Path(home, "p").rglob("libtpd.a")
             if artefact_store.tree_digest(library.parents[1])[0] == tp["content"]]
-print("written-in-y" if recorded and all(library.read_text().startswith(home) for library in recorded) else "not-written-in-y",
+phase = sys.argv[6]
+print("built-in-its-phase-home-restored-into-y" if recorded and all(library.read_text().startswith(phase) for library in recorded) else "not-the-phase-home-build",
       "differs-from-restored" if tp["content"] != restored else "is-the-restored",
-      "consumer-links-it" if consumer["third_party"]["tpd/host"]["content"] == tp["content"] else "consumer-links-another")' "$(tq_record store-d tpd third-party-create)" "$(tq_record store-d ex_d conan-create)" "$tq_tmp/y" "$tq_restored" "$MALF_ROOT")"
+      "consumer-links-it" if consumer["third_party"]["tpd/host"]["content"] == tp["content"] else "consumer-links-another")' "$(tq_record store-d tpd third-party-create)" "$(tq_record store-d ex_d conan-create)" "$tq_tmp/y" "$tq_restored" "$MALF_ROOT" "$tq_tmp/scratch-y/home.ex_d.third-party.")"
 
 # (e) a package written into when it is used: tpw's script appends to its own folder when ex_w's
 # build runs it, after tpw's own step recorded it.
@@ -5168,6 +5169,52 @@ check "(k⁗) RED — a build-scripts package's key before the step names its so
 check "(k) RED — an export that reads the clock moves the key between before and after: UNRECORDED, naming sources.ex_k/host, nothing stored" \
       "rc=2 1 1 0" \
       "$(tq_step k store-k2 ex_k) $(tq_has 'REFUSED ex_k: the key computed before the step .* (DN-142.D19 (4), gate G2): 1 member(s): sources.ex_k/host') $(tq_has '\[1\] ex_k UNRECORDED') $(grep -l '"ex_k"' "$tq_tmp"/store-k2/records/*.json 2>/dev/null | wc -l | tr -d ' ')"
+
+# (r) THE PER-STEP HOME (DN-142.D25 (5) call F, DN-142.D17 (2) amended): the third-party phase and
+# the create each run in a home of their own, restored from the store by digest and discarded; the
+# third-party record keeps a restore-only transport; the walk's home receives each recorded output
+# back from the store. A content only a record keeping no transport holds is refused, naming the
+# node; a kept record whose transport object is gone STOPS the act.
+tq_home r
+tq_tp_key() { grep -l '"third-party-create"' "$tq_tmp/$1"/records/*.json | head -1; }
+check "(r) the phase and the create each restore their home from the store, and both homes are gone after the step" \
+      "rc=0 1 1 1 0" \
+      "$(tq_step r store-pr ex_r) $(tq_has 'RESTORED ex_r:third-party:recorded: 1 node(s)') $(tq_has 'RESTORED ex_r: 1 node(s), [0-9]* transport bytes') $(tq_has 'RESTORED ex_r:recorded: 1 node(s)') $(ls -d "$tq_tmp/scratch-r"/home.* 2>/dev/null | wc -l | tr -d ' ')"
+check "(r) RED — the third-party record keeps a restore-only transport, and transports lists it with the profile's sum" \
+      "1 sum 1 without-transport 0" \
+      "$(python3 -c 'import json, sys; print(int("transport" in json.load(open(sys.argv[1]))["outputs"]["package"]))' "$(tq_tp_key store-pr)") $(python3 "$MALF_ROOT/artefact_store.py" transports "$tq_tmp/store-pr" fixture | tail -2 | cut -d' ' -f1-2 | paste -sd' ')"
+check "(r) the walk's home holds the consumer's package as its record's transport restored it, at the record's content" \
+      "restored-at-its-record" \
+      "$(python3 - "$tq_tmp/r" "$tq_tmp/store-pr" "$MALF_ROOT" <<'PY'
+import json, os, subprocess, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[3])
+import artefact_store
+records = [json.loads(path.read_text()) for path in Path(sys.argv[2], "records").glob("*.json")]
+package = [body["outputs"]["package"] for body in records if body["inputs"]["step"].get("package") == "ex_r"
+           and body["inputs"]["step"]["kind"] == "conan-create"][0]
+folder = subprocess.run(["conan", "cache", "path", package["alias"]], capture_output=True, text=True,
+                        env={**os.environ, "CONAN_HOME": sys.argv[1]}).stdout.strip()
+print("restored-at-its-record" if folder and artefact_store.tree_digest(Path(folder))[0] == package["content"] else "absent-or-other")
+PY
+)"
+tq_home r2
+python3 - "$(tq_tp_key store-pr)" <<'PY'
+import json, sys
+body = json.load(open(sys.argv[1]))
+del body["outputs"]["package"]["transport"]
+json.dump(body, open(sys.argv[1], "w"))
+PY
+check "(r) RED — a content held only by a record keeping no transport is refused at restore, naming the node, and its consumer is SKIPPED" \
+      "rc=4 1 1" \
+      "$(tq_step r2 store-pr ex_r) $(tq_has 'no restorable transport, held only by 1 record(s) keeping none') $(tq_has '\[1\] ex_r SKIPPED')"
+tq_home r3
+tq_step r3 store-pr3 ex_r > /dev/null
+rm "$tq_tmp/store-pr3/objects/$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["outputs"]["package"]["transport"])' "$(tq_tp_key store-pr3)")"
+tq_home r4
+check "(r) RED — a kept record whose transport object is absent STOPS the act as a corrupt store, its line UNRECORDED" \
+      "rc=8 1 1" \
+      "$(tq_step r4 store-pr3 ex_r) $(tq_has 'STOPPED ex_r:third-party:recorded: the record [0-9a-f]\{64\}') $(tq_has '\[1\] ex_r UNRECORDED')"
 rm -rf "$tq_tmp"
 echo
 
@@ -5538,7 +5585,7 @@ chmod 755 "$ls_tmp/producer"
 ls_body() { awk "/^$1\\(\\)/,/^}/" "$MALF_BIN"; }
 check "store-create's create and store-build's build splice the ship lockfile, and malf passes --lockfile-partial nowhere on the ship leg" \
       "1 1 0" \
-      "$(ls_body _malf_store_create_step | grep -c '"${_MALF_SHIP_LOCK\[@\]}"') $(ls_body _malf_store_build_one | grep -c '"${_MALF_SHIP_LOCK\[@\]}"') $(for fn in cmd_store_create _malf_store_create_step _malf_store_build_one cmd_store_build cmd_twin_verify cmd_relocate_verify; do ls_body "$fn"; done | grep -c -- '--lockfile-partial')"
+      "$(ls_body _malf_store_create_step | grep -c '"${_MALF_SHIP_LOCK\[@\]}"') $(ls_body _malf_store_build_in | grep -c '"${_MALF_SHIP_LOCK\[@\]}"') $(for fn in cmd_store_create _malf_store_create_step _malf_store_build_one _malf_store_build_in cmd_store_build cmd_twin_verify cmd_relocate_verify; do ls_body "$fn"; done | grep -c -- '--lockfile-partial')"
 check "store-create, store-build, twin-verify and relocate-verify each take the ship lockfile and refuse without it" \
       "4" "$(for fn in cmd_store_create cmd_store_build cmd_twin_verify cmd_relocate_verify; do ls_body "$fn" | grep -cE '_malf_ship_lock_args \|\| (return|exit)'; done | awk '{n += $1} END {print n}')"
 check "twin-verify's probe and relocate-verify resolve against the lockfile malf took" \
@@ -5962,8 +6009,8 @@ ok = found and found.group(1, 2, 3) == ("3", "st_pkg", "PASS") and float(found.g
 print("ok" if ok else repr(line))' "$st_out")"
 st_body="$(sed -n '/^cmd_store_create()/,/^}/p' "$MALF_BIN")"
 st_step="$(sed -n '/^_malf_store_run_step()/,/^}/p' "$MALF_BIN")"
-check "the walk opens every step it runs and closes it on each of its eight exits: its third-party step failed, a build passed or failed, a declaration unread, its key before the step refused, a create failed, a record stored or not" \
-      "1 1 8 1" "$(grep -c '_malf_store_clock "$scratch/times"; run_at=' <<< "$st_body") $(grep -c '_malf_store_opened "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total" "$name" SKIPPED' <<< "$st_step")"
+check "the walk opens every step it runs and closes it on each of its nine exits: its third-party step failed or found the store corrupt, a build passed, failed or found the store corrupt, a declaration unread, its key before the step refused, its step home unwritten, its create and records in that home" \
+      "1 1 9 1" "$(grep -c '_malf_store_clock "$scratch/times"; run_at=' <<< "$st_body") $(grep -c '_malf_store_opened "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total" "$name" SKIPPED' <<< "$st_step")"
 rm -rf "$st_tmp"
 echo
 

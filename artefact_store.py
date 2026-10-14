@@ -40,8 +40,36 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
         one `third-party-create` record per third-party node the install built, in dependency
         order, keyed by its reference, package id, profile, malf's tree, its recipe's export, its
         dependencies' contents (each held by a record, or refused), the toolchain, the profile
-        and the system; its output the whole package folder, compared at an equal key, no
-        transport kept. Exit 0 stored or matching, 3 a mismatch, 1 a refusal (DN-142.D17 (2))
+        and the system; its output the whole package folder, compared at an equal key, and on a
+        new key a RESTORE-ONLY transport (`conan cache save`, no sources) kept beside it, never
+        compared and never published. Exit 0 stored or matching, 3 a mismatch, 1 a refusal
+        (DN-142.D17 (2))
+    artefact_store.py restore-document <store> <conan home> <graph.json> <prefixes> <profile name>
+                                       <document out> needed|built [<name>/<version>...]
+        the restore list of a graph as a document of `upstream` and `third_party` members, the
+        shape a key-first document has (DN-142.D17 (2), amended): `needed`, every node the graph
+        needs a binary of except the named references, which the step will build (a first-party
+        node read from its own step's record, a third-party one from the record holding its
+        folder); `built`, every node the graph built, read from its folder. Exit 1 refusing a
+        needed node with no binary or one no record holds
+    artefact_store.py restore <store> <conan home> <document.json> <ledger> <subject>
+                              [<recipes home> <graph.json>]
+        THE RESTORE (DN-142.D25 (5) call F, DN-142.D17 (2) amended): each member of the document
+        resolved to the record at its profile holding its content AND a transport (the smallest
+        key on a tie), every transport restored into the home in one conan process, after the
+        graph's recipes from <recipes home> when named (`conan cache save --no-source`, recipes
+        only, never a binary); then each restored folder checked against its record: the tree
+        digest of the folder conan packaged equals the record's `packaged` (its `content` when
+        it has none), the cache's reference, package id and package revision equal the record's
+        alias. One ledger line per call (nodes, transport bytes, seconds). Exit 0 restored; 1
+        refused, naming each node with no restorable transport or each RESTORE failure (a
+        store-integrity fault, never a mismatch event); 2 STOPPED, a kept record whose transport
+        object is absent (a corrupt store)
+    artefact_store.py restore-ledger <ledger>
+        the walk's restore totals, one line: calls, nodes, transport bytes, seconds
+    artefact_store.py transports <store> <profile name>
+        each `third-party-create` record at the profile with its transport's size in bytes, one
+        `<alias> <bytes>` line, then the per-profile sum and the count of records holding none
     artefact_store.py upstreams <store>
         every create or build record whose inputs name an `upstream` package digest that no record
         of that package's OWN create step at the same profile holds, one line per record with each
@@ -126,7 +154,12 @@ A THIRD-PARTY BINARY IS THE OUTPUT OF A STEP OF ITS OWN (DN-142.D17): a `third-p
 record per configuration (`<ref>#<rrev>:<package id>`) the writer consumes, keyed by its reference,
 package id and profile, malf's tree, its recipe's export digest, its dependencies' contents, the
 toolchain, the profile and the system; its output the WHOLE package folder, compared at an equal key
-like any package, with no transport kept. A first-party step's create builds only its own package
+like any package, plus `packaged`, the digest of the folder conan packaged (the immutable `p` a
+`finalize()` recipe derives its consumers' folder from; the folder itself otherwise), compared too.
+On a new key it keeps a RESTORE-ONLY transport (DN-142.D17 (2), amended 2026-10-14): never a key
+member, never compared, never published, its single reader the per-step home's restore. A package
+record (`conan-create` or `third-party-create`) offered with no transport to keep is refused at
+commit, and the transport shares its record's fate. A first-party step's create builds only its own package
 (a third-party node it built or downloaded refuses the step), and a step whose `third_party` names a
 content no `third-party-create` record at its profile holds is refused; when a record holds that
 configuration at another content, the refusal names the folder and the files written into it after
@@ -202,6 +235,8 @@ import json
 import os
 import posixpath
 import re
+import shlex
+import shutil
 import socket
 import stat
 import struct
@@ -209,6 +244,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -870,7 +906,9 @@ def key_first_document(store: Path, home: Path, graph_json: Path, package: str, 
     is the graph's root node, in the context its create gives it: `build` for a `build-scripts`
     package, which `conan create` builds as a tool, `host` otherwise.
     post: every first-party upstream's digest is the one its own step's record holds at its
-    binary alias; raises Refused naming each upstream no record holds, or holds at two contents."""
+    binary alias, every third-party content the one the record holding its folder names (its
+    `packaged` digest read as its content); raises Refused naming each upstream no record holds,
+    or holds at two contents."""
     kind, _equals, value = anchor.partition("=")
     if kind not in ("reference", "tree") or not value:
         raise Refused(f"{package}: the key before the step needs `reference=<ref>` or `tree=<id>`, not {anchor!r}")
@@ -878,16 +916,18 @@ def key_first_document(store: Path, home: Path, graph_json: Path, package: str, 
     nodes = graph_nodes(graph_json)
     refuse_python_requires([root, *nodes], graph_json)
     held = recorded_contents(store, profile)
+    judged = third_party_records(store, profile)
     sources, upstream, third_party = {}, {}, {}
     unrecorded = []
     for node in nodes:
         if node.get("binary") == "Skip":
             continue
         name, label = node["name"], f"{node['name']}/{node['context']}"
-        recipe, _configuration, binary = _alias(node)
+        recipe, configuration, binary = _alias(node)
         if not _owned(name, prefixes):
+            digest = tree_digest(_cache_path(home, binary))[0]
             third_party[label] = {"ref": recipe, "package_id": node["package_id"],
-                                  "content": tree_digest(_cache_path(home, binary))[0]}
+                                  "content": held_content(judged.get(configuration, []), digest) or digest}
             continue
         sources[label] = _export_digest(home, recipe)
         contents = held.get(binary, set())
@@ -1080,18 +1120,36 @@ def built_third_party(nodes: list[dict], prefixes: tuple[str, ...]) -> list[str]
                   if not _owned(node["name"], prefixes) and node.get("binary") in BUILT_BINARIES)
 
 
+def restorable_third_party(store: Path, profile: str) -> dict[str, list[dict]]:
+    """`third_party_records` narrowed to the records a home can be restored from: those keeping a
+    transport (DN-142.D17 (2), amended). A record judged before the amendment holds a content and
+    no transport, so its content is planned for a rebuild, which records one."""
+    return {configuration: kept for configuration, outputs in third_party_records(store, profile).items()
+            if (kept := [output for output in outputs if TRANSPORT_FIELD in output])}
+
+
+def held_content(outputs: list[dict], digest: str) -> str | None:
+    """The recorded content a third-party folder's digest stands for, among `outputs`: the content
+    itself, or the content of the record whose `packaged` digest it is, the immutable folder of a
+    `finalize()` package restored into a home that never consumed it; None when neither holds it."""
+    for output in outputs:
+        if digest in (output["content"], output.get(PACKAGED_FIELD)):
+            return output["content"]
+    return None
+
+
 def third_party_plan(store: Path, home: Path, graph_json: Path, prefixes: tuple[str, ...],
                      profile: str) -> int:
     """`third-party-plan`: each third-party reference a first-party step's graph (`conan graph
     info` of the step's recipe, under the strict lock) needs built by a step of its own, one
     `<name>/<version>` a line, its reason on stderr: a node conan marks Missing, Build or
     Download (a downloaded binary is never consumed, DN-142.D17 (10)), and a present one whose
-    content no record holds (DN-142.D17 (4)). A planned reference makes the build-context tools
+    content no record with a transport holds (DN-142.D17 (4), (2) amended). A planned reference makes the build-context tools
     its build needs appear in the next resolve, so the caller re-plans until nothing is added.
     Exit 1 on a third-party node in a state the plan does not know."""
     nodes = graph_nodes(graph_json)
     refuse_python_requires(nodes, graph_json)
-    held = third_party_records(store, profile)
+    held = restorable_third_party(store, profile)
     plan: dict[str, str] = {}
     unknown = []
     for node in nodes:
@@ -1104,9 +1162,10 @@ def third_party_plan(store: Path, home: Path, graph_json: Path, prefixes: tuple[
             plan.setdefault(pattern, f"{configuration} ({node['context']}) is {state}")
         elif state == "Cache":
             content = tree_digest(_cache_path(home, binary))[0]
-            if content not in {output["content"] for output in held.get(configuration, [])}:
+            if held_content(held.get(configuration, []), content) is None:
                 plan.setdefault(pattern, f"{configuration} ({node['context']}) is present at "
-                                         f"content {content}, which no record holds")
+                                         f"content {content}, which no record with a restorable "
+                                         "transport holds")
         else:
             unknown.append(f"{configuration} ({node['context']}) is {state}")
     if unknown:
@@ -1179,8 +1238,9 @@ def third_party_step(store: Path, home: Path, graph_json: Path, prefixes: tuple[
     (DN-142.D17 (2)), in dependency order, from the `conan install --format=json` graph that
     built them. Its key: the reference, package id and profile; malf's tree; the recipe's export
     digest; each dependency's content, each of which a record must hold (DN-142.D17 (4)); the
-    toolchain, the profile and the system. Its output is the whole package folder, compared at
-    an equal key; no transport is kept, nothing publishes a third-party package.
+    toolchain, the profile and the system. Its output is the whole package folder and the folder
+    conan packaged, compared at an equal key; on a new key a restore-only transport is kept, saved
+    without sources (DN-142.D17 (2), amended), and nothing publishes a third-party package.
     post: exit 0 every node stored or matching; 3 (MISMATCHED) a node rebuilt at an equal key
           differs; else 1 a node consumed an unheld dependency (its record not written) or a
           binary was downloaded."""
@@ -1235,12 +1295,269 @@ def third_party_step(store: Path, home: Path, graph_json: Path, prefixes: tuple[
             worst = 1
             continue
         content, entries = tree_digest(folder)
-        output = {"alias": binary, "content": content, "entries": entries}
-        if LocalStore(store).commit(document, {"package": output}, {}) == 0:
+        output = {"alias": binary, "content": content, PACKAGED_FIELD: tree_digest(packaged)[0],
+                  "entries": entries}
+        with tempfile.TemporaryDirectory(prefix="artefact_store.") as scratch:
+            committed = LocalStore(store).commit(document, {PACKAGE_OUTPUT: output}, {PACKAGE_OUTPUT: (
+                TRANSPORT_FIELD, lambda: _transport(home, binary, Path(scratch), sources=False))})
+        if committed == 0:
             held.setdefault(binary.rsplit("#", 1)[0], []).append(output)
         else:
             mismatched = True
     return MISMATCHED if mismatched else worst
+
+
+# THE PER-STEP HOME'S RESTORE (DN-142.D25 (5) call F, DN-142.D17 (2) amended 2026-10-14). Each keyed
+# step runs in a fresh conan home holding exactly its graph, every binary restored from the store by
+# digest, never fetched from a shared home. The restore list is a document of `upstream` and
+# `third_party` members, a key-first document's own shape: each member resolves to the record at
+# the step's profile holding its content AND a transport, the smallest key on a tie, so a log names
+# the same source on every run. After the restore each folder is checked against its record: its
+# tree digest and the cache's alias. A failed check is a RESTORE refusal, a store-integrity fault
+# that writes no mismatch event; a kept record whose transport object is absent is a corrupt store,
+# and the act STOPS.
+RESTORE_REFUSED = 1
+RESTORE_STOPPED = 2
+RESTORE_NEEDED = "needed"
+RESTORE_BUILT = "built"
+
+
+class CorruptStore(Exception):
+    """A kept record whose transport object is absent: the act stops (DN-142.D17 (2), amended)."""
+
+
+def _restore_index(store: Path, profile: str) -> dict[tuple, list[tuple[str, dict]]]:
+    """Every package record at `profile`, (key, package output) sorted by key, under
+    (`conan-create`, its package, content) and (`third-party-create`, None, content)."""
+    index: dict[tuple, list[tuple[str, dict]]] = {}
+    records = store / "records"
+    for path in sorted(records.glob("*.json")) if records.is_dir() else ():
+        body = json.loads(path.read_text())
+        step = body["inputs"]["step"]
+        output = body["outputs"].get(PACKAGE_OUTPUT)
+        if step.get("kind") not in PACKAGE_KINDS or step.get("profile") != profile or not output:
+            continue
+        package = step["package"] if step["kind"] == "conan-create" else None
+        index.setdefault((step["kind"], package, output["content"]), []).append((body["key"], output))
+    return {member: sorted(found, key=lambda pair: pair[0]) for member, found in index.items()}
+
+
+def restore_sources(store: Path, document: dict) -> tuple[list[dict], list[str]]:
+    """(each member's source: label, record key, output, the configuration the document names or
+    None; each finding naming a member no record with a transport holds).
+    raises CorruptStore naming a candidate record whose transport object is absent."""
+    profile = document["step"]["profile"]
+    index = _restore_index(store, profile)
+    members = [(label, ("conan-create", label.split("/", 1)[0], content), None)
+               for label, content in sorted(document.get("upstream", {}).items())]
+    members += [(label, (THIRD_PARTY_KIND, None, member["content"]),
+                 f"{member['ref']}:{member['package_id']}")
+                for label, member in sorted(document.get("third_party", {}).items())]
+    sources, findings = [], []
+    for label, address, configuration in members:
+        candidates = index.get(address, [])
+        kept = [(key, output) for key, output in candidates if TRANSPORT_FIELD in output]
+        for key, output in kept:
+            if not (store / "objects" / output[TRANSPORT_FIELD]).is_file():
+                raise CorruptStore(f"the record {key} ({output['alias']}) keeps transport "
+                                   f"{output[TRANSPORT_FIELD]}, and {store / 'objects'} does not hold it: "
+                                   "a record and its transport share one fate, so the store is corrupt "
+                                   "(DN-142.D17 (2), amended)")
+        named = f"{label} {configuration or address[1]} at content {address[2]}"
+        if not kept:
+            findings.append(f"{named}: no restorable transport, "
+                            + (f"held only by {len(candidates)} record(s) keeping none: "
+                               + ", ".join(key for key, _ in candidates) if candidates
+                               else f"no {address[0]} record at {profile} holds it"))
+            continue
+        key, output = kept[0]
+        sources.append({"label": label, "key": key, "output": output, "configuration": configuration})
+    return sources, findings
+
+
+def _conan_python() -> list[str]:
+    """The interpreter `conan` runs under, read from its launcher's first line, so a restore loads
+    conan's own API in one process for every transport of a step."""
+    launcher = shutil.which("conan")
+    first = Path(launcher).read_bytes().split(b"\n", 1)[0].decode(errors="replace") if launcher else ""
+    if not first.startswith("#!"):
+        sys.exit(f"artefact_store: the conan launcher {launcher} names no interpreter on its first line, "
+                 "so its API cannot be loaded for a restore")
+    return shlex.split(first[2:])
+
+
+CONAN_RESTORE = """import json, sys
+from conan.api.conan_api import ConanAPI
+api = ConanAPI(cache_folder=sys.argv[1])
+print(json.dumps([api.cache.restore(path).serialize() for path in sys.argv[2:]]))
+"""
+
+
+def _conan_restore(home: Path, archives: list[Path]) -> list[dict]:
+    """Each archive restored into `home` by conan's own API in one process, in order; the package
+    list conan returned for each. raises Refused when conan fails, quoting it."""
+    ran = subprocess.run([*_conan_python(), "-c", CONAN_RESTORE, str(home), *map(str, archives)],
+                         capture_output=True, text=True, check=False)
+    if ran.returncode != 0:
+        raise Refused(f"conan's restore into {home} exited {ran.returncode}:\n{ran.stderr.strip()}")
+    return json.loads(ran.stdout.splitlines()[-1])
+
+
+def _recipes_archive(recipes_home: Path, graph_json: Path, scratch: Path) -> Path | None:
+    """Every recipe revision of the graph's nodes, saved from `recipes_home` without sources or
+    any binary: what conan resolves the graph over, a node it never builds or links included."""
+    recipes: dict[str, dict] = {}
+    for node in graph_nodes(graph_json):
+        if node.get("rrev"):
+            recipes.setdefault(node["ref"].split("#")[0], {"revisions": {}})["revisions"][node["rrev"]] = {}
+    if not recipes:
+        return None
+    listing, archive = scratch / "recipes.json", scratch / "recipes.tgz"
+    listing.write_text(json.dumps({"Local Cache": recipes}))
+    _run(["conan", "cache", "save", f"--list={listing}", f"--file={archive}", "--no-source"],
+         {**os.environ, "CONAN_HOME": str(recipes_home), "TMPDIR": str(scratch)})
+    return archive
+
+
+def _restored_folders(restored: list[dict]) -> dict[str, str]:
+    """Each package `<ref>#<rrev>:<package id>#<prev>` a restore wrote, to its folder under the
+    home's `p/`, from the package lists conan's restore returned."""
+    folders = {}
+    for listing in restored:
+        for reference, body in listing.items():
+            for rrev, recipe in body.get("revisions", {}).items():
+                for package_id, package in recipe.get("packages", {}).items():
+                    for prev, entry in package.get("revisions", {}).items():
+                        folders[f"{reference}#{rrev}:{package_id}#{prev}"] = entry["package_folder"]
+    return folders
+
+
+def restore_findings(home: Path, sources: list[dict], folders: dict[str, str]) -> list[str]:
+    """Each RESTORE failure of `sources` in `home`: a record's alias the restore did not write, an
+    alias naming another configuration than the document's, a folder whose tree digest is not the
+    record's `packaged` (its `content` when it has none)."""
+    findings = []
+    for source in sources:
+        alias, output = source["output"]["alias"], source["output"]
+        if source["configuration"] and alias.rsplit("#", 1)[0] != source["configuration"]:
+            findings.append(f"{source['label']}: the record {source['key']} holding its content is "
+                            f"{alias}, another configuration than {source['configuration']}")
+            continue
+        if alias not in folders:
+            findings.append(f"{source['label']}: the restore of record {source['key']} wrote no "
+                            f"package {alias}")
+            continue
+        want = output.get(PACKAGED_FIELD, output["content"])
+        got = tree_digest(home / "p" / folders[alias])[0]
+        if got != want:
+            findings.append(f"{source['label']}: {alias} restored at {got}, its record {source['key']} "
+                            f"holds {want}")
+    return findings
+
+
+def restore(store: Path, home: Path, document: dict, ledger: Path, subject: str,
+            recipes: tuple[Path, Path] | None = None) -> int:
+    """`restore`: the document's members into `home` from their records' transports, then each
+    folder checked (DN-142.D25 (5) call F). `recipes` names a home and a graph whose recipes are
+    restored first, without sources and without any binary.
+    post: 0 restored and checked, one ledger line appended; RESTORE_REFUSED naming each member no
+          record with a transport holds or each RESTORE failure, nothing written to the store;
+          RESTORE_STOPPED on a corrupt store."""
+    started = time.monotonic()
+    try:
+        sources, findings = restore_sources(store, document)
+    except CorruptStore as corrupt:
+        print(f"artefact_store: STOPPED {subject}: {corrupt}", file=sys.stderr)
+        return RESTORE_STOPPED
+    if findings:
+        print(f"artefact_store: REFUSED {subject}: {len(findings)} graph node(s) with no restorable "
+              "transport, never fetched from a shared home (DN-142.D25 (5) call F, DN-142.D17 (2)): "
+              + "; ".join(findings), file=sys.stderr)
+        return RESTORE_REFUSED
+    archives = [store / "objects" / source["output"][TRANSPORT_FIELD] for source in sources]
+    with tempfile.TemporaryDirectory(prefix="artefact_store.") as scratch:
+        recipe_archive = _recipes_archive(recipes[0], recipes[1], Path(scratch)) if recipes else None
+        try:
+            restored = _conan_restore(home, ([recipe_archive] if recipe_archive else []) + archives)
+        except Refused as refused:
+            print(f"artefact_store: REFUSED {subject}: RESTORE failed, {refused}", file=sys.stderr)
+            return RESTORE_REFUSED
+    failures = restore_findings(home, sources, _restored_folders(restored))
+    if failures:
+        print(f"artefact_store: REFUSED {subject}: RESTORE failed for {len(failures)} node(s), a "
+              "store-integrity fault and never a reproducibility mismatch (DN-142.D17 (2), amended): "
+              + "; ".join(failures), file=sys.stderr)
+        return RESTORE_REFUSED
+    moved = sum(path.stat().st_size for path in archives)
+    seconds = round(time.monotonic() - started, 2)
+    with ledger.open("a") as handle:
+        handle.write(json.dumps({"subject": subject, "nodes": len(sources), "bytes": moved,
+                                 "seconds": seconds}, sort_keys=True) + "\n")
+    print(f"artefact_store: RESTORED {subject}: {len(sources)} node(s), {moved} transport bytes, "
+          f"{seconds} s")
+    return 0
+
+
+def restore_document(store: Path, home: Path, graph_json: Path, prefixes: tuple[str, ...],
+                     profile: str, mode: str, building: set[str]) -> dict:
+    """`restore-document`: the graph's restore list, a key-first document's `upstream` and
+    `third_party` members. `needed`: every node whose binary the graph needs, except the
+    references in `building`, a first-party one read from its own step's record at its alias, a
+    third-party one from the record holding its folder. `built`: every node the graph built, read
+    from its folder. raises Refused naming a needed node with no binary or no record."""
+    held = recorded_contents(store, profile)
+    judged = third_party_records(store, profile)
+    upstream, third_party, unheld = {}, {}, []
+    for node in graph_nodes(graph_json):
+        state, pattern = node.get("binary"), node["ref"].split("#")[0]
+        if state == "Skip" or (mode == RESTORE_BUILT) != (state == "Build") \
+                or (mode == RESTORE_NEEDED and pattern in building):
+            continue
+        label = f"{node['name']}/{node['context']}"
+        recipe, configuration, binary = _alias(node)
+        if not node.get("prev"):
+            unheld.append(f"{label} {configuration} is {state}, with no binary to restore")
+            continue
+        digest = tree_digest(_cache_path(home, binary))[0]
+        if _owned(node["name"], prefixes):
+            contents = held.get(binary, set()) if mode == RESTORE_NEEDED else {digest}
+            if len(contents) != 1:
+                unheld.append(f"{label} {binary}: {len(contents)} recorded contents")
+                continue
+            upstream[label] = next(iter(contents))
+        else:
+            content = held_content(judged.get(configuration, []), digest) if mode == RESTORE_NEEDED else digest
+            if content is None:
+                unheld.append(f"{label} {configuration} at content {digest}: no record holds it")
+                continue
+            third_party[label] = {"ref": recipe, "package_id": node["package_id"], "content": content}
+    if unheld:
+        raise Refused(f"the restore list of {graph_json}: {len(unheld)} node(s) cannot be restored: "
+                      + "; ".join(unheld))
+    return {"step": {"profile": profile}, "upstream": upstream, "third_party": third_party}
+
+
+def restore_ledger(ledger: Path) -> str:
+    """The walk's restore totals from its ledger: calls, nodes, transport bytes, seconds."""
+    rows = [json.loads(line) for line in ledger.read_text().splitlines() if line] if ledger.is_file() else []
+    return (f"{len(rows)} restore(s), {sum(row['nodes'] for row in rows)} node(s), "
+            f"{sum(row['bytes'] for row in rows)} transport bytes, "
+            f"{round(sum(row['seconds'] for row in rows), 2)} s")
+
+
+def third_party_transports(store: Path, profile: str) -> list[str]:
+    """Each `third-party-create` record at `profile` keeping a transport, `<alias> <bytes>`, then
+    `sum <records> <bytes>` and `without-transport <records>`."""
+    lines, total, without = [], 0, 0
+    for outputs in third_party_records(store, profile).values():
+        for output in outputs:
+            if TRANSPORT_FIELD not in output:
+                without += 1
+                continue
+            size = (store / "objects" / output[TRANSPORT_FIELD]).stat().st_size
+            total += size
+            lines.append(f"{output['alias']} {size}")
+    return sorted(lines) + [f"sum {len(lines)} {total}", f"without-transport {without}"]
 
 
 def _declared_executables_env() -> dict:
@@ -1287,10 +1604,11 @@ def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile:
               f"its packages.yml `executables:` declaration (DN-142.D22): " + "; ".join(findings),
               file=sys.stderr)
         return 1
-    stored = LocalStore(store).commit(document, {"package": {"alias": binary, "content": content,
-                                                             "entries": entries}},
-                                      {"package": ("transport", lambda: _transport(home, binary))},
-                                      derived={"package": _transport_build_ids})
+    with tempfile.TemporaryDirectory(prefix="artefact_store.") as scratch:
+        stored = LocalStore(store).commit(
+            document, {"package": {"alias": binary, "content": content, "entries": entries}},
+            {"package": (TRANSPORT_FIELD, lambda: _transport(home, binary, Path(scratch)))},
+            derived={"package": _transport_build_ids})
     if results is None:
         return stored
     package_id = binary.split(":", 1)[1].split("#", 1)[0]
@@ -1610,9 +1928,10 @@ def lookup_build_id(store: Path, build_id: str) -> list[tuple[str, str, str]]:
     return found
 
 
-def _transport(home: Path, binary: str) -> Path:
-    """The package's transport archive, produced once (`conan cache save`; DN-142.D3)."""
-    scratch = Path(tempfile.mkdtemp(prefix="artefact_store."))
+def _transport(home: Path, binary: str, scratch: Path, sources: bool = True) -> Path:
+    """The package's transport archive in `scratch`, produced once (`conan cache save`; DN-142.D3);
+    a third-party one leaves the recipe's sources out (`--no-source`), its one reader a restore.
+    post: the archive is the caller's to delete once the store holds its bytes."""
     pkglist = scratch / "pkglist.json"
     name, rest = binary.split("/", 1)
     version, revisions = rest.split("#", 1)
@@ -1621,7 +1940,8 @@ def _transport(home: Path, binary: str) -> Path:
     pkglist.write_text(json.dumps({"Local Cache": {f"{name}/{version}": {"revisions": {rrev: {
         "packages": {package_id: {"revisions": {prev: {}}}}}}}}}))
     archive = scratch / "transport.tgz"
-    _run(["conan", "cache", "save", f"--list={pkglist}", f"--file={archive}"],
+    _run(["conan", "cache", "save", f"--list={pkglist}", f"--file={archive}"]
+         + ([] if sources else ["--no-source"]),
          {**os.environ, "CONAN_HOME": str(home), "TMPDIR": str(scratch)})
     return archive
 
@@ -1815,10 +2135,17 @@ class LocalStore:
         `derived` maps an output's name to a function of that STORED object returning fields the
         record keeps beside it, an index read from the stored bytes and never compared.
         `subject` names the step in the printed lines when its document names no package or subject.
+        pre: a package step (`conan-create`, `third-party-create`) offers its transport, or is
+             refused: a package record with no transport could never be restored (DN-142.D17 (2)).
         post: exit 0 when the key was new (stored) or every output's compared axes equal the
         record's; 1 when one differs, a mismatch event naming both digests written beside."""
         key = key_of(document)
         subject = subject or document["step"].get("package") or document["step"]["subject"]
+        if document["step"].get("kind") in PACKAGE_KINDS \
+                and objects.get(PACKAGE_OUTPUT, (None,))[0] != TRANSPORT_FIELD:
+            raise Refused(f"{subject} {document['step']['kind']}: a package record is committed with "
+                          "its transport, and this one offers none, so no home could ever restore it "
+                          "(DN-142.D17 (2), DN-142.D25 (5) call F)")
         stored = self.record(key)
         if stored is None:
             for name, (field, produce) in objects.items():
@@ -1921,6 +2248,9 @@ def _described(output: dict) -> str:
 # (a hosted output step 0's B5 verified, DN-142.D20 (2)), whose one caller is B5.
 OBJECTS_FIELD = "objects"
 PACKAGE_OUTPUT = "package"
+TRANSPORT_FIELD = "transport"
+PACKAGED_FIELD = "packaged"
+PACKAGE_KINDS = ("conan-create", "third-party-create")
 TRACKED_KIND = TRACKED_OUTPUT = "tracked"
 INGEST_KIND = INGEST_OUTPUT = "ingest"
 INGEST_ARGV = ["artefact_store.py", "ingest"]
@@ -2558,6 +2888,135 @@ def selftest() -> int:
                        lambda: bench("coderoast_ipc_core"), None)
         expect("unnamed: nothing to judge, nothing stored", (rc, len(listing(bstore, "records"))), (0, 1))
 
+    # THE RESTORE (DN-142.D25 (5) call F, DN-142.D17 (2) amended 2026-10-14): a package record keeps
+    # its transport; each member of a restore list resolves to a record with one, is restored, and is
+    # checked against it. conan's restore is stood in for by a fixture writing the archive's folder.
+    with tempfile.TemporaryDirectory(prefix="artefact_store.") as scratch:
+        root = Path(scratch)
+        rstore, home, ledger = root / "store", root / "home", root / "ledger.jsonl"
+        local = LocalStore(rstore)
+        profile = "fixture"
+
+        def package_tree(name: str, body: str) -> tuple[Path, str]:
+            folder = root / "trees" / name
+            (folder / "lib").mkdir(parents=True, exist_ok=True)
+            (folder / "lib" / f"lib{name}.a").write_text(body)
+            return folder, tree_digest(folder)[0]
+
+        archives: dict[str, tuple[str, Path]] = {}
+
+        def put_record(key: str, kind: str, package: str, alias: str, folder: Path | None,
+                       content: str, transport: str | None = None) -> None:
+            output = {"alias": alias, "content": content, "entries": []}
+            if folder is not None:
+                transport = local.put_bytes(f"archive of {alias} under {key}".encode())
+                archives[transport] = (alias, folder)
+            if transport is not None:
+                output[TRANSPORT_FIELD] = transport
+            body = {"key": key, "inputs": {"step": {"kind": kind, "package": package, "profile": profile}},
+                    "outputs": {PACKAGE_OUTPUT: output}}
+            (rstore / "records" / f"{key}.json").write_text(json.dumps(body))
+
+        conan_calls: list[list[str]] = []
+        tampered: dict[str, str] = {}
+
+        def fixture_restore(into: Path, paths: list[Path]) -> list[dict]:
+            conan_calls.append([path.name for path in paths])
+            listings = []
+            for path in paths:
+                alias, folder = archives[path.name]
+                alias = tampered.get(alias, alias)
+                reference, _hash, rest = alias.partition("#")
+                rrev, package_id, prev = rest.replace(":", "#").split("#")
+                target = into / "p" / f"{reference.split('/')[0]}{prev[:6]}" / "p"
+                shutil.rmtree(target, ignore_errors=True)
+                shutil.copytree(folder, target)
+                if alias in tampered.values():
+                    (target / "lib" / "tampered").write_text("written after its record judged it")
+                listings.append({reference: {"revisions": {rrev: {"packages": {package_id: {
+                    "revisions": {prev: {"package_folder": target.relative_to(into / "p").as_posix()}}}}}}}})
+            return listings
+
+        def restored(document: dict) -> tuple[int, str]:
+            saved = globals()["_conan_restore"]
+            globals()["_conan_restore"] = fixture_restore
+            try:
+                with contextlib.redirect_stdout(io.StringIO()) as out, \
+                        contextlib.redirect_stderr(io.StringIO()) as err:
+                    code = restore(rstore, home, document, ledger, "ex_top")
+            finally:
+                globals()["_conan_restore"] = saved
+            return code, out.getvalue() + err.getvalue()
+
+        tpa_folder, tpa = package_tree("tpa", "the third-party bytes")
+        top_folder, top = package_tree("ex_mid", "the first-party bytes")
+        _old_folder, old = package_tree("tpold", "judged before the amendment")
+        with contextlib.redirect_stderr(io.StringIO()):
+            arm("RED: a third-party-create record offered with no transport is REFUSED at commit",
+                lambda: local.commit({"step": {"kind": THIRD_PARTY_KIND, "package": "tpa", "profile": profile}},
+                                     {PACKAGE_OUTPUT: {"alias": "tpa/1#r:p#v", "content": tpa, "entries": []}},
+                                     {}), "offers none")
+            arm("RED: a conan-create record offered with no transport is REFUSED at commit",
+                lambda: local.commit({"step": {"kind": "conan-create", "package": "ex_mid", "profile": profile}},
+                                     {PACKAGE_OUTPUT: {"alias": "ex_mid/1#r:p#v", "content": top, "entries": []}},
+                                     {}), "offers none")
+        expect("a refused package commit stores nothing", listing(rstore, "records"), [])
+        put_record("b" * 64, THIRD_PARTY_KIND, "tpa", "tpa/1#r:p#v", tpa_folder, tpa)
+        put_record("a" * 64, THIRD_PARTY_KIND, "tpa", "tpa/1#r:p#v", tpa_folder, tpa)
+        put_record("c" * 64, "conan-create", "ex_mid", "ex_mid/1#r:q#w", top_folder, top)
+        put_record("d" * 64, THIRD_PARTY_KIND, "tpold", "tpold/1#r:p#v", None, old)
+        whole = {"step": {"profile": profile}, "upstream": {"ex_mid/host": top},
+                 "third_party": {"tpa/host": {"ref": "tpa/1#r", "package_id": "p", "content": tpa}}}
+        sources, findings = restore_sources(rstore, whole)
+        expect("each member resolves to a record keeping a transport, the smallest key on a tie",
+               ([source["key"] for source in sources], findings), (["c" * 64, "a" * 64], []))
+        code, printed = restored(whole)
+        expect("a restore of records keeping transports restores every node and logs one ledger line",
+               (code, "RESTORED ex_top: 2 node(s)" in printed, len(ledger.read_text().splitlines())),
+               (0, True, 1))
+        conan_calls.clear()
+        code, printed = restored({**whole, "third_party": {
+            **whole["third_party"], "tpold/host": {"ref": "tpold/1#r", "package_id": "p", "content": old}}})
+        expect("RED: a content held only by a record keeping no transport is REFUSED, naming the node, "
+               "and nothing is restored",
+               (code, "tpold/host tpold/1#r:p at content " + old + ": no restorable transport, held only "
+                "by 1 record(s) keeping none: " + "d" * 64 in printed, conan_calls), (RESTORE_REFUSED, True, []))
+        code, printed = restored({**whole, "third_party": {
+            "tpz/host": {"ref": "tpz/1#r", "package_id": "p", "content": "e" * 64}}})
+        expect("RED: a content no record holds is REFUSED, naming the node",
+               (code, "tpz/host tpz/1#r:p at content " + "e" * 64 + ": no restorable transport, no "
+                "third-party-create record at fixture holds it" in printed), (RESTORE_REFUSED, True))
+        tampered["tpa/1#r:p#v"] = "tpa/1#r:p#v"
+        code, printed = restored(whole)
+        expect("RED: a restored folder that differs from its record is a RESTORE refusal, and no "
+               "mismatch event is written",
+               (code, "RESTORE failed for 1 node(s)" in printed,
+                f"tpa/host: tpa/1#r:p#v restored at" in printed, listing(rstore, "mismatches")),
+               (RESTORE_REFUSED, True, True, []))
+        tampered["tpa/1#r:p#v"] = "tpa/1#r:p#other"
+        code, printed = restored(whole)
+        expect("RED: a restore that wrote another package revision than the record's alias is a RESTORE refusal",
+               (code, "tpa/host: the restore of record " + "a" * 64 + " wrote no package tpa/1#r:p#v" in printed),
+               (RESTORE_REFUSED, True))
+        tampered.clear()
+        code, printed = restored({**whole, "third_party": {
+            "tpa/host": {"ref": "tpa/1#r", "package_id": "other", "content": tpa}}})
+        expect("RED: a content resolving to a record of another configuration is a RESTORE refusal",
+               (code, "another configuration than tpa/1#r:other" in printed), (RESTORE_REFUSED, True))
+        (rstore / "objects" / json.loads((rstore / "records" / f"{'b' * 64}.json").read_text())
+         ["outputs"][PACKAGE_OUTPUT][TRANSPORT_FIELD]).unlink()
+        code, printed = restored(whole)
+        expect("RED: a kept record whose transport object is absent STOPS the act as a corrupt store",
+               (code, "STOPPED ex_top: the record " + "b" * 64 in printed), (RESTORE_STOPPED, True))
+        expect("the plan's restorable records are those keeping a transport",
+               sorted(restorable_third_party(rstore, profile)), ["tpa/1#r:p"])
+        expect("a folder digest stands for its record's content, or for the content whose packaged folder it is",
+               (held_content([{"content": "f" * 64, PACKAGED_FIELD: "p" * 64}], "p" * 64),
+                held_content([{"content": "f" * 64, PACKAGED_FIELD: "p" * 64}], "f" * 64),
+                held_content([{"content": "f" * 64}], "p" * 64)), ("f" * 64, "f" * 64, None))
+        expect("the ledger totals the walk's restores",
+               restore_ledger(ledger).split(", ")[:2], ["1 restore(s)", "2 node(s)"])
+
     for failure in failures:
         print(f"artefact_store selftest FAILED: {failure}")
     print(f"artefact_store selftest: {armed[0]} arm(s), {len(failures)} failure(s)")
@@ -2657,6 +3116,20 @@ def main(argv: list[str]) -> int:
         Path(argv[9]).write_text(json.dumps(document, sort_keys=True))
         print(key_of(document))
         return 0
+    if len(argv) >= 8 and argv[0] == "restore-document" and argv[7] in (RESTORE_NEEDED, RESTORE_BUILT):
+        document = restore_document(Path(argv[1]), Path(argv[2]), Path(argv[3]), tuple(argv[4].split()),
+                                    argv[5], argv[7], set(argv[8:]))
+        Path(argv[6]).write_text(json.dumps(document, sort_keys=True))
+        return 0
+    if len(argv) in (6, 8) and argv[0] == "restore":
+        return restore(Path(argv[1]), Path(argv[2]), json.loads(Path(argv[3]).read_text()), Path(argv[4]),
+                       argv[5], (Path(argv[6]), Path(argv[7])) if len(argv) == 8 else None)
+    if len(argv) == 2 and argv[0] == "restore-ledger":
+        print(restore_ledger(Path(argv[1])))
+        return 0
+    if len(argv) == 3 and argv[0] == "transports":
+        print("\n".join(third_party_transports(Path(argv[1]), argv[2])))
+        return 0
     if len(argv) == 6 and argv[0] == "third-party-plan":
         return third_party_plan(Path(argv[1]), Path(argv[2]), Path(argv[3]), tuple(argv[4].split()),
                                 argv[5])
@@ -2676,3 +3149,5 @@ if __name__ == "__main__":
         sys.exit(main(sys.argv[1:]))
     except KeyError_ as refused:
         sys.exit(f"artefact_store: refused — {refused}")
+    except Refused as refused:
+        sys.exit(f"artefact_store: REFUSED {refused}")

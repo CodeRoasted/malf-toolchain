@@ -5311,7 +5311,8 @@ _malf_store_parameters() {   # <profile|-> <argv>...
 # THE HOME is step 0's B2 home (`MALF_CUT_VERIFY_CONAN_HOME`, default the keyed `cut-verify` home):
 # purged of every first-party package and of the previous run's results first, so every step
 # rebuilds first-party code from its export, and the acts after this one (step 0's server smoke and
-# relocate-verify) consume what this act built. MALF_STORE_CONAN_HOME names another; one this run
+# relocate-verify) consume what this act recorded, restored into it from the store. It is where the
+# walk RESOLVES; every step BUILDS in a step home of its own (_malf_step_home, DN-142.D25 (5) call F). MALF_STORE_CONAN_HOME names another; one this run
 # creates is seeded with the B2 home's third-party packages (MALF_TWIN_SEED_HOME names another).
 # THE STORE is a directory standing in for the remote one until its transport and its writer
 # credential are ruled; nothing here publishes anywhere.
@@ -5383,7 +5384,7 @@ cmd_store_create() {
         echo "=== malf store-create: the benchmarks of the packages $MALF_BENCH names run in their creates, under the build slot ==="
     fi
 
-    local name path deps kind dep blocked rc=0 total=0 run_at step_rc
+    local name path deps kind dep blocked rc=0 total=0 run_at step_rc stopped=""
     local -a failed=() skipped=()
     local -A broke=()
     _malf_store_clock "$scratch/times"; run_at="$_MALF_CLOCK_AT"
@@ -5405,9 +5406,15 @@ cmd_store_create() {
             0) ;;
             "$_MALF_STEP_FAILED") failed+=("$name"); broke["$name"]=1 ;;
             "$_MALF_STEP_SKIPPED") skipped+=("$name (its third-party step: $_MALF_THIRD_PARTY_CAUSE)"); broke["$name"]=1 ;;
+            "$_MALF_STEP_STOPPED") stopped="$name"; break ;;
             *) rc=1 ;;
         esac
     done <<< "$wanted"
+    echo "=== malf store-create: restored $(python3 "$MALF_DIR/artefact_store.py" restore-ledger "$scratch/restore.jsonl") ==="
+    if [[ -n "$stopped" ]]; then
+        echo "malf store-create: STOPPED at $name — a kept record's transport is absent, so the store is corrupt and nothing after it ran (DN-142.D17 (2)) — logs in $scratch" >&2
+        return 1
+    fi
 
     if [[ ${#failed[@]} -gt 0 || ${#skipped[@]} -gt 0 ]]; then
         echo "malf store-create: FAILED ${#failed[@]} step(s): ${failed[*]:-none}; skipped ${#skipped[@]}: ${skipped[*]:-none} — logs in $scratch" >&2
@@ -5446,24 +5453,72 @@ _malf_store_bench_args() {
         -c "user.malf:bench_watchdog=$MALF_DIR/.github/actions/measure-benchmark/bench_watchdog.sh"
 }
 
+# THE PER-STEP CONAN HOME (DN-142.D25 (5) call F): every keyed act of the walk (a third-party phase's
+# install, a create, a `conan build`) runs in a fresh conan home of its own, at a random path under
+# the act's scratch, discarded when the act ends. Its metadata is written from malf's tree
+# (_malf_sync_conan_conf: global.conf, settings_user.yml, the helpers, the overlay remote, every
+# registry profile) plus the act's two profile files by name; its binaries come ONLY from the store,
+# by digest (artefact_store.py `restore`), and its recipes from the walk's home without any binary or
+# source. The walk's home (CONAN_HOME) is where the walk RESOLVES (`conan graph info`, the plan, the
+# key before the step) and what later acts consume; it receives each recorded output back from the
+# store, never from a step's home. A path in a key is refused, so a random home moves no key: that
+# rests on DN-142.D4 (a)'s proved path independence.
+# pre: MALF_PROFILE and MALF_BUILD_PROFILE name the act's profile files.
+# post: the new home's path on stdout, or a non-zero exit naming what failed and no home left.
+_malf_step_home() {   # <scratch> <label>
+    local home profile
+    home="$(mktemp -d "$1/home.$2.XXXXXX")" || return 1
+    if ! ( export CONAN_HOME="$home"; _malf_sync_conan_conf ) >/dev/null; then
+        echo "malf store-create: the metadata of the step home $home could not be written from $MALF_DIR" >&2
+        rm -rf "$home"; return 1
+    fi
+    for profile in "$MALF_PROFILE" "$MALF_BUILD_PROFILE"; do
+        cmp -s "$profile" "$home/profiles/${profile##*/}" && continue
+        cp -f "$profile" "$home/profiles/${profile##*/}" \
+            || { echo "malf store-create: the profile $profile could not be written into the step home $home" >&2; rm -rf "$home"; return 1; }
+    done
+    echo "$home"
+}
+
+# THE RESTORE OF A STEP HOME (DN-142.D25 (5) call F): the members of <document> restored into <home>
+# from the store, after the recipes of <graph> from the walk's home, each folder checked against its
+# record (artefact_store.py `restore`). With no graph, the members only: the walk's home receiving a
+# step's recorded outputs.
+# post: exit 0 restored; 1 a refusal (a node no record with a transport holds, or a RESTORE failure),
+#       which closes the step UNRECORDED; 2 a corrupt store, which STOPS the walk.
+_malf_store_restore() {   # <store> <home> <document> <scratch> <subject> [<graph>]
+    local -a recipes=()
+    [[ -z "${6:-}" ]] || recipes=("$CONAN_HOME" "$6")
+    python3 "$MALF_DIR/artefact_store.py" restore "$1" "$2" "$3" "$4/restore.jsonl" "$5" "${recipes[@]}"
+}
+
 # ONE STEP OF THE WALK, run in the walking shell (its CPU is this shell's reaped children): the
 # step's third-party steps first (_malf_store_third_party), then its create and its records, or its
 # `conan build` for a `stored: false` package. Each exit closes the step's line with its verdict:
 # PASS; FAILED (the create or the build failed); UNRECORDED (the executables declaration unread, its
 # key before the step refused, or a record refused, differing at an equal key or from that key);
 # SKIPPED (a third-party step failed or differed: nothing is built on a third-party binary no step
-# judged, DN-142.D17 (5)).
+# judged, DN-142.D17 (5)). The create, the build and their records run in a step home of their own
+# (_malf_step_home), restored from the store; a refused restore closes the step UNRECORDED, and so
+# does a corrupt store, which also returns _MALF_STEP_STOPPED: the walk runs nothing after it.
 # pre: the walk's environment (cmd_store_create), $9... the corpus gates arguments.
-# post: exit 0 PASS, _MALF_STEP_FAILED, _MALF_STEP_UNRECORDED or _MALF_STEP_SKIPPED, the last with
-#       _MALF_THIRD_PARTY_CAUSE naming the cause.
+# post: exit 0 PASS, _MALF_STEP_FAILED, _MALF_STEP_UNRECORDED, _MALF_STEP_SKIPPED or
+#       _MALF_STEP_STOPPED, SKIPPED with _MALF_THIRD_PARTY_CAUSE naming the cause.
 _MALF_STEP_FAILED=1
 _MALF_STEP_UNRECORDED=2
 _MALF_STEP_SKIPPED=4
+_MALF_STEP_STOPPED=8
 _malf_store_run_step() {   # <n> <name> <path> <create|build> <store> <scratch> <prefixes> <walk start> [<corpus gates>]
     local total="$1" name="$2" path="$3" kind="$4" store="$5" scratch="$6" prefixes="$7" run_at="$8"
     local -a corpus_args=("${@:9}")
-    local step_at step_cpu
-    if ! _malf_store_third_party "$total" "$name" "$path" "$prefixes" "$store" "$scratch" "$run_at"; then
+    local step_at step_cpu step_home verdict rc=0
+    _malf_store_third_party "$total" "$name" "$path" "$prefixes" "$store" "$scratch" "$run_at" || rc=$?
+    if [[ $rc -eq 2 ]]; then
+        _malf_store_clock "$scratch/times"; step_at="$_MALF_CLOCK_AT"; step_cpu="$_MALF_CLOCK_CPU"
+        _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+        return "$_MALF_STEP_STOPPED"
+    fi
+    if [[ $rc -ne 0 ]]; then
         echo "--- store-create: SKIP $name — its third-party step: $_MALF_THIRD_PARTY_CAUSE, and nothing is built on a third-party binary no step judged (DN-142.D17 (5)) ---" >&2
         _malf_store_clock "$scratch/times"; step_at="$_MALF_CLOCK_AT"; step_cpu="$_MALF_CLOCK_CPU"
         _malf_store_closed "$total" "$name" SKIPPED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
@@ -5472,10 +5527,13 @@ _malf_store_run_step() {   # <n> <name> <path> <create|build> <store> <scratch> 
     _malf_store_clock "$scratch/times"; step_at="$_MALF_CLOCK_AT"; step_cpu="$_MALF_CLOCK_CPU"
     _malf_store_opened "$total" "$kind" "$name" "$path" "$run_at" "$step_at"
     if [[ "$kind" == "build" ]]; then
-        if _malf_store_build_one "$name" "$path" "${MALF_STORE_BUILD_REV:-HEAD}" "$store" "$scratch" "$prefixes"; then
-            _malf_store_closed "$total" "$name" PASS "$run_at" "$step_at" "$step_cpu" "$scratch/times"
-            return 0
-        fi
+        rc=0
+        _malf_store_build_one "$name" "$path" "${MALF_STORE_BUILD_REV:-HEAD}" "$store" "$scratch" "$prefixes" || rc=$?
+        case $rc in
+            0) _malf_store_closed "$total" "$name" PASS "$run_at" "$step_at" "$step_cpu" "$scratch/times"; return 0 ;;
+            2) _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+               return "$_MALF_STEP_STOPPED" ;;
+        esac
         _malf_store_closed "$total" "$name" FAILED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
         return "$_MALF_STEP_FAILED"
     fi
@@ -5490,21 +5548,51 @@ _malf_store_run_step() {   # <n> <name> <path> <create|build> <store> <scratch> 
         _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
         return "$_MALF_STEP_UNRECORDED"
     fi
-    if ! _malf_store_create_step "$name" "$path" "$prefixes" "$scratch/$name.graph.json" "$scratch/$name.log"; then
+    if ! step_home="$(_malf_step_home "$scratch" "$name")"; then
+        _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+        return "$_MALF_STEP_UNRECORDED"
+    fi
+    _malf_store_create_in "$name" "$path" "$store" "$scratch" "$prefixes" "$step_home" "${corpus_args[@]}"
+    rc=$?
+    rm -rf "$step_home"
+    case $rc in
+        0) verdict=PASS ;;
+        "$_MALF_STEP_FAILED") verdict=FAILED ;;
+        "$_MALF_STEP_STOPPED") verdict=UNRECORDED ;;
+        *) verdict=UNRECORDED; rc=$_MALF_STEP_UNRECORDED ;;
+    esac
+    _malf_store_closed "$total" "$name" "$verdict" "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+    return "$rc"
+}
+
+# A CREATE STEP IN ITS OWN HOME (DN-142.D25 (5) call F): the home restored from the key-first document
+# (its upstreams and third-party nodes by content, its graph's recipes), the create and its records
+# there, then the recorded package restored from the store into the walk's home for the steps after it.
+# pre: the key-first document and graph of <name> are in <scratch> (_malf_store_key_first).
+# post: exit 0 recorded; _MALF_STEP_FAILED the create failed; _MALF_STEP_UNRECORDED a refused restore or
+#       a record refused or differing; _MALF_STEP_STOPPED a corrupt store.
+_malf_store_create_in() {   # <name> <path> <store> <scratch> <prefixes> <step home> [<corpus gates>]
+    local name="$1" path="$2" store="$3" scratch="$4" prefixes="$5" step_home="$6" rc=0
+    local -a corpus_args=("${@:7}")
+    _malf_store_restore "$store" "$step_home" "$scratch/$name.key-first.json" "$scratch" "$name" \
+        "$scratch/$name.key-first.graph.json" || rc=$?
+    [[ $rc -eq 0 ]] || { [[ $rc -eq 2 ]] && return "$_MALF_STEP_STOPPED"; return "$_MALF_STEP_UNRECORDED"; }
+    if ! CONAN_HOME="$step_home" _malf_store_create_step "$name" "$path" "$prefixes" "$scratch/$name.graph.json" "$scratch/$name.log"; then
         echo "malf store-create: conan create $name failed — $scratch/$name.log" >&2
-        _malf_store_closed "$total" "$name" FAILED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
         return "$_MALF_STEP_FAILED"
     fi
-    if MALF_STEP_EXECUTABLES="$scratch/$name.executables.json" MALF_STEP_KEY_FIRST="$scratch/$name.key-first.json" \
-        python3 "$MALF_DIR/artefact_store.py" conan-step "$store" "$CONAN_HOME" "$scratch/$name.graph.json" \
-        "$name" "$MALF_PROFILE_NAME" "$MALF_DIR" "$scratch/toolchain.json" "$prefixes" \
-        "$CONAN_HOME/malf-test-results" "${corpus_args[@]}"; then
-        _malf_store_closed "$total" "$name" PASS "$run_at" "$step_at" "$step_cpu" "$scratch/times"
-        return 0
+    if ! MALF_STEP_EXECUTABLES="$scratch/$name.executables.json" MALF_STEP_KEY_FIRST="$scratch/$name.key-first.json" \
+        CONAN_HOME="$step_home" python3 "$MALF_DIR/artefact_store.py" conan-step "$store" "$step_home" \
+        "$scratch/$name.graph.json" "$name" "$MALF_PROFILE_NAME" "$MALF_DIR" "$scratch/toolchain.json" "$prefixes" \
+        "$step_home/malf-test-results" "${corpus_args[@]}"; then
+        echo "malf store-create: recording $name failed, or differs at an equal key (above)" >&2
+        return "$_MALF_STEP_UNRECORDED"
     fi
-    echo "malf store-create: recording $name failed, or differs at an equal key (above)" >&2
-    _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
-    return "$_MALF_STEP_UNRECORDED"
+    python3 "$MALF_DIR/artefact_store.py" restore-document "$store" "$step_home" "$scratch/$name.graph.json" \
+        "$prefixes" "$MALF_PROFILE_NAME" "$scratch/$name.recorded.json" built || return "$_MALF_STEP_UNRECORDED"
+    rc=0
+    _malf_store_restore "$store" "$CONAN_HOME" "$scratch/$name.recorded.json" "$scratch" "$name:recorded" || rc=$?
+    [[ $rc -eq 0 ]] || { [[ $rc -eq 2 ]] && return "$_MALF_STEP_STOPPED"; return "$_MALF_STEP_UNRECORDED"; }
 }
 
 # A STEP'S TIME IS PRINTED ON ITS OWN TWO LINES, for step 0's timing sidecar (DN-119.D4), which reads
@@ -5607,18 +5695,22 @@ _malf_store_build_args() {
 # ONE `conan install` of the step's recipe builds exactly those references, in exactly the
 # configuration the step's graph names (its options included), into the act's scratch folder, and
 # `third-party-step` records each node it built in dependency order, comparing it at an equal key.
+# The install runs in a PHASE HOME of its own (_malf_step_home, DN-142.D25 (5) call F), restored from
+# the store with every node the graph needs and does not build; each node it recorded is then
+# restored from the store into the walk's home, where the plan and the key before the step read it.
 # A downloaded binary is never consumed: the plan builds it (`--build=<ref>`), and a graph that
 # still downloads is refused. The phase prints its own opening and closing lines,
 # `<name>:third-party`, closing PASS, FAILED or MISMATCH.
 # pre: CONAN_HOME, MALF_CONFIG, MALF_PROFILE_NAME, _MALF_WRITER_PROFILES (_malf_writer_environment),
 #      _MALF_WRITER_ARGS and _MALF_SHIP_LOCK as store-create sets them, and <scratch>/toolchain.json written.
-# post: exit 0 every third-party node the step needs is held by a record; 1 a resolve, the plan, the
-#       install or a refusal failed; 3 a third-party binary rebuilt at an equal key differs. On a
-#       non-zero exit _MALF_THIRD_PARTY_CAUSE names the references and the cause.
+# post: exit 0 every third-party node the step needs is held by a record; 1 a resolve, the plan, a
+#       restore, the install or a refusal failed; 2 a corrupt store (the walk stops); 3 a third-party
+#       binary rebuilt at an equal key differs. On a non-zero exit _MALF_THIRD_PARTY_CAUSE names the
+#       references and the cause.
 _malf_store_third_party() {   # <n> <name> <path> <prefixes> <store> <scratch> <walk start>
     local index="$1" name="$2" path="$3" prefixes="$4" store="$5" scratch="$6" run_at="$7"
     local graph="$scratch/$name.third-party.graph.json" log="$scratch/$name.third-party.log"
-    local round planned rc=0 step_at step_cpu verdict=PASS
+    local round planned rc=0 step_at step_cpu verdict=PASS phase_home
     local -a common=("${_MALF_WRITER_PROFILES[@]}"
                      -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${_MALF_SHIP_LOCK[@]}")
     local -a builds=() next=()
@@ -5641,24 +5733,66 @@ _malf_store_third_party() {   # <n> <name> <path> <prefixes> <store> <scratch> <
     done
     if [[ $rc -eq 0 && ${#builds[@]} -gt 0 ]]; then
         echo "--- store-create: $name: ${#builds[@]} third-party-create step(s): ${builds[*]#--build=} ---"
-        if ! conan install "$path" "${common[@]}" "${builds[@]}" --output-folder="$scratch/$name.third-party" \
-                --format=json > "$scratch/$name.third-party.install.json" 2>> "$log"; then
-            _MALF_THIRD_PARTY_CAUSE="building ${builds[*]#--build=} failed ($log)"; rc=1
+        if ! phase_home="$(_malf_step_home "$scratch" "$name.third-party")"; then
+            _MALF_THIRD_PARTY_CAUSE="its phase home could not be written"; rc=1
         else
-            python3 "$MALF_DIR/artefact_store.py" third-party-step "$store" "$CONAN_HOME" \
-                "$scratch/$name.third-party.install.json" "$prefixes" "$MALF_PROFILE_NAME" "$MALF_DIR" \
-                "$scratch/toolchain.json" || rc=$?
-            case $rc in
-                0) ;;
-                3) _MALF_THIRD_PARTY_CAUSE="a third-party binary differs at an equal key (MISMATCH above)" ;;
-                *) _MALF_THIRD_PARTY_CAUSE="recording ${builds[*]#--build=} was refused (above)"; rc=1 ;;
-            esac
+            _malf_store_third_party_in "$name" "$path" "$prefixes" "$store" "$scratch" "$graph" "$log" \
+                "$phase_home" "${builds[@]}" || rc=$?
+            rm -rf "$phase_home"
         fi
     fi
     [[ $rc -eq 0 ]] || verdict=FAILED
     [[ $rc -eq 3 ]] && verdict=MISMATCH
     _malf_store_closed "$index" "$name:third-party" "$verdict" "$run_at" "$step_at" "$step_cpu" "$scratch/times"
     return "$rc"
+}
+
+# THE THIRD-PARTY PHASE IN ITS OWN HOME (DN-142.D25 (5) call F, DN-142.D17 (2) amended): <phase home>
+# restored from the store with every node <graph> needs and the phase does not build, and its
+# recipes; the install builds the planned references there, `third-party-step` records each with
+# its transport, and each recorded node is restored from the store into the walk's home.
+# post: as _malf_store_third_party, _MALF_THIRD_PARTY_CAUSE set on a non-zero exit.
+_malf_store_third_party_in() {   # <name> <path> <prefixes> <store> <scratch> <graph> <log> <phase home> <--build=ref>...
+    local name="$1" path="$2" prefixes="$3" store="$4" scratch="$5" graph="$6" log="$7" phase_home="$8" rc=0
+    local -a builds=("${@:9}")
+    local -a common=("${_MALF_WRITER_PROFILES[@]}"
+                     -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${_MALF_SHIP_LOCK[@]}")
+    if ! python3 "$MALF_DIR/artefact_store.py" restore-document "$store" "$CONAN_HOME" "$graph" "$prefixes" \
+            "$MALF_PROFILE_NAME" "$scratch/$name.third-party.restore.json" needed "${builds[@]#--build=}"; then
+        _MALF_THIRD_PARTY_CAUSE="its restore list was refused (above)"; return 1
+    fi
+    _malf_store_restore "$store" "$phase_home" "$scratch/$name.third-party.restore.json" "$scratch" \
+        "$name:third-party" "$graph" || rc=$?
+    case $rc in
+        0) ;;
+        2) _MALF_THIRD_PARTY_CAUSE="the store is corrupt (STOPPED above)"; return 2 ;;
+        *) _MALF_THIRD_PARTY_CAUSE="restoring its phase home was refused (above)"; return 1 ;;
+    esac
+    if ! CONAN_HOME="$phase_home" conan install "$path" "${common[@]}" "${builds[@]}" \
+            --output-folder="$scratch/$name.third-party" \
+            --format=json > "$scratch/$name.third-party.install.json" 2>> "$log"; then
+        _MALF_THIRD_PARTY_CAUSE="building ${builds[*]#--build=} failed ($log)"; return 1
+    fi
+    CONAN_HOME="$phase_home" python3 "$MALF_DIR/artefact_store.py" third-party-step "$store" "$phase_home" \
+        "$scratch/$name.third-party.install.json" "$prefixes" "$MALF_PROFILE_NAME" "$MALF_DIR" \
+        "$scratch/toolchain.json" || rc=$?
+    case $rc in
+        0) ;;
+        3) _MALF_THIRD_PARTY_CAUSE="a third-party binary differs at an equal key (MISMATCH above)"; return 3 ;;
+        *) _MALF_THIRD_PARTY_CAUSE="recording ${builds[*]#--build=} was refused (above)"; return 1 ;;
+    esac
+    if ! python3 "$MALF_DIR/artefact_store.py" restore-document "$store" "$phase_home" \
+            "$scratch/$name.third-party.install.json" "$prefixes" "$MALF_PROFILE_NAME" \
+            "$scratch/$name.third-party.recorded.json" built; then
+        _MALF_THIRD_PARTY_CAUSE="the list of its recorded nodes was refused (above)"; return 1
+    fi
+    _malf_store_restore "$store" "$CONAN_HOME" "$scratch/$name.third-party.recorded.json" "$scratch" \
+        "$name:third-party:recorded" || rc=$?
+    case $rc in
+        0) ;;
+        2) _MALF_THIRD_PARTY_CAUSE="the store is corrupt (STOPPED above)"; return 2 ;;
+        *) _MALF_THIRD_PARTY_CAUSE="restoring its recorded nodes into the walk's home was refused (above)"; return 1 ;;
+    esac
 }
 
 _malf_owned_prefixes() {
@@ -5710,10 +5844,13 @@ PY
 # One `stored: false` step (DN-142.D14): a `conan build` of the package's tracked tree at <rev>,
 # materialised from git into <scratch>, in $CONAN_HOME with the writer's conf set and
 # `--build=never`, then its verdict record; it fails if any revision of the package is left in the
-# cache. pre: CONAN_HOME, the profile, _MALF_WRITER_ARGS and _MALF_SHIP_LOCK are set (store-create,
-# store-build).
+# cache. The build and its record run in a step home of its own (_malf_step_home, DN-142.D25 (5) call
+# F), restored from the store with what the key before the step names; CONAN_HOME, the walk's home,
+# is where it resolves. pre: CONAN_HOME, the profile, _MALF_WRITER_ARGS and _MALF_SHIP_LOCK are set
+# (store-create, store-build).
+# post: exit 0 built, tested and recorded; 1 otherwise; 2 a corrupt store (the walk stops).
 _malf_store_build_one() {   # <name> <path> <rev> <store> <scratch> <prefixes>
-    local name="$1" path="$2" rev="$3" store="$4" scratch="$5" prefixes="$6" repo prefix tree left
+    local name="$1" path="$2" rev="$3" store="$4" scratch="$5" prefixes="$6" repo prefix tree step_home rc
     repo="$(git -C "$path" rev-parse --show-toplevel)" && prefix="$(git -C "$path" rev-parse --show-prefix)" \
         || { echo "malf store-build: $path is not in a git checkout" >&2; return 1; }
     tree="$(git -C "$repo" rev-parse "$rev:$prefix")" \
@@ -5725,6 +5862,22 @@ _malf_store_build_one() {   # <name> <path> <rev> <store> <scratch> <prefixes>
     if ! _malf_store_key_first "$name" "$prefixes" "$store" "$scratch" "$scratch/$name.log" "$scratch/$name/$prefix" "$tree"; then
         echo "malf store-build: the key of $name could not be computed before its build (above, or $scratch/$name.log)" >&2; return 1
     fi
+    step_home="$(_malf_step_home "$scratch" "$name")" || return 1
+    local walk_home="$CONAN_HOME"
+    rc=0
+    CONAN_HOME="$step_home" _malf_store_build_in "$name" "$prefix" "$tree" "$store" "$scratch" "$prefixes" \
+        "$walk_home" || rc=$?
+    rm -rf "$step_home"
+    return "$rc"
+}
+
+# The `conan build` of a stored: false step and its record, in CONAN_HOME, a step home restored here
+# from the store, its recipes from <walk home>.
+_malf_store_build_in() {   # <name> <prefix> <tree> <store> <scratch> <prefixes> <walk home>
+    local name="$1" prefix="$2" tree="$3" store="$4" scratch="$5" prefixes="$6" walk_home="$7" left rc=0
+    python3 "$MALF_DIR/artefact_store.py" restore "$store" "$CONAN_HOME" "$scratch/$name.key-first.json" \
+        "$scratch/restore.jsonl" "$name" "$walk_home" "$scratch/$name.key-first.graph.json" || rc=$?
+    [[ $rc -eq 0 ]] || { [[ $rc -eq 2 ]] && return 2; return 1; }
     if ! conan build "$scratch/$name/$prefix" "${_MALF_WRITER_PROFILES[@]}" \
             -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${_MALF_SHIP_LOCK[@]}" --build=never \
             --format=json > "$scratch/$name.graph.json" 2> "$scratch/$name.log"; then
