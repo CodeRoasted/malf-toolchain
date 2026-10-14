@@ -279,8 +279,8 @@ jobs:
                      f"({exc}). An unreadable record is not a record, and it is deliberately NOT skipped "
                      f"in favour of an older run: a corrupt or truncated artifact on a run NEWER than the "
                      f"one that would be chosen is exactly the case where quietly attesting against a "
-                     f"previous build would be wrong. Re-run .github/workflows/pharos-build.yml in "
-                     f"{record_repo} with version={version}.")
+                     f"previous build would be wrong. Re-run step 0 at a candidate of "
+                     f"{version}: `./pharos cut {version} --dispatch` in {record_repo}.")
           if not isinstance(record, dict):
               refuse(f"the build record from {record_repo} run {run_id} parsed as "
                      f"{type(record).__name__}, not an object, so it carries no `version`, no `built` and "
@@ -331,8 +331,8 @@ jobs:
           if seal != "writer":
               refuse(f"the build record for {version} was not sealed by the store writer (publication.seal "
                      f"is {seal!r}): its manifest was never signed or replicated, so no slice exists for "
-                     f"this tag to publish. Re-run .github/workflows/pharos-build.yml in {record_repo} with "
-                     f"version={version} on the release runner, where the writer's key is named.")
+                     f"this tag to publish. Re-run step 0 on the release runner, where the writer's key is named: "
+                     f"`./pharos cut {version} --dispatch` in {record_repo}.")
 
           repos = record.get("repos")
           if not isinstance(repos, dict):
@@ -373,11 +373,14 @@ jobs:
                      f"saw this repository, not a clean attestation.")
           if verified != tagged:
               refuse(f"the tag {tag} points at {tagged} and the build record for {version} verified "
-                     f"{package} at {verified}. This repository moved after step 0, so the tag would "
-                     f"publish over a tree the build never judged. Both SHAs above are {package}'s: "
+                     f"{package} at {verified}. The tag names a commit the build never judged, so it "
+                     f"would publish over an unjudged tree: a release tag is made at the RECORDED commit "
+                     f"(`./pharos cut {version} --resume <run>` tags {verified}), never at a branch head, "
+                     f"which may have moved since the candidate. Both SHAs above are {package}'s: "
                      f"{tagged} is what {tag} resolves to today, never the commit this run was dispatched "
-                     f"from. Re-run .github/workflows/pharos-build.yml in {record_repo} with "
-                     f"version={version}, then re-tag.")
+                     f"from. Re-point the tag at {verified} (a force-move of a published tag is the "
+                     f"Founder's), or make a new candidate with `./pharos cut {version} --dispatch` in "
+                     f"{record_repo} and re-tag from its green run.")
 
           print(f"attested: the tag {tag} and {record_repo}'s build record for {version} agree that "
                 f"{package} is {tagged}")
@@ -415,11 +418,11 @@ jobs:
             dest="$workdir/cand/$id"
             rm -rf "$dest"; mkdir -p "$dest"
             if ! GH_TOKEN="$RECORD_TOKEN" gh run download "$id" --repo "$RECORD_REPO" --name pharos-build-record --dir "$dest" </dev/null >/dev/null 2>"$workdir/dl.err"; then
-              echo "::error::REFUSED — the \`pharos-build-record\` artifact of $RECORD_REPO run $id could not be downloaded. It is candidate $examined of the newest-first list and $passed_over earlier candidate(s) were read and passed over as other cuts' records, so every record that could still have described $TAG is either this one or older than it. gh said: $(tr '\n' ' ' < "$workdir/dl.err"). This job does not fall through to an older run: the unread record may be the one that describes $TAG, and attesting against its predecessor would certify a tree step 0 has since re-judged. TWO CAUSES FAIL IDENTICALLY IN gh's EXIT CODE and both are named rather than one of them guessed at — a run artifact past its 90-day retention has been DELETED, and a token without Actions: Read-only on $RECORD_REPO is REFUSED the download. If the artifact has merely expired, re-run .github/workflows/pharos-build.yml in $RECORD_REPO with version=$version and re-tag."
+              echo "::error::REFUSED — the \`pharos-build-record\` artifact of $RECORD_REPO run $id could not be downloaded. It is candidate $examined of the newest-first list and $passed_over earlier candidate(s) were read and passed over as other cuts' records, so every record that could still have described $TAG is either this one or older than it. gh said: $(tr '\n' ' ' < "$workdir/dl.err"). This job does not fall through to an older run: the unread record may be the one that describes $TAG, and attesting against its predecessor would certify a tree step 0 has since re-judged. TWO CAUSES FAIL IDENTICALLY IN gh's EXIT CODE and both are named rather than one of them guessed at — a run artifact past its 90-day retention has been DELETED, and a token without Actions: Read-only on $RECORD_REPO is REFUSED the download. If the artifact has merely expired, re-run step 0 at a candidate of $version (\`./pharos cut $version --dispatch\` in $RECORD_REPO) and re-tag."
               exit 1
             fi
             if [ ! -f "$dest/preflight.json" ]; then
-              echo "::error::REFUSED — the \`pharos-build-record\` artifact of $RECORD_REPO run $id downloaded but carries no preflight.json. It is candidate $examined of the newest-first list and $passed_over earlier candidate(s) were read and passed over as other cuts' records, so every record that could still have described $TAG is either this one or older than it. An artifact without the record is not a record, and it is not skipped in favour of an older run. Re-run .github/workflows/pharos-build.yml in $RECORD_REPO with version=$version."
+              echo "::error::REFUSED — the \`pharos-build-record\` artifact of $RECORD_REPO run $id downloaded but carries no preflight.json. It is candidate $examined of the newest-first list and $passed_over earlier candidate(s) were read and passed over as other cuts' records, so every record that could still have described $TAG is either this one or older than it. An artifact without the record is not a record, and it is not skipped in favour of an older run. Re-run step 0 at a candidate of $version (\`./pharos cut $version --dispatch\` in $RECORD_REPO)."
               exit 1
             fi
             judge_rc=0
@@ -435,7 +438,7 @@ jobs:
             rm -rf "$dest"
           done <<<"$runs"
           if [ -z "$chosen" ]; then
-            echo "::error::REFUSED — none of the $examined successful \`pharos-build\` run(s) at a candidate of $version in $RECORD_REPO carries a record for version $version; every one of them was read and every one names another cut. THAT COUNT IS THE WINDOW, NOT THE HISTORY: this job reads ONE page of at most 50 successful runs, newest first, so if more than 50 successful builds have run, at any ref, since the one for $version, that build is outside what this step can see and its record was never examined. The remedy is the same on both paths and the diagnosis is not, which is why the window is stated. A tag cut over a build that never saw its version is the window DN-108.D7 exists to close. The versions those records DO carry are deliberately not listed here: this log is public in three of the repositories that run this step, and the set of versions in recent build records is the unreleased version roadmap. Run .github/workflows/pharos-build.yml in $RECORD_REPO with version=$version, then re-tag."
+            echo "::error::REFUSED — none of the $examined successful \`pharos-build\` run(s) at a candidate of $version in $RECORD_REPO carries a record for version $version; every one of them was read and every one names another cut. THAT COUNT IS THE WINDOW, NOT THE HISTORY: this job reads ONE page of at most 50 successful runs, newest first, so if more than 50 successful builds have run, at any ref, since the one for $version, that build is outside what this step can see and its record was never examined. The remedy is the same on both paths and the diagnosis is not, which is why the window is stated. A tag cut over a build that never saw its version is the window DN-108.D7 exists to close. The versions those records DO carry are deliberately not listed here: this log is public in three of the repositories that run this step, and the set of versions in recent build records is the unreleased version roadmap. Run step 0 at a candidate of $version (\`./pharos cut $version --dispatch\` in $RECORD_REPO), then re-tag."
             exit 1
           fi
 
