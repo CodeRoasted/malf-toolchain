@@ -5335,7 +5335,7 @@ cmd_store_create() {
     local scratch; scratch="$(mktemp -d /tmp/malf-store.XXXXXX)"
     local steps unstored prefixes
     steps="$(python3 "$MALF_DIR/malf_graph.py" steps "$MALF_WORKSPACE_ROOT")" && [[ -n "$steps" ]] \
-        || { echo "malf store-create: malf's walk of $MALF_WORKSPACE_ROOT found no step" >&2; return 2; }
+        || { echo "malf store-create: malf's walk of $MALF_WORKSPACE_ROOT found no step, or refused it (above)" >&2; return 2; }
     unstored="$(python3 "$MALF_WORKSPACE_ROOT/scripts/version_line.py" unstored "$MALF_WORKSPACE_ROOT")" \
         || { echo "malf store-create: failed to resolve the stored: false packages" >&2; return 2; }
     prefixes="$(_malf_owned_prefixes)" \
@@ -5577,12 +5577,13 @@ _malf_store_create_in() {   # <name> <path> <store> <scratch> <prefixes> <step h
     _malf_store_restore "$store" "$step_home" "$scratch/$name.key-first.json" "$scratch" "$name" \
         "$scratch/$name.key-first.graph.json" || rc=$?
     [[ $rc -eq 0 ]] || { [[ $rc -eq 2 ]] && return "$_MALF_STEP_STOPPED"; return "$_MALF_STEP_UNRECORDED"; }
-    if ! CONAN_HOME="$step_home" _malf_store_create_step "$name" "$path" "$prefixes" "$scratch/$name.graph.json" "$scratch/$name.log"; then
+    if ! CONAN_HOME="$step_home" _malf_store_create_step "$name" "$path" "$prefixes" "$scratch/$name.graph.json" \
+            "$scratch/$name.log" "$_MALF_TEST_FOLDER"; then
         echo "malf store-create: conan create $name failed — $scratch/$name.log" >&2
         return "$_MALF_STEP_FAILED"
     fi
     if ! MALF_STEP_EXECUTABLES="$scratch/$name.executables.json" MALF_STEP_KEY_FIRST="$scratch/$name.key-first.json" \
-        CONAN_HOME="$step_home" python3 "$MALF_DIR/artefact_store.py" conan-step "$store" "$step_home" \
+        MALF_STEP_TEST_FOLDER="$_MALF_TEST_FOLDER" CONAN_HOME="$step_home" python3 "$MALF_DIR/artefact_store.py" conan-step "$store" "$step_home" \
         "$scratch/$name.graph.json" "$name" "$MALF_PROFILE_NAME" "$MALF_DIR" "$scratch/toolchain.json" "$prefixes" \
         "$step_home/malf-test-results" "${corpus_args[@]}"; then
         echo "malf store-create: recording $name failed, or differs at an equal key (above)" >&2
@@ -5630,9 +5631,12 @@ _malf_store_closed() {   # <n> <name> <verdict> <walk start> <step start> <step 
 # artefact_store.py's `key-first` over it, each first-party upstream read from the record its own step
 # wrote. A create's source is the digest of the reference its `conan export` gave. The document lands at
 # <scratch>/<name>.key-first.json, which the step's record must equal once it has run.
+# A create's test folder is keyed and read from a COPY of its tracked files (DN-142.D26,
+# _malf_store_test_folder); a `conan build` runs no test_package, so its member is null.
 # pre: the walk's environment (cmd_store_create), MALF_STEP_EXECUTABLES for a create.
-# post: exit 0 with the document written and `--- store-create: <name> key before the step <key> ---`
-#       printed; non-zero when the export, the resolve or the key was refused (its log or above).
+# post: exit 0 with the document written, `--- store-create: <name> key before the step <key> ---`
+#       printed and _MALF_TEST_FOLDER naming the copy or `none`, which the step's create and record
+#       take; non-zero when the copy, the export, the resolve or the key was refused (its log or above).
 _malf_store_key_first() {   # <name> <prefixes> <store> <scratch> <log> <recipe path> | ... <source path> <source tree>
     local name="$1" prefixes="$2" store="$3" scratch="$4" log="$5" path="$6" tree="${7:-}" reference key
     local graph="$scratch/$name.key-first.graph.json"
@@ -5640,7 +5644,9 @@ _malf_store_key_first() {   # <name> <prefixes> <store> <scratch> <log> <recipe 
     local anchor
     if [[ -n "$tree" ]]; then
         build_args=(--build=never); anchor="tree=$tree"
+        _MALF_TEST_FOLDER=none
     else
+        _malf_store_test_folder "$path" "$scratch/$name.test_package" || return 1
         reference="$(conan export "$path" --format=json 2>> "$log" \
             | python3 -c 'import json, sys; print(json.load(sys.stdin)["reference"])')" || return 1
         mapfile -t build_args < <(_malf_store_build_args "$name"); anchor="reference=$reference"
@@ -5654,7 +5660,7 @@ _malf_store_key_first() {   # <name> <prefixes> <store> <scratch> <log> <recipe 
     (cd "$path" && conan graph info . "${_MALF_WRITER_PROFILES[@]}" -s build_type="$MALF_CONFIG" \
         "${_MALF_WRITER_ARGS[@]}" "${build_args[@]}" "${_MALF_SHIP_LOCK[@]}" --no-remote --format=json) \
         > "$graph" 2>> "$log" || return 1
-    key="$(python3 "$MALF_DIR/artefact_store.py" key-first "$store" "$CONAN_HOME" "$graph" "$name" \
+    key="$(MALF_STEP_TEST_FOLDER="$_MALF_TEST_FOLDER" python3 "$MALF_DIR/artefact_store.py" key-first "$store" "$CONAN_HOME" "$graph" "$name" \
         "$MALF_PROFILE_NAME" "$MALF_DIR" "$scratch/toolchain.json" "$prefixes" "$scratch/$name.key-first.json" \
         "$anchor")" || return 1
     echo "--- store-create: $name key before the step $key ---"
@@ -5670,12 +5676,41 @@ _malf_store_key_first() {   # <name> <prefixes> <store> <scratch> <log> <recipe 
 # it links is one already in the home: a first-party upstream its own step created, a third-party
 # one its own `third-party-create` step built and recorded (_malf_store_third_party). A binary
 # missing from the home fails the create naming it, never builds or downloads inside it.
-_malf_store_create_step() {   # <name> <path> <prefixes> <graph> <log>
-    local -a build_args
+_malf_store_create_step() {   # <name> <path> <prefixes> <graph> <log> <test folder copy|none>
+    local -a build_args test_args=()
+    case "${6:-}" in
+        none) ;;
+        /*) test_args=("--test-folder=$6") ;;
+        *) echo "malf store-create: the create of $1 names its test folder by a copy's absolute path or \`none\`, not '${6:-}' (DN-142.D26)" >&2
+           return 1 ;;
+    esac
     mapfile -t build_args < <(_malf_store_build_args "$1")
     conan create "$2" "${_MALF_WRITER_PROFILES[@]}" \
         -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${build_args[@]}" "${_MALF_SHIP_LOCK[@]}" \
-        --no-remote --format=json > "$4" 2> "$5"
+        "${test_args[@]}" --no-remote --format=json > "$4" 2> "$5"
+}
+
+# A CREATE'S TEST FOLDER IS READ FROM A COPY OF ITS TRACKED FILES (DN-142.D26 (1)): the files git
+# tracks under <recipe>/test_package, at their working-tree bytes (DN-142.D4 (b)'s rule for exports),
+# copied ONCE per step into <copy>; the key hashes that copy and the create reads it through
+# `--test-folder=<copy>/test_package`, so an untracked file is never read and an edit after the copy
+# reaches neither. A recipe tracking no test folder has none (`none`, the member null, no flag); one
+# whose test folder exists on disk with nothing tracked is refused, since the create would read it.
+# post: _MALF_TEST_FOLDER holds the copy's test folder or `none`; non-zero naming the refusal.
+_malf_store_test_folder() {   # <recipe path> <copy>
+    local path="$1" copy="$2" listed
+    _MALF_TEST_FOLDER=none
+    listed="$(git -C "$path" ls-files -- test_package)" \
+        || { echo "malf store-create: git cannot list the test folder of $path" >&2; return 1; }
+    if [[ -z "$listed" ]]; then
+        [[ ! -e "$path/test_package" ]] && return 0
+        echo "malf store-create: REFUSED $path/test_package exists and git tracks none of it, so a create would read untracked bytes no key names (DN-142.D26)" >&2
+        return 1
+    fi
+    rm -rf "$copy" && mkdir -p "$copy" \
+        && (cd "$path" && git ls-files -z -- test_package | xargs -0 cp --parents -P --preserve=mode -t "$copy") \
+        || { echo "malf store-create: the tracked test folder of $path could not be copied to $copy" >&2; return 1; }
+    _MALF_TEST_FOLDER="$copy/test_package"
 }
 
 # pre: $1 is a store step's package.
@@ -5889,7 +5924,7 @@ _malf_store_build_in() {   # <name> <prefix> <tree> <store> <scratch> <prefixes>
         return 1
     fi
     MALF_STEP_SOURCE="$scratch/$name/$prefix" MALF_STEP_KEY_FIRST="$scratch/$name.key-first.json" \
-        python3 "$MALF_DIR/artefact_store.py" build-step "$store" "$CONAN_HOME" "$scratch/$name.graph.json" \
+        MALF_STEP_TEST_FOLDER=none python3 "$MALF_DIR/artefact_store.py" build-step "$store" "$CONAN_HOME" "$scratch/$name.graph.json" \
         "$name" "$MALF_PROFILE_NAME" "$MALF_DIR" "$scratch/toolchain.json" "$prefixes" "$tree" \
         "$CONAN_HOME/malf-test-results" || return 1
     echo "malf store-build: $name built and tested from its tracked tree $tree; no package of it in the cache"

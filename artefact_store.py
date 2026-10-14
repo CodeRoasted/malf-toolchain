@@ -859,12 +859,28 @@ def _step_inputs(home: Path, graph_json: Path, package: str, prefixes: tuple[str
     return sources, upstream, third_party, target, folders
 
 
+TEST_FOLDER_ENV = "MALF_STEP_TEST_FOLDER"
+
+
+def test_package_member() -> str | None:
+    """DN-142.D26's `test_package` member: the tree digest of the copy of the create's tracked test
+    folder MALF_STEP_TEST_FOLDER names, which the create reads; None for `none` (no test folder, or a
+    `conan build`, which runs none). raises Refused when the variable is unset: an absent member is
+    never read as null."""
+    named = os.environ.get(TEST_FOLDER_ENV)
+    if named is None:
+        raise Refused(f"{TEST_FOLDER_ENV} names neither the copy of the step's test folder nor `none`, "
+                      "and a step's test_package member is never assumed null (DN-142.D26)")
+    return None if named == "none" else tree_digest(Path(named))[0]
+
+
 def _step_document(kind: str, package: str, profile: str, home: Path, malf_dir: Path,
                    toolchain: Path, sources: dict, upstream: dict, third_party: dict) -> dict:
     return {
         "step": {"kind": kind, "package": package, "profile": profile},
         "definition": definition_member(malf_dir, step_parameters(profile)),
         "sources": sources,
+        "test_package": test_package_member(),
         "upstream": upstream,
         "third_party": third_party,
         "toolchain": json.loads(toolchain.read_text()),
@@ -2887,6 +2903,35 @@ def selftest() -> int:
         rc, _out = arm("a package the bench document does not name has no bench verdict",
                        lambda: bench("coderoast_ipc_core"), None)
         expect("unnamed: nothing to judge, nothing stored", (rc, len(listing(bstore, "records"))), (0, 1))
+
+    # THE TEST_PACKAGE MEMBER (DN-142.D26): the digest of the copy of the create's tracked test folder,
+    # null for none, and never assumed null when nobody named it.
+    with tempfile.TemporaryDirectory(prefix="artefact_store.") as scratch:
+        folder = Path(scratch) / "test_package"
+        folder.mkdir()
+        (folder / "conanfile.py").write_text("from conan import ConanFile\n")
+        (folder / "test.cpp").write_text("TEST(Tt, Holds) {}\n")
+        named = handed(None, test_package_member, **{TEST_FOLDER_ENV: str(folder)})
+        expect("the member is the copy's tree digest", named, tree_digest(folder)[0])
+        (folder / "test.cpp").write_text("TEST(Tt, Holds) {};\n")
+        expect("RED: a one-byte edit of a test source moves the member",
+               handed(None, test_package_member, **{TEST_FOLDER_ENV: str(folder)}) != named, True)
+        expect("`none` is null", handed(None, test_package_member, **{TEST_FOLDER_ENV: "none"}), None)
+        saved = os.environ.pop(TEST_FOLDER_ENV, None)
+        try:
+            arm("RED: an unnamed test folder is refused, never read as null", test_package_member,
+                "never assumed null")
+        finally:
+            if saved is not None:
+                os.environ[TEST_FOLDER_ENV] = saved
+        before = Path(scratch) / "before.json"
+        before.write_text(json.dumps({"step": {"package": "tt_w"}, "sources": {}}))
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            agreed = handed(None, lambda: key_first_agrees(
+                {"step": {"package": "tt_w"}, "sources": {}, "test_package": None}),
+                **{KEY_FIRST_ENV: str(before)})
+        expect("RED: a key-first document missing the member is refused at G2, not read as null",
+               (agreed, "test_package (only after the step)" in err.getvalue()), (False, True))
 
     # THE RESTORE (DN-142.D25 (5) call F, DN-142.D17 (2) amended 2026-10-14): a package record keeps
     # its transport; each member of a restore list resolves to a record with one, is restored, and is

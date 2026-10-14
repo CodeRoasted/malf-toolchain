@@ -21,7 +21,9 @@ lines on stdout.
   steps <root_dir>
       `members`, with a third column: each member's first-party requirements among the
       members (`requires` and `test_requires`), by name, comma-separated — the step walk's
-      edges (`malf store-create`).
+      edges (`malf store-create`). Exit 2, printing nothing, when a member's
+      `test_package/conanfile.py` requires a constant reference its tested recipe neither
+      requires nor test-requires (DN-142.D26), each breach named on stderr.
 
   members <root_dir>
       Every recipe under root_dir, topologically sorted by the
@@ -283,11 +285,36 @@ def mode_members(root: pathlib.Path):
     emit(order)
 
 
-def mode_steps(root: pathlib.Path):
+def test_package_breaches(recipes: dict) -> list[str]:
+    """Each constant reference a member's `test_package/conanfile.py` requires or test-requires
+    that its tested recipe does not (DN-142.D26 (1)): a test_package's graph is a sub-graph of its
+    step's, so the step's key and its restored home already hold every node it links. A reference
+    spelled by computation (`self.tested_reference_str`) escapes this AST reading, and is caught by
+    construction at the create, whose home holds only the step's nodes."""
+    breaches = []
+    for ref, recipe in sorted(recipes.items()):
+        test_recipe = pathlib.Path(recipe["dir"]) / "test_package" / "conanfile.py"
+        if not test_recipe.is_file():
+            continue
+        _name, _version, requires, test_requires = recipe_info(test_recipe)
+        own = set(recipe["requires"]) | set(recipe["test_requires"])
+        breaches += [f"{ref}: {test_recipe} requires {dep}, which {ref} neither requires nor test-requires"
+                     for dep in sorted(set(requires) | set(test_requires)) if dep not in own]
+    return breaches
+
+
+def mode_steps(root: pathlib.Path) -> int:
     """`members`, each row carrying a third column: the member's first-party requirements
     (`requires` and `test_requires`) among the members, by name, comma-separated — the edges a
-    step walk needs to skip a dependent of a failed step (DN-142.D5 (4), (7))."""
+    step walk needs to skip a dependent of a failed step (DN-142.D5 (4), (7)).
+    post: 0 with the rows printed; 2 with nothing printed and each test_package breach named."""
     recipes = scan(root)
+    breaches = test_package_breaches(recipes)
+    if breaches:
+        sys.stderr.write(f"malf_graph: REFUSED {len(breaches)} test_package requirement(s) outside the tested "
+                         "recipe's own, which no step's key or home holds (DN-142.D26): "
+                         + "; ".join(breaches) + "\n")
+        return 2
     order = []
     seen = set()
     visiting = set()
@@ -311,6 +338,7 @@ def mode_steps(root: pathlib.Path):
         visit(ref)
     for ref, directory, edges in order:
         print(f"{ref}\t{directory}\t{edges}")
+    return 0
 
 
 def main() -> int:
@@ -329,7 +357,7 @@ def main() -> int:
     elif mode == "members":
         mode_members(pathlib.Path(sys.argv[2]).resolve())
     elif mode == "steps":
-        mode_steps(pathlib.Path(sys.argv[2]).resolve())
+        return mode_steps(pathlib.Path(sys.argv[2]).resolve())
     else:
         sys.stderr.write(f"malf_graph.py: unknown mode '{mode}' (deps|all|members|steps)\n")
         return 2
