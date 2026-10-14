@@ -5557,8 +5557,12 @@ _malf_store_key_first() {   # <name> <prefixes> <store> <scratch> <log> <recipe 
             | python3 -c 'import json, sys; print(json.load(sys.stdin)["reference"])')" || return 1
         target=(--requires="$reference"); mapfile -t build_args < <(_malf_store_build_args "$name")
     fi
-    conan graph info "${target[@]}" "${_MALF_WRITER_PROFILES[@]}" -s build_type="$MALF_CONFIG" \
-        "${_MALF_WRITER_ARGS[@]}" "${build_args[@]}" "${_MALF_SHIP_LOCK[@]}" --no-remote --format=json \
+    # FROM THE RECIPE'S OWN DIRECTORY, never the caller's: conan reads a `conan.lock` from the
+    # current directory when no --lockfile is named (as a fixture walk names none), and a create over
+    # <path> reads the one beside its recipe, so a query run elsewhere resolved another graph — from
+    # malf's root, against malf/conan.lock, it refused every fixture create.
+    (cd "$path" && conan graph info "${target[@]}" "${_MALF_WRITER_PROFILES[@]}" -s build_type="$MALF_CONFIG" \
+        "${_MALF_WRITER_ARGS[@]}" "${build_args[@]}" "${_MALF_SHIP_LOCK[@]}" --no-remote --format=json) \
         > "$graph" 2>> "$log" || return 1
     key="$(python3 "$MALF_DIR/artefact_store.py" key-first "$store" "$CONAN_HOME" "$graph" "$name" \
         "$MALF_PROFILE_NAME" "$MALF_DIR" "$scratch/toolchain.json" "$prefixes" "$scratch/$name.key-first.json" \

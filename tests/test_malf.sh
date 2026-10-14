@@ -5144,6 +5144,13 @@ tq_home k
 check "(k) every step's key is computed before it runs and equals the one after: the line, the equality, and one key" \
       "rc=0 1 1" \
       "$(tq_step k store-k ex_r) $(tq_has 'ex_r key before the step [0-9a-f]\{64\}') $(tq_has 'artefact_store: KEY-FIRST ex_r equal [0-9a-f]\{64\}')"
+# (k′) the key before the step does not depend on the caller's directory: conan reads a
+# `conan.lock` from the current directory for `--requires`, never for a create over a recipe path, so
+# a walk started beside a lock that names none of the fixtures (malf's own root) still keys every step.
+mkdir -p "$tq_tmp/stray" && cp "$MALF_ROOT/conan.lock" "$tq_tmp/stray/conan.lock"
+check "(k′) RED — a step keyed from a directory holding a stray conan.lock computes the same key before and after it" \
+      "rc=0 1" \
+      "$(cd "$tq_tmp/stray" && tq_step k store-k3 ex_r) $(tq_has 'artefact_store: KEY-FIRST ex_r equal [0-9a-f]\{64\}')"
 check "(k) RED — an export that reads the clock moves the key between before and after: UNRECORDED, naming sources.ex_k/host, nothing stored" \
       "rc=2 1 1 0" \
       "$(tq_step k store-k2 ex_k) $(tq_has 'REFUSED ex_k: the key computed before the step .* (DN-142.D19 (4), gate G2): 1 member(s): sources.ex_k/host') $(tq_has '\[1\] ex_k UNRECORDED') $(grep -l '"ex_k"' "$tq_tmp"/store-k2/records/*.json 2>/dev/null | wc -l | tr -d ' ')"
