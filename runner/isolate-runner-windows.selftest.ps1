@@ -154,6 +154,20 @@ if ($named.Count -eq 3) {
 }
 Check 'the .env PATH is the one Get-RunnerPath composes' 'True' "$($text.Contains('"PATH=$(Get-RunnerPath $PythonDir $GitBin $machinePath)"'))"
 
+Write-Host '[7] every machine PATH entry is an absolute drive path: an unexpanded %SystemRoot% entry is relative to the current directory (CWE-427, probe run 38539999125)'
+$faultNode = $ast.FindAll({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-PathFaults' }, $true) | Select-Object -First 1
+Check 'the script defines Get-PathFaults' 'True' "$($null -ne $faultNode)"
+if ($faultNode) {
+    . ([scriptblock]::Create($faultNode.Extent.Text))
+    $live = 'C:\Program Files\Git\bin;C:\WINDOWS\system32;%SystemRoot%\system32;%SystemRoot%;%SYSTEMROOT%\System32\OpenSSH\'
+    Check 'the measured machine PATH: its three unexpanded entries are faults, its drive paths are not' '%SystemRoot%\system32|%SystemRoot%|%SYSTEMROOT%\System32\OpenSSH\' ((Get-PathFaults $live) -join '|')
+    Check 'a relative entry and a drive-relative one are faults too' 'tools|C:tools' ((Get-PathFaults 'C:\WINDOWS;tools;C:tools') -join '|')
+    Check 'a PATH of absolute drive paths has none' '0' "$(@(Get-PathFaults 'C:\WINDOWS\system32;C:\Program Files\Git\cmd;').Count)"
+}
+$refusedAt = $text.IndexOf('if ($pathFaults.Count -gt 0) {')
+$composedAt = $text.IndexOf('PATH=$(Get-RunnerPath')
+Check 'the script refuses a faulty machine PATH before it composes the .env PATH' 'True' "$($refusedAt -gt 0 -and $refusedAt -lt $composedAt)"
+
 Write-Host "`nisolate-runner-windows selftest: $($script:pass) passed, $($script:fail) failed"
 if ($script:fail -gt 0) { exit 1 }
 exit 0

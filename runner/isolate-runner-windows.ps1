@@ -237,6 +237,22 @@ function Get-RunnerPath([string]$python, [string]$gitBin, [string]$machine) {
 }
 $GitBin = Resolve-GitBin (Resolve-Machine 'git.exe')
 if ($machinePath -match '\\Users\\') { Refuse "the machine PATH names a directory under a user profile - the runner's PATH is built from it: $machinePath" }
+# Every machine PATH entry is an ABSOLUTE drive path. The value is REG_SZ on this host (measured
+# 2026-10-14 with `reg query`), so `%SystemRoot%\system32` is never expanded: Windows searches it as a
+# directory RELATIVE to the current one, and any job whose working directory holds a folder of that
+# name chooses what an unqualified command or a missing DLL resolves to (CWE-427; the isolation
+# probe's machine-PATH arm, run 38539999125, created it on both runners). .env is not expanded either,
+# so a relative entry copied into the job PATH below would reach every job. Refused, never repaired
+# here: the machine PATH is the host's, and its owner fixes it.
+function Get-PathFaults([string]$path) {
+    @($path -split ';' | Where-Object { $_ -and ($_ -match '%' -or $_ -notmatch '^[A-Za-z]:\\') })
+}
+$pathFaults = Get-PathFaults $machinePath
+if ($pathFaults.Count -gt 0) {
+    Refuse ("the machine PATH holds $($pathFaults.Count) entr$(if ($pathFaults.Count -eq 1) { 'y' } else { 'ies' }) that is not an absolute drive path, which Windows searches relative to the current directory: $($pathFaults -join '; ') - " +
+            "as an administrator: `$k='HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'; `$p=(Get-Item `$k).GetValue('Path','','DoNotExpandEnvironmentNames'); " +
+            "Set-ItemProperty `$k -Name Path -Type ExpandString -Value ((`$p -split ';' | Where-Object { `$_ } | ForEach-Object { [Environment]::ExpandEnvironmentVariables(`$_) } | Select-Object -Unique) -join ';'), restart both runner services, then re-run this script")
+}
 
 # The job workspace, where .runner says it is (relative to the runner directory unless rooted).
 # note: an instance not installed yet has no .runner; config.cmd's default workFolder is _work.
