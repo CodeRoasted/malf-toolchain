@@ -7,8 +7,10 @@
 #   ci       the runner goes back to the desk account, at its old directory, under its original unit,
 #            and its rootless Docker is removed.
 #   release  the runner is stopped, deregistered from the organisation and its units removed; its
-#            rootless Docker is removed; the build slot goes back to the ci account (runner-instances.sh,
-#            slot_holds), since step 0 then has no other runner.
+#            rootless Docker is removed.
+#   both     the seat goes (DN-119.D9): its slice is stopped, which removes the cgroup and with it the
+#            partition, so its CPUs return to the desk; the slice file and the drop-ins are deleted, and
+#            the partition unit and script with the last instance.
 #
 # WHAT IT DOES NOT UNDO, on purpose:
 #   * /opt/gcc-16.2 stays root-owned and not group/other-writable — the 0777 it had was a defect
@@ -76,28 +78,17 @@ if systemctl is-active --quiet "$UNIT"; then
     fi
 fi
 
-# Every other instance still present on this box keeps what they share: the dockerd child script and
-# the build slot root.
+# Every other instance still present on this box keeps what they share: the dockerd child script, the
+# partition unit and its script.
 others_present=()
 for other in "${INSTANCES[@]}"; do
     [[ "$other" != "$INSTANCE" ]] && instance_present "$other" && others_present+=("$other")
 done
-# The slot root goes away only when no instance remains and nobody holds a slot in it: malf would then
-# resolve /tmp, and a holder in the shared root would stop excluding anyone.
-slot_held=false
-[[ -e "$SLOT_ROOT/slot" ]] && slot_held=true
 
 case "$INSTANCE" in
     ci) runner_plan="$($moved && echo "$NEW_DIR -> $OLD_DIR, owner -> $DESK_USER, original unit restored" || echo "not moved — unit left as it is")" ;;
     release) runner_plan="$UNIT stopped, disabled and deleted; $RUNNER_NAME deregistered from $ORG (a removal token minted by the desk's gh, through stdin)" ;;
 esac
-if ((${#others_present[@]})); then
-    slot_plan="KEPT for ${others_present[*]}; entries recomputed (runner-instances.sh, slot_holds)"
-elif $slot_held; then
-    slot_plan="KEPT — $SLOT_ROOT/slot exists (a lane holds it); re-run after its release"
-else
-    slot_plan="removed — malf falls back to /tmp/coderoast-build-slot"
-fi
 
 cat <<EOF
 
@@ -106,7 +97,9 @@ cat <<EOF
   rootless Docker     $DOCKER_UNIT stopped, disabled and deleted; $CHILD $( ((${#others_present[@]})) && echo "KEPT (used by ${others_present[*]})" || echo deleted)
   bank ACLs           named entries for $RUNNER_USER removed from ${BANK_WRITABLE[*]:-no root (it wrote none)}
   home-mirror ACLs    named entries for $RUNNER_USER removed from ${DESK_USER:-the desk}'s corpora-* directories
-  build slot root     $SLOT_ROOT $slot_plan
+  seat                $SEAT_SLICE stopped (its CPUs $SEAT_CPUS return to the desk) and deleted, with both units' seat.conf;
+                      $PARTITION_TEMPLATE and $PARTITION_SCRIPT $( ((${#others_present[@]})) && echo "KEPT (used by ${others_present[*]})" || echo deleted)
+  build slot          $SLOT_DIR stays in the $RUNNER_USER home, kept with it
   kept on purpose     /opt/gcc-16.2 permissions, the $RUNNER_USER account and home, the packages
 EOF
 $APPLY || { printf '\n[rollback %s] PLAN ONLY — nothing was changed. Re-run with --apply to do it.\n' "$INSTANCE"; exit 0; }
@@ -117,6 +110,7 @@ if systemctl list-unit-files "$DOCKER_UNIT" >/dev/null 2>&1; then
     systemctl disable --now "$DOCKER_UNIT" || true
 fi
 rm -f "/etc/systemd/system/$DOCKER_UNIT"
+rm -rf "/etc/systemd/system/$DOCKER_UNIT.d/"
 if ! ((${#others_present[@]})); then
     rm -f "$CHILD"
     rmdir "$(dirname "$CHILD")" 2>/dev/null || true
@@ -175,17 +169,19 @@ if [[ -n "$DESK_USER" ]]; then
     done
 fi
 
-step "4/5 build slot root"
-if ((${#others_present[@]})); then
-    # The unit is gone, so this instance no longer counts as present: its account loses its entries,
-    # and the remaining instances get theirs (ci takes the slot back when release goes).
-    say "slot root grants: $(apply_slot_acl "${DESK_USER:?the manifest names no desk account to keep on the slot root}")"
-elif $slot_held; then
-    say "$SLOT_ROOT/slot exists — KEPT; release that slot, then re-run this script to remove $SLOT_ROOT"
-else
-    rm -rf "$SLOT_ROOT"
-    say "$SLOT_ROOT removed; malf resolves /tmp/coderoast-build-slot again"
+step "4/5 the seat"
+# Stopping the slice stops the partition unit in it and removes the cgroup, and with the cgroup the
+# partition: the kernel hands its CPUs back to the root partition, which is the desk.
+rm -f "/etc/systemd/system/$UNIT.d/seat.conf"
+systemctl stop "$PARTITION_UNIT" "$SEAT_SLICE" 2>/dev/null || true
+rm -f "/etc/systemd/system/$SEAT_SLICE"
+if ! ((${#others_present[@]})); then
+    rm -f "/etc/systemd/system/$PARTITION_TEMPLATE" "$PARTITION_SCRIPT"
+    rmdir "$(dirname "$PARTITION_SCRIPT")" 2>/dev/null || true
 fi
+systemctl daemon-reload
+[[ ! -d "/sys/fs/cgroup/$SEAT_SLICE" ]] || die "/sys/fs/cgroup/$SEAT_SLICE is still there after the slice was stopped — 'systemctl status $SEAT_SLICE' names what holds it"
+say "$SEAT_SLICE gone; init.scope may run on CPUs $(cat /sys/fs/cgroup/init.scope/cpuset.cpus.effective 2>/dev/null || echo '<unreadable>')"
 
 step "5/5 restore the original unit and start the runner"
 case "$INSTANCE" in

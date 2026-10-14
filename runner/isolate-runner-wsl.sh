@@ -6,7 +6,7 @@
 #
 #   sudo bash malf/runner/isolate-runner-wsl.sh --instance <ci|release>            # PLAN: changes nothing
 #   sudo bash malf/runner/isolate-runner-wsl.sh --instance <ci|release> --apply    # do it
-#   sudo bash malf/runner/isolate-runner-wsl.sh --instance <ci|release> --prove    # the boundary proof only
+#   sudo bash malf/runner/isolate-runner-wsl.sh --instance <ci|release> --prove    # the boundary and seat proofs only
 #   sudo bash malf/runner/isolate-runner-wsl-rollback.sh --instance <ci|release>   # undo it
 #
 # THE BOUNDARY PROOF (--prove, and the last step of every --apply). As every OTHER runner account,
@@ -44,8 +44,25 @@
 # own home bound back (no other home is visible from a release job), ProtectSystem=full, a private
 # /dev/shm and a private IPC namespace (step 0 runs the shared-memory transport's tests, and a
 # segment another account created under the same name would feed them). Its runner carries no
-# label but `coderoast-release` and registers into the group `coderoast-release`. It takes the build
-# slot, which the ci account then loses entirely (runner-instances.sh, slot_holds).
+# label but `coderoast-release` and registers into the group `coderoast-release`.
+#
+# THE SEAT (DN-119.D9, RUL-3). Each instance runs in its own top-level slice, made a cpuset PARTITION
+# ROOT by a root oneshot (`seat-partition@<instance>.service`) and capped in memory, sized by the seat
+# table in runner-instances.sh. The runner and its docker unit carry `Requires=` and `After=` on the
+# oneshot, so a partition that did not take keeps the seat OFFLINE (GitHub queues its jobs) rather
+# than running it unpartitioned. The desk is the root partition's remainder and is configured nowhere.
+# Each seat keeps its build slot in its own account's state (runner-instances.sh, SLOT_DIR), so no
+# account can open another seat's slot: the shared root /var/lib/coderoast-build is retired. The ci
+# instance gets the private IPC namespace and /dev/shm the release instance has: the shared-memory
+# transport's tests name POSIX segments, which live in /dev/shm and which an IPC namespace alone does
+# not separate.
+#
+# THE SEAT PROOF (seat-probe.py, beside this script): from the desk, a task pinned onto a seat CPU is
+# refused (EINVAL), unpinned desk loops never land on one, the desk cgroups' effective CPUs exclude the
+# seat, and both units run inside it; then, under --prove only, an allocation past the seat's cap is
+# OOM-killed at that cap (memory.events), never swapping on release, and on release desk pressure
+# leaves the page cache the seat holds under its memory.min. Run on a box whose runners still sit in
+# system.slice, every arm reds: that is the arm's red-first.
 #
 # WHAT STAYS, stated so nobody reads more into this: localhost TCP services on this box (ollama,
 # the desk's dev servers, and any port another runner's job listens on) remain reachable from a job —
@@ -64,7 +81,6 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=runner-instances.sh
 . "$HERE/runner-instances.sh"
 
-OLD_SLOT="/tmp/coderoast-build-slot"
 PACKAGES=(acl uidmap rootlesskit slirp4netns docker-buildx)
 # Public mirror (no Docker Hub pull), the same digest coderoast-server's redis fixture pins.
 SMOKE_IMAGE="ghcr.io/coderoasted/mirror/library/redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499"
@@ -105,7 +121,7 @@ manifest_of() { sed -n "s/^$2=//p" "$1/manifest"; }
 prove_boundary() {
     local targets=("file:$NEW_DIR/bin/Runner.Worker" "file:$RUNNER_HOME/venv/bin/conan"
                    "dir:$RUNNER_HOME/.cache/coderoast-build/conan/$RUNNER_NAME" "dir:$NEW_DIR/_work"
-                   "file:$NEW_DIR/.path" "file:$NEW_DIR/.env" "dir:$RUNNER_HOME")
+                   "file:$NEW_DIR/.path" "file:$NEW_DIR/.env" "dir:$(dirname "$SLOT_DIR")" "dir:$RUNNER_HOME")
     local writers=("$RUNNER_USER") other user verdict rc=0
     for other in "${INSTANCES[@]}"; do
         [[ "$other" == "$INSTANCE" ]] && continue
@@ -152,6 +168,37 @@ PY
     return "$rc"
 }
 
+# prove_seat <cpu|all> — the seat proof described in the header, for the selected instance. `cpu` runs
+# the CPU arms (no unit is started); `all` adds the memory arms, which start transient units in the
+# seat and in system.slice, and so refuse while a job runs on this instance.
+prove_seat() {
+    local rc=0 slice
+    slice="$(systemctl show -p Slice --value "$UNIT" 2>/dev/null)"
+    [[ -n "$slice" ]] || slice="$SEAT_SLICE"
+    python3 -I "$HERE/seat-probe.py" cpu --slice "$SEAT_SLICE" --cpus "$SEAT_CPUS" --unit "$UNIT" --unit "$DOCKER_UNIT" || rc=1
+    [[ "$1" == all ]] || return "$rc"
+    job_running && die "a job is running on $RUNNER_NAME — the memory arms allocate inside its seat; let it finish, then re-run --prove"
+    # The memory arms judge the slice the runner sits in NOW: before the apply that is system.slice,
+    # which has no cap and no guarantee, and the arms red there.
+    local args=(memory --slice "$slice" --max "$(numfmt --from=iec "$SEAT_MEM_MAX")")
+    [[ -n "$SEAT_MEM_MIN" ]] && args+=(--min "$(numfmt --from=iec "$SEAT_MEM_MIN")")
+    [[ "$SEAT_SWAP_MAX" == 0 ]] && args+=(--swap-zero)
+    python3 -I "$HERE/seat-probe.py" "${args[@]}" || rc=1
+    return "$rc"
+}
+
+# job_running — a Runner.Worker is live in this instance's unit.
+job_running() {
+    local cg pid
+    systemctl is-active --quiet "$UNIT" || return 1
+    cg="$(systemctl show -p ControlGroup --value "$UNIT")"
+    [[ -n "$cg" && -r "/sys/fs/cgroup$cg/cgroup.procs" ]] || return 1
+    while read -r pid; do
+        [[ "$(cat "/proc/$pid/comm" 2>/dev/null)" == Runner.Worker ]] && return 0
+    done < "/sys/fs/cgroup$cg/cgroup.procs"
+    return 1
+}
+
 case "$INSTANCE" in
     ci)
         [[ -f "$UNIT_FILE" ]] || die "no unit file at $UNIT_FILE — install the runner as a service first (malf/runner/README.md)"
@@ -196,8 +243,12 @@ case "$INSTANCE" in
 esac
 if $PROVE_ONLY; then
     printf '\n[isolate %s] boundary proof — %s (%s, %s), as the owner and as every other runner account:\n' "$INSTANCE" "$RUNNER_NAME" "$RUNNER_USER" "$NEW_DIR"
-    if prove_boundary; then say "PROVEN: every other account is refused on every target, and the owner writes every one"; exit 0; fi
-    die "the boundary does NOT hold (a BAD row above): another account can write this runner, or the control failed"
+    prove_boundary || die "the boundary does NOT hold (a BAD row above): another account can write this runner, or the control failed"
+    say "PROVEN: every other account is refused on every target, and the owner writes every one"
+    printf '\n[isolate %s] seat proof — %s, CPUs %s, MemoryMax %s:\n' "$INSTANCE" "$SEAT_SLICE" "$SEAT_CPUS" "$SEAT_MEM_MAX"
+    prove_seat all || die "the seat does NOT hold (a BAD row above): a desk task reaches the seat's CPUs, or its memory is not capped and protected as runner-instances.sh declares"
+    say "PROVEN: the seat's CPUs are its own, and its memory is capped$([[ -n "$SEAT_MEM_MIN" ]] && echo " and guaranteed")"
+    exit 0
 fi
 DESK_UID="$(id -u "$DESK_USER")" || die "desk account '$DESK_USER' does not exist"
 DESK_HOME="$(getent passwd "$DESK_USER" | cut -d: -f6)"
@@ -215,21 +266,22 @@ group_members="$(getent group "$DESK_GROUP" | cut -d: -f4)"
 # No job may be running on THIS instance when it is applied: the apply restarts it, and a job killed
 # mid-step is a red with no cause. The plan only reads, so it runs beside a job (the ci runner carries
 # the corpus collector for hours). Another instance's job is none of this run's business.
-if $APPLY && systemctl is-active --quiet "$UNIT"; then
-    cg="$(systemctl show -p ControlGroup --value "$UNIT")"
-    if [[ -n "$cg" && -r "/sys/fs/cgroup$cg/cgroup.procs" ]]; then
-        while read -r pid; do
-            [[ "$(cat "/proc/$pid/comm" 2>/dev/null)" == Runner.Worker ]] \
-                && die "a job is running on $RUNNER_NAME (Runner.Worker pid $pid) — let it finish, then re-run"
-        done < "/sys/fs/cgroup$cg/cgroup.procs"
-    fi
+if $APPLY && job_running; then
+    die "a job is running on $RUNNER_NAME — let it finish, then re-run"
 fi
 
-# The slot switch: once $SLOT_ROOT exists, every malf resolves the slot there. A lane holding the
-# OLD /tmp slot at that moment would stop excluding anybody, so its release comes first.
-if [[ ! -d "$SLOT_ROOT" && -e "$OLD_SLOT" ]]; then
-    die "$OLD_SLOT exists — a desk lane holds the build slot ('malf slot status' names it). This script moves the slot to $SLOT_ROOT/slot; release it first ('malf slot release --token <t>'), then re-run"
-fi
+# The seat must fit the VM: a cpuset naming a CPU the VM does not have cannot become a partition.
+online_cpus="$(cat /sys/devices/system/cpu/online)"
+python3 -I -c '
+import sys
+def cpus(text):
+    out = set()
+    for part in filter(None, text.strip().split(",")):
+        low, _, high = part.partition("-")
+        out.update(range(int(low), int(high or low) + 1))
+    return out
+sys.exit(0 if cpus(sys.argv[1]) <= cpus(sys.argv[2]) else 1)' "$SEAT_CPUS" "$online_cpus" \
+    || die "the seat table gives $INSTANCE CPUs $SEAT_CPUS, and this VM has $online_cpus online — the table and .wslconfig disagree (runner-instances.sh, THE SEATS)"
 
 # The runner account: absent, or exactly the account this script makes.
 if id "$RUNNER_USER" >/dev/null 2>&1; then
@@ -350,10 +402,12 @@ EOF
 ProtectHome=tmpfs
 BindPaths=$RUNNER_HOME
 ProtectSystem=full
+EOF
+    fi
+    cat <<EOF
 PrivateIPC=yes
 TemporaryFileSystem=/dev/shm:mode=1777,nosuid,nodev
 EOF
-    fi
     for name in "${mirror_dirs[@]}"; do echo "BindReadOnlyPaths=$DESK_HOME/$name:$RUNNER_HOME/$name"; done
 }
 
@@ -431,6 +485,104 @@ WantedBy=multi-user.target
 EOF
 }
 
+# The seat (DN-119.D9): the slice with its CPUs and memory, the oneshot that makes it a partition root,
+# the script that oneshot runs, and the drop-ins that put both units in the slice. Drop-ins, not lines
+# in the units: a runner installer run rewrites the unit, and a drop-in survives it.
+render_slice() {
+    cat <<EOF
+# Written by malf/runner/isolate-runner-wsl.sh (DN-119.D9): the $INSTANCE runner's seat, sized by the
+# seat table in runner-instances.sh. seat-partition@$INSTANCE.service makes it a cpuset partition root.
+[Unit]
+Description=Runner seat $INSTANCE ($RUNNER_NAME): CPUs $SEAT_CPUS, MemoryMax $SEAT_MEM_MAX
+
+[Slice]
+AllowedCPUs=$SEAT_CPUS
+MemoryMax=$SEAT_MEM_MAX
+EOF
+    [[ -n "$SEAT_MEM_MIN" ]] && echo "MemoryMin=$SEAT_MEM_MIN"
+    [[ -n "$SEAT_MEM_LOW" ]] && echo "MemoryLow=$SEAT_MEM_LOW"
+    [[ -n "$SEAT_SWAP_MAX" ]] && echo "MemorySwapMax=$SEAT_SWAP_MAX"
+    return 0
+}
+
+render_partition_unit() {
+    cat <<EOF
+# Written by malf/runner/isolate-runner-wsl.sh (DN-119.D9). Runs inside seat_<instance>.slice, once
+# systemd has realized it, and makes it a cpuset partition root; it fails unless the kernel reads the
+# partition back as root, and every unit of the seat Requires= it.
+[Unit]
+Description=cpuset partition root for runner seat %i
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Slice=seat_%i.slice
+ExecStart=/usr/bin/python3 -I $PARTITION_SCRIPT seat_%i.slice
+EOF
+}
+
+render_partition_script() {
+    cat <<'EOF'
+#!/usr/bin/env python3
+# Written by malf/runner/isolate-runner-wsl.sh (DN-119.D9); run by seat-partition@<instance>.service.
+# Makes <slice> a cpuset partition root and exits 1 unless the kernel reads it back as one, over the
+# CPUs the slice's AllowedCPUs= names, every one of them a CPU this VM has online.
+import subprocess
+import sys
+from pathlib import Path
+
+
+def cpus(text):
+    out = set()
+    for part in filter(None, text.strip().split(",")):
+        low, _, high = part.partition("-")
+        out.update(range(int(low), int(high or low) + 1))
+    return out
+
+
+def refuse(why):
+    print(f"seat-partition: {sys.argv[1]}: {why}", file=sys.stderr)
+    sys.exit(1)
+
+
+slice_name = sys.argv[1]
+group = Path("/sys/fs/cgroup") / slice_name
+wanted_text = subprocess.run(["systemctl", "show", "-p", "AllowedCPUs", "--value", slice_name],
+                             capture_output=True, text=True, check=True).stdout.strip()
+wanted = cpus(wanted_text)
+if not wanted:
+    refuse("AllowedCPUs= is empty: the slice names no CPU")
+online = cpus(Path("/sys/devices/system/cpu/online").read_text())
+if wanted - online:
+    refuse(f"AllowedCPUs={wanted_text} names CPU(s) {sorted(wanted - online)} this VM does not have online")
+configured = (group / "cpuset.cpus").read_text().strip()
+if cpus(configured) != wanted:
+    refuse(f"cpuset.cpus reads '{configured}', not AllowedCPUs={wanted_text}")
+(group / "cpuset.cpus.partition").write_text("root
+")
+state = (group / "cpuset.cpus.partition").read_text().strip()
+if state != "root":
+    refuse(f"cpuset.cpus.partition reads '{state}' after writing root")
+effective = (group / "cpuset.cpus.effective").read_text().strip()
+if cpus(effective) != wanted:
+    refuse(f"a partition root whose cpuset.cpus.effective reads '{effective}', not {wanted_text}")
+print(f"seat-partition: {slice_name} is a partition root over CPUs {effective}")
+EOF
+}
+
+render_seat_dropin() {
+    cat <<EOF
+# Written by malf/runner/isolate-runner-wsl.sh (DN-119.D9): this unit runs in the $INSTANCE seat, and
+# never without its partition.
+[Unit]
+Requires=$PARTITION_UNIT
+After=$PARTITION_UNIT
+
+[Service]
+Slice=$SEAT_SLICE
+EOF
+}
+
 # drift <label> <installed path> <render function> — prints whether the installed file equals the
 # rendering, and the diff when it does not. Reads only.
 drift() {
@@ -469,14 +621,33 @@ cat <<EOF
   bank                $BANK_ROOT: read for every root, write for ${BANK_WRITABLE[*]:-none} (ACL, not world-writable)
   home mirror         links: ${mirror_links[*]:-none}
                       read-only binds: ${mirror_dirs[*]:-none}
-  build slot          $SLOT_ROOT, recomputed over every instance (runner-instances.sh, slot_holds)
+  seat                $SEAT_SLICE, a cpuset partition root over CPUs $SEAT_CPUS (of $online_cpus), MemoryMax $SEAT_MEM_MAX$([[ -n "$SEAT_MEM_MIN" ]] && echo ", MemoryMin $SEAT_MEM_MIN")$([[ -n "$SEAT_MEM_LOW" ]] && echo ", MemoryLow $SEAT_MEM_LOW")$([[ -n "$SEAT_SWAP_MAX" ]] && echo ", MemorySwapMax $SEAT_SWAP_MAX");
+                      the runner and its docker unit inside it, offline unless $PARTITION_UNIT succeeds
+  build slot          $SLOT_DIR, the account's own (mode 700); the runner's .env names it
 EOF
 echo
 echo "[isolate $INSTANCE] drift — what the apply would write, against what is installed:"
 drift "runner unit" "$UNIT_FILE" render_runner_unit
 drift "docker unit" "/etc/systemd/system/$DOCKER_UNIT" render_docker_unit
 drift "dockerd child" "$CHILD" render_child
-echo "  slot root ACL       now: $(getfacl -cp "$SLOT_ROOT" 2>/dev/null | grep '^user:' | tr '\n' ' ')"
+drift "seat slice" "/etc/systemd/system/$SEAT_SLICE" render_slice
+drift "partition unit" "/etc/systemd/system/$PARTITION_TEMPLATE" render_partition_unit
+drift "partition script" "$PARTITION_SCRIPT" render_partition_script
+drift "runner seat" "/etc/systemd/system/$UNIT.d/seat.conf" render_seat_dropin
+drift "docker seat" "/etc/systemd/system/$DOCKER_UNIT.d/seat.conf" render_seat_dropin
+for unit in "$UNIT" "$DOCKER_UNIT"; do
+    now_slice="$(systemctl show -p Slice --value "$unit" 2>/dev/null)"
+    if [[ "$now_slice" == "$SEAT_SLICE" ]]; then
+        printf '  %-20s %s runs in %s\n' "slice now" "$unit" "$now_slice"
+    else
+        printf '  %-20s DRIFT: %s runs in %s, not %s\n' "slice now" "$unit" "${now_slice:-<no unit>}" "$SEAT_SLICE"
+    fi
+done
+partition_now="$(cat "/sys/fs/cgroup/$SEAT_SLICE/cpuset.cpus.partition" 2>/dev/null)" || partition_now="<no such cgroup>"
+printf '  %-20s %s cpuset.cpus.partition: %s%s\n' "partition now" "$SEAT_SLICE" "$partition_now" "$([[ "$partition_now" == root ]] || echo " — DRIFT")"
+if [[ -e "$RETIRED_SLOT_ROOT" ]]; then
+    printf '  %-20s %s is still on the box — retired (DN-119.D9 (3)); remove it once every instance is re-applied (README § Seats)\n' "retired slot root" "$RETIRED_SLOT_ROOT"
+fi
 
 $APPLY || { printf '\n[isolate %s] PLAN ONLY — nothing was changed. Re-run with --apply to do it.\n' "$INSTANCE"; exit 0; }
 
@@ -530,6 +701,10 @@ if [[ "$INSTANCE" == release ]]; then
         install -d -m 0700 -o "$RUNNER_USER" -g "$RUNNER_USER" "$RUNNER_HOME/$d"
     done
 fi
+# The seat's build slot lives in the account's own state (DN-119.D9 (3)); malf creates the slot itself.
+for d in .local .local/state "$(dirname "${SLOT_DIR#"$RUNNER_HOME"/}")"; do
+    install -d -m 0700 -o "$RUNNER_USER" -g "$RUNNER_USER" "$RUNNER_HOME/$d"
+done
 say "$RUNNER_USER: uid $(id -u "$RUNNER_USER"), groups '$(id -nG "$RUNNER_USER")', home $(stat -c %a "$RUNNER_HOME"), subuid $(grep "^$RUNNER_USER:" /etc/subuid | cut -d: -f2,3)"
 
 step "4/10 Python venv $RUNNER_HOME/venv pinned to $DESK_VENV"
@@ -544,7 +719,27 @@ sudo -u "$RUNNER_USER" -H "$RUNNER_HOME/venv/bin/python" -m pip install --disabl
 rm -f "$reqs"
 say "venv: $(sudo -u "$RUNNER_USER" -H "$RUNNER_HOME/venv/bin/python" -m pip freeze | wc -l) packages; cmake $(sudo -u "$RUNNER_USER" -H "$RUNNER_HOME/venv/bin/cmake" --version | head -n1 | awk '{print $3}')"
 
-step "5/10 rootless Docker for $RUNNER_USER, proven BEFORE the runner is touched"
+step "5/10 the seat: $SEAT_SLICE, a cpuset partition root over CPUs $SEAT_CPUS"
+install -d -m 0755 "$(dirname "$PARTITION_SCRIPT")"
+render_partition_script > "$PARTITION_SCRIPT"
+chmod 0755 "$PARTITION_SCRIPT"
+render_slice > "/etc/systemd/system/$SEAT_SLICE"
+render_partition_unit > "/etc/systemd/system/$PARTITION_TEMPLATE"
+for unit in "$UNIT" "$DOCKER_UNIT"; do
+    install -d -m 0755 "/etc/systemd/system/$unit.d"
+    render_seat_dropin > "/etc/systemd/system/$unit.d/seat.conf"
+done
+systemctl daemon-reload
+# `start`, never `restart`: a restart would restart every unit that Requires= it, the runner included,
+# before step 7 stops it. On a re-apply the oneshot is already active and `start` runs nothing, so the
+# script is then run once more by hand: it is idempotent, and it judges the slice as now configured.
+systemctl start "$PARTITION_UNIT" \
+    || die "$PARTITION_UNIT failed — the partition did not take ('journalctl -u $PARTITION_UNIT'); the seat's units cannot start. Undo: $UNDO"
+partition_said="$(python3 -I "$PARTITION_SCRIPT" "$SEAT_SLICE")" \
+    || die "$SEAT_SLICE is not a partition root over $SEAT_CPUS (above); the seat's units cannot start. Undo: $UNDO"
+say "$partition_said"
+
+step "6/10 rootless Docker for $RUNNER_USER, proven BEFORE the runner is touched"
 install -d -m 0755 "$(dirname "$CHILD")"
 render_child > "$CHILD"
 chmod 0755 "$CHILD"
@@ -591,7 +786,7 @@ done
 
 case "$INSTANCE:$STATE" in
     ci:fresh)
-        step "6/10 stop the runner and record the rollback manifest"
+        step "7/10 stop the runner and record the rollback manifest"
         install -d -m 0700 "$STATE_DIR"
         cp -a "$UNIT_FILE" "$STATE_DIR/unit.orig"
         cp -a "$OLD_DIR/.path" "$STATE_DIR/path.orig"
@@ -600,7 +795,7 @@ case "$INSTANCE:$STATE" in
         systemctl stop "$UNIT"
         say "runner stopped; rollback manifest in $STATE_DIR"
 
-        step "7/10 move $OLD_DIR -> $NEW_DIR"
+        step "8/10 move $OLD_DIR -> $NEW_DIR"
         mv "$OLD_DIR" "$NEW_DIR"
         # The runner's self-update writes bin/ and externals/ as ABSOLUTE links into its own directory.
         for link in bin externals; do
@@ -612,14 +807,14 @@ case "$INSTANCE:$STATE" in
         rm -rf "$NEW_DIR/_work/_tool"
         ;;
     release:fresh)
-        step "6/10 record the rollback manifest"
+        step "7/10 record the rollback manifest"
         install -d -m 0700 "$STATE_DIR"
         # The one variable the ci runner's .env carries besides the two this script states (read
         # 2026-09-29): the locale every job inherits.
         echo "LANG=C.UTF-8" > "$STATE_DIR/env.orig"
         printf 'DESK_USER=%s\nDESK_VENV=%s\nAPPLIED=%s\n' "$DESK_USER" "$DESK_VENV" "$(date -Is)" > "$STATE_DIR/manifest"
 
-        step "7/10 download and register $RUNNER_NAME as $RUNNER_USER (group $RELEASE_GROUP, label $RELEASE_GROUP only)"
+        step "8/10 download and register $RUNNER_NAME as $RUNNER_USER (group $RELEASE_GROUP, label $RELEASE_GROUP only)"
         if [[ -f "$NEW_DIR/.runner" ]]; then
             say "$NEW_DIR/.runner exists — registered by an earlier run; not registering again"
         else
@@ -642,7 +837,7 @@ case "$INSTANCE:$STATE" in
         fi
         ;;
     *:applied)
-        step "6/10 and 7/10 — already in place; stopping the runner to re-apply its unit"
+        step "7/10 and 8/10 — already in place; stopping the runner to re-apply its unit"
         systemctl stop "$UNIT"
         ;;
 esac
@@ -657,12 +852,12 @@ install -m 0755 -o "$RUNNER_USER" -g "$RUNNER_USER" "$NEW_DIR/bin/runsvc.sh" "$N
 # (conan-io/setup-conan runs `python -m pip`, so `python` must be a venv the runner owns), then the system.
 printf '%s\n' "$RUNNER_HOME/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" > "$NEW_DIR/.path"
 # .env reaches every job through Runner.Listener. MALF_BUILD_SLOT_DIR is stated here, not left to
-# malf's default, because CI runs the malf-toolchain its workflows PIN, and a pin older than the
-# shared-root default would resolve /tmp — private to this unit — and never see a desk holder.
+# malf's default, because a job runs the malf-toolchain its workflow PINS, and a pin older than the
+# per-account default (DN-119.D9 (3)) would resolve another path.
 {
     grep -vE '^(DOCKER_HOST|MALF_BUILD_SLOT_DIR)=' "$STATE_DIR/env.orig" || true
     echo "DOCKER_HOST=unix://$DOCKER_SOCK"
-    echo "MALF_BUILD_SLOT_DIR=$SLOT_ROOT/slot"
+    echo "MALF_BUILD_SLOT_DIR=$SLOT_DIR"
 } > "$NEW_DIR/.env"
 chown -R "$RUNNER_USER:$RUNNER_USER" "$NEW_DIR"
 if $DESK_READS_HOME; then
@@ -677,7 +872,7 @@ else
     chmod -R go-rwx "$NEW_DIR"
 fi
 
-step "8/10 bank and home mirror"
+step "9/10 bank and home mirror"
 for root in "${BANK_WRITABLE[@]}"; do
     setfacl -R -m "u:$RUNNER_USER:rwX,u:$DESK_USER:rwX" "$BANK_ROOT/$root"
     # A default ACL on every directory: what the runner creates stays writable by the desk (a desk
@@ -694,13 +889,6 @@ for name in "${mirror_dirs[@]}"; do
     find "$DESK_HOME/$name" -type d -exec setfacl -d -m "u:$RUNNER_USER:rX" {} +
 done
 say "home mirror: ${#mirror_links[@]} link(s), ${#mirror_dirs[@]} read-only bind(s) in $RUNNER_HOME"
-
-step "9/10 build slot root $SLOT_ROOT"
-# The unit is written first when this is the instance's first apply: slot_holds reads which
-# instances are present from their unit files.
-if [[ ! -f "$UNIT_FILE" ]]; then render_runner_unit > "$UNIT_FILE"; fi
-say "slot root grants: $(apply_slot_acl "$DESK_USER")"
-say "malf resolves the slot to $SLOT_ROOT/slot for every account (malf/malf, MALF_BUILD_SLOT_SHARED_ROOT)"
 
 step "10/10 runner unit as $RUNNER_USER, sandboxed; start and wait for 'Listening for Jobs'"
 render_runner_unit > "$UNIT_FILE"
@@ -730,11 +918,14 @@ fi
 step "the boundary proof"
 prove_boundary || die "the boundary does NOT hold (a BAD row above) — the runner is up; stop it ('systemctl stop $UNIT') before any job reaches it. Undo: $UNDO"
 
+step "the seat proof (CPU arms; --prove adds the memory arms)"
+prove_seat cpu || die "the seat does NOT hold (a BAD row above) — the runner is up; stop it ('systemctl stop $UNIT') before any job reaches it. Undo: $UNDO"
+
 cat <<EOF
 
 [isolate $INSTANCE] DONE — $RUNNER_NAME listens as $RUNNER_USER ($listening).
   Check, as $DESK_USER:
-    malf slot status                              # must print: malf slot: dir $SLOT_ROOT/slot
+    sudo bash $0 --instance $INSTANCE --prove      # the memory arms; run with the desk idle
     gh api /orgs/$ORG/actions/runners -q '.runners[] | "\(.name) \(.status) \([.labels[].name])"'
   Undo: $UNDO
 EOF

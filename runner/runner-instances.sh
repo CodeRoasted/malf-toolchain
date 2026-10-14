@@ -21,10 +21,36 @@ ORG="CodeRoasted"
 RELEASE_GROUP="coderoast-release"
 # Shared by every instance; root's to write.
 CHILD="/usr/local/libexec/coderoast/dockerd-rootless-child.sh"
-SLOT_ROOT="/var/lib/coderoast-build"
+PARTITION_SCRIPT="/usr/local/libexec/coderoast/seat-partition.py"
+PARTITION_TEMPLATE="seat-partition@.service"
+# The shared slot root earlier versions of these scripts made: retired by DN-119.D9 (3), each seat's
+# slot now lives in its own account's state. The plan names it while it is still on the box, and the
+# runbook (README § Seats) removes it once every instance is re-applied.
+RETIRED_SLOT_ROOT="/var/lib/coderoast-build"
 BANK_ROOT="/mnt/wsl/corpora"
 GCC_PREFIX="/opt/gcc-16.2"
 INSTANCES=(ci release)
+
+# THE SEATS (DN-119.D9, RUL-3). Each runner is a SEAT: a top-level slice that is a cpuset PARTITION
+# ROOT with a hard memory cap. The partition removes the seat's CPUs from every other cgroup's
+# effective set, so the desk (everything outside the seat slices: init.scope, user.slice and
+# system.slice) is the kernel-enforced remainder and needs no configuration of its own.
+#   SEAT_SLICE     a direct child of -.slice, no dash in the name (a dash nests a slice, and a
+#                  partition root's parent must itself be one: the root cgroup is, system.slice is not)
+#   SEAT_CPUS      whole SMT pairs (2k, 2k+1 on this VM); release on the highest pairs, away from cpu 0
+#   SEAT_MEM_MAX   the hard cap (MemoryMax=)
+#   SEAT_MEM_MIN   a guarantee the kernel never reclaims (MemoryMin=), release only
+#   SEAT_MEM_LOW   a best-effort protection (MemoryLow=), ci only
+#   SEAT_SWAP_MAX  MemorySwapMax=; 0 on release, so an overshoot is an OOM kill inside the seat, a
+#                  loud red and never a slow thrash; empty leaves the seat's swap unbounded
+# THE SIZES ARE THE FOUNDER'S RULING (RUL-3, 2026-10-14: the desk gets the larger share, a slower
+# step 0 is accepted). Of 16 vCPUs and 23.47 GiB: desk 0-7 (8 vCPUs, the remainder, about 8.5 GiB
+# guaranteed), ci 8-9, release 10-15. A change to .wslconfig `processors` or `memory` changes this
+# table in the same act: a cpuset naming a CPU the VM no longer has is refused by the partition unit,
+# and the seat stays offline.
+# The release cap holds only once malf derives its width from the seat (DN-119.D9 (1), build row
+# R5): a width read off the VM-wide MemAvailable plans for about 21 GiB inside a 10 GiB seat with no
+# swap, and every heavy build is OOM-killed.
 
 # instance_select <name> — sets every per-instance variable; returns 1 on an unknown name.
 instance_select() {
@@ -46,6 +72,11 @@ instance_select() {
             # The ci unit is the one N214 wrote; it hides nothing under /home (ROADMAP N214 left
             # that open). Re-rendering it therefore reproduces it byte for byte.
             PROTECT_HOME=false
+            SEAT_CPUS="8-9"
+            SEAT_MEM_MAX="5G"
+            SEAT_MEM_MIN=""
+            SEAT_MEM_LOW="5G"
+            SEAT_SWAP_MAX=""
             ;;
         release)
             RUNNER_NAME="malf-release"
@@ -63,6 +94,11 @@ instance_select() {
             # from the release runner's view, so nothing another account planted there (a venv, a
             # tool, a PATH entry) can be reached from a release job even by mistake.
             PROTECT_HOME=true
+            SEAT_CPUS="10-15"
+            SEAT_MEM_MAX="10G"
+            SEAT_MEM_MIN="10G"
+            SEAT_MEM_LOW=""
+            SEAT_SWAP_MAX="0"
             ;;
         *) return 1 ;;
     esac
@@ -72,6 +108,11 @@ instance_select() {
     NEW_DIR="$RUNNER_HOME/$RUNNER_DIRNAME"
     DOCKER_RUNTIME="/run/$RUNNER_USER-docker"
     DOCKER_SOCK="$DOCKER_RUNTIME/docker.sock"
+    SEAT_SLICE="seat_$INSTANCE.slice"
+    PARTITION_UNIT="seat-partition@$INSTANCE.service"
+    # The seat's build slot, in its own account's state (DN-119.D9 (3)): no other account can open
+    # it, so no job of another seat can hold its mutex.
+    SLOT_DIR="$RUNNER_HOME/.local/state/coderoast-build/slot"
 }
 
 # instance_present <name> — the instance's runner unit exists on this box.
@@ -80,48 +121,4 @@ instance_present() {
     instance_select "$1" && [[ -f "$UNIT_FILE" ]] && present=0
     [[ -n "$saved" ]] && instance_select "$saved"
     return "$present"
-}
-
-# slot_holds <name> — whether that instance's account may take the build slot. The slot is taken by
-# step 0 (`pharos build`, `malf slot acquire`) and by nothing else a runner runs, and step 0 runs on
-# the release runner once one is present. Then ci gets NO entry on the slot root, not a read one:
-# `malf slot` flocks `slot.lock`, and flock works on a read-only descriptor, so a ci job able to open
-# that file could hold the mutex and stall every `malf slot` step 0 runs (WIP W284). With no release
-# runner, step 0 is ci's and ci holds the slot.
-slot_holds() {
-    case "$1" in
-        release) return 0 ;;
-        ci) ! instance_present release ;;
-    esac
-}
-
-# apply_slot_acl <desk user> — the slot root's named entries, recomputed from the table: the desk and
-# each present instance allowed to hold the slot get rw (X for directories), on the root, on every
-# entry under it (the lock file, the slot directory a holder left) and as the default for what is
-# created later. Every other runner account's entries are removed. Idempotent. Prints the grant.
-apply_slot_acl() {
-    local spec="u:$1:rwX" dspec="u::rwX,g::---,o::---,u:$1:rwX" name user saved="${INSTANCE:-}"
-    local removed=()
-    for name in "${INSTANCES[@]}"; do
-        instance_select "$name"
-        user="$RUNNER_USER"
-        id "$user" >/dev/null 2>&1 || continue
-        if [[ -f "$UNIT_FILE" ]] && slot_holds "$name"; then
-            spec+=",u:$user:rwX"
-            dspec+=",u:$user:rwX"
-        else
-            removed+=("$user")
-        fi
-    done
-    [[ -n "$saved" ]] && instance_select "$saved"
-    install -d -m 0770 -o root -g root "$SLOT_ROOT"
-    for user in "${removed[@]}"; do
-        if getfacl -p -R "$SLOT_ROOT" | grep -q "user:$user:"; then
-            setfacl -R -x "u:$user" "$SLOT_ROOT"
-            find "$SLOT_ROOT" -type d -exec setfacl -d -x "u:$user" {} +
-        fi
-    done
-    setfacl -R -m "$spec,m::rwX" "$SLOT_ROOT"
-    find "$SLOT_ROOT" -type d -exec setfacl -d -m "$dspec,m::rwX" {} +
-    echo "$spec${removed[*]:+ (no entry: ${removed[*]})}"
 }

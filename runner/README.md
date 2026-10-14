@@ -38,10 +38,10 @@ labels, and whether the desk reads the runner's directory. A script run names it
 is no default.
 
 The WSL instances are one table, `runner-instances.sh`: account, directory, Docker unit, the bank
-roots each writes, whether the desk reads its home, and who holds the build slot. The plan (no flag)
+roots each writes, whether the desk reads its home, and its seat (§ Seats). The plan (no flag)
 renders every unit and script the apply would write and diffs each against what is installed, so
-it checks the script against a runner that cannot be restarted; `--prove` runs the boundary proof
-alone (below).
+it checks the script against a runner that cannot be restarted; `--prove` runs the boundary and
+seat proofs alone (below).
 
 Each script's header names every door it closes and what stays open. In short: the WSL runner runs
 as the system account `ghrunner` inside a systemd sandbox that hides the Windows drives and WSL
@@ -54,9 +54,50 @@ The probe runs in a FRESH workspace, so it cannot see what earlier jobs left: th
 also re-owns and resets the runner's job workspace (`_work`), and the parts of it that need no
 elevation are proven on the Windows host by `pwsh -File malf\runner\isolate-runner-windows.selftest.ps1`.
 
-The build slot is shared with the desk through `/var/lib/coderoast-build` (the WSL script creates
-it; `malf` resolves its slot there whenever it exists), because `/tmp` cannot hold a slot two
-accounts can both reclaim.
+## Seats: each WSL runner owns its CPUs and its memory (`DN-119.D9`, `RUL-3`)
+
+Each WSL runner is a SEAT: a top-level slice (`seat_ci.slice`, `seat_release.slice`) that a root
+oneshot, `seat-partition@<instance>.service`, makes a cpuset **partition root**, with a hard memory
+cap. A partition removes its CPUs from every other cgroup's effective set, so the desk — everything
+outside the seat slices, which on WSL is mostly `init.scope` and has no unit of its own — is the
+kernel-enforced remainder and is configured nowhere. The runner and its docker unit carry `Slice=`,
+`Requires=` and `After=` on the oneshot through a drop-in (`<unit>.d/seat.conf`, which survives an
+installer rewriting the unit), so a partition that did not take keeps the seat offline and its jobs
+queued, never running unpartitioned. The sizes are the seat table in `runner-instances.sh`, ruled by
+the Founder (desk first): of the VM's 16 vCPUs and 23.47 GiB, desk 0–7, ci 8–9 (`MemoryMax` and
+`MemoryLow` 5 GiB), release 10–15 (`MemoryMax` and `MemoryMin` 10 GiB, `MemorySwapMax=0`).
+
+Each seat keeps its **build slot in its own account's state**, `~/.local/state/coderoast-build/slot`
+(mode 700), named in the runner's `.env`: no account can open another seat's slot, so the stall class
+of a shared lock (a ci job holding step 0's mutex through a read-only descriptor) is gone by
+construction, and the shared root `/var/lib/coderoast-build` is retired.
+
+**The seat proof** (`seat-probe.py`, run by `--prove` and, CPU arms only, at the end of `--apply`),
+from the desk: a task pinned onto a seat CPU is refused `EINVAL`; unpinned desk loops, one per CPU,
+sampled 1 000 rounds, never land on one; `init.scope`, `user.slice` and `system.slice` exclude the
+seat's CPUs; both units run in the slice with an affinity inside it. Under `--prove` only: an
+allocation 512 MiB past the cap is OOM-killed AT the cap (`memory.events` `oom` and `oom_kill` both
+rise), on release without swapping; and on release 2 GiB of page cache the seat holds survives desk
+pressure of `MemAvailable` + 1 GiB (at least 95 % kept), which is `memory.min` holding. Every arm
+judges behaviour, so on a box whose runners still sit in `system.slice` every arm reds — measured
+2026-10-14 for the CPU arms, unprivileged, against the release seat: 16 BAD rows, desk tasks pinned
+onto CPUs 10–15 and unpinned desk loops sampled on them 6 873 times.
+
+**The admin runbook** (root, every seat idle, between cuts):
+1. The partition gate on this kernel, before the first apply (`DN-119.D9` gate P0).
+2. `sudo bash malf/runner/isolate-runner-wsl.sh --instance release` (the plan: both units show as
+   DRIFT in `system.slice`), then the same with `--apply`; then `--instance ci`, plan and `--apply`.
+3. `--prove` for both instances, with the desk idle: the memory arms swap desk memory out.
+4. `malf slot status` from the desk reads FREE, then `sudo rm -rf /var/lib/coderoast-build`: the
+   retired shared root, which the plan names while it is on the box.
+5. After any `.wslconfig` change: steps 2 and 3 again. After a `wsl --shutdown`:
+   `systemctl status seat-partition@release seat-partition@ci` reads success (the partition is
+   re-made at every boot).
+
+The release cap holds only once `malf` derives its build width from the seat, not from the
+VM-wide `MemAvailable` (`DN-119.D9` (1), build row R5): until then a release build plans for about
+21 GiB inside a 10 GiB seat with no swap and is OOM-killed. Apply the release seat after R5 reaches
+the malf pin step 0 runs.
 
 ## The desk's Docker: rootless, and the desk account outside the `docker` group
 
@@ -147,10 +188,11 @@ admits. What it adds over the ci instance, and why:
 |---|---|
 | home mode 700, no ACL, every file `ghrelease`'s | the account is the boundary: no ci job writes what a release executes, links or takes a verdict from |
 | `ProtectHome=tmpfs` + its own home bound back | no other home is visible from a release job, so nothing planted there is reachable even by a PATH mistake |
-| `ProtectSystem=full`, `PrivateIPC=yes`, a private `/dev/shm` | step 0 runs the shared-memory transport's tests; a segment another account created under the same name would feed them |
+| `ProtectSystem=full` | `/usr`, `/boot` and `/etc` read-only from a release job |
+| `PrivateIPC=yes` and a private `/dev/shm` (the ci instance has both too, § Seats) | step 0 runs the shared-memory transport's tests; a segment another account created under the same name would feed them, and a POSIX segment lives in `/dev/shm`, which the IPC namespace alone does not separate |
 | its own venv, pinned from the desk's venv (never `ghrunner`'s) | a ci job can write `ghrunner`'s venv, so its package list is not a trusted source |
 | the registration token through stdin into `config.sh`'s environment | `/proc/<pid>/cmdline` is world-readable here; a token read from an argv enrols any runner into any group for an hour |
-| the build slot: `ghrelease` rw, `ghrunner` **no entry** | step 0 takes the slot; `malf slot` flocks `slot.lock` and flock works on a read-only descriptor, so read alone would let a ci job stall step 0 |
+| the build slot in `ghrelease`'s own state, mode 700 (§ Seats) | step 0 takes the slot; `malf slot` flocks `slot.lock` and flock works on a read-only descriptor, so an account able to open it could stall step 0 |
 
 **The group's scope (Argos, 2026-09-29).** It admits `coderoast`, `coderoast-security`,
 `coderoast-server`, `insight-eidos` and `logcraft`, and no other: `insight-canon`,
@@ -179,7 +221,7 @@ and each undone by `isolate-runner-wsl-rollback.sh --instance release --apply` u
 | runner | actions/runner 2.337.0, SHA-256 `70920811…6613` verified; registered `malf-release`, group `coderoast-release` (id 3), label `coderoast-release` only | deregistered (removal token, stdin) |
 | units | `actions.runner.CodeRoasted.malf-release.service`, `coderoast-release-docker.service` (enabled) | stopped, disabled, deleted |
 | rootless Docker | a container published on 127.0.0.1 answered PONG; `-v` of `/home/windows`, `/mnt/c`, `/` and `/home/ghrunner` each refused | with its unit |
-| build slot root | `u:windows:rwX,u:ghrelease:rwX`, no entry for `ghrunner` (was `ghrunner:rwx`) | recomputed: `ghrunner` rw again |
+| build slot root | `u:windows:rwX,u:ghrelease:rwX`, no entry for `ghrunner` (was `ghrunner:rwx`) | retired by the seats: removed by hand (§ Seats, runbook step 4) |
 | home-mirror ACLs | `u:ghrelease:rX` on the three `corpora-*-backup` directories | removed |
 
 **The boundary proof, as run** (`--prove`). Before the release runner existed, on `malf-runner`:
