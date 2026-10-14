@@ -391,8 +391,9 @@ def selftest() -> int:
             staged_owned = arm("an entry destined to its owner's own Release is staged with its .sha256",
                                lambda: stage(owned_registry, "priv-repo", "private", record_hex, allowed,
                                              owned_out, quiet), None)
-            want_owned = ["bench.json", "priv_tools-9.9.9.tgz", "sbom.json", "tool-linux-x64", "tool-linux-x64.sha256",
-                          "win.exe", "priv-repo-9.9.9.slice.json", "priv-repo-9.9.9.slice.json.sig"]
+            want_owned = ["bench.json", "golden.txt", "priv_tools-9.9.9.tgz", "sbom.json", "tool-linux-x64",
+                          "tool-linux-x64.sha256", "win.exe", "win.exe.sha256", "priv-repo-9.9.9.slice.json",
+                          "priv-repo-9.9.9.slice.json.sig"]
             if staged_owned != want_owned:
                 failures.append(f"staged {staged_owned}, want {want_owned}")
             elif (owned_out / "tool-linux-x64").read_bytes() != b"\x7fELF tool bytes" or \
@@ -400,8 +401,14 @@ def selftest() -> int:
                         hashlib.sha256(b"\x7fELF tool bytes").hexdigest()):
                 failures.append("the staged entry or its .sha256 differs from the slice")
             elif (owned_out / "win.exe").read_bytes() != b"MZ windows bytes" or \
-                    (owned_out / "sbom.json").read_bytes() != b'{"bom": 1}\n':
-                failures.append("a staged object's bytes differ from the store's")
+                    not (owned_out / "win.exe.sha256").read_text().startswith(
+                        hashlib.sha256(b"MZ windows bytes").hexdigest()):
+                failures.append("an ingested entry is staged with its own bytes and the .sha256 written from "
+                                "its digest (DN-142.D25 (4) A)")
+            elif (owned_out / "sbom.json").read_bytes() != b'{"bom": 1}\n' or \
+                    (owned_out / "golden.txt").read_bytes() != b"agreed golden digest\n" or \
+                    (owned_out / "golden.txt.sha256").exists():
+                failures.append("a staged object's bytes differ from the store's, or an object gained a sidecar")
             twice = root / "signed-twice"
             twice.write_bytes(pub)
             store_manifest.sign(twice, keys / "writer")
@@ -437,8 +444,8 @@ def selftest() -> int:
                                  "the owner's Release",
                                  lambda: stage(registry, "priv-repo", "private", record_hex, allowed, root / "o9",
                                                said.append), None)
-            if staged_private != ["bench.json", "priv_tools-9.9.9.tgz", "sbom.json", "priv-repo-9.9.9.slice.json",
-                                  "priv-repo-9.9.9.slice.json.sig"] or not all(any(
+            if staged_private != ["bench.json", "golden.txt", "priv_tools-9.9.9.tgz", "sbom.json",
+                                  "priv-repo-9.9.9.slice.json", "priv-repo-9.9.9.slice.json.sig"] or not all(any(
                     line.startswith(f"store_publish: FOREIGN {name} belongs on pub-repo's engine-v9.9.9")
                     for line in said) for name in ("tool-linux-x64", "win.exe")):
                 failures.append(f"the owner staged {staged_private}, saying {said}")
@@ -447,7 +454,7 @@ def selftest() -> int:
                               "projected rows, verified, with the destination slice and its signature",
                               lambda: stage_destinations(registry, "priv-repo", "private", record_hex, allowed,
                                                          elsewhere, quiet), None)
-            want_destination = ["tool-linux-x64", "tool-linux-x64.sha256", "win.exe",
+            want_destination = ["tool-linux-x64", "tool-linux-x64.sha256", "win.exe", "win.exe.sha256",
                                 "pub-repo-engine-v9.9.9.slice.json", "pub-repo-engine-v9.9.9.slice.json.sig"]
             if placed_rows != [("pub-repo", "engine-v9.9.9", "public", want_destination)] or \
                     (elsewhere / "destinations.tsv").read_text() != "pub-repo\tengine-v9.9.9\tpublic\n" or \

@@ -58,6 +58,9 @@ THE PLAN is the builder's declared input: which repository publishes what, under
      "repositories": {<owner>: {"assets": [{"name", "kind": "conan-transport", "package", "destination"},
                                            {"name", "kind": "entry", "package", "entry", "destination",
                                             "verdicts": [<output>...]},
+                                           {"name", "kind": "entry", "step", "member", "destination",
+                                            "verdicts": [], "artifact"} (an INGESTED executable,
+                                            DN-142.D25 (4) A: a row's kind follows its bytes),
                                            {"name", "kind": "object", "step", "member", "destination",
                                             "verdicts": [], "artifact" (an ingested row only)}],
                                 "destinations": {<foreign repo>: {"tag"}},
@@ -116,6 +119,9 @@ DESTINATION_FORMAT = "coderoast.store.destination-slice/1"
 NAMESPACE = "coderoast-store"
 WRITER_IDENTITY = "coderoast-store-writer"
 KINDS = ("conan-transport", "entry", "object")
+# The class an ingestion record must hold for each row kind it can feed (DN-142.D25 (4) A): the
+# ingestion judged the bytes against the declaration, and the row's kind follows them.
+INGESTED_CLASS = {"entry": "executable", "object": "object"}
 PROJECTED = ("name", "kind", "object", "record", "verdicts")
 BINDING = {"tag", "visibility", "slice", "signature"}
 IMAGE_KIND = "oci-image"
@@ -198,7 +204,9 @@ def _plan_findings(plan: dict, version: object) -> list[str]:
             if asset.get("kind") == "conan-transport" and destination != repo:
                 found.append(f"{where}: a transport carries {repo}'s sources, so it is published on {repo}'s "
                              f"own Release, never {destination}'s (N360 plan F9, DN-142.D25 (2))")
-            if asset.get("kind") == "entry" and not asset.get("entry"):
+            if asset.get("kind") == "entry" and "step" in asset:
+                found += [f"{where}: {defect}" for defect in _ingested_entry_defects(repo, asset)]
+            elif asset.get("kind") == "entry" and not asset.get("entry"):
                 found.append(f"{where}: an entry asset names no entry")
             if asset.get("kind") == "object":
                 found += [f"{where}: {defect}" for defect in _object_row_defects(repo, asset)]
@@ -271,6 +279,19 @@ def _object_row_defects(owner: str, asset: dict) -> list[str]:
             found.append("an ingested row names the artifact its record must have read")
     elif "artifact" in asset:
         found.append("only an ingested row names an artifact")
+    return found
+
+
+def _ingested_entry_defects(owner: str, asset: dict) -> list[str]:
+    """Every way an INGESTED entry row misses its shape (DN-142.D25 (4) A): a published executable a
+    hosted run produced is an `entry` whoever produced it, resolved like an ingested object, step ->
+    record -> member; empty when it has it."""
+    found = [defect for defect in _object_row_defects(owner, asset)]
+    if not ingested_step(str(asset.get("step", ""))):
+        found.append(f"an entry row naming a step names an ingestion step `<repository>/ingest.<workflow>`, "
+                     f"not {asset.get('step')!r}: a package's entry is named by `package` and `entry`")
+    if "package" in asset or "entry" in asset:
+        found.append("an ingested entry row names its step and member, never a package or an entry")
     return found
 
 
@@ -368,7 +389,8 @@ def build(store: Path, record_bytes: bytes, plan: dict, sign_with: Signer | None
         carried.add((package, member))
 
     def produced(owner: str, asset: dict) -> dict:
-        """An object row, once its producing record holds the member whole and admits it."""
+        """An object row, or an ingested entry row, once its producing record holds the member whole
+        and admits it."""
         step_id = asset["step"]
         built = stored(step_id)
         step = steps[step_id]
@@ -382,6 +404,10 @@ def build(store: Path, record_bytes: bytes, plan: dict, sign_with: Signer | None
         verdicts: list[str] = []
         if ingested_step(step_id):
             ingestion(owner, asset, built, body, digest)
+            if asset["kind"] == "entry":
+                return {"name": asset["name"], "kind": "entry", "destination": asset["destination"],
+                        "step": step_id, "record": step["key"], "object": digest, "entry": asset["member"],
+                        "entry_digest": digest, "verdicts": [step["key"]]}
         elif kind != artefact_store.TRACKED_KIND:
             if step.get("verdict") != "pass" or body.get("verdict") != "pass":
                 raise Refused(f"its producing record {step_id} is a {kind} whose verdict is "
@@ -411,6 +437,11 @@ def build(store: Path, record_bytes: bytes, plan: dict, sign_with: Signer | None
         defect = artefact_store.exception_defect(body.get("exception"))
         if defect:
             raise Refused(f"its ingestion: {defect}")
+        declared = INGESTED_CLASS[asset["kind"]]
+        if body.get("class") != declared:
+            raise Refused(f"its ingestion recorded the class {body.get('class')!r}, and an ingested "
+                          f"{asset['kind']} row publishes only a {declared!r} (DN-142.D25 (4) A: a row's "
+                          f"kind follows its bytes)")
 
     visibility = plan["visibility"]
     carried: set[tuple[str, str]] = set()
@@ -419,7 +450,7 @@ def build(store: Path, record_bytes: bytes, plan: dict, sign_with: Signer | None
         rows = []
         for asset in body.get("assets", []):
             try:
-                if asset["kind"] == "object":
+                if asset["kind"] == "object" or "step" in asset:
                     rows.append(produced(repo, asset))
                     continue
                 package = asset["package"]
@@ -767,8 +798,21 @@ def _fixture(root: Path) -> tuple[Path, bytes, dict, dict[str, Path]]:
                                         "job": "build"},
                                "title": "Win — step 0 run 777 — priv-repo=" + "f" * 40,
                                "exception": {"since": "2026-10-13", "discharge": "a Windows seat"},
-                               "head_sha": "f" * 40, "inputs_key": "b" * 64}})
+                               "head_sha": "f" * 40, "inputs_key": "b" * 64, "class": "executable"}})
     steps.append({"id": "priv-repo/ingest.win", "key": ingested, "verdict": None})
+    golden = held(b"agreed golden digest\n")
+    agreed = put({"step": {"kind": "ingest", "repository": "priv-repo", "artefact": "golden",
+                           "workflow": ".github/workflows/golden.yml", "job": "compare"},
+                  "run": {"id": 32, "attempt": 1}, "judged": {"priv-repo": "f" * 40}},
+                 {"ingest": {"objects": {"golden.txt": golden},
+                             "producers": {"printed": golden, "github_artifact_digest": "sha256:" + "c" * 64,
+                                           "writer_recomputed": golden},
+                             "seat": {"runner": "GitHub Actions 4", "labels": ["ubuntu-24.04"], "run": 32,
+                                      "job": "compare"},
+                             "title": "Golden — step 0 run 777 — priv-repo=" + "f" * 40,
+                             "exception": {"since": "2026-10-14", "discharge": "a step-0 producer"},
+                             "head_sha": "f" * 40, "inputs_key": "d" * 64, "class": "object"}})
+    steps.append({"id": "priv-repo/ingest.golden", "key": agreed, "verdict": None})
     record = canonical({"version": "9.9.9", "built": True, "cuttable": True, "step0_run": "777", "steps": steps})
     plan = {"format": PLAN_FORMAT, "visibility": {"pub-repo": "public", "priv-repo": "private"}, "repositories": {
         "pub-repo": {"assets": [
@@ -783,8 +827,10 @@ def _fixture(root: Path) -> tuple[Path, bytes, dict, dict[str, Path]]:
              "destination": "priv-repo", "verdicts": []},
             {"name": "bench.json", "kind": "object", "step": "priv_tools/bench", "member": "bench.json",
              "destination": "priv-repo", "verdicts": []},
-            {"name": "win.exe", "kind": "object", "step": "priv-repo/ingest.win", "member": "win.exe",
-             "destination": "pub-repo", "verdicts": [], "artifact": "win-x64"}],
+            {"name": "win.exe", "kind": "entry", "step": "priv-repo/ingest.win", "member": "win.exe",
+             "destination": "pub-repo", "verdicts": [], "artifact": "win-x64"},
+            {"name": "golden.txt", "kind": "object", "step": "priv-repo/ingest.golden", "member": "golden.txt",
+             "destination": "priv-repo", "verdicts": [], "artifact": "golden"}],
             "destinations": {"pub-repo": {"tag": "engine-v9.9.9"}},
             "images": {"srv-image": {"dockerfile": "docker/Dockerfile", "runtime": ["libstdc++.so.6"],
                                      "executables": [{"package": "priv_server", "entry": "bin/server",
@@ -859,7 +905,8 @@ def selftest() -> int:
             want_verdicts = {"priv_tools-9.9.9.tgz": [keys["priv_tools/verdict"]],
                              "tool-linux-x64": [keys["priv_tools/verdict"], keys["priv_tools/consumer"]],
                              "srv-image": [keys["priv_server/verdict"]], "sbom.json": [],
-                             "bench.json": [keys["priv_tools/bench"]], "win.exe": []}
+                             "bench.json": [keys["priv_tools/bench"]], "win.exe": [keys["priv-repo/ingest.win"]],
+                             "golden.txt": []}
             if {name: row.get("verdicts") for name, row in rows.items()} != want_verdicts:
                 failures.append(f"every row lists the verdict records the builder checked for it: "
                                 f"{ {name: row.get('verdicts') for name, row in rows.items()} }")
@@ -867,8 +914,8 @@ def selftest() -> int:
                        if row["kind"] == "object"}
             if objects != {"sbom.json": ("priv_tools/tracked", keys["priv_tools/tracked"], sha256_bytes(b'{"bom": 1}\n')),
                            "bench.json": ("priv_tools/bench", keys["priv_tools/bench"], sha256_bytes(b'{"ns": 7}\n')),
-                           "win.exe": ("priv-repo/ingest.win", keys["priv-repo/ingest.win"],
-                                       sha256_bytes(b"MZ windows bytes"))}:
+                           "golden.txt": ("priv-repo/ingest.golden", keys["priv-repo/ingest.golden"],
+                                          sha256_bytes(b"agreed golden digest\n"))}:
                 failures.append(f"each object row names its producing step, record and object: {objects}")
             destination = json.loads(projected)
             if sorted(destination_slices) != [("priv-repo", "pub-repo")] or \
@@ -984,6 +1031,29 @@ def selftest() -> int:
                 lambda body: body["outputs"]["ingest"]["producers"].__setitem__("printed", "0" * 64))
         arm("RED: an ingestion whose record names another printed digest than its object is refused",
             lambda: build(store_i, record_i, plan_i), "do not all name the object")
+        win = rows["win.exe"]
+        if (win["kind"], win["entry"], win["object"], win["entry_digest"], win["record"]) != \
+                ("entry", "win.exe", sha256_bytes(b"MZ windows bytes"), sha256_bytes(b"MZ windows bytes"),
+                 keys["priv-repo/ingest.win"]):
+            failures.append(f"an ingested executable is an entry row, its object its own bytes: {win}")
+        store_j, record_j, plan_j, _ = _fixture(root / "j")
+        rewrite(store_j, "priv-repo/ingest.win", record_j,
+                lambda body: body["outputs"]["ingest"].__setitem__("class", "object"))
+        arm("RED: an ingested entry row whose ingestion recorded the class object is refused",
+            lambda: build(store_j, record_j, plan_j), "an ingested entry row publishes only a 'executable'")
+        store_k, record_k, plan_k, _ = _fixture(root / "k")
+        rewrite(store_k, "priv-repo/ingest.golden", record_k,
+                lambda body: body["outputs"]["ingest"].__setitem__("class", "executable"))
+        arm("RED: an ingested object row whose ingestion recorded the class executable is refused",
+            lambda: build(store_k, record_k, plan_k), "an ingested object row publishes only a 'object'")
+        arm("RED: an ingested entry row naming a package is refused",
+            lambda: build(store, record, edited(plan, lambda p: p["repositories"]["priv-repo"]["assets"][4]
+                                                .__setitem__("package", "priv_tools"))),
+            "never a package or an entry")
+        arm("RED: an entry row naming a step that is no ingestion is refused",
+            lambda: build(store, record, edited(plan, lambda p: p["repositories"]["priv-repo"]["assets"][4]
+                                                .__setitem__("step", "priv_tools/tracked"))),
+            "names an ingestion step")
         store_d, record_d, plan_d, transports_d = _fixture(root / "d")
         transports_d["pub_lib"].write_bytes(b"tampered")
         arm("a transport object that does not hash to its name is refused",
@@ -1019,7 +1089,8 @@ def selftest() -> int:
             assets = arm("the owner's slice verifies with its foreign row and the destination it declares",
                          lambda: verify(slices["priv-repo"], priv_signature, allowed, "priv-repo"), None)
             if assets is not None and [(asset["name"], asset["destination"]) for asset in assets] != [
-                    ("bench.json", "priv-repo"), ("priv_tools-9.9.9.tgz", "priv-repo"), ("sbom.json", "priv-repo"),
+                    ("bench.json", "priv-repo"), ("golden.txt", "priv-repo"), ("priv_tools-9.9.9.tgz", "priv-repo"),
+                    ("sbom.json", "priv-repo"),
                     ("srv-image", "priv-repo"), ("tool-linux-x64", "pub-repo"), ("win.exe", "pub-repo")]:
                 failures.append(f"the verified owner slice lists {assets}")
             owner = json.loads(slices["priv-repo"])
