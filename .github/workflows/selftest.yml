@@ -75,6 +75,9 @@ jobs:
         # Its own step until tests/test_malf.sh carries it.
         run: bash tests/test_store_key.sh
 
+      - name: the golden's agreement is the compare job's verdict, so its upload follows the compare (DN-142.D25 (5), call A)
+        run: bash tests/test_golden_compare_shape.sh
+
       - name: store_publish selftest (a release job's fetch, verify and stage, against an in-process registry)
         # Its own step until tests/test_malf.sh carries it beside store_replica's and store_manifest's.
         run: timeout 120 python3 store_publish.py selftest
