@@ -2,7 +2,7 @@
 # Checks coderoast-hub out into <dir> at the commit this run must test the shipped scenarios at, and
 # prints that commit; exits non-zero naming why when there is none.
 #
-# RULED (the Founder, 2026-09-26; LEXICON § Rulings closed): a release serves the coderoast-hub
+# RULED (the Founder, 2026-09-26; RULINGS.md RUL-57): a release serves the coderoast-hub
 # commit it recorded, never hub `main`, so its tests must run against that same commit. At a tag the
 # commit is the one step 0's build record verified for coderoast-hub, which the release workflow's
 # `attest` job reads from the record it attested and hands on as its `hub` output. The hub's own tag

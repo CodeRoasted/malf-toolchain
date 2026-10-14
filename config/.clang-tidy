@@ -122,8 +122,8 @@ CheckOptions:
   # Cognitive-complexity bar is DELIBERATELY the default 25 (an explicit policy call,
   # 2026-07-23), made explicit so it is a CHOSEN standard rather than an inherited default,
   # and so there is one place to tune. This is a readability-* check → a warning, and `malf lint`
-  # fails on every finding whatever its severity (the Founder, 2026-10-06, LEXICON.md § Rulings
-  # closed), so a finding here reds the lint gate like any other. Handle a finding by TRIAGE, never
+  # fails on every finding whatever its severity (the Founder, 2026-10-06, RULINGS.md RUL-130),
+  # so a finding here reds the lint gate like any other. Handle a finding by TRIAGE, never
   # by raising
   # this number to silence it: a genuinely sprawling function is refactored (single
   # responsibility); a legitimately-complex algorithmic / hot-path function whose split
