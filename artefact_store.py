@@ -20,12 +20,14 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
         the corpus gates parameter document naming the package, its corpus verdict too
         (DN-142.D21 (1)), whose red is that record's verdict and never this command's exit
     artefact_store.py key-first <store> <conan home> <graph info.json> <package> <profile name>
-                                <malf dir> <toolchain.json> <prefixes> <document out> [<source tree id>]
+                                <malf dir> <toolchain.json> <prefixes> <document out>
+                                reference=<ref>#<rrev>|tree=<source tree id>
         the step's key BEFORE it runs (DN-142.D19 (4)), one line of 64 hex, its document written
-        to <document out>: from the graph `conan graph info` resolved over the step's exported
-        reference (a create) or, with a source tree id, over its materialized source (a `conan
-        build`), each first-party upstream's digest read from its own step's record; exit 1
-        refusing an upstream no record holds. A step handed that document in MALF_STEP_KEY_FIRST
+        to <document out>: from the graph `conan graph info` resolved over the recipe path the step
+        builds (a create's, its source the exported reference's digest, in the context `conan
+        create` gives it; a `conan build`'s materialized source, its source that tree), each
+        first-party upstream's digest read from its own step's record; exit 1 refusing an upstream
+        no record holds. A step handed that document in MALF_STEP_KEY_FIRST
         refuses its record when the key it computes after the build differs, naming each member
         (gate G2), and prints `KEY-FIRST <package> equal <key>` when it agrees
     artefact_store.py third-party-plan <store> <conan home> <graph info.json> <prefixes> <profile name>
@@ -860,19 +862,24 @@ def recorded_contents(store: Path, profile: str) -> dict[str, set[str]]:
 
 def key_first_document(store: Path, home: Path, graph_json: Path, package: str, profile: str,
                        malf_dir: Path, toolchain: Path, prefixes: tuple[str, ...],
-                       source_tree: str | None) -> dict:
-    """The step's input document from the graph `conan graph info` resolved before it ran: a
-    `conan-create` step's when `source_tree` is None (the graph of its exported reference), a
-    `conan-build` step's otherwise (the graph of its materialized source, its source that tree).
+                       anchor: str) -> dict:
+    """The step's input document from the graph `conan graph info` resolved, before it ran, over
+    the very recipe path its create or build will take. `anchor` is `reference=<ref>#<rrev>` for a
+    `conan-create` step (the reference its `conan export` gave, whose export digest is the target's
+    source) or `tree=<id>` for a `conan-build` step (its materialized source's git tree). The target
+    is the graph's root node, in the context its create gives it: `build` for a `build-scripts`
+    package, which `conan create` builds as a tool, `host` otherwise.
     post: every first-party upstream's digest is the one its own step's record holds at its
     binary alias; raises Refused naming each upstream no record holds, or holds at two contents."""
+    kind, _equals, value = anchor.partition("=")
+    if kind not in ("reference", "tree") or not value:
+        raise Refused(f"{package}: the key before the step needs `reference=<ref>` or `tree=<id>`, not {anchor!r}")
+    root = json.loads(graph_json.read_text())["graph"]["nodes"]["0"]
     nodes = graph_nodes(graph_json)
-    refuse_python_requires(nodes, graph_json)
+    refuse_python_requires([root, *nodes], graph_json)
     held = recorded_contents(store, profile)
     sources, upstream, third_party = {}, {}, {}
     unrecorded = []
-    created = "host" if any(node["name"] == package and node["context"] == "host" for node in nodes) \
-        else "build"
     for node in nodes:
         if node.get("binary") == "Skip":
             continue
@@ -883,8 +890,6 @@ def key_first_document(store: Path, home: Path, graph_json: Path, package: str, 
                                   "content": tree_digest(_cache_path(home, binary))[0]}
             continue
         sources[label] = _export_digest(home, recipe)
-        if name == package and node["context"] == created:
-            continue
         contents = held.get(binary, set())
         if len(contents) != 1:
             unrecorded.append(f"{label} {binary}: " + (f"{len(contents)} recorded contents" if contents
@@ -894,10 +899,12 @@ def key_first_document(store: Path, home: Path, graph_json: Path, package: str, 
     if unrecorded:
         raise Refused(f"{package}: the key before the step reads each upstream from its own step's "
                       f"record (DN-142.D19 (4)), and {len(unrecorded)} cannot be read: " + "; ".join(unrecorded))
-    if source_tree is not None:
-        sources[f"{package}/host"] = source_tree
+    if kind == "tree":
+        sources[f"{package}/host"] = value
         return _step_document("conan-build", package, profile, home, malf_dir, toolchain,
                               sources, upstream, third_party)
+    context = "build" if root.get("package_type") == "build-scripts" else "host"
+    sources[f"{package}/{context}"] = _export_digest(home, value)
     document = _step_document("conan-create", package, profile, home, malf_dir, toolchain,
                               sources, upstream, third_party)
     document["step"]["executables"] = executable_classes(_declared_executables_env())
@@ -2640,11 +2647,10 @@ def main(argv: list[str]) -> int:
                           Path(argv[6]), Path(argv[7]), tuple(argv[8].split()),
                           Path(argv[9]) if len(argv) >= 10 else None,
                           Path(argv[10]) if len(argv) == 11 else None)
-    if len(argv) in (10, 11) and argv[0] == "key-first":
+    if len(argv) == 11 and argv[0] == "key-first":
         try:
             document = key_first_document(Path(argv[1]), Path(argv[2]), Path(argv[3]), argv[4], argv[5],
-                                          Path(argv[6]), Path(argv[7]), tuple(argv[8].split()),
-                                          argv[10] if len(argv) == 11 else None)
+                                          Path(argv[6]), Path(argv[7]), tuple(argv[8].split()), argv[10])
         except Refused as refused:
             print(f"artefact_store: REFUSED {refused}", file=sys.stderr)
             return 1

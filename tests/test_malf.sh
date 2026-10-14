@@ -4974,6 +4974,9 @@ tq_first ex_t 'requires = "tpt/0.1"'
 # ex_k's export reads the clock: an input `conan graph info` cannot see, which the create's own export
 # then holds at another value (DN-142.D19 (4), gate G2).
 tq_first ex_k 'requires = "tpr/0.1"'
+# ex_b is a build-scripts package, which `conan create` builds in the BUILD context.
+mkdir -p "$tq_src/ex_b"
+printf 'from conan import ConanFile\n\n\nclass Fixture(ConanFile):\n    name = "ex_b"\n    version = "0.1"\n    package_type = "build-scripts"\n' > "$tq_src/ex_b/conanfile.py"
 printf '\n    def export(self):\n        import time\n        from conan.tools.files import save\n        save(self, self.export_folder + "/stamp", str(time.time_ns()))\n' >> "$tq_src/ex_k/conanfile.py"
 printf 'packages: {}\n' > "$tq_src/packages.yml"
 git -C "$tq_src" init -q && git -C "$tq_src" add -A && git -C "$tq_src" -c user.email=t@t -c user.name=t commit -qm fixtures
@@ -4987,7 +4990,7 @@ tq_step() {   # <home name> <store name> <package> — malf's step function over
     mkdir -p "$tq_tmp/scratch-$1"; printf '{"compiler": "fixture"}' > "$tq_tmp/scratch-$1/toolchain.json"
     bash -c 'MALF_SOURCE_ONLY=1 source "$1" > /dev/null 2>&1; set +e
         export CONAN_HOME="$2"; MALF_PROFILE="$2/profiles/fixture"; MALF_BUILD_PROFILE="$MALF_PROFILE"
-        MALF_CONFIG=Release; MALF_PROFILE_NAME=fixture; _MALF_WRITER_ARGS=(); _MALF_SHIP_LOCK=()
+        MALF_CONFIG=Release; MALF_PROFILE_NAME=fixture; _MALF_WRITER_ARGS=(); _MALF_SHIP_LOCK=(${TQ_LOCK:+--lockfile=$TQ_LOCK})
         _malf_writer_environment || exit 9
         _malf_store_run_step 1 "$5" "$6/$5" create "$3" "$4" ex_ 0' \
         _ "$MALF_BIN" "$tq_tmp/$1" "$tq_tmp/$2" "$tq_tmp/scratch-$1" "$3" "$tq_src" > "$tq_tmp/out" 2>&1
@@ -5151,6 +5154,17 @@ mkdir -p "$tq_tmp/stray" && cp "$MALF_ROOT/conan.lock" "$tq_tmp/stray/conan.lock
 check "(k′) RED — a step keyed from a directory holding a stray conan.lock computes the same key before and after it" \
       "rc=0 1" \
       "$(cd "$tq_tmp/stray" && tq_step k store-k3 ex_r) $(tq_has 'artefact_store: KEY-FIRST ex_r equal [0-9a-f]\{64\}')"
+# (k‴) a step the strict lock names as nobody's requirement (a leaf the walk builds as a root, as
+# coderoast_server is) keys over its recipe path, as its create resolves, never `--requires`.
+CONAN_HOME="$tq_tmp/k" conan lock create --requires=tpr/0.1 -pr:a "$tq_tmp/k/profiles/fixture" \
+    --lockfile-out="$tq_tmp/tpr.lock" > /dev/null 2>&1
+check "(k‴) RED — a root step the strict lock does not name is keyed before and after its create, equal" \
+      "rc=0 1" \
+      "$(TQ_LOCK="$tq_tmp/tpr.lock" tq_step k store-k4 ex_r) $(tq_has 'artefact_store: KEY-FIRST ex_r equal [0-9a-f]\{64\}')"
+# (k⁗) a build-scripts package: its create builds it in the build context, and its key says so.
+check "(k⁗) RED — a build-scripts package's key before the step names its source in the build context, as its create does" \
+      "rc=0 1" \
+      "$(tq_step k store-k5 ex_b) $(tq_has 'artefact_store: KEY-FIRST ex_b equal [0-9a-f]\{64\}')"
 check "(k) RED — an export that reads the clock moves the key between before and after: UNRECORDED, naming sources.ex_k/host, nothing stored" \
       "rc=2 1 1 0" \
       "$(tq_step k store-k2 ex_k) $(tq_has 'REFUSED ex_k: the key computed before the step .* (DN-142.D19 (4), gate G2): 1 member(s): sources.ex_k/host') $(tq_has '\[1\] ex_k UNRECORDED') $(grep -l '"ex_k"' "$tq_tmp"/store-k2/records/*.json 2>/dev/null | wc -l | tr -d ' ')"

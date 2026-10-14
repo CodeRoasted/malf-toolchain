@@ -5538,10 +5538,9 @@ _malf_store_closed() {   # <n> <name> <verdict> <walk start> <step start> <step 
 }
 
 # THE KEY BEFORE THE STEP (DN-142.D19 (4), gate G2): the step's graph resolved by `conan graph info`
-# with the very arguments its create or build will take, and artefact_store.py's `key-first` over it,
-# each first-party upstream read from the record its own step wrote. A create's graph is that of its
-# EXPORTED reference (`conan export`, then `--requires`), the shape `conan create` resolves; a
-# `conan build` step's is that of its materialized source. The document lands at
+# with the very arguments its create or build will take, over the very recipe path, and
+# artefact_store.py's `key-first` over it, each first-party upstream read from the record its own step
+# wrote. A create's source is the digest of the reference its `conan export` gave. The document lands at
 # <scratch>/<name>.key-first.json, which the step's record must equal once it has run.
 # pre: the walk's environment (cmd_store_create), MALF_STEP_EXECUTABLES for a create.
 # post: exit 0 with the document written and `--- store-create: <name> key before the step <key> ---`
@@ -5549,24 +5548,27 @@ _malf_store_closed() {   # <n> <name> <verdict> <walk start> <step start> <step 
 _malf_store_key_first() {   # <name> <prefixes> <store> <scratch> <log> <recipe path> | ... <source path> <source tree>
     local name="$1" prefixes="$2" store="$3" scratch="$4" log="$5" path="$6" tree="${7:-}" reference key
     local graph="$scratch/$name.key-first.graph.json"
-    local -a build_args target
+    local -a build_args
+    local anchor
     if [[ -n "$tree" ]]; then
-        target=("$path"); build_args=(--build=never)
+        build_args=(--build=never); anchor="tree=$tree"
     else
         reference="$(conan export "$path" --format=json 2>> "$log" \
             | python3 -c 'import json, sys; print(json.load(sys.stdin)["reference"])')" || return 1
-        target=(--requires="$reference"); mapfile -t build_args < <(_malf_store_build_args "$name")
+        mapfile -t build_args < <(_malf_store_build_args "$name"); anchor="reference=$reference"
     fi
-    # FROM THE RECIPE'S OWN DIRECTORY, never the caller's: conan reads a `conan.lock` from the
-    # current directory when no --lockfile is named (as a fixture walk names none), and a create over
-    # <path> reads the one beside its recipe, so a query run elsewhere resolved another graph — from
-    # malf's root, against malf/conan.lock, it refused every fixture create.
-    (cd "$path" && conan graph info "${target[@]}" "${_MALF_WRITER_PROFILES[@]}" -s build_type="$MALF_CONFIG" \
+    # OVER THE RECIPE PATH, FROM ITS OWN DIRECTORY, AS THE CREATE RESOLVES IT. Never over the exported
+    # reference (`--requires`): a strict lock names a package only as some recipe's requirement, so a
+    # leaf the create builds as the root (coderoast_server, insight_e2e, ...) is "not in lockfile" for
+    # `--requires`, and a `build-scripts` package is a tool to `conan create` and a host requirement
+    # to `--requires`. And never from the caller's directory: conan reads a `conan.lock` from the
+    # current one when no --lockfile is named, while a create over <path> reads the one beside it.
+    (cd "$path" && conan graph info . "${_MALF_WRITER_PROFILES[@]}" -s build_type="$MALF_CONFIG" \
         "${_MALF_WRITER_ARGS[@]}" "${build_args[@]}" "${_MALF_SHIP_LOCK[@]}" --no-remote --format=json) \
         > "$graph" 2>> "$log" || return 1
     key="$(python3 "$MALF_DIR/artefact_store.py" key-first "$store" "$CONAN_HOME" "$graph" "$name" \
         "$MALF_PROFILE_NAME" "$MALF_DIR" "$scratch/toolchain.json" "$prefixes" "$scratch/$name.key-first.json" \
-        ${tree:+"$tree"})" || return 1
+        "$anchor")" || return 1
     echo "--- store-create: $name key before the step $key ---"
 }
 
