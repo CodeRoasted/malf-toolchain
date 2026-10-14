@@ -19,6 +19,15 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
         with a results directory, the step's test verdict record beside it (DN-142.D5 (3)); with
         the corpus gates parameter document naming the package, its corpus verdict too
         (DN-142.D21 (1)), whose red is that record's verdict and never this command's exit
+    artefact_store.py key-first <store> <conan home> <graph info.json> <package> <profile name>
+                                <malf dir> <toolchain.json> <prefixes> <document out> [<source tree id>]
+        the step's key BEFORE it runs (DN-142.D19 (4)), one line of 64 hex, its document written
+        to <document out>: from the graph `conan graph info` resolved over the step's exported
+        reference (a create) or, with a source tree id, over its materialized source (a `conan
+        build`), each first-party upstream's digest read from its own step's record; exit 1
+        refusing an upstream no record holds. A step handed that document in MALF_STEP_KEY_FIRST
+        refuses its record when the key it computes after the build differs, naming each member
+        (gate G2), and prints `KEY-FIRST <package> equal <key>` when it agrees
     artefact_store.py third-party-plan <store> <conan home> <graph info.json> <prefixes> <profile name>
         each third-party reference a first-party step's resolved graph needs built by a step of its
         own, `<name>/<version>` a line (DN-142.D17 (2), (4), (10)): one conan marks Missing, Build
@@ -80,11 +89,17 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
         record of `<repository>/ingest.<workflow stem>`; exit 0 stored, matching, or diverging
         from an earlier run at an equal `inputs_key` (written under `divergences/`, never a red),
         1 refused with nothing stored
+    artefact_store.py parameters <profile|-> <argv>...
+        the act's parameter document (DN-142.D19 (1)), canonical JSON on one line: MALF_STORE_PARAMETERS
+        when a driver hands one, checked equal to the act's argv and profile, every `env` member equal
+        to the act's environment; else the act's own, `env` empty. Exit 2 refusing a document that
+        disagrees with the act it keys
     artefact_store.py object <store> <key> <output> <member>
         the SHA-256 of object <member> of <output> in the record at <key>, once the store holds its
         bytes whole; exit 1 naming the missing link (DN-142.D25 (1))
     artefact_store.py selftest
-        every arm of the objects convention, the tracked step and the ingestion API, on fixtures
+        every arm of the definition member, the objects convention, the tracked step and the
+        ingestion API, on fixtures
     artefact_store.py toolchain <compiler root> <out.json>
         the measured toolchain member, written once per run (hashing the compiler tree is the
         expensive part of a key)
@@ -161,8 +176,12 @@ this step-0 run, the dated exception and `inputs_key`; an executable among those
 published (DN-142.D22 (4): a PE with no COFF symbol table and no CodeView debug entry, a linked ELF
 in the published form). `object` resolves a row: step -> record -> output -> member -> bytes.
 
-MALF_STORE_DEFINITION, when set, is `<name>=<directory> ...`: each named directory's tracked tree
-joins the key's `definition` beside malf's, for a step another tool drives (Pharos at step 0).
+A key's `definition` is malf's tracked tree plus the PARAMETER DOCUMENT of the act that ran the step
+(DN-142.D2, DN-142.D19 (1)): `{argv, env, profile}`, the program and verb, each variable the driver
+hands the act that is not a location, and the profile name. A driver hands it in
+MALF_STORE_PARAMETERS and it is CHECKED against the act it keys (`parameters`); an act no driver ran
+composes the same document itself with `env` empty. A driver's own code never enters it: a Pharos
+commit re-keys no step malf runs.
 
 The store is a directory: `objects/<sha256>` immutable blobs, `records/<key>.json` one per key,
 `mismatches/<key>.<digest>.json` one per differing rebuild or re-judgement, `divergences/<inputs key>.<key>.json`
@@ -319,26 +338,59 @@ def worktree_tree_id(repository: Path) -> str:
         return _run(["git", "-C", str(repository), "write-tree"], env).strip()
 
 
-def directory_tree_id(directory: Path) -> str:
-    """The git tree id of the TRACKED files under `directory`, as they are on disk: its work
-    tree's (`worktree_tree_id`), narrowed to the directory's prefix when it is not the top."""
-    tree = worktree_tree_id(directory)
-    prefix = _run(["git", "-C", str(directory), "rev-parse", "--show-prefix"]).strip().rstrip("/")
-    return _run(["git", "-C", str(directory), "rev-parse", f"{tree}:{prefix}"]).strip() if prefix else tree
+PARAMETERS_ENV = "MALF_STORE_PARAMETERS"
+PARAMETER_MEMBERS = ("argv", "env", "profile")
 
 
-def definition_member(malf_dir: Path) -> dict[str, str]:
-    """DN-142.D2's `definition` member: malf's tracked tree, and the tracked tree of every
-    directory `MALF_STORE_DEFINITION` names (`<name>=<directory> ...`), so the code that drives a
-    step is part of its key whichever tool drives it.
-    pre: each name is distinct from `malf` and from the others, and each directory is inside a git work tree."""
-    definition = {"malf": worktree_tree_id(malf_dir)}
-    for member in os.environ.get("MALF_STORE_DEFINITION", "").split():
-        name, _, directory = member.partition("=")
-        if not name or not directory or name in definition:
-            raise KeyError_(f"MALF_STORE_DEFINITION: `{member}` is not a new `<name>=<directory>`")
-        definition[name] = directory_tree_id(Path(directory))
-    return definition
+def parameter_document(argv: list[str], profile: str | None) -> dict:
+    """The parameter document of the act `argv` runs at `profile` (DN-142.D19 (1)): the one its
+    driver handed in MALF_STORE_PARAMETERS, checked against the act, else the act's own with `env`
+    empty. `argv` is the program and its verb, never a path nor a package selection: a selection
+    chooses which steps run, never what one computes.
+    post: the document's argv and profile are the act's and each `env` member is the act's own
+    environment's; raises KeyError_ naming every disagreement otherwise."""
+    composed = {"argv": list(argv), "env": {}, "profile": profile}
+    handed = os.environ.get(PARAMETERS_ENV)
+    if handed is None:
+        return composed
+    try:
+        document = json.loads(handed)
+    except ValueError as unparsed:
+        raise KeyError_(f"{PARAMETERS_ENV} is not JSON: {unparsed}") from unparsed
+    if not isinstance(document, dict) or sorted(document) != sorted(PARAMETER_MEMBERS):
+        raise KeyError_(f"{PARAMETERS_ENV} holds {sorted(document) if isinstance(document, dict) else document!r}, "
+                        f"not exactly {list(PARAMETER_MEMBERS)}")
+    wrong = [f"{member} is {document[member]!r}, the act's is {composed[member]!r}"
+             for member in ("argv", "profile") if document[member] != composed[member]]
+    environment = document["env"]
+    if not isinstance(environment, dict):
+        wrong.append(f"env is {environment!r}, not an object")
+    else:
+        wrong += [f"env {name} is {value!r}, the act was handed {os.environ.get(name)!r}"
+                  for name, value in sorted(environment.items()) if os.environ.get(name) != value]
+    if wrong:
+        raise KeyError_(f"{PARAMETERS_ENV} disagrees with the act it keys: " + "; ".join(wrong))
+    canonical_json(document)
+    return document
+
+
+def step_parameters(profile: str | None) -> dict:
+    """The parameter document a step's act exported (`parameters`), its profile the step's own;
+    an act no malf verb ran (a fixture calling a step directly) has the empty argv."""
+    handed = os.environ.get(PARAMETERS_ENV)
+    if handed is None:
+        return {"argv": [], "env": {}, "profile": profile}
+    document = json.loads(handed)
+    if document.get("profile") != profile:
+        raise KeyError_(f"{PARAMETERS_ENV} names profile {document.get('profile')!r}, and the step "
+                        f"runs at {profile!r}")
+    return document
+
+
+def definition_member(malf_dir: Path, parameters: dict) -> dict[str, object]:
+    """DN-142.D2's `definition` member: malf's tracked tree and the act's parameter document, and
+    nothing of the driver's own code (DN-142.D19 (1))."""
+    return {"malf": worktree_tree_id(malf_dir), "parameters": parameters}
 
 
 def measure_toolchain(compiler_root: Path) -> dict[str, object]:
@@ -471,6 +523,9 @@ EXECUTABLES_ENV = "MALF_STEP_EXECUTABLES"
 # DN-142.D23: a `conan build` step's materialized source root, where its declared skips are read
 # (a create's are read from its keyed export_source folder instead).
 STEP_SOURCE_ENV = "MALF_STEP_SOURCE"
+# DN-142.D19 (4), gate G2: the document `key-first` computed BEFORE the step ran, which the step's
+# record must equal once it has run.
+KEY_FIRST_ENV = "MALF_STEP_KEY_FIRST"
 SHT_SYMTAB = 2
 PT_DYNAMIC = 2
 DT_NULL, DT_RPATH, DT_RUNPATH = 0, 15, 29
@@ -768,7 +823,7 @@ def _step_document(kind: str, package: str, profile: str, home: Path, malf_dir: 
                    toolchain: Path, sources: dict, upstream: dict, third_party: dict) -> dict:
     return {
         "step": {"kind": kind, "package": package, "profile": profile},
-        "definition": definition_member(malf_dir),
+        "definition": definition_member(malf_dir, step_parameters(profile)),
         "sources": sources,
         "upstream": upstream,
         "third_party": third_party,
@@ -776,6 +831,111 @@ def _step_document(kind: str, package: str, profile: str, home: Path, malf_dir: 
         "profile": profile_member(home, profile, malf_dir),
         "system": system_member(),
     }
+
+
+# THE KEY BEFORE THE STEP (DN-142.D19 (4)). A key only the build reveals cannot be looked up, so
+# each step's key is also computed BEFORE it runs: from `conan graph info` over its export (a
+# create) or its materialized source (a `conan build`) at its profile under the lock, its own
+# export's digest, each first-party upstream's OUTPUT digest read out of the record its own step
+# wrote (never the home's folder), and each third-party binary's folder, which its own record
+# already judged. The step then computes its key as it always has, from what it built, and the two
+# must be one: a difference is an input only the build reveals, refused naming the members.
+
+
+def recorded_contents(store: Path, profile: str) -> dict[str, set[str]]:
+    """The content digests the `conan-create` records at `profile` hold, by package binary alias
+    (`<ref>#<rrev>:<package id>#<prev>`)."""
+    held: dict[str, set[str]] = {}
+    records = store / "records"
+    for path in sorted(records.glob("*.json")) if records.is_dir() else ():
+        body = json.loads(path.read_text())
+        step = body["inputs"]["step"]
+        package = body["outputs"].get("package") or {}
+        if step.get("kind") == "conan-create" and step.get("profile") == profile and package.get("alias"):
+            held.setdefault(package["alias"], set()).add(package["content"])
+    return held
+
+
+def key_first_document(store: Path, home: Path, graph_json: Path, package: str, profile: str,
+                       malf_dir: Path, toolchain: Path, prefixes: tuple[str, ...],
+                       source_tree: str | None) -> dict:
+    """The step's input document from the graph `conan graph info` resolved before it ran: a
+    `conan-create` step's when `source_tree` is None (the graph of its exported reference), a
+    `conan-build` step's otherwise (the graph of its materialized source, its source that tree).
+    post: every first-party upstream's digest is the one its own step's record holds at its
+    binary alias; raises Refused naming each upstream no record holds, or holds at two contents."""
+    nodes = graph_nodes(graph_json)
+    refuse_python_requires(nodes, graph_json)
+    held = recorded_contents(store, profile)
+    sources, upstream, third_party = {}, {}, {}
+    unrecorded = []
+    created = "host" if any(node["name"] == package and node["context"] == "host" for node in nodes) \
+        else "build"
+    for node in nodes:
+        if node.get("binary") == "Skip":
+            continue
+        name, label = node["name"], f"{node['name']}/{node['context']}"
+        recipe, _configuration, binary = _alias(node)
+        if not _owned(name, prefixes):
+            third_party[label] = {"ref": recipe, "package_id": node["package_id"],
+                                  "content": tree_digest(_cache_path(home, binary))[0]}
+            continue
+        sources[label] = _export_digest(home, recipe)
+        if name == package and node["context"] == created:
+            continue
+        contents = held.get(binary, set())
+        if len(contents) != 1:
+            unrecorded.append(f"{label} {binary}: " + (f"{len(contents)} recorded contents" if contents
+                                                       else "no record of its own step holds it"))
+            continue
+        upstream[label] = next(iter(contents))
+    if unrecorded:
+        raise Refused(f"{package}: the key before the step reads each upstream from its own step's "
+                      f"record (DN-142.D19 (4)), and {len(unrecorded)} cannot be read: " + "; ".join(unrecorded))
+    if source_tree is not None:
+        sources[f"{package}/host"] = source_tree
+        return _step_document("conan-build", package, profile, home, malf_dir, toolchain,
+                              sources, upstream, third_party)
+    document = _step_document("conan-create", package, profile, home, malf_dir, toolchain,
+                              sources, upstream, third_party)
+    document["step"]["executables"] = executable_classes(_declared_executables_env())
+    return document
+
+
+def document_differences(before: object, after: object, where: str = "") -> list[str]:
+    """The dotted path of every leaf at which two input documents differ."""
+    if isinstance(before, dict) and isinstance(after, dict):
+        found = []
+        for name in sorted(set(before) | set(after)):
+            path = f"{where}.{name}" if where else name
+            if name not in before or name not in after:
+                found.append(f"{path} (only {'after' if name not in before else 'before'} the step)")
+            else:
+                found += document_differences(before[name], after[name], path)
+        return found
+    return [] if before == after else [where or "$"]
+
+
+def key_first_agrees(document: dict) -> bool:
+    """Gate G2 for one step: the document KEY_FIRST_ENV names, computed before the step, against
+    the one the step computed after; True when none is named. Prints `KEY-FIRST <package> equal
+    <key>` on agreement, and on a difference the refusal naming every differing member."""
+    named = os.environ.get(KEY_FIRST_ENV)
+    if not named:
+        return True
+    before = json.loads(Path(named).read_text())
+    package = document["step"]["package"]
+    if key_of(before) == key_of(document):
+        print(f"artefact_store: KEY-FIRST {package} equal {key_of(document)}")
+        return True
+    differences = document_differences(before, document)
+    print(f"artefact_store: REFUSED {package}: the key computed before the step ({key_of(before)}) "
+          f"is not the key it computed after ({key_of(document)}), so an input only the build "
+          f"reveals moved it, and a key nobody can compute before the build can never be looked up "
+          f"(DN-142.D19 (4), gate G2): {len(differences)} member(s): "
+          + ", ".join(differences[:NAMED_FILES]) + (", ..." if len(differences) > NAMED_FILES else ""),
+          file=sys.stderr)
+    return False
 
 
 def produced_packages(store: Path, profile: str) -> dict[str, set[str]]:
@@ -1027,7 +1187,7 @@ def third_party_step(store: Path, home: Path, graph_json: Path, prefixes: tuple[
     built = [index for index, node in nodes.items()
              if index != "0" and not _owned(node["name"], prefixes) and node.get("binary") == "Build"]
     held = third_party_records(store, profile)
-    shared = {"definition": definition_member(malf_dir),
+    shared = {"definition": definition_member(malf_dir, step_parameters(profile)),
               "toolchain": json.loads(toolchain.read_text()),
               "profile": profile_member(home, profile, malf_dir), "system": system_member()}
     worst, mismatched = 0, False
@@ -1074,6 +1234,12 @@ def third_party_step(store: Path, home: Path, graph_json: Path, prefixes: tuple[
     return MISMATCHED if mismatched else worst
 
 
+def _declared_executables_env() -> dict:
+    """The `executables:` declaration MALF_STEP_EXECUTABLES names; `{}` when it names none."""
+    named = os.environ.get(EXECUTABLES_ENV)
+    return json.loads(Path(named).read_text()) if named else {}
+
+
 def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile: str,
                malf_dir: Path, toolchain: Path, prefixes: tuple[str, ...],
                results: Path | None = None, corpus_gates: Path | None = None) -> int:
@@ -1087,16 +1253,15 @@ def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile:
                                                                    prefixes, True)
     document = _step_document("conan-create", package, profile, home, malf_dir, toolchain,
                               sources, upstream, third_party)
-    declared_path = os.environ.get(EXECUTABLES_ENV)
-    declared = json.loads(Path(declared_path).read_text()) if declared_path else {}
-    declared = executable_classes(declared)
+    declared = executable_classes(_declared_executables_env())
     unclassed = sorted(path for path, kind in declared.items() if kind is None)
     if unclassed:
         print(f"artefact_store: REFUSED {package}: {len(unclassed)} declared executable(s) neither "
               f"classed nor in the site form (DN-142.D24 (2)): " + ", ".join(unclassed), file=sys.stderr)
         return 1
     document["step"]["executables"] = declared
-    if _refuse_unrecorded(store, document) | _refuse_unheld_third_party(store, document, folders):
+    refused = _refuse_unrecorded(store, document) | _refuse_unheld_third_party(store, document, folders)
+    if not key_first_agrees(document) or refused:
         return 1
     binary, folder = target
     content, entries = tree_digest(folder)
@@ -1145,7 +1310,8 @@ def build_step(store: Path, home: Path, graph_json: Path, package: str, profile:
     sources[f"{package}/host"] = source_tree
     document = _step_document("conan-build", package, profile, home, malf_dir, toolchain,
                               sources, upstream, third_party)
-    if _refuse_unrecorded(store, document) | _refuse_unheld_third_party(store, document, folders):
+    refused = _refuse_unrecorded(store, document) | _refuse_unheld_third_party(store, document, folders)
+    if not key_first_agrees(document) or refused:
         return 1
     built = sorted((results / package).glob("*.xml")) if (results / package).is_dir() else []
     package_ids = sorted({path.name.split(".", 1)[0] for path in built})
@@ -1446,7 +1612,7 @@ def verdict_step(store: Path, predicate: str, malf_dir: Path, clang_format: Path
     mismatch, 2 when a run judged nothing (no record is written for it)."""
     if predicate not in PREDICATES:
         sys.exit(f"artefact_store: no verdict predicate `{predicate}` (known: {' '.join(sorted(PREDICATES))})")
-    definition = definition_member(malf_dir)
+    definition = definition_member(malf_dir, step_parameters(None))
     toolchain = {"clang-format": _executable_member(clang_format),
                  "python3": _executable_member(Path(sys.executable))}
     system = system_member()
@@ -1654,6 +1820,7 @@ OBJECTS_FIELD = "objects"
 PACKAGE_OUTPUT = "package"
 TRACKED_KIND = TRACKED_OUTPUT = "tracked"
 INGEST_KIND = INGEST_OUTPUT = "ingest"
+INGEST_ARGV = ["artefact_store.py", "ingest"]
 TRACKED_PREFIX = f"{TRACKED_OUTPUT}/"
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -1862,9 +2029,7 @@ def ingest(store: Path, step0_run: str, reading: dict, body: bytes, malf_dir: Pa
         wrong += [f"{reading['member']}: {defect}" for defect in ingested_defects(body)]
     if wrong:
         raise Refused(f"ingestion {step_id}: " + "; ".join(wrong))
-    definition = definition_member(malf_dir)
-    if "workflow" in definition:
-        raise Refused(f"ingestion {step_id}: MALF_STORE_DEFINITION names `workflow`, the ingestion's own member")
+    definition = definition_member(malf_dir, parameter_document(INGEST_ARGV, None))
     document = {"step": {"kind": INGEST_KIND, "repository": reading["repository"],
                          "artefact": reading["artefact"], "workflow": reading["workflow"],
                          "job": reading["job"]},
@@ -1933,8 +2098,17 @@ def _pe_fixture(symbols: int = 0, debug_types: tuple[int, ...] = (), dll: bool =
     return bytes(data)
 
 
+def _raises(run) -> bool:
+    try:
+        run()
+    except KeyError_:
+        return True
+    return False
+
+
 def selftest() -> int:
-    """Every arm of the objects convention, the tracked step and the ingestion API, on fixtures."""
+    """Every arm of the definition member, the objects convention, the tracked step and the
+    ingestion API, on fixtures."""
     failures: list[str] = []
     armed = [0]
     malf_dir = Path(__file__).resolve().parent
@@ -1976,6 +2150,62 @@ def selftest() -> int:
     def listing(store: Path, part: str) -> list[str]:
         return sorted(path.name for path in (store / part).glob("*")) if (store / part).is_dir() else []
 
+    def handed(document: object | None, run, **environment: str):
+        """`run()` with MALF_STORE_PARAMETERS set to `document` (unset for None) and `environment`
+        added, the process environment restored after."""
+        saved = dict(os.environ)
+        os.environ.pop(PARAMETERS_ENV, None)
+        if document is not None:
+            os.environ[PARAMETERS_ENV] = document if isinstance(document, str) else json.dumps(document)
+        os.environ.update(environment)
+        try:
+            return run()
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+
+    def refused_document(label: str, document: object, want: str, **environment: str) -> None:
+        try:
+            got = handed(document, lambda: parameter_document(act, "linux-gcc16-release"), **environment)
+        except KeyError_ as refused:
+            if want not in str(refused):
+                failures.append(f"{label}: refused with {refused}, want {want!r}")
+            return
+        failures.append(f"{label}: accepted {got!r}, want a refusal containing {want!r}")
+
+    # THE DEFINITION MEMBER (DN-142.D19 (1)): malf's tree and the act's parameter document, never a
+    # driver's own tree; a handed document is checked against the act it keys.
+    act = ["malf", "store-create"]
+    own = {"argv": act, "env": {}, "profile": "linux-gcc16-release"}
+    expect("an act no driver handed a document composes its own, env empty",
+           handed(None, lambda: parameter_document(act, "linux-gcc16-release")), own)
+    expect("a handed document equal to the act's is the act's",
+           handed(own, lambda: parameter_document(act, "linux-gcc16-release")), own)
+    expect("a declared variable the act was handed is a parameter",
+           handed({**own, "env": {"KNOB": "on"}}, lambda: parameter_document(act, "linux-gcc16-release"),
+                  KNOB="on"), {**own, "env": {"KNOB": "on"}})
+    refused_document("RED: a document naming another verb is refused", {**own, "argv": ["malf", "store-build"]},
+                     "argv is ['malf', 'store-build']")
+    refused_document("RED: a document naming another profile is refused", {**own, "profile": "linux-clang21"},
+                     "profile is 'linux-clang21'")
+    refused_document("RED: a variable the act was not handed is refused", {**own, "env": {"KNOB": "on"}},
+                     "env KNOB is 'on', the act was handed None")
+    refused_document("RED: a member beyond argv, env and profile is refused", {**own, "tree": "pharos"},
+                     "not exactly ['argv', 'env', 'profile']")
+    refused_document("RED: a location among the variables is refused, never keyed",
+                     {**own, "env": {"MALF_STORE_DIR": "/home/x/store"}}, "an absolute path is never a key input",
+                     MALF_STORE_DIR="/home/x/store")
+    refused_document("RED: a document that is not JSON is refused", "pharos=/x", "is not JSON")
+    definition = handed(own, lambda: definition_member(malf_dir, step_parameters("linux-gcc16-release")))
+    expect("the definition holds malf's tree and the parameters, and nothing of a driver's",
+           (sorted(definition), definition["parameters"]), (["malf", "parameters"], own))
+    other = handed({**own, "env": {"KNOB": "on"}},
+                   lambda: definition_member(malf_dir, step_parameters("linux-gcc16-release")), KNOB="on")
+    expect("parameters that differ give create keys that differ",
+           key_of({"definition": definition}) != key_of({"definition": other}), True)
+    expect("RED: a step run at another profile than its act's is refused",
+           handed(own, lambda: _raises(lambda: step_parameters("linux-clang21"))), True)
+
     with tempfile.TemporaryDirectory(prefix="artefact_store.selftest.") as scratch:
         root = Path(scratch)
         store = root / "store"
@@ -1991,7 +2221,7 @@ def selftest() -> int:
                    sorted(body["inputs"]["definition"])),
                    ({"kind": "ingest", "repository": "eidos", "artefact": "sift-windows-x64",
                      "workflow": ".github/workflows/sift-windows.yml", "job": "build"},
-                    {"id": 7, "attempt": 1}, ["malf", "workflow"]))
+                    {"id": 7, "attempt": 1}, ["malf", "parameters", "workflow"]))
             expect("the output carries the objects, the three producers, the seat, head_sha, title, "
                    "exception and inputs_key", (held[OBJECTS_FIELD], held["producers"]["writer_recomputed"],
                    held["seat"]["run"], sorted(held)),
@@ -2144,6 +2374,14 @@ def main(argv: list[str]) -> int:
     except Refused as refused:
         print(f"artefact_store: REFUSED {refused}", file=sys.stderr)
         return 1
+    if len(argv) >= 3 and argv[0] == "parameters":
+        try:
+            document = parameter_document(argv[2:], None if argv[1] == "-" else argv[1])
+        except KeyError_ as refused:
+            print(f"artefact_store: REFUSED — {refused}", file=sys.stderr)
+            return 2
+        print(canonical_json(document).decode())
+        return 0
     if len(argv) == 2 and argv[0] == "key":
         print(key_of(json.loads(Path(argv[1]).read_text())))
         return 0
@@ -2200,6 +2438,17 @@ def main(argv: list[str]) -> int:
                           Path(argv[6]), Path(argv[7]), tuple(argv[8].split()),
                           Path(argv[9]) if len(argv) >= 10 else None,
                           Path(argv[10]) if len(argv) == 11 else None)
+    if len(argv) in (10, 11) and argv[0] == "key-first":
+        try:
+            document = key_first_document(Path(argv[1]), Path(argv[2]), Path(argv[3]), argv[4], argv[5],
+                                          Path(argv[6]), Path(argv[7]), tuple(argv[8].split()),
+                                          argv[10] if len(argv) == 11 else None)
+        except Refused as refused:
+            print(f"artefact_store: REFUSED {refused}", file=sys.stderr)
+            return 1
+        Path(argv[9]).write_text(json.dumps(document, sort_keys=True))
+        print(key_of(document))
+        return 0
     if len(argv) == 6 and argv[0] == "third-party-plan":
         return third_party_plan(Path(argv[1]), Path(argv[2]), Path(argv[3]), tuple(argv[4].split()),
                                 argv[5])

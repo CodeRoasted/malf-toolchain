@@ -4953,6 +4953,10 @@ tq_first ex_z 'requires = "tpz/0.1"'
 tq_first ex_u 'requires = "tpu/0.1"'
 tq_first ex_n 'tool_requires = "tpn/0.1"'
 tq_first ex_t 'requires = "tpt/0.1"'
+# ex_k's export reads the clock: an input `conan graph info` cannot see, which the create's own export
+# then holds at another value (DN-142.D19 (4), gate G2).
+tq_first ex_k 'requires = "tpr/0.1"'
+printf '\n    def export(self):\n        import time\n        from conan.tools.files import save\n        save(self, self.export_folder + "/stamp", str(time.time_ns()))\n' >> "$tq_src/ex_k/conanfile.py"
 printf 'packages: {}\n' > "$tq_src/packages.yml"
 git -C "$tq_src" init -q && git -C "$tq_src" add -A && git -C "$tq_src" -c user.email=t@t -c user.name=t commit -qm fixtures
 tq_home() {   # <home name> — a fresh conan home holding every fixture recipe and no binary
@@ -5115,13 +5119,25 @@ tq_home t
 check "(s) RED — a third-party build that stamps its build time MATCHES when its step rebuilds it in the same home" \
       "rc=0 rc=0 1" \
       "$(tq_step t store-t ex_t) $(CONAN_HOME="$tq_tmp/t" conan remove 'tpt/0.1:*' -c > /dev/null 2>&1; tq_step t store-t ex_t) $(tq_has 'artefact_store: MATCH tpt package')"
+# (k) THE KEY BEFORE THE STEP (DN-142.D19 (4), gate G2): every step computes its key from `conan graph
+# info` and its upstreams' records before it runs, and its record must equal it after. A step whose
+# export reads the clock moves its own sources between the two: refused, naming the member.
+tq_home k
+check "(k) every step's key is computed before it runs and equals the one after: the line, the equality, and one key" \
+      "rc=0 1 1" \
+      "$(tq_step k store-k ex_r) $(tq_has 'ex_r key before the step [0-9a-f]\{64\}') $(tq_has 'artefact_store: KEY-FIRST ex_r equal [0-9a-f]\{64\}')"
+check "(k) RED — an export that reads the clock moves the key between before and after: UNRECORDED, naming sources.ex_k/host, nothing stored" \
+      "rc=2 1 1 0" \
+      "$(tq_step k store-k2 ex_k) $(tq_has 'REFUSED ex_k: the key computed before the step .* (DN-142.D19 (4), gate G2): 1 member(s): sources.ex_k/host') $(tq_has '\[1\] ex_k UNRECORDED') $(grep -l '"ex_k"' "$tq_tmp"/store-k2/records/*.json 2>/dev/null | wc -l | tr -d ' ')"
 rm -rf "$tq_tmp"
 echo
 
 echo "[7q7h] a verdict is a keyed record binding the trees it judged; a fail is stored, a flip at an equal key fails, and a run that judged nothing writes no record (DN-142.D7; ROADMAP N358)"
 # The predicate is `malf format --check`, judged in an export of the fixture's TRACKED tree beside
-# an export of this malf's, so an untracked file is never judged. The definition a driving tool adds
-# (MALF_STORE_DEFINITION) is part of the key, and a malformed one is refused rather than ignored.
+# an export of this malf's, so an untracked file is never judged. The definition is malf's tree plus
+# the driver's PARAMETER DOCUMENT (MALF_STORE_PARAMETERS, DN-142.D19 (1)), never the driver's own tree:
+# another document moves the key, an edited driver tree does not, and a document that disagrees with
+# the act it keys is refused rather than ignored.
 sv_tmp="$(realpath "$(mktemp -d)")"
 sv_repo="$sv_tmp/fixture-repo"; mkdir -p "$sv_repo/src"
 git -C "$sv_repo" init -q && git -C "$sv_repo" config user.email t@t && git -C "$sv_repo" config user.name t
@@ -5131,7 +5147,7 @@ git -C "$sv_repo" add -A && git -C "$sv_repo" commit -qm clean
 sv_step() {   # [env assignments...] — the verdict lines and the exit, keys and digests elided
     local out rc
     out="$(env "$@" MALF_STORE_DIR="$sv_tmp/store" bash "$MALF_BIN" store-verdict format "$sv_repo" 2>&1)"; rc=$?
-    printf 'rc=%s %s' "$rc" "$(grep -oE 'artefact_store: (STORED|MATCH|MISMATCH|FAIL|UNJUDGED) fixture-repo (verdict|format)|verdict (pass|fail) findings|first src/[a-z]+\.cpp|refused — MALF_STORE_DEFINITION' <<< "$out" | sed 's/artefact_store: //' | tr '\n' ' ')"
+    printf 'rc=%s %s' "$rc" "$(grep -oE 'artefact_store: (STORED|MATCH|MISMATCH|FAIL|UNJUDGED) fixture-repo (verdict|format)|verdict (pass|fail) findings|first src/[a-z]+\.cpp|REFUSED — MALF_STORE_PARAMETERS' <<< "$out" | sed 's/artefact_store: //' | tr '\n' ' ')"
 }
 sv_records() { ls "$sv_tmp/store/records" 2>/dev/null | wc -l | tr -d ' '; }
 check "a clean tracked tree is judged: its pass is STORED under a new key" \
@@ -5140,18 +5156,28 @@ printf 'int   bad(  ) {return 1;}\n' > "$sv_repo/src/untracked.cpp"
 check "an untracked file is never judged: the same key, and the pass MATCHES" \
       "rc=0 MATCH fixture-repo verdict verdict pass findings |1" "$(sv_step)|$(sv_records)"
 rm "$sv_repo/src/untracked.cpp"
-check "a driving tool's tree joins the definition and moves the key" \
-      "rc=0 STORED fixture-repo verdict verdict pass findings |2" "$(sv_step MALF_STORE_DEFINITION="driver=$MALF_ROOT")|$(sv_records)"
+sv_params() {   # <argv json> <profile json> -> a parameter document
+    printf '{"argv": %s, "env": {}, "profile": %s}' "$1" "$2"
+}
 mkdir -p "$sv_tmp/driver/sub" && git -C "$sv_tmp/driver" init -q
-printf 'a\n' > "$sv_tmp/driver/sub/code.py"; printf 'b\n' > "$sv_tmp/driver/outside.md"
+printf 'a\n' > "$sv_tmp/driver/sub/code.py"
 git -C "$sv_tmp/driver" add -A && git -C "$sv_tmp/driver" -c user.email=t@t -c user.name=t commit -qm driver
-sv_dir() { python3 -c "import sys; sys.path.insert(0, '$MALF_ROOT'); import artefact_store as s; from pathlib import Path; print(s.directory_tree_id(Path('$sv_tmp/driver/sub')))"; }
-sv_sub="$(git -C "$sv_tmp/driver" rev-parse HEAD:sub)"
-check "a driver directory's definition is its own tracked subtree, as on disk: a file outside it leaves it, a tracked edit inside it moves it" \
-      "$sv_sub $sv_sub moved" \
-      "$(sv_dir) $(printf 'c\n' > "$sv_tmp/driver/outside.md"; sv_dir) $(printf 'd\n' > "$sv_tmp/driver/sub/code.py"; [[ "$(sv_dir)" != "$sv_sub" ]] && echo moved)"
-check "a malformed definition is refused, never ignored" \
-      "rc=1 refused — MALF_STORE_DEFINITION |2" "$(sv_step MALF_STORE_DEFINITION="malf=$MALF_ROOT")|$(sv_records)"
+check "the act's own parameter document, handed by a driver, is the act's key: it MATCHES the undriven run" \
+      "rc=0 MATCH fixture-repo verdict verdict pass findings |1" \
+      "$(sv_step MALF_STORE_PARAMETERS="$(sv_params '["malf", "store-verdict", "format"]' null)")|$(sv_records)"
+printf 'b\n' > "$sv_tmp/driver/sub/code.py"; git -C "$sv_tmp/driver" -c user.email=t@t -c user.name=t commit -qam edited
+check "a driver's own tree never joins the definition: an edited driver leaves the key, and the pass MATCHES" \
+      "rc=0 MATCH fixture-repo verdict verdict pass findings |1" \
+      "$(cd "$sv_tmp/driver" && sv_step MALF_STORE_PARAMETERS="$(sv_params '["malf", "store-verdict", "format"]' null)")|$(sv_records)"
+check "a parameter document naming another act is refused, never ignored, and writes no record" \
+      "rc=2 REFUSED — MALF_STORE_PARAMETERS |1" \
+      "$(sv_step MALF_STORE_PARAMETERS="$(sv_params '["malf", "store-create"]' null)")|$(sv_records)"
+check "a parameter document declaring a variable the act was not handed is refused" \
+      "rc=2 REFUSED — MALF_STORE_PARAMETERS |1" \
+      "$(sv_step MALF_STORE_PARAMETERS='{"argv": ["malf", "store-verdict", "format"], "env": {"SV_KNOB": "on"}, "profile": null}')|$(sv_records)"
+check "a declared variable the act WAS handed is a parameter: it moves the key, STORED under a new one" \
+      "rc=0 STORED fixture-repo verdict verdict pass findings |2" \
+      "$(sv_step SV_KNOB=on MALF_STORE_PARAMETERS='{"argv": ["malf", "store-verdict", "format"], "env": {"SV_KNOB": "on"}, "profile": null}')|$(sv_records)"
 printf 'int   bad(  ) {return 1;}\n' > "$sv_repo/src/bad.cpp"
 git -C "$sv_repo" add -A && git -C "$sv_repo" commit -qm misformatted
 check "a misformatted tracked file is a FAIL, stored under its own key, exit 1, naming the file" \
@@ -5171,6 +5197,31 @@ git -C "$sv_repo" rm -rq src && printf 'no C++ here\n' > "$sv_repo/README" && gi
 check "a tree with no C++ is UNJUDGED, exit 2, and writes no record" \
       "rc=2 UNJUDGED fixture-repo format |3" "$(sv_step)|$(sv_records)"
 rm -rf "$sv_tmp"
+echo
+
+echo "[7q7s] gate G4's harness: a command under \`malf sandbox\` reads only beneath its declared roots, and a create whose build() opens an undeclared file reds with EACCES naming it (DN-142.D19 (5))"
+lb_out="$(timeout 120 python3 "$MALF_ROOT/landlock_sandbox.py" selftest 2>&1)"
+check "landlock_sandbox selftest: 9 arms, every denial fired" \
+      "ok" "$(grep -q '^landlock_sandbox selftest: 9 arm(s), 0 failure(s)$' <<< "$lb_out" && echo ok || echo "failed: $(tail -3 <<< "$lb_out")")"
+lb_tmp="$(realpath "$(mktemp -d)")"
+mkdir -p "$lb_tmp/src/lb_pkg" "$lb_tmp/outside" "$lb_tmp/tmp"
+printf 'undeclared\n' > "$lb_tmp/outside/secret"
+printf 'from conan import ConanFile\n\n\nclass Fixture(ConanFile):\n    name = "lb_pkg"\n    version = "0.1"\n\n    def build(self):\n        open("%s").read()\n' "$lb_tmp/outside/secret" > "$lb_tmp/src/lb_pkg/conanfile.py"
+CONAN_HOME="$lb_tmp/home" bash "$MALF_BIN" profiles > /dev/null 2>&1
+printf '[settings]\nos=Linux\narch=x86_64\nbuild_type=Release\n' > "$lb_tmp/home/profiles/fixture"
+lb_create() {   # [extra --read root] — the fixture's create under the sandbox; its exit and its denial line
+    local -a roots=() root
+    for root in /usr /lib /lib64 /bin /etc /proc /dev "$(dirname "$(dirname "$(readlink -f "$(command -v conan)")")")" "$lb_tmp/src" "$@"; do
+        [[ -e "$root" ]] && roots+=(--read "$root")
+    done
+    local out rc
+    out="$(CONAN_HOME="$lb_tmp/home" TMPDIR="$lb_tmp/tmp" bash "$MALF_BIN" sandbox "${roots[@]}" --write "$lb_tmp/home" --write "$lb_tmp/tmp" \
+        -- conan create "$lb_tmp/src/lb_pkg" -pr:a fixture 2>&1)"; rc=$?
+    printf 'rc=%s %s' "$rc" "$(grep -c "PermissionError: \[Errno 13\] Permission denied: '$lb_tmp/outside/secret'" <<< "$out")"
+}
+check "RED — a create whose build() opens a file outside its roots fails with EACCES naming the path" "rc=1 1" "$(lb_create)"
+check "the control: the same create with that file's directory declared passes" "rc=0 0" "$(lb_create "$lb_tmp/outside")"
+rm -rf "$lb_tmp"
 echo
 
 echo "[7q7k] the GENERALIZED verdict kind (DN-142.D19 (10)): params, data and context in the key; a record fragment and named objects in the outputs; a rebuild compares the verdict, the findings and the record, never an object"
@@ -5872,8 +5923,8 @@ ok = found and found.group(1, 2, 3) == ("3", "st_pkg", "PASS") and float(found.g
 print("ok" if ok else repr(line))' "$st_out")"
 st_body="$(sed -n '/^cmd_store_create()/,/^}/p' "$MALF_BIN")"
 st_step="$(sed -n '/^_malf_store_run_step()/,/^}/p' "$MALF_BIN")"
-check "the walk opens every step it runs and closes it on each of its seven exits: its third-party step failed, a build passed or failed, a create failed, a declaration unread, a record stored or not" \
-      "1 1 7 1" "$(grep -c '_malf_store_clock "$scratch/times"; run_at=' <<< "$st_body") $(grep -c '_malf_store_opened "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total" "$name" SKIPPED' <<< "$st_step")"
+check "the walk opens every step it runs and closes it on each of its eight exits: its third-party step failed, a build passed or failed, a declaration unread, its key before the step refused, a create failed, a record stored or not" \
+      "1 1 8 1" "$(grep -c '_malf_store_clock "$scratch/times"; run_at=' <<< "$st_body") $(grep -c '_malf_store_opened "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total" "$name" SKIPPED' <<< "$st_step")"
 rm -rf "$st_tmp"
 echo
 

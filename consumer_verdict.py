@@ -66,6 +66,7 @@ import artefact_store  # noqa: E402 — a sibling module, located from this file
 import store_manifest  # noqa: E402 — a sibling module, located from this file
 
 NAME = "consumer"
+JUDGE_ARGV = ["consumer_verdict.py", "judge"]
 BASELINE_DIR = "consumer"
 BASELINE_FILE = "baseline.json"
 ROWS = ("libstdcxx-needed", "cxx-version-needs", "runpath", "glibc-floor", "consumer-container",
@@ -304,7 +305,8 @@ def judge(store: Path, steps: list[dict], package: str, entry: str, repository: 
         container_rows(work, executable, held[entry], baseline, runner)
     rows.sort(key=lambda row: ROWS.index(row[0]))
     verdict = "pass" if all(row[1] == PASSED for row in rows) else "fail"
-    definition = artefact_store.definition_member(Path(__file__).resolve().parent)
+    definition = artefact_store.definition_member(Path(__file__).resolve().parent,
+                                                  artefact_store.parameter_document(JUDGE_ARGV, None))
     document = {
         "step": {"kind": "verdict", "id": NAME, "subject": package,
                  "predicate": {"id": "malf consumer_verdict.py", "version": definition["malf"]},
