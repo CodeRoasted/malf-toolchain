@@ -17,7 +17,7 @@ description: |
   where). A caller that asks for it also runs `clean-conan-homes.sh` at its job's end.
 
   Also owns `MALF_TOOLCHAIN_DIR` for the COMPOSITE path and `MALF_LOCKFILE_STRICT` (see the steps
-  below). Do NOT re-declare any of them in a caller — a per-caller copy of a toolchain-layout fact is two places
+  below), and lifts a hosted runner's user-namespace restriction for every test path of the job. Do NOT re-declare any of them in a caller — a per-caller copy of a toolchain-layout fact is two places
   encoding one thing, one of which rots.
 
 inputs:
@@ -83,6 +83,14 @@ runs:
           echo "apt base (+ extra: '${EXTRA_APT:-none}') already present — skipping apt (idempotent skip)"
         fi
         echo "patchelf: $(command -v patchelf) — $(patchelf --version)"
+
+    - name: Lift a hosted runner's AppArmor restriction on unprivileged user namespaces (tests that need one run)
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      # Every test path of the job — conan_module.sh's and coderoast-release.yml's bare `conan
+      # create` alike — runs after this action, so the lift is here once (the script says why).
+      run: bash "$ACTION_PATH/lift-userns-restriction.sh"
 
     - name: CMake 4.3.x and Conan ${{ inputs.conan-version }} from their hash locks, into a job-scoped venv
       shell: bash

@@ -63,9 +63,9 @@ jobs:
         # Its own step until tests/test_malf.sh carries it.
         run: bash tests/test_proof_bricks.sh
 
-      - name: conan_module.sh lifts a hosted runner's user-namespace restriction, and nothing on a self-hosted one
+      - name: setup-build-env lifts a hosted runner's user-namespace restriction for every test path, and nothing on a self-hosted one
         # Its own step until tests/test_malf.sh carries it.
-        run: bash tests/test_conan_module.sh
+        run: bash tests/test_lift_userns_restriction.sh
 
       - name: global.conf renders with HOME unset, as on a Windows runner
         # Its own step until tests/test_malf.sh carries it.
