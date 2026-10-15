@@ -32,7 +32,9 @@ name: CodeRoast publish
 #
 # NOTHING HERE CHECKS OUT THE CALLER'S SOURCE, PROVISIONS A TOOLCHAIN, COMPILES, TESTS OR PACKS:
 # stage-malf copies this revision's own tree (the tools and the writer's public key), and the only
-# other commands are the publication itself. `--verify-tag` keeps the Release command from ever
+# other commands are the publication itself. With no checkout there is no git remote, so every `gh`
+# that acts on a repository names it with `--repo` (coderoast-security run 38803900222 died
+# `fatal: not a git repository` at the v1.10.7 tag without it; workflow_source's repository arm). `--verify-tag` keeps the Release command from ever
 # minting a tag; the tag is the Founder's act (ADR-2.D1).
 
 on:
@@ -84,7 +86,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::tag '$TAG' is not vMAJOR.MINOR.PATCH"; exit 1; }
-          gh release create "$TAG" --verify-tag --title "$TAG" \
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" \
             --notes "Published from the CodeRoast store by digest: the bytes step 0 built and judged in the run whose record has sha256 $RECORD. The attached slice and its signature list every asset's digest." \
             "$RUNNER_TEMP"/assets/*
 
@@ -96,7 +98,7 @@ jobs:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          gh release view "$TAG" --json assets > "$RUNNER_TEMP/release.json"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets > "$RUNNER_TEMP/release.json"
           python3 .malf/store_publish.py check-release "$RUNNER_TEMP/assets" "$RUNNER_TEMP/release.json"
 
       - name: Fetch, verify and stage every destination Release the slice binds (GATING)
