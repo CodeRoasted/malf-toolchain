@@ -71,7 +71,7 @@ jobs:
         # Its own step until tests/test_malf.sh carries it.
         run: bash tests/test_global_conf.sh
 
-      - name: the store writer's public key, as the release job's verifier reads it (DN-142.D8, D9)
+      - name: the store writer's public key, as the release job's verifier reads it (DN-142.D8, DN-142.D9)
         # Its own step until tests/test_malf.sh carries it.
         run: bash tests/test_store_key.sh
 

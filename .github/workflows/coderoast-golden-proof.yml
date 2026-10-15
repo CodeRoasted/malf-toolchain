@@ -167,7 +167,7 @@ jobs:
       CONAN_HOME: ${{ github.workspace }}/.conan2-${{ matrix.arch }}-${{ matrix.leg }}
       DETERMINISM_GCC_PROFILE: ${{ matrix.gcc_profile }}
       DETERMINISM_CLANG_PROFILE: ${{ matrix.clang_profile }}
-      # MALF_TOOLCHAIN_DIR is the generator's resolution mechanism (DN-17.D31/D32), declared because
+      # MALF_TOOLCHAIN_DIR is the generator's resolution mechanism (DN-17.D31, DN-17.D32), declared because
       # these legs are deliberately RAW and inherit nothing from the CI composites. True by
       # construction: `stage-malf` copies malf-toolchain into `malf`.
       MALF_TOOLCHAIN_DIR: ${{ github.workspace }}/malf

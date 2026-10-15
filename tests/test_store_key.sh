@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The store writer's public key, as the release job's verifier reads it (DN-142.D8, D9):
+# The store writer's public key, as the release job's verifier reads it (DN-142.D8, DN-142.D9):
 # keys/store-writer.allowed_signers names the identity and namespace store_manifest.py verifies
 # under, holds one ed25519 key, and refuses a signature that key did not make.
 # Run: bash tests/test_store_key.sh   (its own file while tests/test_malf.sh is held)

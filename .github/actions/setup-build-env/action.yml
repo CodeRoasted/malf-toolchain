@@ -101,7 +101,7 @@ runs:
       run: |
         set -euo pipefail
         # MALF_TOOLCHAIN_DIR is the generator's RESOLUTION MECHANISM, not a convenience
-        # (DN-17.D31/D32): a package that cannot find its build-time generator FATALs — it never
+        # (DN-17.D31, DN-17.D32): a package that cannot find its build-time generator FATALs — it never
         # degrades and never probes a second candidate. Its relative fallback anchors on the DESK
         # layout alone and is unreachable under `conan create`, which builds from sources exported
         # into the conan cache. CI is the environment that can declare, so it declares.

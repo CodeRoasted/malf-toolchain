@@ -4771,8 +4771,9 @@ Commands:
                                    and a fresh clone of its commit; exit 0 only when every pair of recipe
                                    revisions is equal, 1 when one differs, 2 when a package is
                                    not judged, 3 when the verb failed. No compile; seconds
-    store-create [<pkg>...]        ROADMAP N358's one build act over a local store (DN-142.D2/D3/D5/
-                                   D6): every step of malf's walk (named: their closure), each created
+    store-create [<pkg>...]        ROADMAP N358's one build act over a local store (DN-142.D2,
+                                   DN-142.D3, DN-142.D5, DN-142.D6): every step of malf's walk (named:
+                                   their closure), each created
                                    from its export with its tests run (a stored: false one conan-built),
                                    in the purged B2 home (`cut-verify`); package and test-verdict
                                    records keyed by inputs; a failed step skips its dependents — exit 1 on a failed or

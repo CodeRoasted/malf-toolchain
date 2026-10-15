@@ -12,7 +12,7 @@ name: CodeRoast CI
 # + `late-modules` export the public coderoast-hub's `insight_scenarios` recipe after `modules` and
 # build the modules that test_require it (the server's `server`, eidos's `insight-e2e`), and
 # `sbom-path` byte-compares a committed linked-closure SBOM against the resolved graph once every
-# module has built (the server's `server/sbom.cdx.json`, eidos's `sift/sbom.cdx.json`; ADR-4.D5/D6).
+# module has built (the server's `server/sbom.cdx.json`, eidos's `sift/sbom.cdx.json`; ADR-4.D5, ADR-4.D6).
 
 # Sift dogfood is the standard `sift-action@v1` integration only — the internal courtesy `--explain`
 # endpoint is intentionally NOT wired here (retired from in-CI dogfood; the composite still supports it
