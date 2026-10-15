@@ -1862,13 +1862,16 @@ BENCH_PREDICATE = "malf_recipe_tests.run_benches"
 
 
 def bench_runner() -> dict[str, object]:
-    """The `context.runner` a bench verdict declares it reads: the host, its CPU model and count."""
+    """The `context.runner` a bench verdict declares it reads: the host, its CPU model and the CPUs
+    this process may run on — its affinity, which a seat's cpuset partition narrows (DN-119.D9 (1)),
+    never the machine's count, which reads 16 inside a 6-CPU seat."""
     model = ""
     cpuinfo = Path("/proc/cpuinfo")
     if cpuinfo.is_file():
         model = next((line.split(":", 1)[1].strip() for line in cpuinfo.read_text().splitlines()
                       if line.startswith("model name")), "")
-    return {"host": socket.gethostname(), "cpu": model, "cpus": os.cpu_count()}
+    cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()
+    return {"host": socket.gethostname(), "cpu": model, "cpus": cpus}
 
 
 def bench_judgment(sidecar: dict, outputs: Path) -> tuple[dict[str, Path], list[str]]:

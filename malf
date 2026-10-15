@@ -133,27 +133,19 @@ MALF_LINT_CAP_REACHED_PERCENT=90
 # -n 1 already, so it needs no equivalent.)
 MALF_FORMAT_BATCH_SIZE="${MALF_FORMAT_BATCH_SIZE:-50}"
 
-# The WORKSPACE BUILD SLOT (see cmd_slot). Not in the worktree: it coordinates lanes across every
-# repo at once, so it belongs to no repo, and a git-visible lock would be staged by somebody
-# eventually.
+# The BUILD SLOT of this SEAT (see cmd_slot; DN-119.D9 (3)). Not in the worktree: it coordinates
+# lanes across every repo at once, so it belongs to no repo, and a git-visible lock would be
+# staged by somebody eventually.
 #
-# WHERE IT LIVES IS A PROPERTY OF THE MACHINE, and there are two kinds of machine. On a box where
-# the desk and the self-hosted runner are TWO accounts, the slot must be one directory both can
-# create, stamp and reclaim — which /tmp cannot be: it is sticky, so neither account can remove a
-# slot the other created, and fs.protected_regular=2 refuses opening the other account's mutex
-# file with O_CREAT even when its mode would allow it. That box carries the shared root below,
-# created by malf/runner/isolate-runner-wsl.sh with a default ACL granting both accounts rw on
-# everything created inside it, whatever either one's umask. Its EXISTENCE is the switch, and
-# existence is a machine fact, never a per-user one: every account on the box resolves the same
-# path, and an account the ACL does not name fails loudly at the mutex rather than silently
-# using a private slot. Every other box keeps ${TMPDIR:-/tmp}, the path the hand-rolled protocol
-# used before this verb existed. MALF_BUILD_SLOT_DIR still overrides both (the selftests pin a
-# scratch slot through it).
-MALF_BUILD_SLOT_SHARED_ROOT="${MALF_BUILD_SLOT_SHARED_ROOT:-/var/lib/coderoast-build}"
-if [[ -z "${MALF_BUILD_SLOT_DIR:-}" && -d "$MALF_BUILD_SLOT_SHARED_ROOT" ]]; then
-    MALF_BUILD_SLOT_DIR="$MALF_BUILD_SLOT_SHARED_ROOT/slot"
-fi
-MALF_BUILD_SLOT_DIR="${MALF_BUILD_SLOT_DIR:-${TMPDIR:-/tmp}/coderoast-build-slot}"
+# IT LIVES IN THE ACCOUNT'S OWN STATE, ONE SLOT PER SEAT. Seat and account are one-to-one (the desk,
+# the release runner, the CI runner), and the seats share no build state — the conan home, the
+# editable registry, the build trees and the docker daemon are each per account — so nothing a
+# seat builds needs excluding from another seat's build. A slot one account cannot open is a
+# stall no other account can cause: a CI job once held the release slot's mutex through a
+# read-only descriptor of a shared file. Inside a seat the protocol is unchanged, and desk lanes
+# still share one slot because they share one tree. MALF_BUILD_SLOT_DIR overrides the path (a
+# runner's .env names it; the selftests pin a scratch slot through it).
+MALF_BUILD_SLOT_DIR="${MALF_BUILD_SLOT_DIR:-${XDG_STATE_HOME:-${HOME:-}/.local/state}/coderoast-build/slot}"
 # How long `malf slot` waits for the mutex around one read-decide-write. Not how long it waits
 # for the SLOT — the slot is never waited on, it is reported.
 MALF_BUILD_SLOT_WAIT_S="${MALF_BUILD_SLOT_WAIT_S:-10}"
@@ -1330,16 +1322,69 @@ _malf_restore_user_presets() {
     fi
 }
 
+# ─── THE SEAT: the slice of the machine this process runs on, as the kernel reports it ───────────
+#
+# A runner seat is a top-level cgroup (`seat_release.slice`, `seat_ci.slice`) that is a cpuset
+# partition root with a hard memory cap; the desk is everything outside the seats (DN-119.D9 (1)).
+# Every reading below takes its files as operands, so the selftests hand it a fixture tree; the
+# defaults are the live kernel's.
+
+# This process's cgroup v2 path (`/init.scope`, `/seat_release.slice/malf-release.service`), from
+# a /proc/<pid>/cgroup file; non-zero and silent when the file carries no v2 line.
+_malf_cgroup_path() {   # [proc cgroup file]
+    awk -F: '$1 == "0" && $2 == "" {print $3; found = 1} END {exit !found}' \
+        "${1:-/proc/self/cgroup}" 2>/dev/null
+}
+
+# The first line of one cgroup interface file, or non-zero when it cannot be read.
+_malf_cgroup_value() {   # <cgroup fs root> <cgroup path> <file>
+    local file="$1${2%/}/$3" line
+    [[ -r "$file" ]] || return 1
+    IFS= read -r line < "$file" || [[ -n "$line" ]] || return 1
+    echo "$line"
+}
+
+# The seat as one line: the top-level cgroup, its effective CPUs, its partition state and its
+# three memory bounds, each as the kernel prints it, or `absent` where the file is not there (the
+# root cgroup carries none of the memory files, a kernel without cpuset partitions no partition
+# file).
+_malf_seat_line() {   # [cgroup fs root] [proc cgroup file]
+    local fs="${1:-/sys/fs/cgroup}" own top field value line
+    own="$(_malf_cgroup_path "${2:-/proc/self/cgroup}")" || {
+        echo "seat unknown — this process reports no cgroup v2 path"
+        return 0
+    }
+    top="${own#/}"; top="/${top%%/*}"
+    line="seat $top"
+    for field in cpuset.cpus.effective cpuset.cpus.partition memory.max memory.min memory.swap.max; do
+        value="$(_malf_cgroup_value "$fs" "$top" "$field")" || value=absent
+        line+=" · $field ${value:-empty}"
+    done
+    echo "$line"
+}
+
 # ─── A FAN-OUT'S WIDTH IS DERIVED FROM BOTH OPERANDS, THE CORES AND THE MEMORY ───────────────────
 #
-#   width = max(1, min(cores, floor((MemAvailable − reserve) / cap)))
+#   width = max(1, min(cores, floor((memory − reserve) / cap)))
 #
-# THE MEMORY OPERAND IS MemAvailable, READ WHEN THE FAN-OUT STARTS — never MemTotal. One machine
-# can host two builds at once that know nothing of each other (a desk and a CI runner sharing a
-# VM). Off MemTotal each takes its full width; the sum fits once and not twice, and the failure is
-# swap thrash, which reads as a slow build and never as a red. Off MemAvailable the build that
-# starts second sees what the first already holds: beside a -j16 build at its 7.8 GiB peak, 12.2
-# GiB are available and the second build gets 9 jobs.
+# THE CORES ARE THE PROCESS'S AFFINITY (`nproc`), never the machine's count: inside a seat the
+# cpuset partition narrows the affinity of every task in it, and nproc honours that.
+#
+# THE MEMORY OPERAND IS THE SEAT'S, READ WHEN THE FAN-OUT STARTS (DN-119.D9 (1)) — the least of
+# two terms, either of which may be absent:
+#   term 1, the machine: MemAvailable, minus what every OTHER seat is guaranteed and not yet using,
+#     Σ max(0, memory.min − memory.current). On the desk that keeps a build off memory a runner
+#     seat may reclaim at any moment; a build planned on it would be the one the kernel takes back.
+#   term 2, the caps: over this process's cgroup and every ancestor with a finite memory.max, the
+#     least memory.max − memory.current + inactive_file. Inside a seat this is the binding term:
+#     MemAvailable is the VM's, and a 10 GiB seat planning on it plans for twice its cap, with no
+#     swap, and is OOM-killed on every heavy build.
+#
+# NEVER MemTotal. One machine can host two builds at once that know nothing of each other. Off
+# MemTotal each takes its full width; the sum fits once and not twice, and the failure is swap
+# thrash, which reads as a slow build and never as a red. Off MemAvailable the build that starts
+# second sees what the first already holds: beside a -j16 build at its 7.8 GiB peak, 12.2 GiB are
+# available and the second build gets 9 jobs.
 #
 # WHAT IT DOES NOT PROTECT, stated: two fan-outs that start within the same few seconds both read
 # the idle figure, and one sampled before the other reaches its peak sees memory the other will
@@ -1349,8 +1394,8 @@ _malf_restore_user_presets() {
 # A WIDTH CHANGES SCHEDULING, NEVER A VERDICT: no result reads it, so a width that depends on the
 # machine's load touches no determinism property.
 #
-# WHERE MemAvailable IS NOT REPORTED (a /proc/meminfo without the line, or none at all), the width
-# is the cores alone and the printed derivation says the memory operand was not applied.
+# WHERE NEITHER TERM IS REPORTED (no MemAvailable line and no finite memory.max), the width is the
+# cores alone and the printed derivation says the memory operand was not applied.
 
 # MemAvailable in KiB from a meminfo file (default /proc/meminfo); non-zero and silent when the
 # file does not carry the line.
@@ -1358,9 +1403,64 @@ _malf_mem_available_kib() {   # [meminfo file]
     awk '/^MemAvailable:/ {print $2; found = 1} END {exit !found}' "${1:-/proc/meminfo}" 2>/dev/null
 }
 
+# The memory operand, in KiB, and its derivation. Sets _MALF_MEM_KIB (empty when neither term is
+# reported) and _MALF_MEM_WHY (the terms with their operands, for the printed width line). Sets
+# globals rather than printing, so the one reading is both what is used and what is printed.
+_malf_mem_budget() {   # [meminfo file] [cgroup fs root] [proc cgroup file]
+    local meminfo="${1:-/proc/meminfo}" fs="${2:-/sys/fs/cgroup}" pcg="${3:-/proc/self/cgroup}"
+    local avail="" own="" top="" seat name min cur unmet=0 term1="" term2="" path max inactive head
+    local term2_why=""
+    _MALF_MEM_KIB=""; _MALF_MEM_WHY=""
+    avail="$(_malf_mem_available_kib "$meminfo")" || avail=""
+    own="$(_malf_cgroup_path "$pcg")" || own=""
+    if [[ -n "$own" ]]; then
+        top="${own#/}"; top="/${top%%/*}"
+    fi
+    if [[ -n "$avail" ]]; then
+        for seat in "$fs"/seat_*.slice; do
+            [[ -d "$seat" ]] || continue
+            name="/${seat##*/}"
+            [[ "$name" == "$top" ]] && continue
+            min="$(_malf_cgroup_value "$fs" "$name" memory.min)" || continue
+            cur="$(_malf_cgroup_value "$fs" "$name" memory.current)" || continue
+            [[ "$min" =~ ^[0-9]+$ && "$cur" =~ ^[0-9]+$ ]] || continue
+            (( min > cur )) && unmet=$(( unmet + (min - cur) / 1024 ))
+        done
+        term1=$(( avail > unmet ? avail - unmet : 0 ))
+        _MALF_MEM_WHY="MemAvailable $(( avail / 1024 )) MiB - other seats' unmet memory.min $(( unmet / 1024 )) MiB = $(( term1 / 1024 )) MiB"
+    fi
+    path="$own"
+    while [[ -n "$path" && "$path" != "/" ]]; do
+        max="$(_malf_cgroup_value "$fs" "$path" memory.max)" || max=""
+        if [[ "$max" =~ ^[0-9]+$ ]]; then
+            cur="$(_malf_cgroup_value "$fs" "$path" memory.current)" || cur=0
+            [[ "$cur" =~ ^[0-9]+$ ]] || cur=0
+            inactive="$(awk '$1 == "inactive_file" {print $2}' "$fs$path/memory.stat" 2>/dev/null)"
+            [[ "$inactive" =~ ^[0-9]+$ ]] || inactive=0
+            head=$(( max + inactive > cur ? (max - cur + inactive) / 1024 : 0 ))
+            if [[ -z "$term2" ]] || (( head < term2 )); then
+                term2="$head"
+                term2_why="$path memory.max $(( max / 1048576 )) MiB - current $(( cur / 1048576 )) MiB + inactive_file $(( inactive / 1048576 )) MiB = $(( head / 1024 )) MiB"
+            fi
+        fi
+        path="${path%/*}"
+    done
+    if [[ -n "$term2" ]]; then
+        _MALF_MEM_WHY="${_MALF_MEM_WHY:+$_MALF_MEM_WHY, }$term2_why"
+        if [[ -z "$term1" ]] || (( term2 < term1 )); then
+            _MALF_MEM_KIB="$term2"
+        else
+            _MALF_MEM_KIB="$term1"
+        fi
+    else
+        _MALF_MEM_KIB="$term1"
+    fi
+    return 0
+}
+
 # The width, PURE: its four operands in, the job count out. An empty memory operand means the
-# machine does not report it.
-_malf_width() {   # <cores> <MemAvailable KiB, or empty> <reserve KiB> <cap KiB a job>
+# machine reports neither term.
+_malf_width() {   # <cores> <memory KiB, or empty> <reserve KiB> <cap KiB a job>
     local cores="$1" avail="$2" reserve="$3" cap="$4" jobs
     [[ -n "$avail" ]] || { echo "$cores"; return 0; }
     jobs=$(( avail > reserve ? (avail - reserve) / cap : 0 ))
@@ -1369,32 +1469,41 @@ _malf_width() {   # <cores> <MemAvailable KiB, or empty> <reserve KiB> <cap KiB 
     echo "$jobs"
 }
 
-# The derivation as one line: the four operands and the width they gave.
-_malf_width_line() {   # <what> <jobs> <cores> <MemAvailable KiB, or empty> <reserve KiB> <cap KiB>
+# The derivation as one line: the four operands, the width they gave, and where the memory
+# operand came from.
+_malf_width_line() {   # <what> <jobs> <cores> <memory KiB, or empty> <reserve KiB> <cap KiB> [why]
     if [[ -z "$4" ]]; then
-        echo "$1: -j$2 = $3 cores; MemAvailable is not reported here, so memory does not bound the width"
+        echo "$1: -j$2 = $3 cores; neither MemAvailable nor a cgroup memory.max is reported here, so memory does not bound the width"
         return 0
     fi
-    echo "$1: -j$2 = max(1, min($3 cores, floor((MemAvailable $(( $4 / 1024 )) MiB - reserve $(( $5 / 1024 )) MiB) / $(( $6 / 1024 )) MiB a job)))"
+    echo "$1: -j$2 = max(1, min($3 cores, floor((memory $(( $4 / 1024 )) MiB - reserve $(( $5 / 1024 )) MiB) / $(( $6 / 1024 )) MiB a job)))${7:+; memory = min($7)}"
 }
 
-# The build's width. Sets _MALF_BUILD_JOBS, _MALF_BUILD_CAP_KB and _MALF_BUILD_WIDTH_LINE in one
-# reading of the machine, so what is printed is what was used.
+# A fan-out's width at one cap a job, in ONE reading of the machine, so what is printed is what
+# is used: sets _MALF_WIDTH_JOBS and _MALF_WIDTH_LINE. The three trailing operands are the files the
+# memory operand reads (`_malf_mem_budget`); empty means the live kernel's.
+_malf_fanout_width() {   # <what> <cap KiB a job> [meminfo file] [cgroup fs root] [proc cgroup file]
+    local cores
+    cores="$(nproc 2>/dev/null || echo 2)"
+    _malf_mem_budget "${3:-}" "${4:-}" "${5:-}"
+    _MALF_WIDTH_JOBS="$(_malf_width "$cores" "$_MALF_MEM_KIB" "$MALF_FANOUT_RESERVE_KB" "$2")"
+    _MALF_WIDTH_LINE="$(_malf_width_line "$1" "$_MALF_WIDTH_JOBS" "$cores" "$_MALF_MEM_KIB" \
+        "$MALF_FANOUT_RESERVE_KB" "$2" "$_MALF_MEM_WHY")"
+}
+
+# The build's width. Sets _MALF_BUILD_JOBS, _MALF_BUILD_CAP_KB and _MALF_BUILD_WIDTH_LINE.
 #
 # A SANITIZER BUILD HAS ITS OWN CAP, because it is far heavier in the clang frontend: import-std
 # module instantiation under instrumentation drives deep frontend recursion AND about 3 GB a
 # translation unit. At full width on a memory-tight machine that thrashes AND starves the
 # frontend's stack — the intermittent "stack exhaustion" frontend ICE on the heaviest module
 # translation unit (`_malf_configure_and_build` raises the compiler's stack for the same reason).
-_malf_build_width() {
-    local cores avail=""
-    cores="$(nproc 2>/dev/null || echo 2)"
-    avail="$(_malf_mem_available_kib)" || avail=""
+_malf_build_width() {   # [meminfo file] [cgroup fs root] [proc cgroup file]
     _MALF_BUILD_CAP_KB="$MALF_BUILD_JOB_MEM_KB"
     [[ "${MALF_IS_SANITIZER:-0}" == "1" ]] && _MALF_BUILD_CAP_KB="$MALF_SANITIZER_JOB_MEM_KB"
-    _MALF_BUILD_JOBS="$(_malf_width "$cores" "$avail" "$MALF_FANOUT_RESERVE_KB" "$_MALF_BUILD_CAP_KB")"
-    _MALF_BUILD_WIDTH_LINE="$(_malf_width_line "malf build" "$_MALF_BUILD_JOBS" "$cores" "$avail" \
-        "$MALF_FANOUT_RESERVE_KB" "$_MALF_BUILD_CAP_KB")"
+    _malf_fanout_width "malf build" "$_MALF_BUILD_CAP_KB" "$@"
+    _MALF_BUILD_JOBS="$_MALF_WIDTH_JOBS"
+    _MALF_BUILD_WIDTH_LINE="$_MALF_WIDTH_LINE"
 }
 
 # Run a command and record, in <peak file>, the largest max RSS (KiB) any process of its tree
@@ -2487,17 +2596,15 @@ PY
     echo "malf lint: checking ${#files[@]} file(s) ..."
 
     # Parallel execution via xargs -P, its width derived like every fan-out's (`_malf_width`):
-    # from the cores and from the memory available now, at MALF_LINT_MEM_LIMIT_KB a child. The
-    # same figure caps each child's address space below — the job count alone bounds how MANY
-    # processes run, not how large any one of them grows, which is the half that lets a single
-    # pathological TU take the box down. The derivation is printed, so a log says why a run was
-    # narrow.
-    local jobs lint_cores lint_avail=""
-    lint_cores="$(nproc 2>/dev/null || echo 2)"
-    lint_avail="$(_malf_mem_available_kib)" || lint_avail=""
-    jobs="$(_malf_width "$lint_cores" "$lint_avail" "$MALF_FANOUT_RESERVE_KB" "$MALF_LINT_MEM_LIMIT_KB")"
-    _malf_width_line "malf lint" "$jobs" "$lint_cores" "$lint_avail" "$MALF_FANOUT_RESERVE_KB" \
-        "$MALF_LINT_MEM_LIMIT_KB"
+    # from the cores and from the memory this seat has now (`_malf_mem_budget`), at
+    # MALF_LINT_MEM_LIMIT_KB a child. The same figure caps each child's address space below — the
+    # job count alone bounds how MANY processes run, not how large any one of them grows, which is
+    # the half that lets a single pathological TU take the box down. The derivation is printed, so
+    # a log says why a run was narrow.
+    local jobs
+    _malf_fanout_width "malf lint" "$MALF_LINT_MEM_LIMIT_KB"
+    jobs="$_MALF_WIDTH_JOBS"
+    echo "$_MALF_WIDTH_LINE"
     export _MALF_MEM_LIMIT="$MALF_LINT_MEM_LIMIT_KB"
 
     local tmpdir="$_MALF_LINT_SCRATCH"
@@ -4837,9 +4944,11 @@ Commands:
                                             and the token is the only escape.
                                             Never 'rm -rf' the directory.
                                    status   FREE / HELD / STALE / UNKNOWN, and exits 0 / 1 / 2 / 3
-                                   Path: MALF_BUILD_SLOT_DIR (default /var/lib/coderoast-build/slot
-                                   when /var/lib/coderoast-build exists — the box whose desk and
-                                   runner are two accounts — else /tmp/coderoast-build-slot).
+                                   status and acquire print the seat: the top-level cgroup, its
+                                   cpuset.cpus.effective and partition, memory.max/min/swap.max.
+                                   Path: MALF_BUILD_SLOT_DIR (default
+                                   ${XDG_STATE_HOME:-$HOME/.local/state}/coderoast-build/slot —
+                                   one slot per seat, in its account's own state, mode 0700).
     sbom    [--check]              regenerate each published CycloneDX SBOM from the RESOLVED
                                    conan graph (malf/sbom_gen.py). --check writes nothing and
                                    fails if a committed SBOM has drifted from the graph.
@@ -6329,9 +6438,11 @@ cmd_slot() {
     # The mutex is a plain FILE beside the directory, never inside it: the critical section
     # creates and destroys that directory, so a lock living in it would lose its inode mid-hold
     # and stop excluding anything. Truncating rather than recreating keeps the inode stable across
-    # runs, which is what flock's identity is.
+    # runs, which is what flock's identity is. Every directory this creates on the way is mode 0700
+    # (DN-119.D9 (3)): the slot is its account's alone, and another account must not even read it.
     local guard="${MALF_BUILD_SLOT_DIR}.lock" slot_fd
-    if ! mkdir -p "$(dirname "$MALF_BUILD_SLOT_DIR")" 2>/dev/null || ! : > "$guard" 2>/dev/null; then
+    if ! (umask 077 && mkdir -p "$(dirname "$MALF_BUILD_SLOT_DIR")") 2>/dev/null \
+       || ! : > "$guard" 2>/dev/null; then
         echo "malf slot: error: cannot create the mutex file $guard" >&2
         exit 1
     fi
@@ -6343,9 +6454,13 @@ cmd_slot() {
         exit 1
     fi
 
+    # THE SEAT IS PRINTED BY status AND acquire (DN-119.D9 (3)): one slot per seat, so a reader sees
+    # whose slot it is and on which slice of the machine — the partition, the CPUs, the caps — as
+    # the kernel reports them. It decides nothing here; the refusal sits where a verdict is judged.
     local slot_rc=0
     case "$sub" in
     acquire)
+        echo "malf slot: $(_malf_seat_line)"
         _malf_slot_read
         case "$_MALF_SLOT_STATE" in
         held)
@@ -6456,6 +6571,7 @@ cmd_slot() {
         # 0 free · 1 held (alive) · 2 stale (reclaimable) · 3 unknown (needs a human).
         _malf_slot_read
         echo "malf slot: dir $MALF_BUILD_SLOT_DIR"
+        echo "malf slot: $(_malf_seat_line)"
         case "$_MALF_SLOT_STATE" in
         free)
             echo "malf slot: FREE — the directory does not exist."
