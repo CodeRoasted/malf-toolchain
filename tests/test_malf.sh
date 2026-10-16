@@ -5806,8 +5806,6 @@ check "store-create, store-build, twin-verify and relocate-verify each take the 
       "4" "$(for fn in cmd_store_create cmd_store_build cmd_twin_verify cmd_relocate_verify; do ls_body "$fn" | grep -cE '_malf_ship_lock_args \|\| (return|exit)'; done | awk '{n += $1} END {print n}')"
 check "twin-verify's probe and relocate-verify resolve against the lockfile malf took" \
       "1 1" "$(ls_body cmd_twin_verify | grep -c 'package_twin.py" missing .*"${_MALF_SHIP_LOCK\[0\]#--lockfile=}"') $(ls_body cmd_relocate_verify | grep -c '"${_MALF_SHIP_LOCK\[0\]#--lockfile=}"')"
-check "the reusable release workflow's create resolves strictly against the toolchain checkout's conan.lock" \
-      "1 0" "$(grep -c -- '--lockfile="$MALF_TOOLCHAIN_DIR/conan.lock"' "$MALF_ROOT/.github/workflows/coderoast-release.yml") $(grep -vE '^\s*#' "$MALF_ROOT/.github/workflows/coderoast-release.yml" | grep -c -- '--lockfile-partial')"
 rm -rf "$ls_tmp"
 echo
 

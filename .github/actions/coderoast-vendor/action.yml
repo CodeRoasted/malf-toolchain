@@ -3,8 +3,7 @@ description: |
   Put cross-repo Conan deps into the local cache, driven by a data manifest, in one of two declared
   ways (`deps`): `vendor` restores each row's release tarball (ci_fetch_conan_package.sh), `build`
   creates each row from its repository's `main` (ci_build_conan_package.sh). Single-sources both
-  scripts and the token-by-visibility selection. Used by coderoast-ci (build half) and
-  coderoast-release, which always vendors.
+  scripts and the token-by-visibility selection. Used by coderoast-ci.
 
   Assumes setup-build-env already ran (CONAN_HOME, the profile and MALF_TOOLCHAIN_DIR staged).
 

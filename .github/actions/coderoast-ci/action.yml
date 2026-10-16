@@ -114,8 +114,8 @@ runs:
         # NOT SET HERE, deliberately: MALF_LOCKFILE / MALF_LOCKFILE_PARTIAL and MALF_TOOLCHAIN_DIR.
         # conan_module.sh derives all three from its own location — it is the one path every module
         # goes through, here, in `late-modules` and in the `conan-module` action — and
-        # `setup-build-env` exports MALF_TOOLCHAIN_DIR job-wide by the same derivation for the bare
-        # `conan create` of `coderoast-release.yml`. A copy here would be a second encoding that rots.
+        # `setup-build-env` exports MALF_TOOLCHAIN_DIR job-wide by the same derivation for a
+        # workflow's own bare `conan create`. A copy here would be a second encoding that rots.
       run: bash "$GITHUB_ACTION_PATH/build_modules.sh" "$PROFILE_NAME" <<< "$MODULES"
 
     - name: Export insight_scenarios from the public coderoast-hub (the release's recorded commit on a tag)

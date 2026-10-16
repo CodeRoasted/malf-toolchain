@@ -8,9 +8,10 @@
 #
 # WHY IN setup-build-env AND NOT IN conan_module.sh, where it first landed (malf 146c811): every
 # job that runs a package's tests passes through this action, and conan_module.sh is only ONE of
-# those paths. `coderoast-release.yml` runs a bare `conan create` in a `run:` block, whose
-# test_package and declared-skip judgment never reach conan_module.sh, so the lift never ran
-# there: coderoast-ipc's v1.10.7 Release (run 38738860055, job `release / publish`) refused the
+# those paths. A workflow's own bare `conan create` in a `run:` block (the superproject's
+# `conan-cache-publish.yml`) runs test_package and the declared-skip judgment without reaching
+# conan_module.sh, so the lift would never run there: the retired tag-time release build did exactly
+# that, and coderoast-ipc's v1.10.7 Release (run 38738860055, job `release / publish`) refused the
 # same four skips its CI job in that very run had lifted and run. MALF_TOOLCHAIN_DIR moved here for
 # the identical reason (this action's own step says so).
 set -euo pipefail

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # setup-build-env lifts a hosted runner's AppArmor restriction on unprivileged user namespaces for
 # the job, touches nothing on a self-hosted runner, and is the ONE seat of that lift, so every test
-# path behind the action gets it (coderoast-release.yml's bare `conan create` included).
+# path behind the action gets it (a workflow's own bare `conan create` included).
 # Run: bash tests/test_lift_userns_restriction.sh
 set -uo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

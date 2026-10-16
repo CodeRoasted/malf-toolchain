@@ -88,8 +88,8 @@ runs:
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
-      # Every test path of the job — conan_module.sh's and coderoast-release.yml's bare `conan
-      # create` alike — runs after this action, so the lift is here once (the script says why).
+      # Every test path of the job — conan_module.sh's and a workflow's own bare `conan create`
+      # alike — runs after this action, so the lift is here once (the script says why).
       run: bash "$ACTION_PATH/lift-userns-restriction.sh"
 
     - name: CMake 4.3.x and Conan ${{ inputs.conan-version }} from their hash locks, into a job-scoped venv
@@ -116,10 +116,11 @@ runs:
         #
         # WHY HERE, when `conan_module.sh` already exports it. That script is the single source
         # of truth for PER-MODULE build logic, and the claim written at its site — "it is the one
-        # thing every path goes through" — is false for exactly one live path: this repo's own
-        # `coderoast-release.yml` runs a bare `conan create` in a `run:` block, never through
-        # conan_module.sh, so the release job of EVERY consumer repo built with the variable unset.
-        # `setup-build-env` is the step that path does run, before any build. Both derive the same
+        # thing every path goes through" — is false for a workflow's own bare `conan create` in a
+        # `run:` block (the superproject's `conan-cache-publish.yml`, eidos's `sift-windows.yml`),
+        # which never reaches conan_module.sh: until 2026-10-16 the release job of every consumer
+        # repository built that way with the variable unset. `setup-build-env` is the step every such
+        # path does run, before any build. Both derive the same
         # absolute path from the same fact (this action's own location inside the pinned
         # malf-toolchain checkout under `_actions/`), and conan_module.sh's `:-` default means the
         # value exported here WINS rather than competing — so this is one fact with one derivation
