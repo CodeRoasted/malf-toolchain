@@ -64,15 +64,10 @@ on:
         required: false
         default: 'true'
       hub-scenarios:
-        description: 'Export the public coderoast-hub''s insight_scenarios recipe after `modules`, before `late-modules`: at the release''s recorded commit on a tag (`hub-ref`, refused when absent), at main off a tag.'
+        description: 'Export the public coderoast-hub''s insight_scenarios recipe, at hub main, after `modules` and before `late-modules`. No tag runs this workflow: the hub commit a release records is the one step 0''s candidate holds.'
         type: boolean
         required: false
         default: false
-      hub-ref:
-        description: 'The coderoast-hub commit the release build record verified — the release passes its attest job''s `hub` output. Read only on a tag run.'
-        type: string
-        required: false
-        default: ''
       late-modules:
         description: 'Modules built after the hub export, same grammar as `modules`.'
         type: string
@@ -110,7 +105,6 @@ jobs:
           modules: ${{ inputs.modules }}
           extra-apt: ${{ inputs.extra-apt }}
           hub-scenarios: ${{ inputs.hub-scenarios }}
-          hub-ref: ${{ inputs.hub-ref }}
           late-modules: ${{ inputs.late-modules }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           release-token: ${{ secrets.CR_RELEASE_TOKEN }}

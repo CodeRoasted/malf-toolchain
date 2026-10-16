@@ -53,16 +53,12 @@ inputs:
     default: ''
   hub-scenarios:
     description: |
-      'true' to `conan export` the content-only `insight_scenarios` recipe from the PUBLIC coderoast-hub
-      after `modules` and before `late-modules` (a test_requires of the late modules). The hub commit is
-      the one the release recorded on a tag run (`hub-ref`, refused when absent — never hub `main`)
-      and `main` off a tag: `checkout_release_hub.sh` beside this file owns the rule and its why.
+      'true' to `conan export` the content-only `insight_scenarios` recipe from the PUBLIC coderoast-hub,
+      at hub `main`, after `modules` and before `late-modules` (a test_requires of the late modules).
+      No tag runs this action: the hub commit a release records, which a deploy serves (RUL-57),
+      is the one step 0's candidate holds.
     required: false
     default: 'false'
-  hub-ref:
-    description: 'The coderoast-hub commit the release build record verified (the attest job''s `hub` output). Read only on a tag run.'
-    required: false
-    default: ''
   late-modules:
     description: 'Modules built AFTER the hub export, same grammar as `modules` (a module that test_requires insight_scenarios).'
     required: false
@@ -118,15 +114,13 @@ runs:
         # workflow's own bare `conan create`. A copy here would be a second encoding that rots.
       run: bash "$GITHUB_ACTION_PATH/build_modules.sh" "$PROFILE_NAME" <<< "$MODULES"
 
-    - name: Export insight_scenarios from the public coderoast-hub (the release's recorded commit on a tag)
+    - name: Export insight_scenarios from the public coderoast-hub, at main
       if: inputs.hub-scenarios == 'true'
       shell: bash
-      env:
-        REF_TYPE: ${{ github.ref_type }}
-        HUB_REF: ${{ inputs.hub-ref }}
       run: |
         set -euo pipefail
-        bash "$GITHUB_ACTION_PATH/checkout_release_hub.sh" "$REF_TYPE" "$HUB_REF" "$RUNNER_TEMP/coderoast-hub"
+        git clone --quiet --depth 1 https://github.com/CodeRoasted/coderoast-hub.git "$RUNNER_TEMP/coderoast-hub"
+        echo "coderoast-hub at $(git -C "$RUNNER_TEMP/coderoast-hub" rev-parse HEAD) (main)"
         conan export "$RUNNER_TEMP/coderoast-hub/insight-playground"
 
     - name: Build + test + create the late modules (after the hub export)
