@@ -5855,7 +5855,7 @@ _malf_store_key_first() {   # <name> <prefixes> <store> <scratch> <log> <recipe 
     (cd "$path" && conan graph info . "${_MALF_WRITER_PROFILES[@]}" -s build_type="$MALF_CONFIG" \
         "${_MALF_WRITER_ARGS[@]}" "${build_args[@]}" "${_MALF_SHIP_LOCK[@]}" --no-remote --format=json) \
         > "$graph" 2>> "$log" || return 1
-    key="$(MALF_STEP_TEST_FOLDER="$_MALF_TEST_FOLDER" python3 "$MALF_DIR/artefact_store.py" key-first "$store" "$CONAN_HOME" "$graph" "$name" \
+    key="$(MALF_STEP_TEST_FOLDER="$_MALF_TEST_FOLDER" MALF_STEP_SOURCE="${tree:+$path}" python3 "$MALF_DIR/artefact_store.py" key-first "$store" "$CONAN_HOME" "$graph" "$name" \
         "$MALF_PROFILE_NAME" "$MALF_DIR" "$scratch/toolchain.json" "$prefixes" "$scratch/$name.key-first.json" \
         "$anchor")" || return 1
     echo "--- store-create: $name key before the step $key ---"
