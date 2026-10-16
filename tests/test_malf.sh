@@ -5517,6 +5517,10 @@ check "every overlay recipe is pinned in malf/conan.lock at the revision the ove
             done
         done | tee "$ov_tmp/unpinned" | wc -l | tr -d ' ')"
 [[ -s "$ov_tmp/unpinned" ]] && sed 's/^/       /' "$ov_tmp/unpinned"
+# note: a recipe's module imports conan, so its helpers run under the interpreter conan's own script names; CI's python3 is the system one, which has no conan (W515)
+ov_conan_python="$(sed -n '1s/^#!//p' "$(readlink -f "$(command -v conan)")")"
+check "the overlay recipes' helpers run under conan's own interpreter, read from conan's shebang, which imports conan" \
+      "conan" "$($ov_conan_python -c 'import conan; print(conan.__name__)')"
 check "autoconf's frozen-state rewrite: a state without the prefix is unchanged, the prefix leaves every record re-measured, a record it does not know refuses" \
       "same|T4,8;namea/b.m4:1;D-1,3;x/y;F3,7;finbuiltin|refused" \
       "$($ov_conan_python -c 'import runpy, sys
@@ -5650,10 +5654,6 @@ locks = r.subject_locks(source, lock, rows, fresh / "locks")
 print(r.seed(source, fresh, "fixture", rows, locks))' "$MALF_ROOT" "$ls_home" "$ls_tmp/fresh-app" "$ls_tmp/lock-app/conan.lock" "$ls_tmp/released-app.tsv" 2>/dev/null | tail -1) ls_lib=$(CONAN_HOME="$ls_tmp/fresh-app" conan list 'ls_lib/0.1#*' --format=json 2>/dev/null | python3 -c 'import json, sys; print(sum(len(v.get("revisions", {})) for v in json.load(sys.stdin)["Local Cache"].values()))') install=$(CONAN_HOME="$ls_tmp/fresh-app" conan install --requires=ls_app/0.1 -pr:a fixture --lockfile="$ls_tmp/fresh-app/locks/ls_app.lock" --build=never -of "$ls_tmp/fresh-app/consumer" > /dev/null 2>&1; echo $?)"
 printf 'int gone(void) { return 0; }\n' > "$ls_tmp/gone.c"
 printf 'int gone(void);\nint main(void) { return gone(); }\n' > "$ls_tmp/main.c"
-# note: a recipe's module imports conan, so its helpers run under the interpreter conan's own script names; CI's python3 is the system one, which has no conan (W515)
-ov_conan_python="$(sed -n '1s/^#!//p' "$(readlink -f "$(command -v conan)")")"
-check "the overlay recipes' helpers run under conan's own interpreter, read from conan's shebang, which imports conan" \
-      "conan" "$($ov_conan_python -c 'import conan; print(conan.__name__)')"
 cc -shared -fPIC -o "$ls_tmp/producer/libgone.so" "$ls_tmp/gone.c" \
     && cc -o "$ls_tmp/bad/bin/app" "$ls_tmp/main.c" -L"$ls_tmp/producer" -lgone -Wl,-rpath,"$ls_tmp/producer"
 chmod 0 "$ls_tmp/producer"
