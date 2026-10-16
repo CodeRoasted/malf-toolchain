@@ -2475,6 +2475,13 @@ check "a SECOND lane is refused while the holder's anchor is alive, and is told 
       "rc=1 named present" \
       "rc=$sl_acq2_rc $([[ "$sl_acq2_out" == *"HELD by 'suite-lane-A'"* && "$sl_acq2_out" == *"is ALIVE"* ]] \
           && echo named || echo "GOT: $sl_acq2_out") $(sl_dir_exists)"
+# A REFUSED ACQUIRE HANDS OUT NOTHING THAT READS AS A GRANT (W537). Measured 2026-10-16: two lanes
+# of one session, so the refusal took the shared-anchor branch, which printed the HOLDER's token on
+# a `malf slot: token` line. The second lane scraped `token <hex>` from its own acquire's output,
+# read it as its grant, built beside the holder, then released the holder's slot with it.
+check "a refused acquire says REFUSED and carries no token at all, the holder's included" \
+      "refused no-token" \
+      "$([[ "$sl_acq2_out" == *"REFUSED"* ]] && echo refused || echo "NOT-NAMED-REFUSED") $(grep -qE '[0-9a-f]{32}' <<< "$sl_acq2_out" && echo "TOKEN-LEAKED: $(grep -oE '[0-9a-f]{32}' <<< "$sl_acq2_out" | head -1)" || echo no-token)"
 
 # THE THREE WAYS A THIRD PARTY REACHES FOR SOMEBODY ELSE'S SLOT. All three refuse, and — the arm
 # that matters — the directory is still there afterwards.

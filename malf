@@ -6553,15 +6553,16 @@ cmd_slot() {
         _malf_slot_read
         case "$_MALF_SLOT_STATE" in
         held)
-            echo "malf slot: HELD by '${_MALF_SLOT_LABEL:-<unlabelled>}' since ${_MALF_SLOT_SINCE:-<unknown>} — anchor pid $_MALF_SLOT_ANCHOR is ALIVE." >&2
+            echo "malf slot: REFUSED — HELD by '${_MALF_SLOT_LABEL:-<unlabelled>}' since ${_MALF_SLOT_SINCE:-<unknown>} — anchor pid $_MALF_SLOT_ANCHOR is ALIVE." >&2
             echo "malf slot: that lane still exists whether or not a malf process is running right now —" >&2
             echo "malf slot: the anchor is its SESSION, and a holder between runs is the normal state." >&2
             echo "malf slot: wait for it. If it is genuinely stuck, kill pid $_MALF_SLOT_ANCHOR and re-run this" >&2
             echo "malf slot: command, which will then reclaim the slot itself. Do not rm -rf $MALF_BUILD_SLOT_DIR." >&2
-            if _malf_slot_anchor_is_shared; then
-                echo "malf slot: token $_MALF_SLOT_TOKEN" >&2
-                _malf_slot_shared_anchor_note >&2
-            fi
+            # A refusal prints NO token, the holder's included (W537): a token beside an acquire reads
+            # as its grant. Measured 2026-10-16: a lane scraped the holder's token off its own refused
+            # acquire, built beside the holder, then released the holder's slot with it. The token
+            # stays where taking it is a deliberate act: 'malf slot status'.
+            _malf_slot_anchor_is_shared && _malf_slot_shared_anchor_note >&2
             slot_rc=1
             ;;
         unknown)
