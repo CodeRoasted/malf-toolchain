@@ -213,7 +213,8 @@ this step-0 run, the dated exception and `inputs_key`; an executable among those
 published (DN-142.D22 (4): a PE with no COFF symbol table and no CodeView debug entry, a linked ELF
 in the published form). `object` resolves a row: step -> record -> output -> member -> bytes.
 
-A key's `definition` is malf's tracked tree plus the PARAMETER DOCUMENT of the act that ran the step
+A key's `definition` is the step's malf CLOSURE (`malf_closure.py`, DN-142.D29: the malf files the
+step executes, never malf's whole tree) plus the PARAMETER DOCUMENT of the act that ran the step
 (DN-142.D2, DN-142.D19 (1)): `{argv, env, profile}`, the program and verb, each variable the driver
 hands the act that is not a location, and the profile name. A driver hands it in
 MALF_STORE_PARAMETERS and it is CHECKED against the act it keys (`parameters`); an act no driver ran
