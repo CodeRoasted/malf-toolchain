@@ -360,6 +360,14 @@ check "store_manifest selftest: 60 arms, every refusal fired, the green manifest
 
 echo
 
+echo "[7k] malf_closure carries its own grammar proof (selftest): an anchored reference, a function-level import and a directory reference each reach their target, a bare word and a computed path reach nothing, a consumer's \${MALF_TOOLCHAIN_DIR}/ reference seeds the act, a cycle terminates (DN-142.D29)"
+closure_selftest_output="$(timeout 120 python3 "$MALF_ROOT/malf_closure.py" selftest 2>&1)"
+closure_selftest_status=$?
+check "malf_closure selftest: 8 arms, 0 failed" \
+      "ok" "$([[ $closure_selftest_status -eq 0 ]] && grep -q '^malf_closure selftest: 8 passed, 0 failed$' <<< "$closure_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$closure_selftest_output")")"
+
+echo
+
 echo "[7j0] artefact_store's object producers carry their own refusal proof (selftest): the objects convention resolves step -> record -> output -> member, the tracked step is keyed on blob ids at a commit, and the ingestion write refuses a printed digest that is not the bytes, a record without its seat or dated exception, a PE carrying a symbol table or a CodeView entry, and records a divergence at an equal inputs_key, never a red (DN-142.D20 (2), DN-142.D25)"
 objects_selftest_output="$(timeout 120 python3 "$MALF_ROOT/artefact_store.py" selftest 2>&1)"
 objects_selftest_status=$?
