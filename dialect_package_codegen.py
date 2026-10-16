@@ -75,7 +75,7 @@ rows alone keeps its content hash and its emitted bytes.
 
 A MARKER ROW MAY CLOSE THE STEPS OF ITS JOB. The optional `role: Closes` states that the
 row's line enters the current job's epilogue, a step-level unit the core supplies and names
-(DN-89.D40): the runner's own teardown, which no line names. A closing row is legal only on
+(ADR-20.D32): the runner's own teardown, which no line names. A closing row is legal only on
 `kind: Step`, and like an opening row it declares no `child_order:`, no `extract:` and no
 `version_coordinate:`, since the unit it enters carries no class, instance or version of the
 dialect's. What the row does to the open unit is the core's algorithm; the derived emit row
