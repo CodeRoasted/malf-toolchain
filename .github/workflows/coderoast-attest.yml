@@ -36,10 +36,10 @@ on:
   workflow_call:
     inputs:
       runs-on:
-        description: 'Runner label. PUBLIC and package callers omit it (hosted ubuntu-latest); the superproject passes coderoast-release (DN-119.D8).'
+        description: 'Runner label. PUBLIC and package callers omit it (hosted ubuntu-24.04); the superproject passes coderoast-release (DN-119.D8).'
         type: string
         required: false
-        default: 'ubuntu-latest'
+        default: 'ubuntu-24.04'
     secrets:
       BUILD_RECORD_READ_TOKEN:
         description: 'Fine-grained PAT, repository access CodeRoasted/coderoast ALONE, Actions: Read-only and Contents: Read-only (the compare API, DN-108.D36 (15)). Required in every package repository; the superproject passes none (its own github.token reads its own runs).'

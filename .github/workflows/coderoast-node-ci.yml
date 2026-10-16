@@ -52,7 +52,7 @@ on:
         description: 'The runner. PUBLIC callers MUST omit it (a self-hosted runner a fork can reach is an RCE).'
         type: string
         required: false
-        default: 'ubuntu-latest'
+        default: 'ubuntu-24.04'
 
 # NO `permissions:` HERE, deliberately. A called workflow can only DOWNGRADE the token its caller
 # grants, so a `contents: read` here would strip the dogfood's commit comment, pull-request comment

@@ -19,10 +19,10 @@ on:
         type: string
         required: true
       runs-on:
-        description: 'Runner label. PUBLIC callers MUST omit it (hosted ubuntu-latest) — a self-hosted runner reachable from a public repository is an RCE. A PRIVATE caller may pass the release runner.'
+        description: 'Runner label. PUBLIC callers MUST omit it (hosted ubuntu-24.04) — a self-hosted runner reachable from a public repository is an RCE. A PRIVATE caller may pass the release runner.'
         type: string
         required: false
-        default: 'ubuntu-latest'
+        default: 'ubuntu-24.04'
 
 jobs:
   attach:

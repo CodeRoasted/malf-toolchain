@@ -41,6 +41,9 @@ or packs.
     store_publish.py check-release <out dir> <release.json>
         the reading after the publish (DN-142.D24 (3)): the Release's asset names, from
         `gh release view --json assets`, equal the staged files, both ways
+    store_publish.py stale-assets <out dir> <release.json>
+        before a re-publication over an existing Release (a force-moved tag re-fires it): one line per
+        asset name the Release holds that the staged files do not, for the job to remove
     store_publish.py stage-destinations <repository> <visibility> <step-0 record digest> <allowed signers> <out dir>
         Token: GITHUB_TOKEN (the OWNER's, `packages: read`): every destination Release the owner
         slice binds, staged and listed in <out dir>/destinations.tsv
@@ -278,6 +281,15 @@ def check_release(out: Path, release: dict) -> None:
                       f"{sorted(attached - staged)}, staged and not attached {sorted(staged - attached)}")
 
 
+def stale_assets(out: Path, release: dict) -> list[str]:
+    """The assets a Release already holds that the staged slice does not list, sorted. A force-moved
+    tag re-fires its Release workflow over a Release a previous run published (ADR-2.D1: a re-cut moves
+    the tag, never deletes it): the publication then uploads the staged files over it, and removes
+    exactly these, so the reading after it (check-release) holds the Release to the new slice."""
+    staged = {path.name for path in out.iterdir() if path.is_file()}
+    return sorted({asset["name"] for asset in release.get("assets", [])} - staged)
+
+
 def check_destination(out: Path, release: dict, releases: list[dict], tag: str) -> None:
     """The destination Release holds exactly its staged files, and it never wears the Latest badge:
     a foreign Release is an asset host, and its repository's own line owns the badge. `releases` is
@@ -426,6 +438,15 @@ def selftest() -> int:
                 arm("one asset fewer on the Release than the slice lists reds the reading",
                     lambda: check_release(out, {"assets": listed["assets"][1:]}),
                     "staged and not attached ['pub_lib-9.9.9.tgz']")
+                republished = {"assets": [{"name": "pub_lib-9.9.9.tgz"}, {"name": "pub-repo-benchmark.json"},
+                                          {"name": "golden.txt.sha256"}]}
+                if stale_assets(out, republished) != ["golden.txt.sha256", "pub-repo-benchmark.json"]:
+                    failures.append(f"a re-fired Release's stale assets read {stale_assets(out, republished)}, want "
+                                    f"the two the slice no longer lists")
+                if stale_assets(out, listed) != []:
+                    failures.append(f"a Release equal to the slice reads stale assets {stale_assets(out, listed)}")
+                if stale_assets(out, {"assets": []}) != []:
+                    failures.append("a Release with no asset reads a stale asset")
             arm("another slice for the same record is refused by the writer, never rewritten",
                 lambda: store_replica.replicate_slice(
                     registry, store_replica.github_guard(registry.base, "coderoasted", "t"), "coderoasted",
@@ -572,6 +593,10 @@ def main(argv: list[str]) -> int:
         if len(argv) == 3 and argv[0] == "check-release":
             check_release(Path(argv[1]), json.loads(Path(argv[2]).read_text()))
             print(f"store_publish: the Release equals the slice ({argv[1]})")
+            return 0
+        if len(argv) == 3 and argv[0] == "stale-assets":
+            for name in stale_assets(Path(argv[1]), json.loads(Path(argv[2]).read_text())):
+                print(name)
             return 0
         if len(argv) == 5 and argv[0] == "check-destination":
             check_destination(Path(argv[1]), json.loads(Path(argv[2]).read_text()),

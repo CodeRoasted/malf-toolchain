@@ -6,9 +6,9 @@
 # ⛔ SECURITY (read once): self-hosted runners must NEVER run a PUBLIC / fork-exposed
 #    repo — a fork PR would execute attacker code on this box. On GitHub Free an org
 #    runner is visible to ALL repos, so safety is enforced at the WORKFLOW layer: only
-#    PRIVATE repos carry `runs-on: ${{ vars.CI_RUNS_ON || 'ubuntu-latest' }}`; every
+#    PRIVATE repos carry `runs-on: ${{ vars.CI_RUNS_ON || 'ubuntu-24.04' }}`; every
 #    public repo (canon, metalog, ipc, web, sift-action, malf-toolchain) stays pinned
-#    to ubuntu-latest and can never target this runner. Do not add the `malf-local`
+#    to ubuntu-24.04 and can never target this runner. Do not add the `malf-local`
 #    label to a public repo's workflow.
 #
 # Usage (on the warehouse box, while `gh` is authenticated as an org admin):
@@ -185,5 +185,5 @@ cat <<EOF
   (Corpus crawl routes separately via coderoast-corpora's repo var CORPUS_RUNNER=corpora-runner.)
   Fall back to GitHub-hosted:
     gh variable delete CI_RUNS_ON --org $ORG
-  (Only PRIVATE-repo workflows read CI_RUNS_ON; public repos stay on ubuntu-latest.)
+  (Only PRIVATE-repo workflows read CI_RUNS_ON; public repos stay on ubuntu-24.04.)
 EOF

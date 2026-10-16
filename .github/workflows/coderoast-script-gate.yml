@@ -23,7 +23,7 @@ on:
         description: 'The runner. PUBLIC callers MUST omit it (a self-hosted runner a fork can reach is an RCE); PRIVATE callers pass vars.CI_RUNS_ON.'
         type: string
         required: false
-        default: 'ubuntu-latest'
+        default: 'ubuntu-24.04'
 
 permissions:
   contents: read

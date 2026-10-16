@@ -89,10 +89,10 @@ on:
         required: false
         default: ''
       runs-on:
-        description: 'Runner label for the build job. Defaults to hosted ubuntu-latest. PUBLIC callers MUST omit it — a self-hosted runner reachable from a public repo fork PR is an RCE. PRIVATE callers pass vars.CI_RUNS_ON (fallback ubuntu-latest) to route to the self-hosted fleet.'
+        description: 'Runner label for the build job. Defaults to hosted ubuntu-24.04. PUBLIC callers MUST omit it — a self-hosted runner reachable from a public repo fork PR is an RCE. PRIVATE callers pass vars.CI_RUNS_ON (fallback ubuntu-24.04) to route to the self-hosted fleet.'
         type: string
         required: false
-        default: 'ubuntu-latest'
+        default: 'ubuntu-24.04'
     secrets:
       CR_RELEASE_TOKEN:
         description: 'Fine-grained PAT (Contents:read) for PRIVATE-repo release reads. Required only if any vendor row is `private`. Pass via `secrets: inherit`.'

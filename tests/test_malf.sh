@@ -1142,7 +1142,7 @@ echo "[7h] build_inventory — the ADR-3.D10 shape gate on workspace-grain cells
 # the tree. Homing: RATIFIED in place (Kleio, 2026-08-17) — every property here is a
 # malf-repo-local tool contract, so the tool's own no-network selftest is the home; the
 # workspace shape's LIVE compile proof is deliberately NOT here — it is held by
-# ADR-3.D10's release-train coverage MUST (scripts/workspace_grain_coverage.py), and a
+# ADR-3.D10's release-train coverage MUST (`./pharos check --module workspace_grain_coverage`), and a
 # stubbed compile in this suite would be a second, weaker copy of that gate.
 inv_tmp="$(mktemp -d)"   # cleaned inline below (a second `trap ... EXIT` would REPLACE [7d]'s)
 BI="$MALF_ROOT/build_inventory.py"
@@ -3280,6 +3280,30 @@ for path in sorted(Path(sys.argv[1]).rglob("*")):
 print(" ".join(bad) or "none")
 PYC
 )"
+
+check "every conan create or install the malf driver runs names user.malf:profile, directly or through _malf_conan_install_args or the writer's conf set (DN-142.D23; insight-metalog v1.10.7 Release run 38861801791)" \
+      "none" "$(python3 - "$MALF_ROOT/malf" <<'PYC'
+import re, sys
+from pathlib import Path
+lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+bad = []
+for index, line in enumerate(lines):
+    if not re.match(r'^\s*(if (! )?)?(\w+="[^"]*" )*conan (create|install) ', line):
+        continue
+    command, cursor = line, index
+    while command.rstrip().endswith("\\") and cursor + 1 < len(lines):
+        cursor += 1
+        command += lines[cursor]
+    if not any(spelling in command for spelling in
+               ("user.malf:profile=", "_malf_conan_install_args", "_MALF_WRITER_ARGS", "common[@]")):
+        bad.append(f"malf:{index + 1}")
+print(" ".join(bad) or "none")
+PYC
+)"
+check "_malf_conan_install_args names the act's profile as user.malf:profile" \
+      "1" "$(MALF_PROFILE=/p/linux-gcc16-release MALF_BUILD_PROFILE=/p/linux-gcc16-release MALF_PROFILE_NAME=linux-gcc16-release \
+             bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; MALF_PROFILE_NAME=linux-gcc16-release; _malf_conan_install_args' _ "$MALF_BIN" \
+             | tr ' ' '\n' | grep -cx 'user.malf:profile=linux-gcc16-release')"
 
 # DN-142.D5 (4): a test input outside the recipe folder is exported by the helper, tracked files only.
 ex_repo="$cs_tmp/exrepo"; mkdir -p "$ex_repo/pkg" "$ex_repo/support/sub" "$ex_repo/scripts"
@@ -6103,6 +6127,61 @@ check "store-create, store-build and store-verdict each refuse a cache root befo
 check "no store verb spells a store default of its own: the root has one definition" \
       "1 1 3" "$(grep -c 'MALF_STORE_DIR:-' "$MALF_BIN") $(sed -n '/^_malf_store_root()/,/^}/p' "$MALF_BIN" | grep -c 'MALF_STORE_DIR:-') $(grep -cE 'store="\$\(_malf_store_root store-(create|build|verdict)\)"' "$MALF_BIN")"
 rm -rf "$sr_tmp"
+echo
+
+echo "[7q18] a failed step's log is QUOTED into the walk's output, never only named, and a red walk archives its logs where its caller names (CLAUDE.md § Observability; step 0 run 38823789127)"
+# note: measured at step 0 run 38823789127 (1.10.7): coderoast_infra_postgres's create failed and
+# the walk named only /tmp/malf-store.T0NS2C/coderoast_infra_postgres.log, which on the release
+# runner is inside the service's systemd PrivateTmp — unreadable from the desk and gone at the end.
+ql_tmp="$(realpath "$(mktemp -d /tmp/malf-quotelog.XXXXXX)")"
+{
+    for ql_n in $(seq 1 40); do echo "build line $ql_n"; done
+    echo "92% tests passed, 1 tests failed out of 13"
+    echo ""
+    echo "The following tests FAILED:"
+    printf '\t 13 - PostgresBackedCases (Failed)\n'
+    echo "Errors while running CTest"
+    for ql_n in $(seq 1 300); do echo "tail line $ql_n"; done
+    printf 'wide %s\n' "$(printf 'x%.0s' $(seq 1 5000))"
+} > "$ql_tmp/step.log"
+: > "$ql_tmp/empty.log"
+ql_quote() {   # <log> -> the quote's stderr, then rc=<status>
+    bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set -e; _malf_quote_log "$2" "pkg (its create)"; echo "rc=$?" >&2' \
+        _ "$MALF_BIN" "$1" 2>&1
+}
+ql_out="$(ql_quote "$ql_tmp/step.log")"
+check "every line of the quote opens with the marker Pharos's live runner reads nothing off, and the quote exits 0" \
+      "0 rc=0" "$(grep -v '^rc=' <<< "$ql_out" | grep -cv '^malf log| ') $(tail -1 <<< "$ql_out")"
+check "ctest's failure roll-up is quoted even where it stands OUTSIDE the tail: the summary, the block's header and the failed test" \
+      "1 1 1" "$(grep -c '^malf log| 92% tests passed, 1 tests failed out of 13$' <<< "$ql_out") $(grep -c '^malf log| The following tests FAILED:$' <<< "$ql_out") $(grep -cF 'malf log| '$'\t'' 13 - PostgresBackedCases (Failed)' <<< "$ql_out")"
+check "the tail is the log's LAST 200 lines, no more, headed with the log's total" \
+      "199 0 1 1" "$(grep -c '^malf log| tail line' <<< "$ql_out") $(grep -c '^malf log| tail line 101$' <<< "$ql_out") $(grep -c '^malf log| tail line 102$' <<< "$ql_out") $(grep -c 'the last 200 of 346 line(s) of' <<< "$ql_out")"
+check "a line is cut at 2000 characters, so one runaway line cannot flood the job log" \
+      "$((10 + 2000))" "$(grep '^malf log| wide' <<< "$ql_out" | awk '{ print length($0) }')"
+check "an empty log and an absent one each say so in ONE quoted line, and neither is a failure" \
+      "1 rc=0|1 rc=0" "$(ql_quote "$ql_tmp/empty.log" | grep -c 'absent or empty') $(ql_quote "$ql_tmp/empty.log" | tail -1)|$(ql_quote "$ql_tmp/none.log" | grep -c 'absent or empty') $(ql_quote "$ql_tmp/none.log" | tail -1)"
+ql_body="$(sed -n '/^cmd_store_create()/,/^}/p' "$MALF_BIN")"
+check "every failure that names a step's log quotes it: the create, the key before a create or a build, a build, a third-party resolve and install" \
+      "1 1 1 1 1 1" "$(for ql_fn in _malf_store_create_in _malf_store_run_step _malf_store_build_one _malf_store_build_in; do sed -n "/^$ql_fn()/,/^}/p" "$MALF_BIN" | grep -c '_malf_quote_log "$scratch/$name.log"'; done | tr '\n' ' ')$(sed -n '/^_malf_store_third_party()/,/^}/p' "$MALF_BIN" | grep -c '_malf_quote_log "$log"') $(sed -n '/^_malf_store_third_party_in()/,/^}/p' "$MALF_BIN" | grep -c '_malf_quote_log "$log"')"
+check "each of the walk's three red returns after its steps archives the logs first, and the walk removes a stale archive before its first step" \
+      "3 3 1" "$(grep -c '_malf_store_keep_logs "$scratch"' <<< "$ql_body") $(grep -B1 -E 'echo "malf store-create: (STOPPED|FAILED|every step built and tested)' <<< "$ql_body" | grep -c '_malf_store_keep_logs') $(grep -c 'rm -f "$MALF_STORE_LOG_ARCHIVE"' <<< "$ql_body")"
+mkdir -p "$ql_tmp/scratch/home.pkg.x" "$ql_tmp/scratch/nested"
+echo a > "$ql_tmp/scratch/pkg.log"; echo b > "$ql_tmp/scratch/pkg.third-party.log"
+echo c > "$ql_tmp/scratch/pkg.graph.json"; echo d > "$ql_tmp/scratch/nested/deep.log"; echo e > "$ql_tmp/scratch/home.pkg.x/conan.log"
+ql_keep() {   # <archive or ''> -> the archive's member list (or none), then rc=<status>
+    local out rc
+    out="$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set -e
+        if [[ -n "$3" ]]; then export MALF_STORE_LOG_ARCHIVE="$3"; else unset MALF_STORE_LOG_ARCHIVE; fi
+        _malf_store_keep_logs "$2"' _ "$MALF_BIN" "$ql_tmp/scratch" "$1" 2>&1)"; rc=$?
+    if [[ -n "$1" && -f "$1" ]]; then printf '%s' "$(tar -tzf "$1" | LC_ALL=C sort | tr '\n' ' ')"; else printf 'none '; fi
+    printf 'rc=%s %s' "$rc" "$(grep -c 'archived in\|archiving the logs' <<< "$out")"
+}
+check "a set archive holds exactly the scratch's top-level logs — no graph, no nested file, no step home's" \
+      "pkg.log pkg.third-party.log rc=0 1" "$(ql_keep "$ql_tmp/logs.tar.gz")"
+check "unset, nothing is archived and nothing is said" "none rc=0 0" "$(ql_keep '')"
+check "an archive that cannot be written is said, leaves no file, and is never a failure of the walk" \
+      "none rc=0 1" "$(ql_keep "$ql_tmp/no-such-dir/logs.tar.gz")"
+rm -rf "$ql_tmp"
 echo
 
 echo

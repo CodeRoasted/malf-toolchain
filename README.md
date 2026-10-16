@@ -79,8 +79,10 @@ MSVC `cl.exe` is the only mature C++23 named-modules + `import std` path on Wind
 `std.ixx`; CMake drives it under Ninja). 14.52 is the **fix floor**: earlier toolsets miscompile
 exported defaulted `operator==` on module-defined DTOs (a consumer-TU double-free) and have an
 `import std`/`<stop_token>` C1116 — both fixed at 14.52. It is gatherable for free from the VS
-Insiders channel (the version-agnostic Preview component); `setup-msvc1452` installs it, asserts the
-14.52 floor, activates the dev env, and exports `MSVC1452_INSTALL` so Conan points `vcvars` at it.
+Insiders channel (the version-agnostic Preview component); `setup-msvc1452` installs it, activates
+EXACTLY toolset 14.52 (`-vcvars_ver=14.52`, never the newest installed; a channel that stops serving
+14.52 fails the leg and the pin is bumped on purpose), and exports `MSVC1452_INSTALL` so Conan points
+`vcvars` at it.
 The MSVC build is bit-identical to the Linux golden across canon, metalog, and the Sift diff
 (eidos) on the shared **plain-text** determinism corpus — the cross-OS half of the claim, measured,
 not assumed. The JSON-ingestion surfaces (W1 ordinal histograms, OTEL trace/severity fields) are now
@@ -99,7 +101,7 @@ Composite actions consumed cross-repo by `uses:` — true single source, no per-
 |---|---|
 | `setup-gcc` | Provision the pinned from-source gcc (tag-derived version + prefix, `/opt/gcc-16.2` today; above) — the Linux ship + determinism reference leg. |
 | `setup-clang21-libcxx` | Provision clang-21 + libc++ and the `import std` / modules bridge — the dev compiler and the cross-stdlib determinism leg (the gates run gcc-16.2 ≡ clang-21/libc++). |
-| `setup-msvc1452` | On a Windows runner: install MSVC 14.52 from the VS Insiders Preview component, assert the 14.52 fix floor, activate the dev env (`cl.exe`/`link.exe` + INCLUDE/LIB), and export `MSVC1452_INSTALL` (the `windows-msvc-release` profile points Conan's `vcvars` at it). The Windows + cross-OS leg. |
+| `setup-msvc1452` | On a Windows runner: install MSVC 14.52 from the VS Insiders Preview component, activate exactly toolset 14.52 (build >= the 14.52.36418 fix floor, any other toolset refused), activate the dev env (`cl.exe`/`link.exe` + INCLUDE/LIB), and export `MSVC1452_INSTALL` (the `windows-msvc-release` profile points Conan's `vcvars` at it). The Windows + cross-OS leg. |
 | `setup-build-env` | The shared Linux C++ build env as one step: apt base + pinned CMake 4.3.x + Conan (no autodetect) + the conan dep-binary cache + the canonical `linux-gcc16-release` profile (fetched from `profiles/` here — no per-repo vendored copy). Owns `CONAN_HOME`. Run after `setup-gcc`; pass repo-specific apt via `extra-apt`. |
 | `conan-module` | Test / create one Conan module (gated by `test`/`create` inputs from `dorny/paths-filter`), with a gdb crash-diagnose fallback for `-march` SIGILLs. Reconciled from the three drifted per-repo copies. |
 
@@ -119,7 +121,7 @@ tool, on our CI and on your fork. Usage: **[MALF.md](MALF.md)**.
   - `linux-gcc16-release` — gcc-16.2 / libstdc++ (ship + determinism reference)
   - `linux-clang21-libcxx-release` — clang-21 / libc++ (dev default; the cross-stdlib leg)
   - `linux-clang21-libcxx-debug` — clang-21 / libc++ at `build_type=Debug`, no sanitizer (the desk debug leg: log elision off, `assert()` live, insight-canon's arena reset-poison armed; `linux-clang21-asan` is the same build type with AddressSanitizer attached)
-  - `windows-msvc-release` — MSVC 14.52 (`compiler.version=195` → conan maps to vs_version 18 + `vcvars_ver=14.5` → the 14.52 toolset; Ninja generator; `vcvars` pointed at `MSVC1452_INSTALL`)
+  - `windows-msvc-release` — MSVC 14.52 (`compiler.version=195` + `tools.microsoft:msvc_update=2` → conan maps to vs_version 18 + `vcvars_ver=14.52`, exactly the 14.52 toolset; Ninja generator; `vcvars` pointed at `MSVC1452_INSTALL`)
 
   **What switching profiles costs, once.** Every profile other than the dev default keys its own
   Conan cache (`_malf_profile_key` → `.conan2/<key>/`), and *every* profile — the default included —

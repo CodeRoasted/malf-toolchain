@@ -1,6 +1,6 @@
 # windows-msvc-release — the Windows / MSVC build profile (shared, single-sourced here).
 #
-# TOOLCHAIN: MSVC >= 14.52.36418, installed by this repo's setup-msvc1452 action (VS 2026
+# TOOLCHAIN: MSVC toolset 14.52 exactly, build >= 14.52.36418, installed by this repo's setup-msvc1452 action (VS 2026
 # Insiders channel + the VC.Preview.Tools component). 14.52 is the C++23-modules fix floor:
 # the released 14.51 / 14.44 toolsets miscompile module-boundary DTOs (consumer-TU
 # special-member double-free) and carry an import-std/stop_token C1116.
@@ -58,9 +58,15 @@ openssl/*:no_dso=True
 tools.cmake.cmaketoolchain:generator=Ninja
 # Point conan's vcvars at the side-by-side install setup-msvc1452 lays down (MSVC1452_INSTALL),
 # so conan selects OUR instance instead of auto-detecting the runner's pre-installed VS via
-# vswhere. compiler.version=195 → conan vs_version=18 + vcvars_ver=14.5, which resolves to the
-# highest 14.5x in that install = 14.52. Empty string (action not run) = fall back to vswhere.
+# vswhere. Empty string (action not run) = fall back to vswhere.
 tools.microsoft.msbuild:installation_path={{ os.getenv("MSVC1452_INSTALL", "") }}
+# THE TOOLSET IS EXACTLY 14.52 IN CONAN'S OWN vcvars TOO (RUL-154). compiler.version=195 alone makes
+# conan call vcvarsall with -vcvars_ver=14.5, which resolves to the HIGHEST 14.5x in the install: a
+# 14.53 the Insiders channel lays down beside 14.52 would compile every conan-driven package while
+# setup-msvc1452 had activated 14.52. msvc_update=2 makes it -vcvars_ver=14.52. A conf, not
+# compiler.update: global.conf's package_id confs do not list it, so no package id moves. Held equal
+# to setup-msvc1452's toolset by tests/test_proof_bricks.sh.
+tools.microsoft:msvc_update=2
 # NO -march here: that is a gcc/clang flag MSVC does not understand. MSVC's x64 default codegen
 # (SSE2 baseline, /fp:precise — no contraction) is the determinism-relevant portable floor, the
 # equivalent of the Linux profiles' -march=x86-64-v2 + -ffp-contract=off, without a flag.

@@ -26,7 +26,7 @@ name: CodeRoast Golden Proof
 #   3. `main`. metalog-spec is `main` off the reading: it never carries the uniform tag.
 #
 # PUBLIC CALLERS, HOSTED RUNNERS. The Linux legs run on hosted ubuntu images and the MSVC leg on
-# `windows-runner`, whose default is the hosted windows-2025: a self-hosted runner a public
+# `windows-runner`, whose default is the hosted windows-2025-vs2026: a self-hosted runner a public
 # repository's fork can reach is an RCE, and our runner groups refuse public repositories anyway.
 
 on:
@@ -81,10 +81,10 @@ on:
         required: false
         default: ''
       windows-runner:
-        description: 'The MSVC leg''s runner. Public callers omit it (hosted windows-2025).'
+        description: 'The MSVC leg''s runner. Public callers omit it (hosted windows-2025-vs2026).'
         type: string
         required: false
-        default: 'windows-2025'
+        default: 'windows-2025-vs2026'
     outputs:
       canon:
         description: 'The insight-canon ref the legs read.'
@@ -103,7 +103,7 @@ jobs:
   subjects:
     name: Resolve the insight-canon and metalog-spec this run reads
     # Hosted, and nothing else runs in it. It holds no credential: step 0 hands it the commits.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       canon: ${{ steps.resolve.outputs.canon }}
       spec: ${{ steps.resolve.outputs.spec }}
@@ -157,8 +157,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { leg: gcc,   arch: x86,   runner: ubuntu-latest,    label: "gcc-16 · libstdc++ · x86",   require: "g++",     gcc_profile: linux-gcc16-release,       clang_profile: linux-clang21-libcxx-release }
-          - { leg: clang, arch: x86,   runner: ubuntu-latest,    label: "clang-21 · libc++ · x86",    require: "clang++", gcc_profile: linux-gcc16-release,       clang_profile: linux-clang21-libcxx-release }
+          - { leg: gcc,   arch: x86,   runner: ubuntu-24.04,     label: "gcc-16 · libstdc++ · x86",   require: "g++",     gcc_profile: linux-gcc16-release,       clang_profile: linux-clang21-libcxx-release }
+          - { leg: clang, arch: x86,   runner: ubuntu-24.04,     label: "clang-21 · libc++ · x86",    require: "clang++", gcc_profile: linux-gcc16-release,       clang_profile: linux-clang21-libcxx-release }
           - { leg: gcc,   arch: arm64, runner: ubuntu-24.04-arm, label: "gcc-16 · libstdc++ · arm64", require: "g++",     gcc_profile: linux-gcc16-arm64-release, clang_profile: linux-clang21-libcxx-arm64-release }
           - { leg: clang, arch: arm64, runner: ubuntu-24.04-arm, label: "clang-21 · libc++ · arm64",  require: "clang++", gcc_profile: linux-gcc16-arm64-release, clang_profile: linux-clang21-libcxx-arm64-release }
     env:

@@ -2,8 +2,8 @@ name: 'Setup an MSVC leg (Windows)'
 description: |
   The provisioning half of every CodeRoast MSVC leg — the brick insight-canon's, insight-metalog's
   and insight-eidos's golden `proof-msvc` legs and insight-eidos's `sift-windows` build share; they
-  keep only WHAT they build and prove. MSVC 14.52 installed, activated and verified against the fix
-  floor; CMake 4.3.x and Ninja; Conan; zstd; the restore of a keyed conan cache; the MSVC conan
+  keep only WHAT they build and prove. MSVC 14.52 installed, activated and verified equal to the
+  pinned toolset; CMake 4.3.x and Ninja; Conan; zstd; the restore of a keyed conan cache; the MSVC conan
   profile staged from a malf-toolchain checkout.
 
   ONE FORM FOR BOTH RUNNER KINDS. The org variable WINDOWS_RUNNER routes a private repository's
@@ -53,12 +53,16 @@ runs:
     - name: Install + activate MSVC 14.52 (the C++23-modules fix floor; not pre-installed)
       uses: CodeRoasted/malf-toolchain/.github/actions/setup-msvc1452@1fa07e321902f4292d8363e7932063d54686746d
 
-    - name: Verify the active toolset is MSVC 14.52, not a fallback
+    - name: Verify the active toolset is exactly MSVC 14.52, neither a fallback nor a newer one
+      # EQUALITY, NEVER A MINIMUM (RUL-154): a `>= 14.52` check passes a 14.53 the Insiders channel
+      # moved to. The major.minor is setup-msvc1452's `toolset` default, held equal by
+      # tests/test_proof_bricks.sh.
       shell: pwsh
       run: |
         if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) { Write-Error "cl.exe not on PATH — MSVC env not activated"; exit 1 }
         if (-not $env:VCToolsVersion) { Write-Error "VCToolsVersion not set — MSVC env not activated"; exit 1 }
-        if ([version]$env:VCToolsVersion -lt [version]'14.52') { Write-Error "active toolset $env:VCToolsVersion < 14.52 (the fix floor)"; exit 1 }
+        $active = ($env:VCToolsVersion -split '\.')[0..1] -join '.'
+        if ($active -ne '14.52') { Write-Error "active toolset $env:VCToolsVersion is not 14.52 (the pinned toolset)"; exit 1 }
         Write-Host "active VCToolsVersion: $env:VCToolsVersion"
 
     - name: CMake 4.3.x, Ninja and Conan from their hash locks, into a job-scoped venv

@@ -1047,6 +1047,12 @@ _malf_ship_lock_args() {
     _MALF_SHIP_LOCK=("--lockfile=$lock")
 }
 
+# `--build=missing` builds every dependency this graph lacks a binary for, and a first-party
+# recipe's build() runs its tests (malf_recipe_tests.py run_tests), which judge each skip at
+# `user.malf:profile` and raise without it (DN-142.D23). So the install names the act's profile,
+# the one a writer create names: measured at insight-metalog's v1.10.7 Release (run 38861801791),
+# where `malf build` inside measure-benchmark built the vendored insight_canon from source and
+# died "user.malf:profile names no profile". A `user.*` conf is never a package-id input.
 _malf_conan_install_args() {
     local build_type="${MALF_CONFIG:-Release}"
     # shellcheck disable=SC2046
@@ -1054,6 +1060,7 @@ _malf_conan_install_args() {
          "--profile:host=$MALF_PROFILE" \
          "--profile:build=$MALF_BUILD_PROFILE" \
          "-s" "build_type=$build_type" \
+         "-c" "user.malf:profile=$MALF_PROFILE_NAME" \
          $(_malf_lockfile_args)
 }
 
@@ -3396,6 +3403,7 @@ for r in re.findall(r\"(?:test_)?requires\\s*\\(\\s*['\\\"]([^'\\\"]+)['\\\"]\\s
         --profile:host="$MALF_PROFILE" \
         --profile:build="$MALF_PROFILE" \
         --build=missing \
+        -c "user.malf:profile=$MALF_PROFILE_NAME" \
         -c "tools.cmake.cmaketoolchain:generator=Ninja" \
         -s "build_type=$MALF_CONFIG" \
         2>&1 | grep -vE "^$|^======|^Requirements|^Packages|^Build" || true
@@ -4777,7 +4785,9 @@ Commands:
                                    from its export with its tests run (a stored: false one conan-built),
                                    in the purged B2 home (`cut-verify`); package and test-verdict
                                    records keyed by inputs; a failed step skips its dependents — exit 1 on a failed or
-                                   skipped step or a differing output at an equal key
+                                   skipped step or a differing output at an equal key. A failed step's
+                                   log is quoted (ctest's roll-up, its last 200 lines); a red walk
+                                   archives its logs into MALF_STORE_LOG_ARCHIVE when set
     store-build <pkg>...           DN-142.D14's step of a `stored: false` package: a `conan build`
                                    of its tracked tree at MALF_STORE_BUILD_REV (default HEAD) in the
                                    store's home, writer confs, --build=never, tests run in build();
@@ -5321,7 +5331,8 @@ _malf_store_parameters() {   # <profile|-> <argv>...
 # Exit 0 every step green and every output stored or matching; 1 a step failed, was skipped, or
 # rebuilt at an equal key differs; 2 refused before any step.
 # Usage: malf store-create [<package>...]   (MALF_STORE_DIR: the store, default ~/coderoast-store;
-#        a root under a cache is refused, _malf_store_root)
+#        a root under a cache is refused, _malf_store_root; MALF_STORE_LOG_ARCHIVE: where a red walk
+#        archives its logs, _malf_store_keep_logs)
 cmd_store_create() {
     local arg
     for arg in "$@"; do [[ "$arg" != -* ]] || _malf_refuse_option store-create "$arg"; done
@@ -5386,6 +5397,7 @@ cmd_store_create() {
     fi
 
     local name path deps kind dep blocked rc=0 total=0 run_at step_rc stopped=""
+    [[ -z "${MALF_STORE_LOG_ARCHIVE:-}" ]] || rm -f "$MALF_STORE_LOG_ARCHIVE"
     local -a failed=() skipped=()
     local -A broke=()
     _malf_store_clock "$scratch/times"; run_at="$_MALF_CLOCK_AT"
@@ -5413,20 +5425,88 @@ cmd_store_create() {
     done <<< "$wanted"
     echo "=== malf store-create: restored $(python3 "$MALF_DIR/artefact_store.py" restore-ledger "$scratch/restore.jsonl") ==="
     if [[ -n "$stopped" ]]; then
+        _malf_store_keep_logs "$scratch"
         echo "malf store-create: STOPPED at $name — a kept record's transport is absent, so the store is corrupt and nothing after it ran (DN-142.D17 (2)) — logs in $scratch" >&2
         return 1
     fi
 
     if [[ ${#failed[@]} -gt 0 || ${#skipped[@]} -gt 0 ]]; then
+        _malf_store_keep_logs "$scratch"
         echo "malf store-create: FAILED ${#failed[@]} step(s): ${failed[*]:-none}; skipped ${#skipped[@]}: ${skipped[*]:-none} — logs in $scratch" >&2
         return 1
     fi
     if [[ $rc -ne 0 ]]; then
+        _malf_store_keep_logs "$scratch"
         echo "malf store-create: every step built and tested, and recording one failed or differs at an equal key (above) — logs in $scratch" >&2
         return 1
     fi
     echo "malf store-create: all $total step(s) built, tested and recorded"
     rm -rf "$scratch"
+}
+
+# A FAILED STEP'S LOG IS QUOTED INTO THE WALK'S OWN OUTPUT, never only named (CLAUDE.md
+# § Observability). Measured at step 0 run 38823789127 (1.10.7): coderoast_infra_postgres's create
+# failed and the walk printed only the path of its log, /tmp/malf-store.T0NS2C/coderoast_infra_postgres.log,
+# which on the release runner is inside the service's systemd PrivateTmp: root-only from the desk
+# and gone with the service, so the cause was unreadable and could only be learned by building the
+# candidate again. The quote is bounded: ctest's own failure roll-up (its "tests passed, N tests
+# failed out of M" lines and each "The following tests FAILED:" block), wherever it stands in the
+# log, then the log's last _MALF_LOG_TAIL_LINES lines, each cut at _MALF_LOG_LINE_CHARS characters.
+# ctest runs with --output-on-failure inside every create (malf_recipe_tests.py `selection`), and
+# conan writes a recipe's commands to stderr (conan_run: `stdout = stdout or sys.stderr`), which is
+# this log, so a failing test's own output is in that tail.
+# EVERY QUOTED LINE OPENS WITH _MALF_LOG_QUOTE, and that is a contract with Pharos: its live runner
+# prints such a line and reads nothing off it (scripts/pharos/build.py QUOTED_LOG), so a quoted conan
+# "Building your package in" line or a quoted ctest "Total Test time" never counts in the timing
+# sidecar, a quoted closing line never reads as a step, and a quote never pushes the walk's own
+# lines out of the tail a finding names.
+# post: the quote on stderr, or one line saying the log is absent or empty, or could not be read;
+#       never a non-zero exit, so a quote cannot change a step's verdict.
+_MALF_LOG_TAIL_LINES=200
+_MALF_LOG_LINE_CHARS=2000
+_MALF_LOG_QUOTE="malf log| "
+_malf_quote_log() {   # <log> <subject>
+    local log="$1" subject="$2" total
+    if [[ ! -s "$log" ]]; then
+        echo "${_MALF_LOG_QUOTE}$subject: its log $log is absent or empty, so nothing is quoted" >&2
+        return 0
+    fi
+    total="$(wc -l < "$log")" || total="?"
+    {
+        echo "$subject: ctest's failure roll-up in $log (nothing below when no ctest run in it failed):"
+        awk '/tests passed, [0-9]+ tests? failed out of [0-9]+/ { print; block = 0; next }
+             /^The following tests FAILED:/ { block = 1; print; next }
+             block && /^[[:space:]]/ { print; next }
+             { block = 0 }' "$log"
+        echo "$subject: the last $_MALF_LOG_TAIL_LINES of $total line(s) of $log:"
+        tail -n "$_MALF_LOG_TAIL_LINES" "$log"
+    } | cut -c "-$_MALF_LOG_LINE_CHARS" | awk -v quote="$_MALF_LOG_QUOTE" '{ print quote $0 }' >&2 \
+        || echo "${_MALF_LOG_QUOTE}$subject: its log $log could not be quoted (above)" >&2
+    return 0
+}
+
+# A RED WALK'S LOGS ARE ARCHIVED WHERE ITS CALLER NAMES (MALF_STORE_LOG_ARCHIVE), because the scratch
+# that holds them is under /tmp, which the release runner's service keeps private (systemd
+# PrivateTmp): step 0 names a path beside its record, and pharos-build.yml uploads it as an artifact.
+# Every `*.log` at the top of the scratch, and nothing else: the graphs, the key documents and the
+# step homes stay. A green walk removes its scratch and writes no archive.
+# post: the archive written and named on stderr, or a line saying why not; never a non-zero exit.
+_malf_store_keep_logs() {   # <scratch>
+    local scratch="$1" archive="${MALF_STORE_LOG_ARCHIVE:-}"
+    [[ -n "$archive" ]] || return 0
+    local -a logs=()
+    mapfile -t logs < <(find "$scratch" -maxdepth 1 -type f -name '*.log' -printf '%P\n' | LC_ALL=C sort)
+    if [[ ${#logs[@]} -eq 0 ]]; then
+        echo "malf store-create: no log in $scratch, so nothing is archived into $archive" >&2
+        return 0
+    fi
+    if tar -czf "$archive" -C "$scratch" -- "${logs[@]}"; then
+        echo "malf store-create: ${#logs[@]} log(s) of $scratch archived in $archive" >&2
+    else
+        rm -f "$archive"
+        echo "malf store-create: archiving the logs of $scratch into $archive failed (above)" >&2
+    fi
+    return 0
 }
 
 # THE BENCHMARKS (DN-142.D25 (5) calls D and E): MALF_BENCH, when set, names the parameter document
@@ -5546,6 +5626,7 @@ _malf_store_run_step() {   # <n> <name> <path> <create|build> <store> <scratch> 
     if ! MALF_STEP_EXECUTABLES="$scratch/$name.executables.json" \
         _malf_store_key_first "$name" "$prefixes" "$store" "$scratch" "$scratch/$name.log" "$path"; then
         echo "malf store-create: the key of $name could not be computed before its create (above, or $scratch/$name.log)" >&2
+        _malf_quote_log "$scratch/$name.log" "$name (its key before the create)"
         _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
         return "$_MALF_STEP_UNRECORDED"
     fi
@@ -5581,6 +5662,7 @@ _malf_store_create_in() {   # <name> <path> <store> <scratch> <prefixes> <step h
     if ! CONAN_HOME="$step_home" _malf_store_create_step "$name" "$path" "$prefixes" "$scratch/$name.graph.json" \
             "$scratch/$name.log" "$_MALF_TEST_FOLDER"; then
         echo "malf store-create: conan create $name failed — $scratch/$name.log" >&2
+        _malf_quote_log "$scratch/$name.log" "$name (its create)"
         return "$_MALF_STEP_FAILED"
     fi
     if ! MALF_STEP_EXECUTABLES="$scratch/$name.executables.json" MALF_STEP_KEY_FIRST="$scratch/$name.key-first.json" \
@@ -5759,7 +5841,8 @@ _malf_store_third_party() {   # <n> <name> <path> <prefixes> <store> <scratch> <
     _malf_store_opened "$index" install "$name:third-party" "$path" "$run_at" "$step_at"
     for round in 1 2 3 4 5 6 7 8 9; do
         if ! conan graph info "$path" "${common[@]}" "${builds[@]}" --format=json > "$graph" 2>> "$log"; then
-            _MALF_THIRD_PARTY_CAUSE="resolving its graph failed ($log)"; rc=1; break
+            _MALF_THIRD_PARTY_CAUSE="resolving its graph failed ($log)"; rc=1
+            _malf_quote_log "$log" "$name:third-party (its resolve)"; break
         fi
         if ! planned="$(python3 "$MALF_DIR/artefact_store.py" third-party-plan "$store" "$CONAN_HOME" \
                 "$graph" "$prefixes" "$MALF_PROFILE_NAME")"; then
@@ -5811,7 +5894,8 @@ _malf_store_third_party_in() {   # <name> <path> <prefixes> <store> <scratch> <g
     if ! CONAN_HOME="$phase_home" conan install "$path" "${common[@]}" "${builds[@]}" \
             --output-folder="$scratch/$name.third-party" \
             --format=json > "$scratch/$name.third-party.install.json" 2>> "$log"; then
-        _MALF_THIRD_PARTY_CAUSE="building ${builds[*]#--build=} failed ($log)"; return 1
+        _MALF_THIRD_PARTY_CAUSE="building ${builds[*]#--build=} failed ($log)"
+        _malf_quote_log "$log" "$name:third-party (its install)"; return 1
     fi
     CONAN_HOME="$phase_home" python3 "$MALF_DIR/artefact_store.py" third-party-step "$store" "$phase_home" \
         "$scratch/$name.third-party.install.json" "$prefixes" "$MALF_PROFILE_NAME" "$MALF_DIR" \
@@ -5900,7 +5984,8 @@ _malf_store_build_one() {   # <name> <path> <rev> <store> <scratch> <prefixes>
         || { echo "malf store-build: git archive $rev -- $prefix failed in $repo" >&2; return 1; }
     echo "--- store-build: conan build $name ($repo at $(git -C "$repo" rev-parse --short=12 "$rev"):$prefix) ---"
     if ! _malf_store_key_first "$name" "$prefixes" "$store" "$scratch" "$scratch/$name.log" "$scratch/$name/$prefix" "$tree"; then
-        echo "malf store-build: the key of $name could not be computed before its build (above, or $scratch/$name.log)" >&2; return 1
+        echo "malf store-build: the key of $name could not be computed before its build (above, or $scratch/$name.log)" >&2
+        _malf_quote_log "$scratch/$name.log" "$name (its key before the build)"; return 1
     fi
     step_home="$(_malf_step_home "$scratch" "$name")" || return 1
     local walk_home="$CONAN_HOME"
@@ -5921,7 +6006,8 @@ _malf_store_build_in() {   # <name> <prefix> <tree> <store> <scratch> <prefixes>
     if ! conan build "$scratch/$name/$prefix" "${_MALF_WRITER_PROFILES[@]}" \
             -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${_MALF_SHIP_LOCK[@]}" --build=never \
             --format=json > "$scratch/$name.graph.json" 2> "$scratch/$name.log"; then
-        echo "malf store-build: conan build $name failed — $scratch/$name.log" >&2; return 1
+        echo "malf store-build: conan build $name failed — $scratch/$name.log" >&2
+        _malf_quote_log "$scratch/$name.log" "$name (its build)"; return 1
     fi
     left="$(conan list "$name/*" --format=json | python3 -c 'import json, sys; print(sum(len(v) for v in json.load(sys.stdin).get("Local Cache", {}).values()))')"
     if [[ "$left" != "0" ]]; then

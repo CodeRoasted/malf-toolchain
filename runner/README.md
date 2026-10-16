@@ -14,8 +14,8 @@ A self-hosted runner must **never** run a **public / fork-exposed** repo: a fork
 execute attacker-controlled code on this box (RCE on your network). On GitHub Free an
 org runner is visible to *all* repos, so this is enforced at the **workflow layer**:
 
-- **Private** repos use `runs-on: ${{ vars.CI_RUNS_ON || 'ubuntu-latest' }}`.
-- **Public** repos stay hard-pinned to `ubuntu-latest`. Never add the `malf-local`
+- **Private** repos use `runs-on: ${{ vars.CI_RUNS_ON || 'ubuntu-24.04' }}`.
+- **Public** repos stay hard-pinned to `ubuntu-24.04`. Never add the `malf-local`
   label to a public repo's workflow.
 
 ## Isolation: no job reads a desk credential (ROADMAP N214)
@@ -198,7 +198,7 @@ admits. What it adds over the ci instance, and why:
 `coderoast-server`, `insight-eidos` and `logcraft`, and no other: `insight-canon`,
 `insight-metalog` and `coderoast-ipc` are PUBLIC repositories, which the group refuses
 (`allows_public_repositories: false`) and the safety rule above forbids, and every one of their
-release jobs runs on GitHub-hosted `ubuntu-latest` — a fresh machine per job, never this box.
+release jobs runs on GitHub-hosted `ubuntu-24.04` — a fresh machine per job, never this box.
 
 **Workflow restriction: available, and not usable here (measured 2026-09-29).** The organisation's
 plan accepts `restricted_to_workflows` (`workflow_restrictions_read_only: false`), but every entry must
@@ -306,7 +306,7 @@ gh variable set CI_RUNS_ON --org CodeRoasted --body malf-local --visibility priv
 gh variable delete CI_RUNS_ON --org CodeRoasted
 ```
 
-When `CI_RUNS_ON` is unset, `runs-on` falls back to `ubuntu-latest` — so the default is
+When `CI_RUNS_ON` is unset, `runs-on` falls back to `ubuntu-24.04` — so the default is
 unchanged and nothing breaks if the runner is offline. Set it only while the runner is
 running (jobs queue until a matching runner is online).
 

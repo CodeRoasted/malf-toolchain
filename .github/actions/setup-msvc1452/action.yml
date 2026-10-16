@@ -1,20 +1,31 @@
 name: Setup MSVC 14.52 (Preview)
 description: >
-  Install MSVC >= 14.52.36418 (the C++23-modules fix floor) on a Windows runner and
-  activate its dev environment (cl.exe / link.exe + INCLUDE/LIB on PATH for the rest of
+  Install MSVC toolset 14.52, at build >= 14.52.36418 (the C++23-modules fix floor), on a Windows
+  runner and activate its dev environment (cl.exe / link.exe + INCLUDE/LIB on PATH for the rest of
   the job). The stock runner ships only released toolsets (14.51 and older), all bugged;
   14.52 is Preview-only (GA ~Nov 2026), so we install it from the VS 2026 Insiders channel
   via the version-agnostic VC.Preview.Tools component (there is no version-pinned
   Component.VC.14.52.*). Anonymous, no secrets — fetches from Microsoft each run.
 
-  NOTE — drift: the Insiders Preview floats (weekly). This action pins a >= floor, not an
-  exact toolset. That floor is what a determinism claim rests on: the toolchain is PINNED and
-  FETCHABLE here, so the claim does not wait on 14.52 GA — GA only widens who can reproduce it
-  without the Preview step.
+  EXACTLY 14.52, NEVER THE NEWEST (RUL-154, the Founder, 2026-10-15). The Insiders Preview
+  floats weekly, and the day it ships 14.53 a newest-wins selection would move the leg's compiler
+  with no diff anywhere. So the toolset is a pinned major.minor, activated with
+  `-vcvars_ver=<toolset>` and verified equal after activation; any other installed toolset is
+  never activated. A channel that stops serving 14.52 makes this action FAIL LOUDLY, naming the
+  toolsets it did install, and the pin is bumped on purpose: this input, setup-proof-msvc's
+  equality check and profiles/windows-msvc-release's `tools.microsoft:msvc_update`, held equal by
+  tests/test_proof_bricks.sh. Within 14.52 the build floats above the fix floor (vcvars takes the
+  highest 14.52.x installed). That pin is what a determinism claim rests on: the toolchain is
+  PINNED and FETCHABLE here, so the claim does not wait on 14.52 GA — GA only widens who can
+  reproduce it without the Preview step.
 
 inputs:
-  min-version:
-    description: 'Minimum acceptable MSVC toolset version (the fix floor)'
+  toolset:
+    description: 'The exact MSVC toolset major.minor activated; any other is refused'
+    required: false
+    default: '14.52'
+  min-build:
+    description: 'The lowest acceptable build of that toolset (the fix floor)'
     required: false
     default: '14.52.36418'
   arch:
@@ -24,13 +35,13 @@ inputs:
 
 outputs:
   toolset-version:
-    description: 'The gathered MSVC toolset version (e.g. 14.52.36502)'
+    description: 'The activated MSVC toolset version, VCToolsVersion (e.g. 14.52.36502)'
     value: ${{ steps.gather.outputs.toolset-version }}
   install-path:
-    description: 'The VS Build Tools install path that carries the gathered toolset'
+    description: 'The VS Build Tools install path that carries the activated toolset'
     value: ${{ steps.gather.outputs.install-path }}
   vcvars-path:
-    description: 'Absolute path to the vcvarsall.bat that activates the gathered toolset'
+    description: 'Absolute path to the vcvarsall.bat that activates the toolset'
     value: ${{ steps.gather.outputs.vcvars-path }}
 
 runs:
@@ -45,17 +56,21 @@ runs:
         # AND a fresh UAC elevation every run). On a hosted runner LOCALAPPDATA is per-job, so it still
         # installs each run as before.
         $installPath = Join-Path $env:LOCALAPPDATA 'malf-msvc1452'
-        $floor = [version]'${{ inputs.min-version }}'
+        $toolset = '${{ inputs.toolset }}'
+        $floor = [version]'${{ inputs.min-build }}'
 
-        # Idempotent skip: if a toolset >= the fix floor is already installed at $installPath, reuse it
-        # — no re-download, no installer, no UAC. The VS bootstrapper self-elevates, so SKIPPING the
-        # install is exactly what avoids the elevation popup on a persistent (self-hosted) runner.
+        # Idempotent skip: if a $toolset.x build >= the fix floor is already installed at $installPath,
+        # reuse it — no re-download, no installer, no UAC. The VS bootstrapper self-elevates, so
+        # SKIPPING the install is exactly what avoids the elevation popup on a persistent (self-hosted)
+        # runner. A NEWER toolset there does not count: only the pinned one does.
         $have = $false
         $msvcProbe = Join-Path $installPath 'VC\Tools\MSVC'
         if (Test-Path $msvcProbe) {
-          $existing = Get-ChildItem $msvcProbe -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending
-          if ($existing -and [version]$existing[0].Name -ge $floor) {
-            Write-Host "MSVC $($existing[0].Name) already at $installPath (>= $floor) — skipping VS Build Tools install (idempotent skip)"
+          $existing = Get-ChildItem $msvcProbe -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name.StartsWith("$toolset.") -and [version]$_.Name -ge $floor } |
+            Sort-Object { [version]$_.Name } -Descending
+          if ($existing) {
+            Write-Host "MSVC $($existing[0].Name) already at $installPath ($toolset, >= $floor) — skipping VS Build Tools install (idempotent skip)"
             $have = $true
           }
         }
@@ -87,7 +102,7 @@ runs:
             # The RELEASED grouped toolset lays down the version-agnostic VC\Auxiliary\Build\vcvars*.bat
             # infrastructure + the Windows SDK base; the Preview component only adds the 14.52 toolset
             # binaries (no scripts). Install BOTH: scripts from released, 14.52 from Preview. vcvars
-            # -vcvars_ver=14.52 then selects the Preview toolset for compilation.
+            # -vcvars_ver=<toolset> then selects the Preview toolset for compilation.
             '--add', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
             '--add', 'Microsoft.VisualStudio.Component.VC.Preview.Tools.x86.x64',
             # A Windows SDK is mandatory: vcvars refuses to activate (and the linker can't resolve
@@ -108,26 +123,30 @@ runs:
         }
         "MSVC1452_INSTALL=$installPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding ascii
 
-    - name: Verify the floor + activate the dev environment
+    - name: Verify the pinned toolset + activate the dev environment
       id: gather
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
         $installPath = $env:MSVC1452_INSTALL
+        $toolset = '${{ inputs.toolset }}'
+        $floor   = [version]'${{ inputs.min-build }}'
+        if (-not "$floor".StartsWith("$toolset.")) { throw "min-build $floor is not a build of toolset $toolset" }
 
-        # VERDICT — the gathered toolset must clear the fix floor (fail loud on a silent no-op
-        # to the released 14.51, runner-images #14101).
+        # VERDICT — a build of EXACTLY the pinned toolset, at or above the fix floor, must be installed.
+        # Fails loud on a silent no-op to the released 14.51 (runner-images #14101) AND on the channel
+        # moving past the pin: a 14.53 the Insiders channel serves instead is never activated.
         $msvc = Join-Path $installPath 'VC\Tools\MSVC'
         if (-not (Test-Path $msvc)) { throw "no MSVC toolset dir under $msvc — gather produced nothing" }
-        $sets = Get-ChildItem $msvc -Directory | Sort-Object Name -Descending
+        $sets = Get-ChildItem $msvc -Directory | Sort-Object { [version]$_.Name } -Descending
         Write-Host "gathered toolsets: $($sets.Name -join ', ')"
-        $newest = [version]$sets[0].Name
-        $floor  = [version]'${{ inputs.min-version }}'
-        if ($newest -lt $floor) {
-          throw "GATHER FAILED: newest toolset $newest < required $floor. The Preview component did not install (silent no-op to released 14.51) or 14.52 left the Insiders catalog."
+        $pinned = $sets | Where-Object { $_.Name.StartsWith("$toolset.") -and [version]$_.Name -ge $floor }
+        if (-not $pinned) {
+          throw "GATHER FAILED: no toolset $toolset build >= $floor under $msvc (installed: $($sets.Name -join ', ')). Either the Preview component did not install (silent no-op to the released toolset) or the VS Insiders channel no longer serves $toolset. The MSVC leg activates exactly $toolset and no other (RUL-154): bump the pin on purpose (this action's toolset and min-build, setup-proof-msvc's equality check, profiles/windows-msvc-release's tools.microsoft:msvc_update), never let it follow the channel."
         }
-        $toolset = $sets[0].Name
-        Write-Host "GATHER OK: $toolset >= $floor"
+        $others = $sets | Where-Object { -not $_.Name.StartsWith("$toolset.") }
+        if ($others) { Write-Host "installed but never activated (not $toolset): $($others.Name -join ', ')" }
+        Write-Host "GATHER OK: $($pinned[0].Name) is toolset $toolset, >= $floor"
 
         # Locate vcvarsall.bat (the custom install path is not assumed). vcvarsall takes the target
         # architecture as its first positional arg — unlike vcvars64.bat, which is the x64-only
@@ -143,7 +162,7 @@ runs:
         $vcvarsPath = $vcvars.FullName
         Write-Host "vcvarsall.bat: $vcvarsPath"
 
-        # ACTIVATE — run vcvars for the gathered toolset and export its env delta to the job
+        # ACTIVATE — run vcvars for the pinned toolset and export its env delta to the job
         # (GITHUB_ENV for vars, GITHUB_PATH for the new PATH entries), so cl.exe / Ninja / conan
         # in every subsequent step use 14.52. (Same mechanism as ilammy/msvc-dev-cmd, but for our
         # freshly-installed side-by-side toolset rather than a pre-installed instance.)
@@ -151,12 +170,12 @@ runs:
         Get-ChildItem Env: | ForEach-Object { $before[$_.Name] = $_.Value }
 
         # Run vcvars (output captured to a log so any failure is diagnosable) and dump the resulting
-        # env to a separate file — '&' (not '&&') so `set` runs even if vcvars warns. Use the
-        # major.minor toolset (14.52); vcvars resolves it to the installed 14.52.x (not the 14.51).
-        $mm = ($toolset -split '\.')[0..1] -join '.'
+        # env to a separate file — '&' (not '&&') so `set` runs even if vcvars warns. The pinned
+        # major.minor, never one read off the install: vcvars resolves it to the highest installed
+        # 14.52.x, never a 14.51 or a 14.53 beside it.
         $out  = Join-Path $env:RUNNER_TEMP 'vcvars_out.txt'
         $dump = Join-Path $env:RUNNER_TEMP 'msvc_env.txt'
-        cmd /c "call `"$vcvarsPath`" ${{ inputs.arch }} -vcvars_ver=$mm > `"$out`" 2>&1 & set > `"$dump`""
+        cmd /c "call `"$vcvarsPath`" ${{ inputs.arch }} -vcvars_ver=$toolset > `"$out`" 2>&1 & set > `"$dump`""
         Write-Host "=== vcvars output ==="
         Get-Content $out -ErrorAction SilentlyContinue
         $captured = @{}
@@ -164,9 +183,13 @@ runs:
           if ($_ -match '^([^=]+)=(.*)$') { $captured[$matches[1]] = $matches[2] }
         }
         if (-not $captured.ContainsKey('VCToolsVersion')) {
-          throw "vcvars did not activate (no VCToolsVersion) — toolset=$toolset, vcvars_ver=$mm (see vcvars output above)"
+          throw "vcvars did not activate (no VCToolsVersion) — vcvars_ver=$toolset (see vcvars output above)"
         }
-        Write-Host "activated VCToolsVersion=$($captured['VCToolsVersion'])"
+        $active = $captured['VCToolsVersion']
+        if (-not $active.StartsWith("$toolset.") -or [version]$active -lt $floor) {
+          throw "vcvars activated VCToolsVersion=$active, not a toolset $toolset build >= $floor"
+        }
+        Write-Host "activated VCToolsVersion=$active"
 
         foreach ($name in $captured.Keys) {
           if ($name -ieq 'Path') { continue }
@@ -179,6 +202,6 @@ runs:
           $_ | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
         }
 
-        "toolset-version=$toolset" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+        "toolset-version=$active" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
         "install-path=$installPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
         "vcvars-path=$vcvarsPath"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii

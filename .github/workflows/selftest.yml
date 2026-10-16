@@ -11,7 +11,7 @@ name: Selftest
 # it writes; getting those wrong is silent, not loud). See tests/test_malf.sh for why each
 # check earns its place.
 #
-# Hosted `ubuntu-latest`: this repo is PUBLIC, and the job needs no secret and no build — bash,
+# Hosted `ubuntu-24.04`: this repo is PUBLIC, and the job needs no secret and no build — bash,
 # python3 and a hash-locked conan (the one network fetch), and runs in about a minute.
 
 on:
@@ -30,7 +30,7 @@ concurrency:
 
 jobs:
   selftest:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -59,7 +59,7 @@ jobs:
         # Its own step until tests/test_malf.sh carries it.
         run: bash tests/test_setup_build_env.sh
 
-      - name: the proof bricks register malf's recipe overlay first, the MSVC spelling held equal to malf's (DN-142.D17 (8))
+      - name: the proof bricks register malf's recipe overlay first, the MSVC spelling held equal to malf's (DN-142.D17 (8)), and pin the MSVC toolset exactly (RUL-154)
         # Its own step until tests/test_malf.sh carries it.
         run: bash tests/test_proof_bricks.sh
 

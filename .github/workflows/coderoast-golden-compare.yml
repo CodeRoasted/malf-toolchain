@@ -29,10 +29,10 @@ on:
         required: false
         default: ''
       runs-on:
-        description: 'Runner label. PUBLIC callers MUST omit it (hosted ubuntu-latest) — a self-hosted runner reachable from a fork PR is an RCE.'
+        description: 'Runner label. PUBLIC callers MUST omit it (hosted ubuntu-24.04) — a self-hosted runner reachable from a fork PR is an RCE.'
         type: string
         required: false
-        default: 'ubuntu-latest'
+        default: 'ubuntu-24.04'
 
 jobs:
   compare:

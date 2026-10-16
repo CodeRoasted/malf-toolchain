@@ -35,16 +35,17 @@ name: CodeRoast publish
 # other commands are the publication itself. With no checkout there is no git remote, so every `gh`
 # that acts on a repository names it with `--repo` (coderoast-security run 38803900222 died
 # `fatal: not a git repository` at the v1.10.7 tag without it; workflow_source's repository arm). `--verify-tag` keeps the Release command from ever
-# minting a tag; the tag is the Founder's act (ADR-2.D1).
+# minting a tag; the tag is the Founder's act (ADR-2.D1). A Release that already exists (a re-cut
+# force-moved its tag, which re-fires this workflow) is re-published, never re-created: see the step.
 
 on:
   workflow_call:
     inputs:
       runs-on:
-        description: 'Runner label. Package callers omit it (hosted ubuntu-latest): the job reads a registry and the GitHub API, and needs no cache, no slot and no secret beyond its own token.'
+        description: 'Runner label. Package callers omit it (hosted ubuntu-24.04): the job reads a registry and the GitHub API, and needs no cache, no slot and no secret beyond its own token.'
         type: string
         required: false
-        default: 'ubuntu-latest'
+        default: 'ubuntu-24.04'
       record-sha256:
         description: 'The digest of the step-0 record the caller''s attest job attested (its `record-sha256` output).'
         type: string
@@ -78,7 +79,13 @@ jobs:
           python3 .malf/store_publish.py stage "${GITHUB_REPOSITORY#*/}" "$VISIBILITY" "$RECORD" \
             .malf/keys/store-writer.allowed_signers "$RUNNER_TEMP/assets"
 
-      - name: Create the Release at the existing tag and attach the staged assets
+      - name: Create the Release at the existing tag, or re-publish the one a moved tag left, and attach the staged assets
+        # A RE-CUT FORCE-MOVES THE TAG (ADR-2.D1) AND THE MOVE RE-FIRES THIS WORKFLOW over the Release a
+        # previous run published, so `create` would fail "already exists". An existing Release is
+        # re-published instead: its notes name the new record, the staged files replace their namesakes
+        # (`--clobber`), every asset the new slice does not list is removed (store_publish.py
+        # stale-assets), and a draft (a deleted-and-recreated tag) is published. The read-back below
+        # then holds it to the new slice, both ways, exactly as after a create.
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
@@ -86,9 +93,20 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::tag '$TAG' is not vMAJOR.MINOR.PATCH"; exit 1; }
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" \
-            --notes "Published from the CodeRoast store by digest: the bytes step 0 built and judged in the run whose record has sha256 $RECORD. The attached slice and its signature list every asset's digest." \
-            "$RUNNER_TEMP"/assets/*
+          notes="Published from the CodeRoast store by digest: the bytes step 0 built and judged in the run whose record has sha256 $RECORD. The attached slice and its signature list every asset's digest."
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets > "$RUNNER_TEMP/existing.json"; then
+            echo "the Release $TAG exists (a moved tag re-fired it): re-publishing it from record $RECORD"
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes "$notes" --draft=false
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "$RUNNER_TEMP"/assets/*
+            python3 .malf/store_publish.py stale-assets "$RUNNER_TEMP/assets" "$RUNNER_TEMP/existing.json" > "$RUNNER_TEMP/stale.txt"
+            while IFS= read -r name; do
+              echo "removing $name: the slice of record $RECORD does not list it"
+              gh release delete-asset "$TAG" "$name" --repo "$GITHUB_REPOSITORY" --yes
+            done < "$RUNNER_TEMP/stale.txt"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --notes "$notes" \
+              "$RUNNER_TEMP"/assets/*
+          fi
 
       - name: Read the Release back — it holds exactly the slice's assets, both ways (GATING)
         # DN-142.D24 (3): a hand-edited workflow that attached one more file would otherwise drift
@@ -140,9 +158,21 @@ jobs:
               kind=MISSING
             fi
             [ "$kind" = "tag" ] || { echo "::error::refs/tags/$tag on $repo is '$kind', not an annotated tag (ADR-2.D1)"; exit 1; }
-            gh release create "$tag" --repo "$repo" --verify-tag --latest=false --title "$tag" \
-              --notes "Assets of $OWNER, published from the CodeRoast store by digest: the bytes step 0 judged in the run whose record has sha256 $RECORD. The attached destination slice and its signature list every asset's digest." \
-              "$RUNNER_TEMP/destinations/$destination"/*
+            notes="Assets of $OWNER, published from the CodeRoast store by digest: the bytes step 0 judged in the run whose record has sha256 $RECORD. The attached destination slice and its signature list every asset's digest."
+            if gh release view "$tag" --repo "$repo" --json assets > "$RUNNER_TEMP/destination-existing.json"; then
+              echo "the destination Release $tag on $repo exists (the owner's moved tag re-fired it): re-publishing it"
+              gh release edit "$tag" --repo "$repo" --title "$tag" --notes "$notes" --draft=false
+              gh release upload "$tag" --repo "$repo" --clobber "$RUNNER_TEMP/destinations/$destination"/*
+              python3 .malf/store_publish.py stale-assets "$RUNNER_TEMP/destinations/$destination" \
+                "$RUNNER_TEMP/destination-existing.json" > "$RUNNER_TEMP/destination-stale.txt"
+              while IFS= read -r name; do
+                echo "removing $name from $repo $tag: the destination slice does not list it"
+                gh release delete-asset "$tag" "$name" --repo "$repo" --yes
+              done < "$RUNNER_TEMP/destination-stale.txt"
+            else
+              gh release create "$tag" --repo "$repo" --verify-tag --latest=false --title "$tag" --notes "$notes" \
+                "$RUNNER_TEMP/destinations/$destination"/*
+            fi
             gh release view "$tag" --repo "$repo" --json assets > "$RUNNER_TEMP/destination-release.json"
             gh release list --repo "$repo" --limit 1000 --json tagName,isLatest > "$RUNNER_TEMP/destination-releases.json"
             python3 .malf/store_publish.py check-destination "$RUNNER_TEMP/destinations/$destination" \

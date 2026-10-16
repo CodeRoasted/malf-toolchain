@@ -34,10 +34,10 @@ on:
         type: string
         required: true
       runs-on:
-        description: 'Runner label. Callers omit it (hosted ubuntu-latest): the job reads a registry and the GitHub API.'
+        description: 'Runner label. Callers omit it (hosted ubuntu-24.04): the job reads a registry and the GitHub API.'
         type: string
         required: false
-        default: 'ubuntu-latest'
+        default: 'ubuntu-24.04'
 
 jobs:
   publish-image:

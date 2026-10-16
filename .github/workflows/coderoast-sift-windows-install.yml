@@ -21,10 +21,10 @@ on:
   workflow_call:
     inputs:
       runs-on:
-        description: 'The Windows runner. Default hosted windows-latest. PUBLIC callers MUST omit it; a PRIVATE caller passes its WINDOWS_RUNNER switch.'
+        description: 'The Windows runner. Default hosted windows-2025-vs2026. PUBLIC callers MUST omit it; a PRIVATE caller passes its WINDOWS_RUNNER switch.'
         type: string
         required: false
-        default: 'windows-latest'
+        default: 'windows-2025-vs2026'
 
 permissions:
   contents: read
