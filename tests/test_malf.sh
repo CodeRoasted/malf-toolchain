@@ -935,7 +935,7 @@ check "the lint child's declared cap is 1.75 GiB, and on an idle 16-core machine
 check "beside a build holding 7.8 GiB (12.2 GiB available) the lint gets 5 jobs" \
       "5" "$(_malf_width 16 12792627 "$MALF_FANOUT_RESERVE_KB" "$MALF_LINT_MEM_LIMIT_KB")"
 check "the run prints its width's derivation, the four operands and the width" \
-      "1" "$(grep -cE '^malf lint: -j[0-9]+ = (max\(1, min\([0-9]+ cores, floor\(\(MemAvailable [0-9]+ MiB - reserve 2048 MiB\) / [0-9]+ MiB a job\)\)\)|[0-9]+ cores; MemAvailable is not reported)' <<< "$lk_cost_out")"
+      "1" "$(grep -cE '^malf lint: -j[0-9]+ = (max\(1, min\([0-9]+ cores, floor\(\(memory [0-9]+ MiB - reserve 2048 MiB\) / [0-9]+ MiB a job\)\)\); memory = min\(MemAvailable [0-9]+ MiB - other seats. unmet memory\.min [0-9]+ MiB = [0-9]+ MiB.*\)|[0-9]+ cores; neither MemAvailable nor a cgroup memory.max is reported)' <<< "$lk_cost_out")"
 lk_ul_out="$(cd "$lk_repo/core" && PATH="$lk_bin:$PATH" LK_TIDY_LOG="$lk_tmp/tidy.ul.log" \
     LK_TIDY_ULIMIT_LOG="$lk_tmp/ulimit.log" MALF_LINT_MEM_LIMIT_KB=3000000 MALF_PROFILE_NAME="" bash "$MALF_BIN" lint --console 2>&1)"
 check "each child runs under the address-space cap the width counted it at (MALF_LINT_MEM_LIMIT_KB)" \
@@ -2651,29 +2651,80 @@ check "the slot is deleted only from inside cmd_slot, and it is deleted somewher
 rm -rf "$sl_tmp"
 echo
 
-echo "[7r2] the slot's DEFAULT path is a machine fact: the shared root when it exists, else TMPDIR"
+echo "[7r2] one slot per SEAT: the default path is the account's own state, and status/acquire print the seat"
 
-# On the box where the desk and the self-hosted runner are two accounts, /tmp cannot hold a slot
-# both can reclaim (sticky bit, fs.protected_regular=2), so malf switches to a shared root whose
-# EXISTENCE is the switch. The arms pin the three resolutions; the default path is the one almost
-# every invocation takes and the one nobody passes a flag to, so it is pinned rather than trusted.
-# Every arm steers BOTH candidates into scratch — the shared root through
-# MALF_BUILD_SLOT_SHARED_ROOT, the fallback through TMPDIR — so no arm reads or truncates a live
-# lane's slot or mutex on the developer's own box. What cannot run here is the cross-account half
-# (two uids and a default ACL need root); malf/runner/isolate-runner-wsl.sh proves that on the box.
+# Seat and account are one-to-one, and the seats share no build state, so each seat's slot lives in
+# its own account's state (DN-119.D9 (3)): two HOMEs are two slots, neither can open the other's,
+# and one seat holding its slot leaves the other's FREE. Every arm steers HOME and XDG_STATE_HOME
+# into scratch, so no arm reads or truncates the live desk's slot or mutex.
 sd_tmp="$(mktemp -d)"
-mkdir "$sd_tmp/shared" "$sd_tmp/tmp"
-sd_dir() {   # <shared root> [MALF_BUILD_SLOT_DIR] -> the dir `status` reports
-    env -u MALF_BUILD_SLOT_DIR TMPDIR="$sd_tmp/tmp" MALF_BUILD_SLOT_SHARED_ROOT="$1" \
-        ${2:+MALF_BUILD_SLOT_DIR="$2"} bash "$MALF_BIN" slot status 2>&1 \
-        | sed -n 's/^malf slot: dir //p'
+mkdir -p "$sd_tmp/seat-a" "$sd_tmp/seat-b" "$sd_tmp/xdg" "$sd_tmp/var-lib-coderoast-build"
+sd_status() {   # <HOME> [XDG_STATE_HOME] -> `malf slot status`, the slot path steered by them alone
+    env -u MALF_BUILD_SLOT_DIR -u XDG_STATE_HOME HOME="$1" ${2:+XDG_STATE_HOME="$2"} \
+        MALF_BUILD_SLOT_SHARED_ROOT="$sd_tmp/var-lib-coderoast-build" \
+        bash "$MALF_BIN" slot status 2>&1
 }
-check "shared root present, nothing set -> the slot lives under the shared root" \
-      "$sd_tmp/shared/slot" "$(sd_dir "$sd_tmp/shared")"
-check "shared root absent -> the slot falls back to \${TMPDIR}/coderoast-build-slot" \
-      "$sd_tmp/tmp/coderoast-build-slot" "$(sd_dir "$sd_tmp/absent")"
-check "MALF_BUILD_SLOT_DIR set -> it wins over a present shared root" \
-      "$sd_tmp/explicit" "$(sd_dir "$sd_tmp/shared" "$sd_tmp/explicit")"
+sd_dir() { sd_status "$@" | sed -n 's/^malf slot: dir //p'; }
+check "no XDG_STATE_HOME -> the slot is \$HOME/.local/state/coderoast-build/slot" \
+      "$sd_tmp/seat-a/.local/state/coderoast-build/slot" "$(sd_dir "$sd_tmp/seat-a")"
+check "two HOMEs are two slots (two seats never share one)" \
+      "$sd_tmp/seat-b/.local/state/coderoast-build/slot" "$(sd_dir "$sd_tmp/seat-b")"
+check "XDG_STATE_HOME set -> the slot is under it" \
+      "$sd_tmp/xdg/coderoast-build/slot" "$(sd_dir "$sd_tmp/seat-a" "$sd_tmp/xdg")"
+check "the retired shared root is never read, even where a directory by that name exists" \
+      "$sd_tmp/seat-a/.local/state/coderoast-build/slot" "$(sd_dir "$sd_tmp/seat-a")"
+check "MALF_BUILD_SLOT_DIR set -> it wins over the account's state" \
+      "$sd_tmp/explicit" \
+      "$(env -u XDG_STATE_HOME HOME="$sd_tmp/seat-a" MALF_BUILD_SLOT_DIR="$sd_tmp/explicit" \
+           bash "$MALF_BIN" slot status 2>&1 | sed -n 's/^malf slot: dir //p')"
+sd_acq="$(env -u MALF_BUILD_SLOT_DIR -u XDG_STATE_HOME HOME="$sd_tmp/seat-a" MALF_BUILD_SLOT_ANCHOR=$$ \
+            bash "$MALF_BIN" slot acquire --label seat-a 2>&1)"; sd_acq_rc=$?
+sd_tok="$(sed -n 's/^malf slot: release with:  malf slot release --token \([0-9a-f]\{32\}\)$/\1/p' <<< "$sd_acq")"
+check "seat A acquires its own slot, and the directories it creates are mode 0700" \
+      "rc=0 700 700" \
+      "rc=$sd_acq_rc $(stat -c %a "$sd_tmp/seat-a/.local/state/coderoast-build" 2>&1) $(stat -c %a "$sd_tmp/seat-a/.local/state" 2>&1)"
+sd_b_out="$(sd_status "$sd_tmp/seat-b")"; sd_b_rc=$?
+check "seat A holding its slot leaves seat B's FREE (exit 0): the seats exclude nothing of each other" \
+      "rc=0 free" "rc=$sd_b_rc $([[ "$sd_b_out" == *"FREE"* ]] && echo free || echo "GOT: $sd_b_out")"
+sd_a_out="$(sd_status "$sd_tmp/seat-a")"; sd_a_rc=$?
+check "seat A reads its own slot HELD (exit 1)" \
+      "rc=1 held" "rc=$sd_a_rc $([[ "$sd_a_out" == *"HELD by 'seat-a'"* ]] && echo held || echo "GOT: $sd_a_out")"
+# THE SEAT LINE: status and acquire print the top-level cgroup and its five readings, each as the
+# kernel prints it or `absent`, so a reader sees on which slice of the machine the slot lives.
+sd_seat_re='^malf slot: seat (/[^ ]*|unknown) .*$'
+sd_seat_full_re='^malf slot: seat /[^ ]* · cpuset\.cpus\.effective [^ ]+ · cpuset\.cpus\.partition [^ ]+ · memory\.max [^ ]+ · memory\.min [^ ]+ · memory\.swap\.max [^ ]+$|^malf slot: seat unknown — this process reports no cgroup v2 path$'
+check "status prints the seat line, right after the dir line, with all five readings" \
+      "1 seat" \
+      "$(grep -cE "$sd_seat_full_re" <<< "$sd_a_out") $(sed -n '2p' <<< "$sd_a_out" | grep -qE "$sd_seat_re" && echo seat || echo "GOT: $(sed -n '2p' <<< "$sd_a_out")")"
+check "acquire prints the seat line too" \
+      "1" "$(grep -cE "$sd_seat_full_re" <<< "$sd_acq")"
+sd_rel="$(env -u MALF_BUILD_SLOT_DIR -u XDG_STATE_HOME HOME="$sd_tmp/seat-a" \
+            bash "$MALF_BIN" slot release --token "$sd_tok" 2>&1)"; sd_rel_rc=$?
+check "seat A releases its slot with its token" \
+      "rc=0 released" "rc=$sd_rel_rc $([[ "$sd_rel" == *"RELEASED"* ]] && echo released || echo "GOT: $sd_rel")"
+# The seat line from a fixture cgroup tree: the reading is of the TOP-LEVEL cgroup (the seat), never
+# the leaf the process sits in.
+sd_cg="$sd_tmp/cgroup"
+mkdir -p "$sd_cg/seat_release.slice/malf-release.service"
+printf '10-15\n' > "$sd_cg/seat_release.slice/cpuset.cpus.effective"
+printf 'root\n' > "$sd_cg/seat_release.slice/cpuset.cpus.partition"
+printf '10737418240\n' > "$sd_cg/seat_release.slice/memory.max"
+printf '10737418240\n' > "$sd_cg/seat_release.slice/memory.min"
+printf '0\n' > "$sd_cg/seat_release.slice/memory.swap.max"
+printf 'max\n' > "$sd_cg/seat_release.slice/malf-release.service/memory.max"
+printf '0-15\n' > "$sd_cg/cpuset.cpus.effective"
+printf '0::/seat_release.slice/malf-release.service\n' > "$sd_tmp/pcg-release"
+printf '0::/\n' > "$sd_tmp/pcg-root"
+printf '12:memory:/legacy\n' > "$sd_tmp/pcg-v1"
+check "a process in the release seat reads the seat's own cgroup, all five values verbatim" \
+      "seat /seat_release.slice · cpuset.cpus.effective 10-15 · cpuset.cpus.partition root · memory.max 10737418240 · memory.min 10737418240 · memory.swap.max 0" \
+      "$(_malf_seat_line "$sd_cg" "$sd_tmp/pcg-release")"
+check "the root cgroup carries no memory files: each one reads absent" \
+      "seat / · cpuset.cpus.effective 0-15 · cpuset.cpus.partition absent · memory.max absent · memory.min absent · memory.swap.max absent" \
+      "$(_malf_seat_line "$sd_cg" "$sd_tmp/pcg-root")"
+check "a process with no cgroup v2 line says so, never a guess" \
+      "seat unknown — this process reports no cgroup v2 path" \
+      "$(_malf_seat_line "$sd_cg" "$sd_tmp/pcg-v1")"
 rm -rf "$sd_tmp"
 echo
 
@@ -2707,11 +2758,93 @@ check "the memory operand is the MemAvailable line, never MemTotal or MemFree" \
 check "a meminfo without MemAvailable answers nothing, and says so by its exit code" \
       "rc=1 []" "rc=$(_malf_mem_available_kib "$wd_tmp/meminfo_old" >/dev/null; echo $?) [$(_malf_mem_available_kib "$wd_tmp/meminfo_old")]"
 check "the printed derivation carries the four operands and the width" \
-      "malf build: -j9 = max(1, min(16 cores, floor((MemAvailable 12492 MiB - reserve 2048 MiB) / 1126 MiB a job)))" \
+      "malf build: -j9 = max(1, min(16 cores, floor((memory 12492 MiB - reserve 2048 MiB) / 1126 MiB a job)))" \
       "$(_malf_width_line "malf build" 9 16 12792627 "$wd_reserve" "$wd_cap")"
-check "on a machine with no MemAvailable the derivation says the memory operand was not applied" \
-      "malf build: -j16 = 16 cores; MemAvailable is not reported here, so memory does not bound the width" \
+check "on a machine reporting neither memory term the derivation says the memory operand was not applied" \
+      "malf build: -j16 = 16 cores; neither MemAvailable nor a cgroup memory.max is reported here, so memory does not bound the width" \
       "$(_malf_width_line "malf build" 16 16 "" "$wd_reserve" "$wd_cap")"
+
+echo "[7s2] the memory operand is the SEAT's: min(MemAvailable - other seats' unmet memory.min, least cgroup memory.max - current + inactive_file)"
+
+# DN-119.D9 (1). Inside a seat the VM-wide MemAvailable plans for about twice a 10 GiB cap with no
+# swap, and every heavy build is OOM-killed; on the desk a build planned on memory a seat may
+# reclaim is the one the kernel takes back. Every arm reads a fixture cgroup tree and meminfo
+# (bytes in cgroup files, KiB in meminfo, KiB out), so the live machine's state reaches no arm.
+mb_tmp="$(mktemp -d)"; mb_cg="$mb_tmp/cgroup"; mb_gib=1073741824
+mb_set() {   # <cgroup path> <file> <value>
+    mkdir -p "$mb_cg$1"; printf '%s\n' "$3" > "$mb_cg$1/$2"
+}
+mb_stat() {   # <cgroup path> <inactive_file bytes>
+    mkdir -p "$mb_cg$1"; printf 'anon 1\nfile 2\ninactive_file %s\nactive_file 3\n' "$2" > "$mb_cg$1/memory.stat"
+}
+mb_run() {   # <meminfo> <proc cgroup line> -> "<KiB or empty>|<why>"
+    printf '%s\n' "$2" > "$mb_tmp/pcg"
+    _malf_mem_budget "$1" "$mb_cg" "$mb_tmp/pcg"
+    echo "${_MALF_MEM_KIB}|${_MALF_MEM_WHY}"
+}
+printf 'MemTotal:       24610264 kB\nMemAvailable:   %s kB\n' $(( 20 * wd_gib )) > "$mb_tmp/meminfo20"
+printf 'MemTotal:       24610264 kB\n' > "$mb_tmp/meminfo_none"
+# The box: a release seat guaranteed 10 GiB and holding 4, a ci seat with no guarantee, the desk in
+# init.scope with no cap.
+mb_set /seat_release.slice memory.min $(( 10 * mb_gib )); mb_set /seat_release.slice memory.current $(( 4 * mb_gib ))
+mb_set /seat_release.slice memory.max max
+mb_set /seat_ci.slice memory.min 0; mb_set /seat_ci.slice memory.current $(( 3 * mb_gib ))
+mb_set /seat_ci.slice memory.max $(( 5 * mb_gib )); mb_stat /seat_ci.slice 0
+mb_set /init.scope memory.max max; mb_set /init.scope memory.current $(( 9 * mb_gib ))
+check "the desk: MemAvailable 20 GiB minus the release seat's unmet guarantee (10 - 4 GiB) is 14 GiB" \
+      "$(( 14 * wd_gib ))|MemAvailable 20480 MiB - other seats' unmet memory.min 6144 MiB = 14336 MiB" \
+      "$(mb_run "$mb_tmp/meminfo20" '0::/init.scope')"
+check "the desk's width on 16 cores is then 10 jobs, not the 16 the VM-wide figure gives" \
+      "10" "$(_malf_width 16 $(( 14 * wd_gib )) "$wd_reserve" "$wd_cap")"
+# Inside the release seat: its own guarantee is never subtracted from its own budget; its cap binds.
+mb_set /seat_release.slice memory.max $(( 10 * mb_gib )); mb_set /seat_release.slice memory.current $(( 3 * mb_gib ))
+mb_stat /seat_release.slice $(( 1 * mb_gib ))
+mb_set /seat_release.slice/malf-release.service memory.max max
+check "inside the release seat the cap binds: 10 GiB max - 3 GiB current + 1 GiB inactive_file = 8 GiB" \
+      "$(( 8 * wd_gib ))|MemAvailable 20480 MiB - other seats' unmet memory.min 0 MiB = 20480 MiB, /seat_release.slice memory.max 10240 MiB - current 3072 MiB + inactive_file 1024 MiB = 8192 MiB" \
+      "$(mb_run "$mb_tmp/meminfo20" '0::/seat_release.slice/malf-release.service')"
+mb_set /seat_release.slice memory.max max
+check "a seat's OWN unmet memory.min is never subtracted from its own budget (only OTHER seats')" \
+      "$(( 20 * wd_gib ))" \
+      "$(mb_run "$mb_tmp/meminfo20" '0::/seat_release.slice/malf-release.service' | cut -d'|' -f1)"
+# The least of every capped ancestor, the leaf included.
+mb_set /seat_release.slice memory.max $(( 10 * mb_gib ))
+mb_set /seat_release.slice/malf-release.service memory.max $(( 6 * mb_gib ))
+mb_set /seat_release.slice/malf-release.service memory.current $(( 1 * mb_gib )); mb_stat /seat_release.slice/malf-release.service 0
+check "the least capped ancestor wins, and the derivation names it: the service's 6 - 1 GiB under the seat's 8" \
+      "$(( 5 * wd_gib ))|/seat_release.slice/malf-release.service memory.max 6144 MiB" \
+      "$(mb_run "$mb_tmp/meminfo20" '0::/seat_release.slice/malf-release.service' | sed 's/|.*, \(\/seat[^ ]* memory.max [0-9]* MiB\).*/|\1/')"
+# THE RED-FIRST COORDINATE OF DN-119.D9 R5, through the build's own width function: a 4 GiB cgroup on
+# 4 CPUs (the affinity, set by taskset) is 4 cores and 1 job, where the VM-wide reading gave 4 jobs.
+mb_set /scope.slice/run-x.scope memory.max $(( 4 * mb_gib )); mb_set /scope.slice/run-x.scope memory.current $(( 6 * 1048576 ))
+mb_stat /scope.slice/run-x.scope 0
+printf '0::/scope.slice/run-x.scope\n' > "$mb_tmp/pcg-scope"
+check "malf build's width line in a 4 GiB cgroup on 4 CPUs: 4 cores, 1 job, both memory terms named" \
+      "malf build: -j1 = max(1, min(4 cores, floor((memory 4090 MiB - reserve 2048 MiB) / 1126 MiB a job))); memory = min(MemAvailable 20480 MiB - other seats' unmet memory.min 7168 MiB = 13312 MiB, /scope.slice/run-x.scope memory.max 4096 MiB - current 6 MiB + inactive_file 0 MiB = 4090 MiB)" \
+      "$(env -u MALF_IS_SANITIZER taskset -c 0-3 bash -c 'MALF_SOURCE_ONLY=1 source "$1"; set +e; _malf_build_width "$2" "$3" "$4"; echo "$_MALF_BUILD_WIDTH_LINE"' _ \
+           "$MALF_BIN" "$mb_tmp/meminfo20" "$mb_cg" "$mb_tmp/pcg-scope" 2>&1)"
+# The least capped ancestor wins wherever it sits: here the seat (8 GiB) under a looser service (11).
+mb_set /seat_release.slice/malf-release.service memory.max $(( 12 * mb_gib ))
+check "a looser leaf under a tighter seat: the seat's 8 GiB binds, and the derivation names the seat" \
+      "$(( 8 * wd_gib ))|/seat_release.slice memory.max 10240 MiB" \
+      "$(mb_run "$mb_tmp/meminfo20" '0::/seat_release.slice/malf-release.service' | sed 's/|.*, \(\/seat[^ ]* memory.max [0-9]* MiB\).*/|\1/')"
+# A cgroup already past its cap leaves nothing, never a negative figure.
+mb_set /full.slice memory.max $(( 2 * mb_gib )); mb_set /full.slice memory.current $(( 3 * mb_gib )); mb_stat /full.slice 0
+check "a cgroup past its cap leaves 0 KiB (one job), never a negative figure" \
+      "0" "$(mb_run "$mb_tmp/meminfo20" '0::/full.slice' | cut -d'|' -f1)"
+check "no MemAvailable and no finite memory.max: no memory operand, and the width is the cores" \
+      "|" "$(mb_run "$mb_tmp/meminfo_none" '0::/init.scope')"
+check "no MemAvailable but a capped seat: the cap alone is the operand" \
+      "$(( 8 * wd_gib ))" \
+      "$(mb_set /seat_release.slice/malf-release.service memory.max max; mb_run "$mb_tmp/meminfo_none" '0::/seat_release.slice/malf-release.service' | cut -d'|' -f1)"
+rm -rf "$mb_tmp"
+# THE CORES ARE THE AFFINITY, which a seat's cpuset partition narrows; os.cpu_count() reads the
+# machine and says 16 inside a 6-CPU seat. A bench verdict's runner context records the count it
+# measured on, so it reads the affinity too. Guarded against vacuity: on a one-CPU machine both
+# readings agree and the arm would prove nothing.
+check "a bench verdict's runner context counts the CPUs this process may run on (taskset -c 0 -> 1), on a machine of more" \
+      "1 more" \
+      "$(taskset -c 0 python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import artefact_store; print(artefact_store.bench_runner()["cpus"])' "$MALF_ROOT" 2>&1) $( (( $(getconf _NPROCESSORS_ONLN) > 1 )) && echo more || echo "ONE CPU — the arm is vacuous here")"
 # THE CAP IS A MEASUREMENT AND IT AGES as translation units grow. A build whose largest process
 # peaked above the cap the width was derived from says so — a note, never a failure: a width
 # changes scheduling, never a verdict.
