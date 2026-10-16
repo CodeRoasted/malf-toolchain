@@ -397,8 +397,9 @@ def run_tests(conanfile) -> None:
 
     pre: called from `build()`, after `cmake.build()`
     post: under `tools.build:skip_test` nothing ran; otherwise no exported test source spells a
-        translation unit's own name, and the JUnit file
-        `<user.malf:test_results>/<name>/<package id>.xml` holds the run, or the build failed
+        translation unit's own name, the JUnit file `<user.malf:test_results>/<name>/<package id>.xml`
+        holds the run when the tree enabled testing, and a package `user.malf:bench` names ran its
+        benchmarks whether or not it enabled testing; or the build failed
     """
     from conan.errors import ConanException
 
@@ -416,7 +417,9 @@ def run_tests(conanfile) -> None:
                              "must run at least one test")
     package_id = conanfile.info.package_id()
     if not (Path(build_dir) / "CTestTestfile.cmake").is_file():
+        # note: a package with no test still runs its benchmarks; insight_canon_bench, test-less, stored no bench at step 0 run 38869897758
         conanfile.output.info(f"malf: {conanfile.name} enabled no testing, so no test runs")
+        run_benches(conanfile, build_dir, results, package_id)
         return
     try:
         listed = corpus_listing(build_dir)
