@@ -12,9 +12,12 @@ two seeds, and the entry names of each directory holding one of them:
                   resolving into malf.
 
 ONE GRAMMAR, ANCHORED, NEVER A BARE WORD. File `f` reaches tracked path `p` when
-  * `f` names `p` behind a malf-root anchor (`$MALF_DIR/`, `${MALF_TOOLCHAIN_DIR}/`) or behind the
-    file's own directory (a shell variable assigned `$(cd "$(dirname "${BASH_SOURCE[0]}")<rel>" &&
-    pwd)`, cmake's `${CMAKE_CURRENT_LIST_DIR}/`, Python's `Path(__file__).parent / "<name>"` and
+  * `f` names `p` behind a malf-root anchor (`$MALF_DIR/`, `${MALF_TOOLCHAIN_DIR}/`, the `path:` a
+    workflow's own step stages or checks malf out at) or behind the file's own directory (a shell
+    variable assigned `$(cd "$(dirname "${BASH_SOURCE[0]}")<rel>" && pwd)`, a composite action's
+    `${{ github.action_path }}/` and `$GITHUB_ACTION_PATH/`, a variable a step's `env:` binds to it
+    or a shell re-binds by `cd`, cmake's `${CMAKE_CURRENT_LIST_DIR}/`, Python's
+    `Path(__file__).parent / "<name>"` and
     `Path(__file__).with_name("<name>")`, a conan profile's `{{ profile_dir }}/`), `..` normalized and a
     path leaving malf's root reaching nothing;
   * `f` is Python and imports, at any depth of the file, a module that resolves to `p` in malf's
@@ -56,9 +59,22 @@ DRIVER = "malf"
 # and the variable a consumer's build is handed for the same tree.
 ROOT_ANCHOR = re.compile(r"\$\{?(?:MALF_DIR|MALF_TOOLCHAIN_DIR)\}?/(?P<path>[A-Za-z0-9_.][A-Za-z0-9_./-]*)")
 CONSUMER_ANCHOR = re.compile(r"\$\{?MALF_TOOLCHAIN_DIR\}?/(?P<path>[A-Za-z0-9_.][A-Za-z0-9_./-]*)")
-# A shell variable bound to the script's own directory, with the relative tail `cd` applies to it.
-SHELL_SELF = re.compile(r'(?P<name>[A-Za-z_][A-Za-z0-9_]*)="\$\(cd "\$\(dirname "(?:\$\{BASH_SOURCE\[0\]\}|\$0)"\)'
-                        r'(?P<tail>[^"]*)" && pwd\)')
+# The naming file's own directory as a shell spells it, and as a composite action does (its own
+# `${{ github.action_path }}` and `$GITHUB_ACTION_PATH`).
+SELF_DIR = r'(?:\$\(dirname "(?:\$\{BASH_SOURCE\[0\]\}|\$0)"\)|\$\{\{ github\.action_path \}\}|\$\{?GITHUB_ACTION_PATH\}?)'
+ACTION_SELF = re.compile(r"(?:\$\{\{ github\.action_path \}\}|\$\{?GITHUB_ACTION_PATH\}?)/(?P<path>[A-Za-z0-9_.][A-Za-z0-9_./-]*)")
+# A variable bound to that directory: a step's `env:` entry `NAME: ${{ github.action_path }}`, or a
+# shell's `NAME="$(cd "<own directory or a bound variable><tail>" && pwd)"`, with the tail `cd` applies.
+YAML_SELF = re.compile(r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*):\s*\$\{\{ github\.action_path \}\}\s*$", re.M)
+SHELL_BOUND = r'(?P<name>[A-Za-z_][A-Za-z0-9_]*)="\$\(cd "(?P<anchor>{anchor})(?P<tail>[^"]*)" && pwd\)'
+SHELL_SELF = re.compile(SHELL_BOUND.format(anchor=SELF_DIR))
+# A workflow's own copy of malf: a step that `uses:` malf's `stage-malf` action, or an `actions/checkout`
+# whose `repository:` is malf-toolchain, puts malf's tree at its `with:` mapping's `path:` (`stage-malf`'s
+# default `malf`), and the rest of that file spells malf's root by it (`.malf/store_publish.py`).
+MALF_CHECKOUT = re.compile(r"^(?P<indent>[ \t]*)(?:-[ \t]+)?(?P<key>repository|uses):\s*['\"]?CodeRoasted/malf-toolchain"
+                           r"(?P<rest>/\.github/actions/stage-malf@\S+|)['\"]?\s*$", re.M)
+STAGE_DEFAULT = "malf"
+CHECKOUT_PATH = re.compile(r"^[ \t]*path:\s*['\"]?(?P<path>[A-Za-z0-9_.][A-Za-z0-9_./-]*?)/?['\"]?\s*$")
 # A conan profile's own directory, as conan renders it into the profile's Jinja.
 PROFILE_SELF = re.compile(r"\{\{\s*profile_dir\s*\}\}/(?P<path>[A-Za-z0-9_.][A-Za-z0-9_./-]*)")
 CMAKE_SELF = re.compile(r"\$\{CMAKE_CURRENT_LIST_DIR\}/(?P<path>[A-Za-z0-9_.][A-Za-z0-9_./-]*)")
@@ -138,7 +154,9 @@ def _git(where: Path, env: dict | None, *args: str) -> str:
 
 def _normal(base: str, relative: str) -> str | None:
     """`relative` joined onto malf-relative `base`, normalized; None when it leaves malf's root."""
-    joined = posixpath.normpath(posixpath.join(base, relative.rstrip(PROSE_TAIL) or "."))
+    if relative.endswith(tuple(PROSE_TAIL)) and not relative.endswith(".."):
+        relative = relative[:-1]
+    joined = posixpath.normpath(posixpath.join(base, relative or "."))
     if joined == ".." or joined.startswith("../") or joined.startswith("/"):
         return None
     return joined
@@ -163,11 +181,22 @@ def edges(tree: Tree, path: str) -> set[str]:
     reached: set[str] = set()
     for match in ROOT_ANCHOR.finditer(text):
         reached |= _targets(tree, _normal(ROOT, match["path"]))
-    for bound in SHELL_SELF.finditer(text):
-        base = _normal(here, "." + bound["tail"]) if bound["tail"] else here
-        if base is None:
-            continue
-        anchor = re.compile(r"\$\{?" + re.escape(bound["name"]) + r"\}?/(?P<path>[A-Za-z0-9_.][A-Za-z0-9_./-]*)")
+    for root in _checkout_roots(text):
+        anchor = re.compile(r"(?<![A-Za-z0-9_./-])" + re.escape(root) + r"/(?P<path>[A-Za-z0-9_.][A-Za-z0-9_./-]*)")
+        for match in anchor.finditer(text):
+            reached |= _targets(tree, _normal(ROOT, match["path"]))
+    for match in ACTION_SELF.finditer(text):
+        reached |= _targets(tree, _normal(here, match["path"]))
+    bases = {bound["name"]: here for bound in YAML_SELF.finditer(text)}
+    bound_dirs = SELF_DIR if not bases else SELF_DIR[:-1] + "".join(
+        r"|\$\{?" + re.escape(name) + r"\}?" for name in sorted(bases)) + ")"
+    for bound in re.finditer(SHELL_BOUND.format(anchor=bound_dirs), text):
+        origin = bases.get(re.sub(r"[${}]", "", bound["anchor"]), here)
+        base = _normal(origin, "." + bound["tail"]) if bound["tail"] else origin
+        if base is not None:
+            bases[bound["name"]] = base
+    for name, base in sorted(bases.items()):
+        anchor = re.compile(r"\$\{?" + re.escape(name) + r"\}?/(?P<path>[A-Za-z0-9_.][A-Za-z0-9_./-]*)")
         for match in anchor.finditer(text):
             reached |= _targets(tree, _normal(base, match["path"]))
     for match in CMAKE_SELF.finditer(text):
@@ -182,6 +211,39 @@ def edges(tree: Tree, path: str) -> set[str]:
         reached |= _imports(tree, path, here, text)
     reached.discard(path)
     return reached
+
+
+def _checkout_roots(text: str) -> set[str]:
+    """Where each step of a workflow that copies malf puts it (`MALF_CHECKOUT`): the `path:` of the
+    step's own lines — those after its `uses:` or around its `repository:` until a line indented less
+    than the step's keys or the next step — else `stage-malf`'s default."""
+    roots: set[str] = set()
+    lines = text.splitlines()
+    for match in MALF_CHECKOUT.finditer(text):
+        if match["key"] == "uses" and not match["rest"]:
+            continue
+        start = text.count("\n", 0, match.start())
+        indent = len(match["indent"]) + (2 if match.group(0).lstrip().startswith("-") else 0)
+        floor = indent if match["key"] == "uses" else indent - 2
+        found_path = None
+        for line in lines[start + 1:]:
+            depth = len(line) - len(line.lstrip())
+            if line.strip() and (depth < floor or (depth <= floor and line.lstrip().startswith("- "))):
+                break
+            found = CHECKOUT_PATH.match(line)
+            if found:
+                found_path = found["path"]
+        if found_path is None and match["key"] == "repository":
+            for line in reversed(lines[:start]):
+                depth = len(line) - len(line.lstrip())
+                if line.strip() and depth < indent:
+                    break
+                found = CHECKOUT_PATH.match(line)
+                if found:
+                    found_path = found["path"]
+        roots.add(found_path or STAGE_DEFAULT if match["key"] == "uses" else found_path or "")
+    roots.discard("")
+    return roots
 
 
 def _imports(tree: Tree, path: str, here: str, text: str) -> set[str]:
@@ -260,16 +322,17 @@ class Closure:
                 "listings": {directory: names for directory, names in sorted(self.listings.items())}}
 
 
-def closure(tree: Tree, seeds: set[str]) -> Closure:
+def closure(tree: Tree, seeds: set[str], pruned=lambda path: False) -> Closure:
     """The fixpoint of the grammar's edges from `seeds`, and the listings of the directories its
-    files lie in. A seed that is not tracked raises: a seed is read off the key's own inputs."""
+    files lie in; a file `pruned` answers True for is neither reached nor expanded through. A seed that
+    is not tracked raises: a seed is read off the key's own inputs."""
     absent = sorted(seed for seed in seeds if seed not in tree.entries)
     if absent:
         raise ClosureError(f"seed(s) not tracked in malf: {', '.join(absent)}")
     reached, pending = set(seeds), sorted(seeds)
     while pending:
         path = pending.pop()
-        for target in sorted(edges(tree, path) - reached):
+        for target in sorted(path for path in edges(tree, path) - reached if not pruned(path)):
             reached.add(target)
             pending.append(target)
     result = Closure(files={path: tree.entries[path][1] for path in reached})
@@ -311,6 +374,14 @@ def _fixture(base: Path) -> Path:
         "cycle_b.py": "import cycle_a\n",
         "tests/run.sh": "echo never reached\n",
         ".github/workflows/ci.yml": "run: ./malf build\n",
+        ".github/workflows/publish.yml": "jobs:\n  publish:\n    steps:\n      - name: stage\n"
+                                         "        uses: CodeRoasted/malf-toolchain/.github/actions/stage-malf@0123\n"
+                                         "        with:\n          path: .malf\n"
+                                         "      - run: python3 .malf/store.py stage\n",
+        ".github/actions/sbom/action.yml": "runs:\n  steps:\n    - env:\n        ACTION_PATH: ${{ github.action_path }}\n"
+                                           "      run: |\n        ROOT=\"$(cd \"$ACTION_PATH/../../..\" && pwd)\"\n"
+                                           "        python3 \"$ROOT/codegen.py\"\n"
+                                           "    - run: ${{ github.action_path }}/../../../helper.py\n",
         "unreached.py": "print('nobody names me')\n",
     }
     for path, text in files.items():
@@ -351,6 +422,14 @@ def selftest() -> int:
             "workflow no file names", [path for path in driven.files if path.startswith((".github", "tests"))], [])
         arm("a conan profile's `{{ profile_dir }}/../wrap` reaches every file under wrap/, and one leaving "
             "malf's root reaches nothing", sorted(edges(tree, "config/writer.profile")), ["wrap/malf-cc"])
+        arm("a composite action reaches malf through its own directory: `${{ github.action_path }}/`, and a "
+            "variable bound to it in a step's env and re-bound by `cd`",
+            sorted(edges(tree, ".github/actions/sbom/action.yml")), ["codegen.py", "helper.py"])
+        arm("a workflow reaches malf through the path its own step stages malf at (`.malf/store.py`)",
+            sorted(edges(tree, ".github/workflows/publish.yml")), ["store.py"])
+        arm("a pruned file is neither reached nor expanded through",
+            sorted(closure(tree, {".github/actions/sbom/action.yml"}, lambda path: path == "codegen.py").files),
+            [".github/actions/sbom/action.yml", "config/data.txt", "helper.py"])
         act = act_seeds(tree, malf, [base / "consumer"])
         arm("a consumer CMake file naming ${MALF_TOOLCHAIN_DIR}/codegen.py seeds codegen.py into A",
             sorted(act), ["codegen.py"])
