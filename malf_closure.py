@@ -3,7 +3,7 @@
 
 A step's definition used to carry malf's whole tracked tree, so every malf commit re-keyed every step,
 even a commit to a workflow no step executes. The member is now the files the step can reach from
-two seeds, and the entry names of each directory holding one of them:
+two seeds, and the entry names of each directory holding one of them and of each ancestor of it:
 
   D, the driver   the file the act's argv runs when it runs malf: `malf`, or a tracked malf file
                   (`artefact_store.py ingest`). An argv that runs no malf file has no D.
@@ -91,20 +91,20 @@ class ClosureError(RuntimeError):
 
 @dataclass
 class Tree:
-    """malf's tracked files: path -> (mode, blob id), and a reader of each one's bytes."""
+    """malf's tracked files: path -> (mode, blob id), a reader of each one's bytes, and the blob ids
+    of the files a closure reached (`blobs`)."""
 
     entries: dict[str, tuple[str, str]]
     read: "callable"
+    blobs: "callable"
 
     @classmethod
     def worktree(cls, malf_dir: Path) -> "Tree":
-        """The tracked files AS THEY ARE ON DISK, through a private index so the shared one is
-        never written: a definition is the code that runs."""
-        with tempfile.TemporaryDirectory(prefix="malf_closure.") as scratch:
-            env = {**os.environ, "GIT_INDEX_FILE": str(Path(scratch) / "index")}
-            _git(malf_dir, env, "read-tree", "HEAD")
-            _git(malf_dir, env, "add", "--update", "--", ".")
-            listed = _git(malf_dir, env, "ls-files", "--stage", "-z")
+        """The tracked files AS THEY ARE ON DISK: the tracked list from `git ls-files`, and the blob
+        id of a reached file hashed from its working bytes, never another file's (DN-142.D29, ruled on
+        gate M-trace: the key's composition reads the closure's files and malf's `.git`, nothing else).
+        An entry's listed blob is the index's; only `blobs` answers the bytes on disk."""
+        listed = _git(malf_dir, None, "ls-files", "--stage", "-z")
         entries = {}
         for record in listed.split("\0"):
             if record:
@@ -114,11 +114,32 @@ class Tree:
 
         def read(path: str) -> bytes:
             target = malf_dir / path
-            if entries[path][0] == SYMLINK_MODE:
-                return os.readlink(target).encode()
-            return target.read_bytes()
+            try:
+                if entries[path][0] == SYMLINK_MODE:
+                    return os.readlink(target).encode()
+                return target.read_bytes()
+            except OSError as unread:
+                raise ClosureError(f"the tracked file {path} cannot be read on disk: {unread}") from unread
 
-        return cls(entries, read)
+        def blobs(paths: list[str]) -> dict[str, str]:
+            linked = [path for path in paths if entries[path][0] == SYMLINK_MODE]
+            regular = [path for path in paths if entries[path][0] != SYMLINK_MODE]
+            hashed = {}
+            if regular:
+                done = subprocess.run(["git", "-C", str(malf_dir), "hash-object", "--stdin-paths"],
+                                      input="\n".join(regular) + "\n", capture_output=True, text=True)
+                if done.returncode != 0:
+                    raise ClosureError(f"git hash-object failed in {malf_dir}: {done.stderr.strip()}")
+                hashed.update(zip(regular, done.stdout.split()))
+            for path in linked:
+                done = subprocess.run(["git", "-C", str(malf_dir), "hash-object", "--stdin"], input=read(path),
+                                      capture_output=True)
+                if done.returncode != 0:
+                    raise ClosureError(f"git hash-object failed for {path}: {done.stderr.decode().strip()}")
+                hashed[path] = done.stdout.decode().strip()
+            return hashed
+
+        return cls(entries, read, blobs)
 
     @classmethod
     def at(cls, malf_dir: Path, rev: str) -> "Tree":
@@ -135,7 +156,7 @@ class Tree:
             return subprocess.run(["git", "-C", str(malf_dir), "cat-file", "blob", entries[path][1]],
                                   capture_output=True, check=True).stdout
 
-        return cls(entries, read)
+        return cls(entries, read, lambda paths: {path: entries[path][1] for path in paths})
 
     def under(self, directory: str) -> list[str]:
         """Every tracked path under `directory` (itself, when it is a file)."""
@@ -311,7 +332,8 @@ def act_seeds(tree: Tree, malf_dir: Path, roots: list[Path]) -> set[str]:
 
 @dataclass
 class Closure:
-    """The files a step reaches, by path and blob, and the entry names of each directory holding one."""
+    """The files a step reaches, by path and blob, and the entry names of each directory holding one and of
+    each ancestor of it: a tool walks down to a file it reads (conan lists its recipe index from the top)."""
 
     files: dict[str, str] = field(default_factory=dict)
     listings: dict[str, list[str]] = field(default_factory=dict)
@@ -335,13 +357,14 @@ def closure(tree: Tree, seeds: set[str], pruned=lambda path: False) -> Closure:
         for target in sorted(path for path in edges(tree, path) - reached if not pruned(path)):
             reached.add(target)
             pending.append(target)
-    result = Closure(files={path: tree.entries[path][1] for path in reached})
+    result = Closure(files=tree.blobs(sorted(reached)))
     for path in reached:
         directory = posixpath.dirname(path) or ROOT
-        if directory not in result.listings:
+        while directory not in result.listings:
             prefix = "" if directory == ROOT else directory + "/"
             result.listings[directory] = sorted({entry[len(prefix):].split("/", 1)[0]
                                                  for entry in tree.entries if entry.startswith(prefix)})
+            directory = posixpath.dirname(directory) or ROOT
     return result
 
 
@@ -383,6 +406,7 @@ def _fixture(base: Path) -> Path:
                                            "        python3 \"$ROOT/codegen.py\"\n"
                                            "    - run: ${{ github.action_path }}/../../../helper.py\n",
         "unreached.py": "print('nobody names me')\n",
+        "overlay/recipes/x/all/conanfile.py": "from conan import ConanFile\n",
     }
     for path, text in files.items():
         (malf / path).parent.mkdir(parents=True, exist_ok=True)
@@ -437,7 +461,7 @@ def selftest() -> int:
             sorted(closure(tree, act).files), ["codegen.py", "cycle_a.py", "cycle_b.py"])
         arm("each directory holding a closure file is listed by its entry names",
             driven.listings, {".": [".github", "codegen.py", "config", "cycle_a.py", "cycle_b.py", "helper.py",
-                                     "malf", "profiles", "store.py", "tests", "unreached.py", "wrap"],
+                                     "malf", "overlay", "profiles", "store.py", "tests", "unreached.py", "wrap"],
                               "config": ["data.txt", "writer.profile"], "profiles": ["one", "two"],
                               "wrap": ["malf-cc"]})
         arm("an argv that runs no malf file has no driver seed; a tracked malf file as argv[0] is its own seed",
@@ -445,6 +469,21 @@ def selftest() -> int:
             (set(), {"store.py"}))
         arm("the member is the same read at the commit as on the clean working tree",
             closure(Tree.at(malf, "HEAD"), {"malf"}).member(), closure(tree, {"malf"}).member())
+        (malf / "unreached.py").chmod(0)
+        try:
+            unreadable_beside = sorted(closure(Tree.worktree(malf), {"malf"}).files) == sorted(driven.files)
+        finally:
+            (malf / "unreached.py").chmod(0o644)
+        arm("the member reads only the closure's files: a tracked file it never reaches may be unreadable",
+            unreadable_beside, True)
+        (malf / "helper.py").write_text("VALUE = 'edited, not committed'\n")
+        edited = closure(Tree.worktree(malf), {"malf"}).files
+        arm("a closure file's blob is its working bytes, an uncommitted edit included",
+            (edited["helper.py"] != driven.files["helper.py"], edited["store.py"] == driven.files["store.py"]),
+            (True, True))
+        arm("every ancestor of a closure file's directory is listed, so a tool may walk down to it",
+            sorted(closure(tree, {"overlay/recipes/x/all/conanfile.py"}).listings),
+            [".", "overlay", "overlay/recipes", "overlay/recipes/x", "overlay/recipes/x/all"])
         refused = None
         try:
             closure(tree, {"absent.py"})

@@ -456,7 +456,10 @@ _malf_default_build_root() {
 # `malf-overlay`. A recipe the overlay does not hold falls through to conancenter.
 # post: the home's first remote is `malf-overlay` at $MALF_DIR/overlay, or the function failed.
 _malf_sync_overlay_remote() {
-    [[ -d "$MALF_DIR/overlay/recipes" ]] || return 0
+    # A missing overlay is a red, never a silent skip (DN-142.D29 (7), ruled on gate M-trace): a home
+    # synced without it resolves conancenter's recipes where the lock pins the overlay's.
+    [[ -d "$MALF_DIR/overlay/recipes" ]] \
+        || { echo "malf: $MALF_DIR/overlay/recipes is missing, and every conan home malf syncs resolves from it first" >&2; return 1; }
     mkdir -p "$CONAN_HOME"
     # note: remotes.json is written directly, never through `conan remote add`, so a sync costs no
     #       conan process; a home conan has not initialized yet gets conan's default remote behind

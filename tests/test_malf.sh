@@ -29,7 +29,7 @@ MALF_TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MALF_ROOT="$(cd "$MALF_TEST_DIR/.." && pwd)"
 MALF_BIN="$MALF_ROOT/malf"
 
-# A COPY of malf runs beside every file its home sync reads (_malf_sync_conan_conf), as the real one
+# A COPY of malf runs beside every file its home sync reads (_malf_sync_conan_conf, the overlay), as the real one
 # does: a missing one is a red there, never a skip (DN-142.D29 (7)). Nothing already in <dir> is replaced,
 # so a mutated helper copied first stays the mutant.
 malf_sync_files() {   # <dir>
@@ -37,6 +37,7 @@ malf_sync_files() {   # <dir>
     cp -n "$MALF_ROOT/global.conf" "$MALF_ROOT/settings_user.yml" "$MALF_ROOT/malf_recipe_exports.py" \
         "$MALF_ROOT/malf_recipe_tests.py" "$1/"
     cp -n "$MALF_ROOT/cmake/malf-path-map.cmake" "$1/cmake/"
+    [[ -e "$1/overlay" ]] || cp -r "$MALF_ROOT/overlay" "$1/overlay"
 }
 
 pass_count=0
@@ -373,8 +374,8 @@ echo
 echo "[7k] malf_closure carries its own grammar proof (selftest): an anchored reference, a function-level import and a directory reference each reach their target, a bare word and a computed path reach nothing, a consumer's \${MALF_TOOLCHAIN_DIR}/ reference seeds the act, a cycle terminates (DN-142.D29)"
 closure_selftest_output="$(timeout 120 python3 "$MALF_ROOT/malf_closure.py" selftest 2>&1)"
 closure_selftest_status=$?
-check "malf_closure selftest: 12 arms, 0 failed" \
-      "ok" "$([[ $closure_selftest_status -eq 0 ]] && grep -q '^malf_closure selftest: 12 passed, 0 failed$' <<< "$closure_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$closure_selftest_output")")"
+check "malf_closure selftest: 15 arms, 0 failed" \
+      "ok" "$([[ $closure_selftest_status -eq 0 ]] && grep -q '^malf_closure selftest: 15 passed, 0 failed$' <<< "$closure_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$closure_selftest_output")")"
 
 echo
 
