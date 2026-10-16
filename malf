@@ -483,10 +483,13 @@ PY
 
 _malf_sync_conan_conf() {
     local conf_file source profile
-    for conf_file in global.conf settings_user.yml malf-path-map.cmake malf_recipe_exports.py malf_recipe_tests.py; do
-        source="$MALF_DIR/$conf_file"
-        [[ "$conf_file" == *.cmake ]] && source="$MALF_DIR/cmake/$conf_file"
-        [[ -f "$source" ]] || continue
+    # EVERY SOURCE IS SPELLED AS ITS FULL ANCHORED PATH, never composed from a word list, so the closure
+    # grammar names each in the driver's seed (DN-142.D29 (7), ruled (a)); and a missing one is a red,
+    # never a silent skip: a home synced without it is not the home its key names.
+    for source in "$MALF_DIR/global.conf" "$MALF_DIR/settings_user.yml" "$MALF_DIR/cmake/malf-path-map.cmake" \
+                  "$MALF_DIR/malf_recipe_exports.py" "$MALF_DIR/malf_recipe_tests.py"; do
+        conf_file="${source##*/}"
+        [[ -f "$source" ]] || { echo "malf: $source is missing, and every conan home malf syncs holds it" >&2; exit 1; }
         mkdir -p "$CONAN_HOME"
         if [[ ! -f "$CONAN_HOME/$conf_file" ]] || ! cmp -s "$source" "$CONAN_HOME/$conf_file"; then
             _malf_install_file "$source" "$CONAN_HOME/$conf_file" || exit 1

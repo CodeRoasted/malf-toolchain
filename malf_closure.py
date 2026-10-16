@@ -15,7 +15,8 @@ ONE GRAMMAR, ANCHORED, NEVER A BARE WORD. File `f` reaches tracked path `p` when
   * `f` names `p` behind a malf-root anchor (`$MALF_DIR/`, `${MALF_TOOLCHAIN_DIR}/`) or behind the
     file's own directory (a shell variable assigned `$(cd "$(dirname "${BASH_SOURCE[0]}")<rel>" &&
     pwd)`, cmake's `${CMAKE_CURRENT_LIST_DIR}/`, Python's `Path(__file__).parent / "<name>"` and
-    `Path(__file__).with_name("<name>")`);
+    `Path(__file__).with_name("<name>")`, a conan profile's `{{ profile_dir }}/`), `..` normalized and a
+    path leaving malf's root reaching nothing;
   * `f` is Python and imports, at any depth of the file, a module that resolves to `p` in malf's
     root or in `f`'s own directory;
   * `f` is a tracked symlink whose target resolves to `p`.
@@ -58,6 +59,8 @@ CONSUMER_ANCHOR = re.compile(r"\$\{?MALF_TOOLCHAIN_DIR\}?/(?P<path>[A-Za-z0-9_.]
 # A shell variable bound to the script's own directory, with the relative tail `cd` applies to it.
 SHELL_SELF = re.compile(r'(?P<name>[A-Za-z_][A-Za-z0-9_]*)="\$\(cd "\$\(dirname "(?:\$\{BASH_SOURCE\[0\]\}|\$0)"\)'
                         r'(?P<tail>[^"]*)" && pwd\)')
+# A conan profile's own directory, as conan renders it into the profile's Jinja.
+PROFILE_SELF = re.compile(r"\{\{\s*profile_dir\s*\}\}/(?P<path>[A-Za-z0-9_.][A-Za-z0-9_./-]*)")
 CMAKE_SELF = re.compile(r"\$\{CMAKE_CURRENT_LIST_DIR\}/(?P<path>[A-Za-z0-9_.][A-Za-z0-9_./-]*)")
 PYTHON_SELF = re.compile(r"Path\(__file__\)(?:\.resolve\(\))?\.parent(?P<segments>(?:\s*/\s*[\"'][^\"'\n]+[\"'])+)")
 PYTHON_SIBLING = re.compile(r"Path\(__file__\)(?:\.resolve\(\))?\.with_name\(\s*[\"'](?P<name>[^\"'\n]+)[\"']")
@@ -168,6 +171,8 @@ def edges(tree: Tree, path: str) -> set[str]:
         for match in anchor.finditer(text):
             reached |= _targets(tree, _normal(base, match["path"]))
     for match in CMAKE_SELF.finditer(text):
+        reached |= _targets(tree, _normal(here, match["path"]))
+    for match in PROFILE_SELF.finditer(text):
         reached |= _targets(tree, _normal(here, match["path"]))
     if path.endswith(".py") or text.startswith("#!/usr/bin/env python"):
         for match in PYTHON_SELF.finditer(text):
@@ -292,10 +297,13 @@ def _fixture(base: Path) -> Path:
     files = {
         "malf": '#!/usr/bin/env bash\nMALF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
                 'python3 "$MALF_DIR/store.py" "$@"\ncp -r "$MALF_DIR/profiles/" home\n'
+                'conan create --profile "$MALF_DIR/config/writer.profile"\n'
                 'echo "tests are run by tests/run.sh"\nfor name in a b; do cat "$MALF_DIR/$name"; done\n',
         "store.py": "import json\n\ndef late():\n    import helper\n    return helper\n",
         "helper.py": "from pathlib import Path\nDATA = Path(__file__).resolve().parent / 'config' / 'data.txt'\n",
         "config/data.txt": "x\n",
+        "config/writer.profile": "[buildenv]\nPATH=+(path){{ profile_dir }}/../wrap\nX={{ profile_dir }}/../../outside\n",
+        "wrap/malf-cc": "#!/usr/bin/env bash\n",
         "profiles/one": "[settings]\n",
         "profiles/two": "[settings]\n",
         "codegen.py": "import cycle_a\n",
@@ -337,10 +345,12 @@ def selftest() -> int:
         driven = closure(tree, driver_seeds(tree, ["malf", "store-create"]))
         arm("an anchored reference, a function-level import and a directory reference each reach their "
             "target; a Path(__file__) segment chain reaches its file",
-            sorted(driven.files), ["config/data.txt", "helper.py", "malf", "profiles/one", "profiles/two",
-                                   "store.py"])
+            sorted(driven.files), ["config/data.txt", "config/writer.profile", "helper.py", "malf", "profiles/one",
+                                   "profiles/two", "store.py", "wrap/malf-cc"])
         arm("a bare word `tests` in a message reaches nothing, nor a computed `$MALF_DIR/$name`, nor a "
             "workflow no file names", [path for path in driven.files if path.startswith((".github", "tests"))], [])
+        arm("a conan profile's `{{ profile_dir }}/../wrap` reaches every file under wrap/, and one leaving "
+            "malf's root reaches nothing", sorted(edges(tree, "config/writer.profile")), ["wrap/malf-cc"])
         act = act_seeds(tree, malf, [base / "consumer"])
         arm("a consumer CMake file naming ${MALF_TOOLCHAIN_DIR}/codegen.py seeds codegen.py into A",
             sorted(act), ["codegen.py"])
@@ -348,8 +358,9 @@ def selftest() -> int:
             sorted(closure(tree, act).files), ["codegen.py", "cycle_a.py", "cycle_b.py"])
         arm("each directory holding a closure file is listed by its entry names",
             driven.listings, {".": [".github", "codegen.py", "config", "cycle_a.py", "cycle_b.py", "helper.py",
-                                     "malf", "profiles", "store.py", "tests", "unreached.py"],
-                              "config": ["data.txt"], "profiles": ["one", "two"]})
+                                     "malf", "profiles", "store.py", "tests", "unreached.py", "wrap"],
+                              "config": ["data.txt", "writer.profile"], "profiles": ["one", "two"],
+                              "wrap": ["malf-cc"]})
         arm("an argv that runs no malf file has no driver seed; a tracked malf file as argv[0] is its own seed",
             (driver_seeds(tree, ["pharos", "check"]), driver_seeds(tree, ["store.py", "ingest"])),
             (set(), {"store.py"}))

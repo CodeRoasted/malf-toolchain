@@ -29,6 +29,16 @@ MALF_TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MALF_ROOT="$(cd "$MALF_TEST_DIR/.." && pwd)"
 MALF_BIN="$MALF_ROOT/malf"
 
+# A COPY of malf runs beside every file its home sync reads (_malf_sync_conan_conf), as the real one
+# does: a missing one is a red there, never a skip (DN-142.D29 (7)). Nothing already in <dir> is replaced,
+# so a mutated helper copied first stays the mutant.
+malf_sync_files() {   # <dir>
+    mkdir -p "$1/cmake"
+    cp -n "$MALF_ROOT/global.conf" "$MALF_ROOT/settings_user.yml" "$MALF_ROOT/malf_recipe_exports.py" \
+        "$MALF_ROOT/malf_recipe_tests.py" "$1/"
+    cp -n "$MALF_ROOT/cmake/malf-path-map.cmake" "$1/cmake/"
+}
+
 pass_count=0
 fail_count=0
 
@@ -363,8 +373,8 @@ echo
 echo "[7k] malf_closure carries its own grammar proof (selftest): an anchored reference, a function-level import and a directory reference each reach their target, a bare word and a computed path reach nothing, a consumer's \${MALF_TOOLCHAIN_DIR}/ reference seeds the act, a cycle terminates (DN-142.D29)"
 closure_selftest_output="$(timeout 120 python3 "$MALF_ROOT/malf_closure.py" selftest 2>&1)"
 closure_selftest_status=$?
-check "malf_closure selftest: 8 arms, 0 failed" \
-      "ok" "$([[ $closure_selftest_status -eq 0 ]] && grep -q '^malf_closure selftest: 8 passed, 0 failed$' <<< "$closure_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$closure_selftest_output")")"
+check "malf_closure selftest: 9 arms, 0 failed" \
+      "ok" "$([[ $closure_selftest_status -eq 0 ]] && grep -q '^malf_closure selftest: 9 passed, 0 failed$' <<< "$closure_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$closure_selftest_output")")"
 
 echo
 
@@ -602,7 +612,8 @@ check "lint (default mode) refuses with no compile_commands.json" \
 #    a style nobody chose. The refusal is checked against a malf whose bundled config is not
 #    reachable, since the real one always is.
 fmt_iso="$(mktemp -d)"
-cp "$MALF_BIN" "$fmt_iso/malf"          # copied ALONE: no sibling config/ dir, so no fallback
+cp "$MALF_BIN" "$fmt_iso/malf"          # copied with its sync files ALONE: no sibling config/ dir, so no fallback
+malf_sync_files "$fmt_iso"
 fmt_none_out="$(cd "$guard_tmp" && bash "$fmt_iso/malf" format --check 2>&1)"; fmt_none_rc=$?
 check "format refuses rather than fall back to LLVM style" \
       "rc=1 refused" \
@@ -1620,6 +1631,7 @@ print(src.count(old))
 open(sys.argv[2], "w").write(src.replace(old, new))
 PY
 )"
+malf_sync_files "$dt_tmp"
 check "detector — the anti-vacuity mutation applied to exactly one site (arming proof)" \
       "1" "$dt_mut_count"
 check "detector — without the benchmark pattern the bench TU is MISSED (proves it can fail)" \
@@ -3011,7 +3023,7 @@ a, e = t.guarded(d, t.selection(d), owed=True); b, f = t.guarded(d, t.selection(
 print(0 if e is None and a[-1] == "--no-tests=error" else a, 1 if f is not None else b)' "$MALF_ROOT" "$tp_tmp/one")"
 # The selection is READ from the helper, never restated in malf: a copy of malf beside a helper whose
 # label is mutated passes the mutated label, so a second spelling in malf would leave this arm red.
-mkdir -p "$tp_tmp/mutant"; cp "$MALF_BIN" "$MALF_ROOT/malf_recipe_tests.py" "$tp_tmp/mutant/"
+mkdir -p "$tp_tmp/mutant"; cp "$MALF_BIN" "$MALF_ROOT/malf_recipe_tests.py" "$tp_tmp/mutant/"; malf_sync_files "$tp_tmp/mutant"
 sed -i 's/^CORPUS_LABEL = "corpus"$/CORPUS_LABEL = "kitchen"/' "$tp_tmp/mutant/malf_recipe_tests.py"
 check "malf test reads the selection from the helper: a mutated label in the helper is the label ctest gets" \
       "$(tp_argv --test-dir "$N" --output-on-failure -LE kitchen --output-junit "$N/malf-test.junit.xml"; echo rc=0)" \
@@ -3227,7 +3239,7 @@ check "the vendor create reads the consumer set from the helper and spells no sk
 
 # The writers read their set from the helper, never spell it: a copy of malf beside a helper whose
 # writer set is mutated hands the mutated set to its caller, and both writers splice what it read.
-mkdir -p "$cs_tmp/mutant"; cp "$MALF_BIN" "$MALF_ROOT/malf_recipe_tests.py" "$cs_tmp/mutant/"
+mkdir -p "$cs_tmp/mutant"; cp "$MALF_BIN" "$MALF_ROOT/malf_recipe_tests.py" "$cs_tmp/mutant/"; malf_sync_files "$cs_tmp/mutant"
 sed -i 's/^    "writer": (),$/    "writer": ("-c", "user.probe:writer=1"),/' "$cs_tmp/mutant/malf_recipe_tests.py"
 check "the writers' conf set is READ from the helper: a mutated set in the helper is the set malf hands its creates, then the profile its skips are judged at (DN-142.D23)" \
       "-c|user.probe:writer=1|-c|user.malf:profile=$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; printf %s "$MALF_PROFILE_NAME"' _ "$MALF_BIN")" \
