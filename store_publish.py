@@ -55,6 +55,12 @@ or packs.
     store_publish.py deployment <slice> <signature> <allowed signers> <repository> <image> <version>
         what a deploy runs, from the Release's own signed slice: `image <manifest hex>`, then one
         `executable <entry> <sha256> <build-id>` line per executable the image carries
+    store_publish.py rehearse <repository> <step-0 record digest> <allowed signers> <candidate> <out dir>
+        step 0's rehearsal of this act before any tag (ROADMAP N393): the repository's visibility read
+        from GitHub, `stage` and `stage-destinations` into <out dir>, ONE draft pre-release named by the
+        candidate created with the staged files, read back by check-release, then deleted. Tokens, each
+        from a FILE: MALF_STORE_TOKEN_FILE (the writer's, reads the store package) and
+        MALF_STORE_REHEARSAL_TOKEN_FILE (`contents: write` on the releasing repositories, for the draft)
     store_publish.py selftest
         the whole act against an in-process registry seeded by the writer's own functions
 
@@ -80,6 +86,16 @@ import store_manifest  # noqa: E402 — a sibling module, located from this file
 import store_replica  # noqa: E402 — a sibling module, located from this file
 
 TAG = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
+# A step-0 candidate's name (DN-108.D36): the rehearsal's draft is named by it, never by a release tag.
+CANDIDATE = re.compile(r"^candidate/[0-9]+\.[0-9]+\.[0-9]+/[0-9a-f]{16}$")
+# The token file holding `contents: write` on each releasing repository, in the writer account's home
+# beside MALF_STORE_TOKEN_FILE (ROADMAP N393): it creates and deletes the rehearsal's draft, and nothing else.
+REHEARSAL_TOKEN_ENV = "MALF_STORE_REHEARSAL_TOKEN_FILE"
+# One page of the Releases listing: a page this full cannot prove a candidate's draft is absent.
+RELEASES_PAGE = 100
+GH_TIMEOUT_SECONDS = 900
+# `gh` as the rehearsal runs it: argv after `gh` -> (exit code, stdout, stderr).
+Gh = Callable[[list[str]], "tuple[int, str, str]"]
 
 
 class Refused(Exception):
@@ -299,6 +315,148 @@ def check_destination(out: Path, release: dict, releases: list[dict], tag: str) 
     if listed != [False]:
         raise Refused(f"the destination Release {tag} is listed with isLatest {listed}, not once and False: a "
                       f"foreign Release is created --latest=false and never claims its repository's badge")
+
+
+def _gh_json(gh: Gh, argv: list[str]) -> object:
+    code, out, err = gh(argv)
+    if code != 0:
+        raise Refused(f"gh {' '.join(argv)} exited {code}: {(err or out).strip()[-400:]}")
+    try:
+        return json.loads(out)
+    except ValueError as unread:
+        raise Refused(f"gh {' '.join(argv)} printed no JSON: {unread}") from unread
+
+
+def _named(gh: Gh, repo_path: str, candidate: str) -> list[dict]:
+    """Every Release of the repository whose tag name is the candidate's, drafts included (the
+    listing shows drafts to a token that can push, which `contents: write` is)."""
+    listed = _gh_json(gh, ["api", f"{repo_path}/releases?per_page={RELEASES_PAGE}"])
+    if not isinstance(listed, list):
+        raise Refused(f"{repo_path}/releases is not a list")
+    if len(listed) >= RELEASES_PAGE:
+        raise Refused(f"{repo_path} lists {len(listed)} Releases or more on one page: the absence of a draft "
+                      f"named {candidate} cannot be read from it")
+    return [row for row in listed if row.get("tag_name") == candidate]
+
+
+def _delete(gh: Gh, repo_path: str, release_id: object) -> None:
+    code, out, err = gh(["api", "-X", "DELETE", f"{repo_path}/releases/{release_id}"])
+    if code != 0:
+        raise Refused(f"the draft {release_id} of {repo_path} could not be deleted (exit {code}): "
+                      f"{(err or out).strip()[-400:]}")
+
+
+def rehearse(registry: store_replica.Registry, repository: str, record_hex: str, allowed: Path, candidate: str,
+             out: Path, gh: Gh, say: Callable[[str], None]) -> list[str]:
+    """THE PUBLISH REHEARSED AT THE CANDIDATE (ROADMAP N393, RUL-152): the repository's visibility read
+    from GitHub (the second producer `stage` compares the slice against), its slice staged exactly as
+    the tag's `stage` stages it, every destination slice it binds verified and staged, then ONE draft
+    pre-release named by the candidate created with those files by `gh release create`, read back by
+    `check-release`, and deleted. A draft creates no tag and is visible only to accounts that can push.
+    A leftover draft of an earlier rehearsal is deleted first; a PUBLISHED Release of that name is
+    refused and never touched. The staged names, once the draft held exactly them and is gone."""
+    if not CANDIDATE.match(candidate):
+        raise Refused(f"{candidate!r} is not a candidate name (candidate/<V>/<16 hex>): a rehearsal never "
+                      f"names a release tag")
+    repo_path = f"repos/{store_replica.ORG}/{repository}"
+    seen = _gh_json(gh, ["api", repo_path])
+    visibility = seen.get("visibility") if isinstance(seen, dict) else None
+    release_dir = out / "release"
+    staged = stage(registry, repository, str(visibility), record_hex, allowed, release_dir, say)
+    stage_destinations(registry, repository, str(visibility), record_hex, allowed, out / "destinations", say)
+    found = _named(gh, repo_path, candidate)
+    published = [row.get("id") for row in found if not row.get("draft")]
+    if published:
+        raise Refused(f"{repository} has a published Release named {candidate} (id {published}): a rehearsal "
+                      f"never touches a published Release")
+    for row in found:
+        say(f"store_publish: deleting the leftover rehearsal draft {row.get('id')} of {repository}")
+        _delete(gh, repo_path, row.get("id"))
+    failure: Refused | None = None
+    try:
+        notes = (f"A step-0 rehearsal of the store publish for {candidate} (step-0 record sha256 {record_hex}): "
+                 f"a draft, never published, deleted by the run that created it (ROADMAP N393).")
+        code, out_text, err = gh(["release", "create", "--repo", f"{store_replica.ORG}/{repository}", "--draft",
+                                  "--prerelease", "--title", f"{candidate} (rehearsal)", "--notes", notes,
+                                  candidate, *[str(release_dir / name) for name in staged]])
+        if code != 0:
+            raise Refused(f"gh release create exited {code}: {(err or out_text).strip()[-400:]}")
+        created = [row for row in _named(gh, repo_path, candidate) if row.get("draft")]
+        if len(created) != 1:
+            raise Refused(f"{len(created)} draft(s) named {candidate} after one create, not 1")
+        release = _gh_json(gh, ["api", f"{repo_path}/releases/{created[0].get('id')}"])
+        check_release(release_dir, release if isinstance(release, dict) else {})
+    except Refused as refused:
+        failure = refused
+    try:
+        for row in _named(gh, repo_path, candidate):
+            if row.get("draft"):
+                _delete(gh, repo_path, row.get("id"))
+        left = [row.get("id") for row in _named(gh, repo_path, candidate) if row.get("draft")]
+    except Refused as cleanup:
+        raise Refused(f"{failure}; and the cleanup failed: {cleanup}" if failure else str(cleanup)) from cleanup
+    if left:
+        raise Refused(f"the draft(s) {left} named {candidate} are still listed after its deletion"
+                      + (f" (after: {failure})" if failure else ""))
+    if failure is not None:
+        raise failure
+    say(f"store_publish: REHEARSED {repository} at {candidate}: a draft pre-release held exactly the "
+        f"{len(staged)} staged asset(s), read back by check-release, then deleted")
+    return staged
+
+
+def live_gh(token: str) -> Gh:
+    """`gh` with the rehearsal token as GH_TOKEN, never prompting."""
+    def run(argv: list[str]) -> tuple[int, str, str]:
+        done = subprocess.run(["gh", *argv], env={**os.environ, "GH_TOKEN": token, "GH_PROMPT_DISABLED": "1"},
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=GH_TIMEOUT_SECONDS, check=False)
+        return done.returncode, done.stdout, done.stderr
+    return run
+
+
+class _FakeForge:
+    """The selftest's GitHub: one repository's Releases, answering the `gh` calls `rehearse` makes.
+    `drop` loses one named asset at upload; `keep_on_delete` answers a DELETE without deleting."""
+
+    def __init__(self, full_name: str, visibility: str = "public", seeded: list[dict] | None = None,
+                 drop: str | None = None, keep_on_delete: bool = False) -> None:
+        self.full_name, self.visibility, self.drop, self.keep_on_delete = full_name, visibility, drop, keep_on_delete
+        self.releases = [{**row, "id": index + 1} for index, row in enumerate(seeded or [])]
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv: list[str]) -> tuple[int, str, str]:
+        self.calls.append(list(argv))
+        path = f"repos/{self.full_name}"
+        if argv == ["api", path]:
+            return 0, json.dumps({"visibility": self.visibility}), ""
+        if argv == ["api", f"{path}/releases?per_page={RELEASES_PAGE}"]:
+            return 0, json.dumps(self.releases[:RELEASES_PAGE]), ""
+        if len(argv) == 2 and argv[0] == "api" and argv[1].startswith(f"{path}/releases/"):
+            wanted = int(argv[1].rsplit("/", 1)[1])
+            hit = [row for row in self.releases if row["id"] == wanted]
+            return (0, json.dumps(hit[0]), "") if hit else (1, "", "HTTP 404")
+        if argv[:3] == ["api", "-X", "DELETE"]:
+            wanted = int(argv[3].rsplit("/", 1)[1])
+            if not self.keep_on_delete:
+                self.releases = [row for row in self.releases if row["id"] != wanted]
+            return 0, "", ""
+        if argv[:2] == ["release", "create"]:
+            valued = {"--repo", "--title", "--notes"}
+            positional, index = [], 2
+            while index < len(argv):
+                if argv[index] in valued:
+                    index += 2
+                    continue
+                if not argv[index].startswith("--"):
+                    positional.append(argv[index])
+                index += 1
+            names = [Path(path).name for path in positional[1:] if Path(path).name != self.drop]
+            self.releases.append({"id": max([row["id"] for row in self.releases], default=0) + 1,
+                                  "tag_name": positional[0], "draft": "--draft" in argv,
+                                  "prerelease": "--prerelease" in argv, "assets": [{"name": n} for n in names]})
+            return 0, "", ""
+        return 1, "", f"the fake forge has no answer for {argv}"
 
 
 def selftest() -> int:
@@ -555,6 +713,62 @@ def selftest() -> int:
                 lambda: deployment(private, other_signature, allowed, "priv-repo", "srv-image", "9.9.9"),
                 "does not verify")
 
+            candidate = "candidate/9.9.9/0123456789abcdef"
+            for name, (label, forge_knobs, run_with, refusal) in enumerate((
+                    ("the rehearsal stages the slice into ONE draft pre-release named by the candidate, reads it "
+                     "back equal to the slice, then deletes it", {}, candidate, None),
+                    ("a leftover rehearsal draft named by the candidate is deleted before the new one",
+                     {"seeded": [{"tag_name": candidate, "draft": True, "assets": []}]}, candidate, None),
+                    ("RED: a draft missing one staged asset reds the reading, and the draft is still deleted",
+                     {"drop": "pub_lib-9.9.9.tgz"}, candidate, "staged and not attached ['pub_lib-9.9.9.tgz']"),
+                    ("RED: a PUBLISHED Release named by the candidate is refused and never touched",
+                     {"seeded": [{"tag_name": candidate, "draft": False, "assets": []}]}, candidate,
+                     "a published Release named"),
+                    ("RED: a deletion the forge did not perform reds the rehearsal",
+                     {"keep_on_delete": True}, candidate, "still listed after its deletion"),
+                    ("RED: a name that is no candidate's is refused before any call", {}, "v9.9.9",
+                     "is not a candidate name"),
+                    ("RED: a repository whose visibility differs from the slice's is refused before any draft",
+                     {"visibility": "private"}, candidate, "the repository is private now"),
+                    ("RED: one page full of Releases cannot prove the candidate's absence",
+                     {"seeded": [{"tag_name": f"v0.0.{index}", "draft": False, "assets": []}
+                                 for index in range(RELEASES_PAGE)]}, candidate, "Releases or more"))):
+                forge = _FakeForge(f"{store_replica.ORG}/pub-repo", **forge_knobs)
+                _fake, rehearsed_registry = registry_with(pub, signed(pub, "writer"))
+                done = arm(label, lambda: rehearse(rehearsed_registry, "pub-repo", record_hex, allowed, run_with,
+                                                   root / f"rehearsal-{name}", forge, quiet), refusal)
+                creates = [call for call in forge.calls if call[:2] == ["release", "create"]]
+                drafts = [row for row in forge.releases if row["draft"]]
+                if refusal is None and (done != want or len(creates) != 1 or drafts or
+                                        not {"--draft", "--prerelease"} <= set(creates[0]) or
+                                        "--verify-tag" in creates[0] or creates[0][-len(want) - 1] != candidate):
+                    failures.append(f"{label}: returned {done}, created {creates}, drafts left {drafts}")
+                if refusal is not None and drafts and not forge_knobs.get("keep_on_delete"):
+                    failures.append(f"{label}: a refused rehearsal left the draft(s) {drafts}")
+                if run_with != candidate and forge.calls:
+                    failures.append(f"{label}: a refused name still called the forge {forge.calls}")
+                if forge_knobs.get("visibility") and creates:
+                    failures.append(f"{label}: a refused visibility still created {creates}")
+                if any(not row["draft"] and row["tag_name"] == candidate for row in forge_knobs.get("seeded", [])) \
+                        and (creates or [{key: value for key, value in row.items() if key != "id"}
+                                         for row in forge.releases if row["tag_name"] == candidate] !=
+                             forge_knobs["seeded"]):
+                    failures.append(f"{label}: the published Release was touched: {forge.releases}, {creates}")
+
+            private_forge = _FakeForge(f"{store_replica.ORG}/priv-repo", visibility="private")
+            _fake, private_registry = registry_with(private, signed(private, "writer"))
+            rehearsed_private = arm("the rehearsal of an owner binding a destination also verifies and stages that "
+                                    "destination's slice, and drafts nothing on the destination",
+                                    lambda: rehearse(private_registry, "priv-repo", record_hex, allowed, candidate,
+                                                     root / "rehearsal-private", private_forge, quiet), None)
+            listed_tsv = root / "rehearsal-private" / "destinations" / "destinations.tsv"
+            if rehearsed_private is not None and (
+                    not listed_tsv.is_file() or listed_tsv.read_text() != "pub-repo\tengine-v9.9.9\tpublic\n"
+                    or any("pub-repo" in " ".join(call) for call in private_forge.calls)):
+                failures.append(f"the private owner's rehearsal staged destinations "
+                                f"{listed_tsv.read_text() if listed_tsv.is_file() else 'none'} and called "
+                                f"{private_forge.calls}")
+
             _fake, registry = registry_with(pub, signed(pub, "other"))
             arm("a slice signed by any key but the writer's stages nothing",
                 lambda: stage(registry, "pub-repo", "public", record_hex, allowed, root / "o4", quiet), "does not verify")
@@ -585,6 +799,14 @@ def selftest() -> int:
     print(f"store_publish selftest: {armed[0]} arm(s), {len(failures)} failure(s)")
     return 1 if failures else 0
 
+
+def _token_file(env: str, label: str) -> str:
+    """The token in the file `env` names, for `label`; never an argument, never the environment's value."""
+    path = os.environ.get(env, "")
+    if not path or not Path(path).is_file() or not Path(path).read_text().strip():
+        raise Refused(f"{env} names no non-empty file: {label} reads its token from the writer account's "
+                      f"token file")
+    return Path(path).read_text().strip()
 
 def main(argv: list[str]) -> int:
     try:
@@ -620,6 +842,15 @@ def main(argv: list[str]) -> int:
             target = store_replica.Registry(store_replica.REGISTRY, f"{store_replica.ORG}/{argv[5]}", (actor, token))
             manifest = publish_image(registry, target, argv[1], argv[2], argv[3], Path(argv[4]), argv[5], argv[6], print)
             print(f"store_publish: PUBLISHED ghcr.io/{store_replica.ORG}/{argv[5]}@{manifest}")
+            return 0
+        if len(argv) == 6 and argv[0] == "rehearse":
+            writer = _token_file(store_replica.TOKEN_FILE_ENV, "the store package read")
+            forge = _token_file(REHEARSAL_TOKEN_ENV, "the rehearsal's draft")
+            registry = store_replica.Registry(store_replica.REGISTRY,
+                                              f"{store_replica.ORG}/{store_replica.package_of(argv[1])}",
+                                              (os.environ.get(store_replica.REGISTRY_USER_ENV,
+                                                              store_replica.REGISTRY_USER_DEFAULT), writer))
+            rehearse(registry, argv[1], argv[2], Path(argv[3]), argv[4], Path(argv[5]), live_gh(forge), print)
             return 0
         if len(argv) == 6 and argv[0] in ("stage", "stage-destinations"):
             token = os.environ.get("GITHUB_TOKEN", "")
