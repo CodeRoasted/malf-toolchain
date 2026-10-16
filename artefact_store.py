@@ -1377,8 +1377,11 @@ def third_party_step(store: Path, home: Path, graph_json: Path, prefixes: tuple[
 # step runs in a fresh conan home holding exactly its graph, every binary restored from the store by
 # digest, never fetched from a shared home. The restore list is a document of `upstream` and
 # `third_party` members, a key-first document's own shape: each member resolves to the record at
-# the step's profile holding its content AND a transport, the smallest key on a tie, so a log names
-# the same source on every run. After the restore each folder is checked against its record: its
+# the step's profile holding its content AND a transport, the one at the configuration the step's graph
+# names first, then the smallest key on a tie, so a log names the same source on every run. A package
+# whose bytes did not change across two versions has one content under two configurations, and only
+# its configuration says which one this walk resolves (1.10.8 desk walk, 2026-10-16: the smallest key
+# restored coderoast_ipc_core/1.10.7 into a walk resolving 1.10.8, and every consumer missed it). After the restore each folder is checked against its record: its
 # tree digest and the cache's alias. A failed check is a RESTORE refusal, a store-integrity fault
 # that writes no mismatch event; a kept record whose transport object is absent is a corrupt store,
 # and the act STOPS.
@@ -1408,20 +1411,37 @@ def _restore_index(store: Path, profile: str) -> dict[tuple, list[tuple[str, dic
     return {member: sorted(found, key=lambda pair: pair[0]) for member, found in index.items()}
 
 
+# A restore list's map of each member's label to the configuration (`<ref>#<rrev>:<package id>`) its
+# graph names: never a key member, only which record of a content stands for the member.
+CONFIGURATIONS_FIELD = "configurations"
+
+
+def graph_configurations(graph_json: Path) -> dict[str, str]:
+    """Each node's label (`<name>/<context>`) to the configuration the graph resolved it at."""
+    return {f"{node['name']}/{node['context']}": _alias(node)[1] for node in graph_nodes(graph_json)
+            if node.get("rrev") and node.get("package_id")}
+
+
 def restore_sources(store: Path, document: dict) -> tuple[list[dict], list[str]]:
     """(each member's source: label, record key, output, the configuration the document names or
     None; each finding naming a member no record with a transport holds).
     raises CorruptStore naming a candidate record whose transport object is absent."""
     profile = document["step"]["profile"]
     index = _restore_index(store, profile)
-    members = [(label, ("conan-create", label.split("/", 1)[0], content), None)
+    configurations = document.get(CONFIGURATIONS_FIELD, {})
+    members = [(label, ("conan-create", label.split("/", 1)[0], content), configurations.get(label))
                for label, content in sorted(document.get("upstream", {}).items())]
     members += [(label, (THIRD_PARTY_KIND, None, member["content"]),
                  f"{member['ref']}:{member['package_id']}")
                 for label, member in sorted(document.get("third_party", {}).items())]
     sources, findings = [], []
     for label, address, configuration in members:
-        candidates = index.get(address, [])
+        if configuration is None:
+            findings.append(f"{label} at content {address[2]}: the restore list names no configuration for "
+                            "it, so a record of another version holding the same bytes could stand in for it")
+            continue
+        candidates = sorted(index.get(address, []),
+                            key=lambda pair: (pair[1]["alias"].rsplit("#", 1)[0] != configuration, pair[0]))
         kept = [(key, output) for key, output in candidates if TRANSPORT_FIELD in output]
         for key, output in kept:
             if not (store / "objects" / output[TRANSPORT_FIELD]).is_file():
@@ -1530,6 +1550,8 @@ def restore(store: Path, home: Path, document: dict, ledger: Path, subject: str,
           record with a transport holds or each RESTORE failure, nothing written to the store;
           RESTORE_STOPPED on a corrupt store."""
     started = time.monotonic()
+    if CONFIGURATIONS_FIELD not in document and recipes is not None:
+        document = {**document, CONFIGURATIONS_FIELD: graph_configurations(recipes[1])}
     try:
         sources, findings = restore_sources(store, document)
     except CorruptStore as corrupt:
@@ -1573,7 +1595,7 @@ def restore_document(store: Path, home: Path, graph_json: Path, prefixes: tuple[
     from its folder. raises Refused naming a needed node with no binary or no record."""
     held = recorded_contents(store, profile)
     judged = third_party_records(store, profile)
-    upstream, third_party, unheld = {}, {}, []
+    upstream, third_party, unheld, configurations = {}, {}, [], {}
     for node in graph_nodes(graph_json):
         state, pattern = node.get("binary"), node["ref"].split("#")[0]
         if state == "Skip" or (mode == RESTORE_BUILT) != (state == "Build") \
@@ -1581,6 +1603,7 @@ def restore_document(store: Path, home: Path, graph_json: Path, prefixes: tuple[
             continue
         label = f"{node['name']}/{node['context']}"
         recipe, configuration, binary = _alias(node)
+        configurations[label] = configuration
         if not node.get("prev"):
             unheld.append(f"{label} {configuration} is {state}, with no binary to restore")
             continue
@@ -1600,7 +1623,8 @@ def restore_document(store: Path, home: Path, graph_json: Path, prefixes: tuple[
     if unheld:
         raise Refused(f"the restore list of {graph_json}: {len(unheld)} node(s) cannot be restored: "
                       + "; ".join(unheld))
-    return {"step": {"profile": profile}, "upstream": upstream, "third_party": third_party}
+    return {"step": {"profile": profile}, "upstream": upstream, "third_party": third_party,
+            CONFIGURATIONS_FIELD: {label: configurations[label] for label in [*upstream, *third_party]}}
 
 
 def restore_ledger(ledger: Path) -> str:
@@ -3116,10 +3140,26 @@ def selftest() -> int:
         put_record("c" * 64, "conan-create", "ex_mid", "ex_mid/1#r:q#w", top_folder, top)
         put_record("d" * 64, THIRD_PARTY_KIND, "tpold", "tpold/1#r:p#v", None, old)
         whole = {"step": {"profile": profile}, "upstream": {"ex_mid/host": top},
-                 "third_party": {"tpa/host": {"ref": "tpa/1#r", "package_id": "p", "content": tpa}}}
+                 "third_party": {"tpa/host": {"ref": "tpa/1#r", "package_id": "p", "content": tpa}},
+                 CONFIGURATIONS_FIELD: {"ex_mid/host": "ex_mid/1#r:q", "tpa/host": "tpa/1#r:p"}}
         sources, findings = restore_sources(rstore, whole)
         expect("each member resolves to a record keeping a transport, the smallest key on a tie",
                ([source["key"] for source in sources], findings), (["c" * 64, "a" * 64], []))
+        # TWO VERSIONS, ONE CONTENT (1.10.8 desk walk, 2026-10-16): a package whose bytes did not change
+        # across versions is held by a record of each, and the restore lands the one the graph names,
+        # never the smallest key's.
+        put_record("0" * 64, "conan-create", "ex_mid", "ex_mid/0#r:q#w", top_folder, top)
+        sources, findings = restore_sources(rstore, whole)
+        expect("two versions holding one content: the record at the graph's configuration is restored, not the "
+               "smallest key's", ([source["output"]["alias"] for source in sources], findings),
+               (["ex_mid/1#r:q#w", "tpa/1#r:p#v"], []))
+        sources, findings = restore_sources(rstore, {key: value for key, value in whole.items()
+                                                     if key != CONFIGURATIONS_FIELD})
+        expect("RED: a first-party member whose configuration the restore list does not name is refused, never "
+               "resolved by the smallest key", (sources, [finding.split(":", 1)[0] for finding in findings]),
+               ([{"label": "tpa/host", "key": "a" * 64, "output": sources[0]["output"] if sources else None,
+                  "configuration": "tpa/1#r:p"}], ["ex_mid/host at content " + top]))
+        (rstore / "records" / ("0" * 64 + ".json")).unlink()
         code, printed = restored(whole)
         expect("a restore of records keeping transports restores every node and logs one ledger line",
                (code, "RESTORED ex_top: 2 node(s)" in printed, len(ledger.read_text().splitlines())),
