@@ -395,11 +395,11 @@ check "artefact_store reads \`unconfined: {why}\` from packages.yml at HEAD, and
           && { python3 "$MALF_ROOT/artefact_store.py" unconfined "$uc_tmp/p" pa; python3 "$MALF_ROOT/artefact_store.py" unconfined "$uc_tmp/p" pb 2>/dev/null; echo "rc=$?"; } | paste -sd'|')"
 rm -rf "$uc_tmp"
 
-echo "[7k] malf_closure carries its own grammar proof (selftest): an anchored reference, a function-level import and a directory reference each reach their target, a bare word and a computed path reach nothing, a consumer's \${MALF_TOOLCHAIN_DIR}/ reference seeds the act, a cycle terminates (DN-142.D29)"
+echo "[7k] malf_closure carries its own grammar proof (selftest): an anchored reference, a function-level import and a directory reference each reach their target, a bare word and a computed path reach nothing, a consumer's \${MALF_TOOLCHAIN_DIR}/ reference seeds the act, a cycle terminates; the driver-read watch reports a cmp, a source and a subshell cat, a write event, and refuses an overflow and zero opens (DN-142.D29)"
 closure_selftest_output="$(timeout 120 python3 "$MALF_ROOT/malf_closure.py" selftest 2>&1)"
 closure_selftest_status=$?
-check "malf_closure selftest: 25 arms, 0 failed" \
-      "ok" "$([[ $closure_selftest_status -eq 0 ]] && grep -q '^malf_closure selftest: 25 passed, 0 failed$' <<< "$closure_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$closure_selftest_output")")"
+check "malf_closure selftest: 32 arms, 0 failed" \
+      "ok" "$([[ $closure_selftest_status -eq 0 ]] && grep -q '^malf_closure selftest: 32 passed, 0 failed$' <<< "$closure_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$closure_selftest_output")")"
 
 echo
 

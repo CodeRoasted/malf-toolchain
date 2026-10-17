@@ -34,6 +34,12 @@ soundness is the kernel's.
 
     malf_closure.py member <malf-dir> [--argv <word>]... [--act-root <dir>]...
         the member over the working tree's tracked files, as canonical JSON
+    malf_closure.py watch <malf-dir> --fragment <file> -- <command> [<argument>...]
+        <command> under an inotify watch of every directory of the checkout but `.git`, armed before it
+        starts and drained after it exits (DN-142.D29, the driver-read watch): the fragment holds each
+        malf-relative path opened (kind, count), each write event, the totals, the overflow and the
+        refusals (an overflowed queue, zero malf opens). Exit: the command's own, or 2 refused before it
+        ran (the watch could not be armed)
     malf_closure.py selftest
         every arm over a fixture malf tree
 """
@@ -43,15 +49,19 @@ from __future__ import annotations
 import argparse
 import ast
 import contextlib
+import ctypes
 import io
 import json
 import os
 import posixpath
 import re
+import select
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -541,7 +551,150 @@ def denials_counted(tally: Path | None) -> bool:
     return words == [COUNTED, "0"]
 
 
-# ── selftest ────────────────────────────────────────────────────────────────────────────────────
+# ── the driver-read watch (DN-142.D29, the 2026-10-17 amendment ruling the measurement's mechanism) ─
+#
+# The driver runs unconfined and its spawned processes are outside its audit hook, so their malf reads
+# are COUNTED by watching the FILES, never the processes: an inotify watch on every directory of malf's
+# checkout (`.git` excluded) for the whole of one command. No ptrace, so it composes with each act's own
+# `strace -f`; a Landlock-denied open produces no event, so whoever opened a path, an open of a malf file
+# no record's key names is an exception. The watcher only REPORTS: the reading that judges the fragment
+# against the window's records is Pharos's.
+
+IN_MODIFY, IN_OPEN, IN_MOVED_FROM, IN_MOVED_TO = 0x2, 0x20, 0x40, 0x80
+IN_CREATE, IN_DELETE, IN_Q_OVERFLOW, IN_ISDIR = 0x100, 0x200, 0x4000, 0x40000000
+IN_NONBLOCK, IN_CLOEXEC = 0o4000, 0o2000000
+WRITE_EVENTS = {IN_CREATE: "IN_CREATE", IN_MODIFY: "IN_MODIFY", IN_MOVED_FROM: "IN_MOVED_FROM",
+                IN_MOVED_TO: "IN_MOVED_TO", IN_DELETE: "IN_DELETE"}
+WATCH_MASK = IN_OPEN | IN_CREATE | IN_MODIFY | IN_MOVED_FROM | IN_MOVED_TO | IN_DELETE
+# struct inotify_event's fixed head: wd, mask, cookie, len; `len` bytes of NUL-padded name follow.
+INOTIFY_EVENT = struct.Struct("iIII")
+WATCH_READ_BYTES = 1 << 16
+WATCH_POLL_SECONDS = 0.2
+GIT_DIR = ".git"
+
+
+class WatchRefused(RuntimeError):
+    """The watch could not be armed, so the command must not run unmeasured."""
+
+
+class Watch:
+    """inotify over every directory of a malf checkout but its `.git`: the malf-relative paths opened
+    (with their kind and count) and every write event, read off the queue by `consume`."""
+
+    def __init__(self, malf_dir: Path):
+        self.home = Path(os.path.realpath(malf_dir))
+        self.libc = ctypes.CDLL(None, use_errno=True)
+        self.fd = self.libc.inotify_init1(IN_NONBLOCK | IN_CLOEXEC)
+        if self.fd < 0:
+            raise WatchRefused(f"inotify_init1: {os.strerror(ctypes.get_errno())}")
+        self.directories: dict[int, str] = {}
+        self.opens: dict[str, dict[str, object]] = {}
+        self.writes: dict[str, dict[str, int]] = {}
+        self.events = self.malf_opens = 0
+        self.overflowed = False
+        self.arm(ROOT)
+
+    def arm(self, relative: str) -> None:
+        """Watch `relative` and every directory beneath it but `.git`, a symlink never followed."""
+        for directory, names, _files in os.walk(self.home if relative == ROOT else self.home / relative):
+            names[:] = sorted(name for name in names if name != GIT_DIR)
+            here = os.path.relpath(directory, self.home)
+            wd = self.libc.inotify_add_watch(self.fd, os.fsencode(directory), WATCH_MASK)
+            if wd < 0:
+                raise WatchRefused(f"inotify_add_watch {directory}: {os.strerror(ctypes.get_errno())}")
+            self.directories[wd] = posixpath.normpath(here.replace(os.sep, "/"))
+
+    def consume(self, buffer: bytes) -> None:
+        """Account every event in `buffer`, the bytes of one read of the inotify descriptor."""
+        offset = 0
+        while offset < len(buffer):
+            wd, mask, _cookie, length = INOTIFY_EVENT.unpack_from(buffer, offset)
+            raw = buffer[offset + INOTIFY_EVENT.size:offset + INOTIFY_EVENT.size + length]
+            offset += INOTIFY_EVENT.size + length
+            self.events += 1
+            if mask & IN_Q_OVERFLOW:
+                self.overflowed = True
+                continue
+            directory = self.directories.get(wd)
+            if directory is None:
+                continue
+            name = os.fsdecode(raw.split(b"\0", 1)[0])
+            if name == GIT_DIR:
+                continue
+            path = directory if not name else name if directory == ROOT else f"{directory}/{name}"
+            if mask & IN_OPEN:
+                # note: a subdirectory's open is reported by its parent AND by its own watch; its own is counted.
+                if name and mask & IN_ISDIR:
+                    continue
+                self.malf_opens += 1
+                seen = self.opens.setdefault(path, {"kind": "directory" if mask & IN_ISDIR else "file", "count": 0})
+                seen["count"] = int(seen["count"]) + 1
+            for bit, label in WRITE_EVENTS.items():
+                if mask & bit:
+                    self.writes.setdefault(path, {}).setdefault(label, 0)
+                    self.writes[path][label] += 1
+            if mask & IN_CREATE and mask & IN_ISDIR:
+                self.arm(path)
+
+    def drain(self) -> None:
+        """Consume every event the queue holds now."""
+        while True:
+            try:
+                buffer = os.read(self.fd, WATCH_READ_BYTES)
+            except BlockingIOError:
+                return
+            self.consume(buffer)
+
+    def close(self) -> None:
+        os.close(self.fd)
+
+    def refusals(self) -> list[str]:
+        """Why this window measured nothing trustworthy: an overflowed queue lost events, and zero malf
+        opens means the watch never armed (bash opens `malf` itself)."""
+        refused = []
+        if self.overflowed:
+            refused.append("the inotify queue overflowed: events were lost, so the window is unmeasured")
+        if self.malf_opens == 0:
+            refused.append("malf opens total 0: the watch saw no open, so it never armed (DN-142.D29, M-watch)")
+        return refused
+
+    def fragment(self, code: int) -> dict[str, object]:
+        """The step-0 record's fragment: every opened path, every write event, the totals, the overflow,
+        the refusals and the command's exit; bounded by the checkout's size, never by the window's length."""
+        return {"opens": {path: self.opens[path] for path in sorted(self.opens)},
+                "writes": {path: dict(sorted(self.writes[path].items())) for path in sorted(self.writes)},
+                "events": self.events, "malf_opens": self.malf_opens, "watched": len(self.directories),
+                "overflowed": self.overflowed, "refusals": self.refusals(), "exit": code}
+
+
+def watch(malf_dir: Path, fragment: Path, command: list[str]) -> int:
+    """Run `command` under a Watch of malf's checkout armed BEFORE it starts, drain the queue after it
+    exits, write the fragment (atomically: an absent fragment means the watcher did not finish) and
+    return the command's exit. The watcher's CPU and the window's wall time are printed, never recorded."""
+    started, cpu = time.monotonic(), time.process_time()
+    watcher = Watch(malf_dir)
+    try:
+        child = subprocess.Popen(command)
+        while child.poll() is None:
+            select.select([watcher.fd], [], [], WATCH_POLL_SECONDS)
+            watcher.drain()
+        watcher.drain()
+    finally:
+        watcher.close()
+    written = watcher.fragment(child.returncode)
+    partial = fragment.with_name(fragment.name + ".partial")
+    partial.write_text(json.dumps(written, sort_keys=True, indent=1) + "\n")
+    partial.replace(fragment)
+    for why in written["refusals"]:
+        print(f"malf_closure watch: REFUSED — {why}", file=sys.stderr)
+    print(f"malf_closure watch: {written['events']} event(s), {written['malf_opens']} malf open(s) of "
+          f"{len(written['opens'])} path(s), {len(written['writes'])} path(s) written, over {written['watched']} "
+          f"directories; watcher cpu {time.process_time() - cpu:.3f} s over wall {time.monotonic() - started:.3f} s",
+          file=sys.stderr)
+    return child.returncode
+
+
+# ── selftest────────────────────────────────────────────────────────────────────────────────────
 
 
 def _fixture(base: Path) -> Path:
@@ -714,6 +867,38 @@ def selftest() -> int:
         except ClosureError as error:
             refused = str(error)
         arm("a seed that is not tracked is refused, named", refused, "seed(s) not tracked in malf: absent.py")
+        fragment_path = Path(held) / "watch.json"
+        script = (f"cmp -s {malf / 'unreached.py'} {malf / 'unreached.py'}; . {malf / 'config' / 'data.txt'} 2>/dev/null; "
+                  f"(cat {malf / 'cycle_a.py'} >/dev/null); cat {malf / 'helper.py'} >/dev/null; ls {malf / 'profiles'} "
+                  f">/dev/null; git -C {malf} rev-parse HEAD >/dev/null")
+        code = watch(malf, fragment_path, ["bash", "-c", script])
+        watched = json.loads(fragment_path.read_text())
+        arm("RED: a `cmp`, a bash `source` and a subshell `cat` of malf files are each reported as opened files",
+            (code, [watched["opens"].get(path, {}).get("kind") for path in ("unreached.py", "config/data.txt", "cycle_a.py")]),
+            (0, ["file", "file", "file"]))
+        arm("a read of a closure file is reported like any other; a listing is reported as a directory; malf's .git "
+            "is never watched", (watched["opens"].get("helper.py", {}).get("kind"),
+                                  watched["opens"].get("profiles", {}).get("kind"),
+                                  [path for path in watched["opens"] if path == ".git" or path.startswith(".git/")]),
+            ("file", "directory", []))
+        arm("a clean window writes nothing and refuses nothing", (watched["writes"], watched["refusals"],
+                                                                  watched["malf_opens"] > 0), ({}, [], True))
+        code = watch(malf, fragment_path, ["sh", "-c", f"echo x > {malf / 'profiles' / 'three'}"])
+        watched = json.loads(fragment_path.read_text())
+        (malf / "profiles" / "three").unlink()
+        arm("RED: a file created in the checkout is a write event", sorted(watched["writes"].get("profiles/three", {})),
+            ["IN_CREATE", "IN_MODIFY"])
+        overflowed = Watch(malf)
+        overflowed.consume(INOTIFY_EVENT.pack(-1, IN_Q_OVERFLOW, 0, 0))
+        overflowed.close()
+        arm("RED: an IN_Q_OVERFLOW makes the measurement refuse", any("overflowed" in why for why in overflowed.refusals()),
+            True)
+        code = watch(malf, fragment_path, ["true"])
+        arm("RED: a command that opens nothing under the checkout makes the measurement refuse (the watch never armed)",
+            (code, json.loads(fragment_path.read_text())["refusals"]),
+            (0, ["malf opens total 0: the watch saw no open, so it never armed (DN-142.D29, M-watch)"]))
+        code = watch(malf, fragment_path, ["sh", "-c", f"cat {malf / 'malf'} >/dev/null; exit 7"])
+        arm("the command's own exit is the watcher's", (code, json.loads(fragment_path.read_text())["exit"]), (7, 7))
     print(f"malf_closure selftest: {passed} passed, {failed} failed")
     return 1 if failed else 0
 
@@ -744,6 +929,23 @@ def main(argv: list[str]) -> int:
                            shutil.which("strace"))
         except ClosureError as unread:
             print(f"malf_closure.py confine: REFUSED — {unread}", file=sys.stderr)
+            return 2
+    if argv[:1] == ["watch"]:
+        if "--" not in argv:
+            print("malf_closure.py watch: name the command after --", file=sys.stderr)
+            return 2
+        split = argv.index("--")
+        options = argparse.ArgumentParser(prog="malf_closure.py watch")
+        options.add_argument("malf_dir", type=Path)
+        options.add_argument("--fragment", type=Path, required=True)
+        given = options.parse_args(argv[1:split])
+        if not argv[split + 1:]:
+            print("malf_closure.py watch: the command after -- is empty", file=sys.stderr)
+            return 2
+        try:
+            return watch(given.malf_dir, given.fragment, argv[split + 1:])
+        except WatchRefused as unarmed:
+            print(f"malf_closure.py watch: REFUSED — {unarmed}", file=sys.stderr)
             return 2
     parser = argparse.ArgumentParser(prog="malf_closure.py")
     verbs = parser.add_subparsers(dest="verb", required=True)
