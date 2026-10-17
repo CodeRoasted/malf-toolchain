@@ -102,7 +102,10 @@ class Tree:
     def worktree(cls, malf_dir: Path) -> "Tree":
         """The tracked files AS THEY ARE ON DISK: the tracked list from `git ls-files`, and the blob
         id of a reached file hashed from its working bytes, never another file's (DN-142.D29, ruled on
-        gate M-trace: the key's composition reads the closure's files and malf's `.git`, nothing else).
+        gate M-trace: the key's composition reads the closure's files and malf's `.git`, nothing else),
+        with `--no-filters`: the bytes that RUN, so `.gitattributes` is never an input of the hash, and two
+        on-disk byte strings an eol conversion would fold together never share an id (gate M-trace's
+        second walk, ruled 2026-10-17).
         An entry's listed blob is the index's; only `blobs` answers the bytes on disk."""
         listed = _git(malf_dir, None, "ls-files", "--stage", "-z")
         entries = {}
@@ -126,13 +129,13 @@ class Tree:
             regular = [path for path in paths if entries[path][0] != SYMLINK_MODE]
             hashed = {}
             if regular:
-                done = subprocess.run(["git", "-C", str(malf_dir), "hash-object", "--stdin-paths"],
+                done = subprocess.run(["git", "-C", str(malf_dir), "hash-object", "--no-filters", "--stdin-paths"],
                                       input="\n".join(regular) + "\n", capture_output=True, text=True)
                 if done.returncode != 0:
                     raise ClosureError(f"git hash-object failed in {malf_dir}: {done.stderr.strip()}")
                 hashed.update(zip(regular, done.stdout.split()))
             for path in linked:
-                done = subprocess.run(["git", "-C", str(malf_dir), "hash-object", "--stdin"], input=read(path),
+                done = subprocess.run(["git", "-C", str(malf_dir), "hash-object", "--no-filters", "--stdin"], input=read(path),
                                       capture_output=True)
                 if done.returncode != 0:
                     raise ClosureError(f"git hash-object failed for {path}: {done.stderr.decode().strip()}")
@@ -406,6 +409,7 @@ def _fixture(base: Path) -> Path:
                                            "        python3 \"$ROOT/codegen.py\"\n"
                                            "    - run: ${{ github.action_path }}/../../../helper.py\n",
         "unreached.py": "print('nobody names me')\n",
+        ".gitattributes": "* text=auto eol=lf\n",
         "overlay/recipes/x/all/conanfile.py": "from conan import ConanFile\n",
     }
     for path, text in files.items():
@@ -460,7 +464,7 @@ def selftest() -> int:
         arm("a cycle of imports terminates, each member reached once",
             sorted(closure(tree, act).files), ["codegen.py", "cycle_a.py", "cycle_b.py"])
         arm("each directory holding a closure file is listed by its entry names",
-            driven.listings, {".": [".github", "codegen.py", "config", "cycle_a.py", "cycle_b.py", "helper.py",
+            driven.listings, {".": [".gitattributes", ".github", "codegen.py", "config", "cycle_a.py", "cycle_b.py", "helper.py",
                                      "malf", "overlay", "profiles", "store.py", "tests", "unreached.py", "wrap"],
                               "config": ["data.txt", "writer.profile"], "profiles": ["one", "two"],
                               "wrap": ["malf-cc"]})
@@ -481,6 +485,11 @@ def selftest() -> int:
         arm("a closure file's blob is its working bytes, an uncommitted edit included",
             (edited["helper.py"] != driven.files["helper.py"], edited["store.py"] == driven.files["store.py"]),
             (True, True))
+        (malf / "helper.py").write_bytes(b"VALUE = 1\r\n")
+        crlf = closure(Tree.worktree(malf), {"malf"}).files["helper.py"]
+        (malf / "helper.py").write_bytes(b"VALUE = 1\n")
+        arm("a blob is the raw bytes that run: under `* text=auto eol=lf` a CRLF file never shares its LF "
+            "form's id", crlf != closure(Tree.worktree(malf), {"malf"}).files["helper.py"], True)
         arm("every ancestor of a closure file's directory is listed, so a tool may walk down to it",
             sorted(closure(tree, {"overlay/recipes/x/all/conanfile.py"}).listings),
             [".", "overlay", "overlay/recipes", "overlay/recipes/x", "overlay/recipes/x/all"])

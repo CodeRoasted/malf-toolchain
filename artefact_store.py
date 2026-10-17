@@ -1791,7 +1791,7 @@ def junit_results(results: Path, package: str, package_id: str
 def selection_member(malf_dir: Path) -> dict[str, object]:
     """The test selection a verdict ran: the helper's git blob id and its label expression."""
     helper = malf_dir / "malf_recipe_tests.py"
-    blob = _run(["git", "hash-object", str(helper)]).strip()
+    blob = _run(["git", "hash-object", "--no-filters", str(helper)]).strip()
     sys.path.insert(0, str(malf_dir))
     import malf_recipe_tests
 
