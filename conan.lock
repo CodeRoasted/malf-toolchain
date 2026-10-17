@@ -34,6 +34,7 @@
         "fmt/12.1.0#6baf0fb8351783472b94ee6e36232391%1785754553.994",
         "drogon/1.9.13#28d7de5b5b7090fc47654c94e3b288dd%1792165028.4814734",
         "coderoast_server_logging/1.10.8",
+        "coderoast_server_core/1.10.8",
         "coderoast_server_catalogs/1.10.8",
         "coderoast_ipc_producer/1.10.8",
         "coderoast_ipc_core/1.10.8",
