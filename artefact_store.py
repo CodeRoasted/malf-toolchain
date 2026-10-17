@@ -428,6 +428,31 @@ def step_parameters(profile: str | None) -> dict:
     return document
 
 
+# Provenance, never a key member and never compared (DN-142.D29 (8), ruled (c)): whether the act that
+# produced a record ran in its Landlock domain with its denials counted at zero. Every record carries
+# it, false unless its act's tally (MALF_STEP_TALLY, written by `malf_closure.py confine`) says so: an
+# act no domain confined (a Pharos verdict act today) is false, explicitly.
+DENIALS_FIELD = "denials_counted"
+TALLY_ENV = "MALF_STEP_TALLY"
+
+
+def step_denials_counted() -> bool:
+    """`denials_counted` for the record an act's step commits now: its tally's word, false without one."""
+    named = os.environ.get(TALLY_ENV)
+    return _closure().denials_counted(Path(named) if named else None)
+
+
+def servable(record: dict) -> str | None:
+    """None when a stored record may be SERVED in place of executing its step (N359's reuse), else why
+    not: a record whose act did not run in its domain with its denials counted at zero is never served,
+    and an absent field reads as false (DN-142.D29 (8), ruled (c)). Comparing a rebuild against it is
+    always allowed."""
+    if record.get("produced_by", {}).get(DENIALS_FIELD) is True:
+        return None
+    return (f"the record {record.get('key')} was produced by an act whose reads were not counted in its domain "
+            f"({DENIALS_FIELD} is {record.get('produced_by', {}).get(DENIALS_FIELD)!r}), so it re-executes")
+
+
 def _closure():
     """malf's closure grammar, beside this file (`malf_closure.py`, DN-142.D29)."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -795,6 +820,24 @@ def declared_executables(package_dir: Path, package: str) -> dict:
                          f"nor in the site form {{published: {{<site kind>: ...}}}}: "
                          + ", ".join(f"{path}: {kind}" for path, kind in sorted(wrong.items())))
     return dict(sorted(declared.items()))
+
+
+def declared_unconfined(package_dir: Path, package: str) -> str:
+    """The `unconfined: {why: <reason>}` `package` declares beside its `executables:` in the
+    `packages.yml` of the repository holding `package_dir`, read from HEAD: its `why`, or "" when it
+    declares none (DN-142.D29 ruled (v): a package whose tests change mount topology, which no Landlock
+    domain allows). Raises ValueError on a declaration that is not a mapping naming a non-empty `why`."""
+    import yaml
+
+    top = Path(_run(["git", "-C", str(package_dir), "rev-parse", "--show-toplevel"]).strip())
+    document = yaml.safe_load(_run(["git", "-C", str(top), "show", "HEAD:packages.yml"])) or {}
+    entry = (document.get("packages") or {}).get(package) or {}
+    if "unconfined" not in entry:
+        return ""
+    declared = entry["unconfined"]
+    if not isinstance(declared, dict) or set(declared) != {"why"} or not str(declared.get("why") or "").strip():
+        raise ValueError(f"{package}: `unconfined:` is a mapping holding exactly a non-empty `why:`, not {declared!r}")
+    return " ".join(str(declared["why"]).split())
 
 
 def build_ids_of(files: dict[str, bytes]) -> tuple[dict[str, str], list[str]]:
@@ -2251,7 +2294,8 @@ class LocalStore:
                     outputs[name].update(derived[name](self.root / "objects" / outputs[name][field]))
             body = {"key": key, "inputs": document, "outputs": outputs,
                     "produced_by": {"seat": socket.gethostname(),
-                                    "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}}
+                                    "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                                    DENIALS_FIELD: step_denials_counted()}}
             if self._create(self.root / "records" / f"{key}.json",
                             json.dumps(body, sort_keys=True, indent=1).encode()):
                 for name, output in outputs.items():
@@ -2797,6 +2841,40 @@ def selftest() -> int:
             untracked = str(refused)
         expect("RED: a toolchain that tracks no `malf` gives a step run by `malf` no key: a refusal naming the "
                "seed, never an empty member", untracked.endswith("seed(s) not tracked in malf: malf"), True)
+        # A RECORD SAYS WHETHER ITS ACT'S READS WERE COUNTED IN ITS DOMAIN (DN-142.D29 (8), ruled (c)), and
+        # the reuse path serves only a counted one. A Pharos verdict act runs no domain before its own
+        # traced walk: its record is false, explicitly, and is never served.
+        verdict_store = Path(scratch) / "verdict-store"
+        verdict_body = {"step": {"kind": "verdict", "id": "B4/clang-tidy/fixture", "subject": "fixture",
+                                 "predicate": {"id": "malf lint", "version": "1"}, "params": {}},
+                        "definition": {"malf": {"files": [], "listings": {}}, "parameters": create},
+                        "judged": {}, "data": {}, "toolchain": {}, "system": "s", "context": {}}
+
+        def committed_with(tally: str | None, salt: str) -> dict:
+            saved = os.environ.pop(TALLY_ENV, None)
+            if tally is not None:
+                (Path(scratch) / f"tally-{salt}").write_text(tally)
+                os.environ[TALLY_ENV] = str(Path(scratch) / f"tally-{salt}")
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    judged_verdict(verdict_store, {**verdict_body, "context": {"salt": salt}},
+                                   {"verdict": "pass", "findings": [], "entries": [], "record": {}}, {})
+            finally:
+                os.environ.pop(TALLY_ENV, None)
+                if saved is not None:
+                    os.environ[TALLY_ENV] = saved
+            return LocalStore(verdict_store).record(key_of({**verdict_body, "context": {"salt": salt}}))
+
+        unconfined = committed_with(None, "verdict-act")
+        expect("a verdict act's record before its confinement carries denials_counted false, explicitly, and is "
+               "never served", (unconfined["produced_by"].get(DENIALS_FIELD, "absent"), servable(unconfined) is None),
+               (False, False))
+        counted = committed_with("counted 0\n", "counted")
+        expect("a record whose act ran in its domain with zero denials carries true and may be served",
+               (counted["produced_by"][DENIALS_FIELD], servable(counted)), (True, None))
+        expect("RED: an uncounted act's record is false and never served; an absent field reads false",
+               (committed_with("uncounted\n", "uncounted")["produced_by"][DENIALS_FIELD],
+                servable({"key": "k", "produced_by": {}}) is None), (False, False))
         acted = definition_member(fixture, {"argv": [], "env": {}, "profile": None}, [Path(scratch) / "consumer"])["malf"]
         expect("a consumer file naming ${MALF_TOOLCHAIN_DIR}/codegen.py brings it into the act's member",
                [path for path, _blob in acted["files"]] if isinstance(acted, dict) else acted,
@@ -3269,6 +3347,13 @@ def main(argv: list[str]) -> int:
             objects[label] = Path(path)
         return judged_verdict(Path(argv[1]), json.loads(Path(argv[2]).read_text()),
                               json.loads(Path(argv[3]).read_text()), objects)
+    if len(argv) == 3 and argv[0] == "unconfined":
+        try:
+            print(declared_unconfined(Path(argv[1]), argv[2]))
+        except ValueError as malformed:
+            print(f"artefact_store: REFUSED {malformed}", file=sys.stderr)
+            return 2
+        return 0
     if len(argv) == 3 and argv[0] == "executables":
         print(json.dumps(declared_executables(Path(argv[1]), argv[2]), sort_keys=True))
         return 0
@@ -3335,6 +3420,9 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
+    # The driver's reads under malf are its closure's alone (DN-142.D29): an audit hook, installed for
+    # good when the walk names its closure, refuses any other open.
+    _closure().guard_from_environment()
     try:
         sys.exit(main(sys.argv[1:]))
     except KeyError_ as refused:

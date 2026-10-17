@@ -52,6 +52,11 @@ jobs:
           ln -s "$RUNNER_TEMP/conan-venv/bin/conan" "$RUNNER_TEMP/conan-bin/conan"
           echo "$RUNNER_TEMP/conan-bin" >> "$GITHUB_PATH"
 
+      - name: strace, the tracer R3's denial counter runs (DN-142.D29 (8)), at the release seat's pinned version
+        # malf_closure.py's confine arms count denials with it, as step 0's B0 requires it of the release
+        # seat (scripts/pharos/build.py HOST_PACKAGES): the same package at the same version.
+        run: sudo apt-get update -qq && sudo apt-get install --yes --no-install-recommends strace=6.8-0ubuntu2
+
       - name: malf selftest (syntax + dispatch integrity + profile/build keys)
         run: bash tests/test_malf.sh
 

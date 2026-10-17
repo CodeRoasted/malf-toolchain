@@ -33,6 +33,7 @@ lines on stdout.
 """
 
 import ast
+import os
 import pathlib
 import sys
 
@@ -334,6 +335,12 @@ def mode_steps(root: pathlib.Path) -> int:
         visiting.remove(ref)
         seen.add(ref)
 
+    if not recipes:
+        # A walk that finds no recipe is REFUSED, never an empty walk: under a Landlock domain a
+        # directory it may not list reads as empty, and an empty walk would build nothing and pass
+        # (DN-142.D29, found running the first confined store-create, 2026-10-17).
+        sys.stderr.write(f"malf_graph.py steps: no recipe found under {root} — refusing an empty walk\n")
+        return 2
     for ref in sorted(recipes, key=lambda r: recipes[r]["dir"]):
         visit(ref)
     for ref, directory, edges in order:
@@ -365,4 +372,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # The driver's reads under malf are its closure's alone (DN-142.D29): an audit hook, installed for
+    # good when the walk names its closure, refuses any other open.
+    if os.environ.get("MALF_DRIVER_CLOSURE"):
+        sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+        import malf_closure
+
+        malf_closure.guard_from_environment()
     sys.exit(main())

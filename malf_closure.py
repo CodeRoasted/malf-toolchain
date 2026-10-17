@@ -42,10 +42,13 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
+import io
 import json
 import os
 import posixpath
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -316,7 +319,7 @@ def act_seeds(tree: Tree, malf_dir: Path, roots: list[Path]) -> set[str]:
     home = malf_dir.resolve()
     seeds: set[str] = set()
     for root in roots:
-        for directory, subdirectories, files in os.walk(root, followlinks=False):
+        for directory, subdirectories, files in _source_walk(root):
             for name in files + [entry for entry in subdirectories if Path(directory, entry).is_symlink()]:
                 candidate = Path(directory, name)
                 if candidate.is_symlink():
@@ -331,6 +334,24 @@ def act_seeds(tree: Tree, malf_dir: Path, roots: list[Path]) -> set[str]:
                 for match in CONSUMER_ANCHOR.finditer(text):
                     seeds |= _targets(tree, _normal(ROOT, match["path"]))
     return seeds
+
+
+def _source_walk(root: Path):
+    """`os.walk` over a step's source: in a git checkout its tracked and untracked-not-ignored files
+    alone (what an export can copy; never a build tree), elsewhere (an export folder, a conan home under
+    an ignored path of a checkout included) every entry."""
+    ignored = subprocess.run(["git", "-C", str(root), "check-ignore", "-q", "."], capture_output=True).returncode == 0
+    listed = subprocess.run(["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard",
+                             "--", "."], capture_output=True, text=True)
+    if listed.returncode != 0 or ignored:
+        yield from os.walk(root, followlinks=False)
+        return
+    folders: dict[str, list[str]] = {}
+    for rel in filter(None, listed.stdout.split("\0")):
+        head, _sep, name = rel.rpartition("/")
+        folders.setdefault(str(root / head) if head else str(root), []).append(name)
+    for directory, names in sorted(folders.items()):
+        yield directory, [], names
 
 
 @dataclass
@@ -375,6 +396,149 @@ def member(malf_dir: Path, argv: list[str], act_roots: list[Path], tree: Tree | 
     """The step's `definition.malf`: the closure of its driver and its act over malf's working tree."""
     tree = Tree.worktree(malf_dir) if tree is None else tree
     return closure(tree, driver_seeds(tree, argv) | act_seeds(tree, malf_dir, act_roots)).member()
+
+
+# ── the domain (DN-142.D29 (5), build row R3) ───────────────────────────────────────────────────────
+
+SANDBOX = "landlock_sandbox.py"
+# The exit of an act a counted denial refused: nothing of it is stored (DN-142.D19 (8)).
+DENIED = 3
+# What a tally file says of an act: its denials were counted, and how many; or nothing counted them.
+COUNTED, UNCOUNTED = "counted", "uncounted"
+# A Landlock denial as the tracer prints it: the failed call's path, and EACCES.
+TRACED_CALL = re.compile(r"^\d+ +\w+\((?P<args>.*)\) += -1 EACCES")
+TRACED_FD = re.compile(r"^(?:-?\d+|AT_FDCWD)<(?P<base>[^>]*)>")
+TRACED_STRING = re.compile(r'"((?:[^"\\]|\\.)*)"')
+
+
+def complement(root: Path) -> list[Path]:
+    """Every path beside `root` and beside each of its ancestors: read everywhere but `root`'s tree."""
+    granted: list[Path] = []
+    target = root.resolve()
+    for ancestor in reversed(target.parents):
+        step = target.relative_to(ancestor).parts[0]
+        granted += [ancestor / entry for entry in sorted(os.listdir(ancestor)) if entry != step]
+    return granted
+
+
+def domain_argv(malf_dir: Path, member: dict) -> list[str]:
+    """`landlock_sandbox.py`'s arguments for a domain that reads everything but malf, and in malf the
+    member's files and listings: reads alone are confined."""
+    home = malf_dir.resolve()
+    argv = ["--reads-only"]
+    for path in complement(home):
+        argv += ["--read", str(path)]
+    # Each ancestor of malf is LISTABLE: its entry names, malf's own among them, are no input of a step,
+    # and a walk of the workspace (malf_graph's, conan's) lists them. Without it a listing of the
+    # workspace root is denied and a glob over it reads empty, silently (found running the first
+    # confined store-create, 2026-10-17: `malf_graph.py steps` printed no step and exited 0).
+    for ancestor in home.parents:
+        argv += ["--list", str(ancestor)]
+    for path, _blob in member["files"]:
+        argv += ["--read", str(home / path)]
+    for directory in member["listings"]:
+        argv += ["--list", str(home if directory == ROOT else home / directory)]
+    return argv
+
+
+def counted_denials(trace: Path, malf_dir: Path) -> list[str]:
+    """Each path the traced act was denied (EACCES) under malf or on one of its ancestors (the only places
+    its domain withholds anything), in order, as the tracer printed it."""
+    home = str(malf_dir.resolve())
+    denied = []
+    for line in trace.read_text(errors="replace").splitlines():
+        match = TRACED_CALL.match(line)
+        if not match:
+            continue
+        strings = TRACED_STRING.findall(match["args"])
+        if not strings:
+            continue
+        base = TRACED_FD.match(match["args"])
+        path = os.path.normpath(strings[0] if strings[0].startswith("/") or not base
+                                else os.path.join(base["base"], strings[0]))
+        if path == home or path.startswith(home + "/") or (home + "/").startswith(path.rstrip("/") + "/"):
+            denied.append(path)
+    return denied
+
+
+def confine(malf_dir: Path, argv: list[str], act_roots: list[Path], tally: Path, command: list[str],
+            tracer: str | None = None) -> int:
+    """Run `command` in the domain of its closure (`member`), counting its denials where `strace` is on
+    the PATH: a counted denial REFUSES the act (exit DENIED, the paths named, nothing for its records to
+    store), an uncounted act runs as it would. `tally` receives `counted <n>` or `uncounted`, what the
+    act's records keep as `denials_counted` (DN-142.D29 (8), ruled (c))."""
+    member_ = member(malf_dir, argv, act_roots)
+    sandbox = [sys.executable, "-I", str(Path(__file__).resolve().parent / SANDBOX),
+               *domain_argv(malf_dir, member_), "--", *command]
+    if tracer is None:
+        tally.write_text(f"{UNCOUNTED}\n")
+        return subprocess.run(sandbox, check=False).returncode
+    with tempfile.TemporaryDirectory(prefix="malf_closure.trace.") as scratch:
+        trace = Path(scratch) / "trace"
+        ran = subprocess.run([tracer, "-f", "-qq", "--seccomp-bpf", "-y", "-e", "trace=%file,execve",
+                              "-e", "status=failed", "-s", "4096", "-o", str(trace), *sandbox], check=False)
+        denied = counted_denials(trace, malf_dir)
+    tally.write_text(f"{COUNTED} {len(denied)}\n")
+    if denied:
+        print(f"malf_closure: REFUSED — {len(denied)} read(s) outside the step's closure were denied, and an "
+              f"act that reads an undeclared input is never stored (DN-142.D29 (4)); fix the grammar in "
+              f"{Path(__file__).name}, never a list: " + ", ".join(dict.fromkeys(denied)), file=sys.stderr)
+        return DENIED
+    return ran.returncode
+
+
+# THE DRIVER'S OWN READS, ENFORCED IN ITS PYTHON (DN-142.D29, ruled with the driver's unconfinement):
+# the driver runs with no domain (an unconfined act needs an unconfined parent), so each of its Python
+# processes installs an audit hook that refuses an `open` of a path under malf outside the driver's
+# closure D ∪ ⋃A (and outside malf's `.git`, which its git reads use). An audit hook cannot be
+# removed. `MALF_DRIVER_CLOSURE` names the file holding that closure, one malf-relative path a line,
+# written once per walk (`driver-closure`); a process the variable names none for installs nothing.
+DRIVER_CLOSURE_ENV = "MALF_DRIVER_CLOSURE"
+
+
+class DriverRead(PermissionError):
+    """An `open` the driver's closure does not name."""
+
+
+def guard_driver(malf_dir: Path, allowed: set[str]) -> None:
+    """Refuse, for good, every `open` this process makes of a path under `malf_dir` that `allowed`
+    (malf-relative paths) does not hold, nor malf's `.git`: a DriverRead naming the path and the rule."""
+    home = os.path.realpath(malf_dir) + os.sep
+
+    def hook(event: str, args: tuple) -> None:
+        if event != "open" or not args or isinstance(args[0], int) or args[0] is None:
+            return
+        path = os.path.realpath(os.fsdecode(args[0]))
+        if not path.startswith(home):
+            return
+        relative = path[len(home):]
+        if relative in allowed or relative == ".git" or relative.startswith(".git" + os.sep):
+            return
+        raise DriverRead(f"malf driver: {path} is outside the driver's closure (D ∪ ⋃A, DN-142.D29); a read "
+                         f"the grammar does not name is fixed in {Path(__file__).name}, never a list")
+
+    sys.addaudithook(hook)
+
+
+def guard_from_environment() -> None:
+    """`guard_driver` over the closure `MALF_DRIVER_CLOSURE` names, when it names one."""
+    named = os.environ.get(DRIVER_CLOSURE_ENV)
+    if not named:
+        return
+    lines = Path(named).read_text().splitlines()
+    guard_driver(Path(lines[0]), set(lines[1:]))
+
+
+def denials_counted(tally: Path | None) -> bool:
+    """Whether a tally says its act ran in its domain with its denials counted at zero; an absent or
+    unreadable tally, or one that counted nothing, is False, and nothing defaults it to True."""
+    if tally is None:
+        return False
+    try:
+        words = tally.read_text().split()
+    except OSError:
+        return False
+    return words == [COUNTED, "0"]
 
 
 # ── selftest ────────────────────────────────────────────────────────────────────────────────────
@@ -461,6 +625,17 @@ def selftest() -> int:
         act = act_seeds(tree, malf, [base / "consumer"])
         arm("a consumer CMake file naming ${MALF_TOOLCHAIN_DIR}/codegen.py seeds codegen.py into A",
             sorted(act), ["codegen.py"])
+        checkout = base / "checkout"
+        (checkout / "cache" / "e").mkdir(parents=True)
+        (checkout / "build").mkdir()
+        (checkout / ".gitignore").write_text("cache/\nbuild/\n")
+        (checkout / "cache" / "e" / "CMakeLists.txt").write_text("${MALF_TOOLCHAIN_DIR}/codegen.py\n")
+        (checkout / "build" / "CMakeCache.txt").write_text("${MALF_TOOLCHAIN_DIR}/helper.py\n")
+        subprocess.run(["git", "-C", str(checkout), "init", "-q"], check=True)
+        arm("a source in a checkout is walked by git's listing (never its ignored build tree), and an export "
+            "folder under an ignored path of a checkout is walked whole",
+            (sorted(act_seeds(tree, malf, [checkout])), sorted(act_seeds(tree, malf, [checkout / "cache" / "e"]))),
+            ([], ["codegen.py"]))
         arm("a cycle of imports terminates, each member reached once",
             sorted(closure(tree, act).files), ["codegen.py", "cycle_a.py", "cycle_b.py"])
         arm("each directory holding a closure file is listed by its entry names",
@@ -493,6 +668,46 @@ def selftest() -> int:
         arm("every ancestor of a closure file's directory is listed, so a tool may walk down to it",
             sorted(closure(tree, {"overlay/recipes/x/all/conanfile.py"}).listings),
             [".", "overlay", "overlay/recipes", "overlay/recipes/x", "overlay/recipes/x/all"])
+        tally = Path(held) / "tally"
+        tracer = shutil.which("strace")
+        arm("the seat carries the tracer the denial counter runs (DN-142.D29 (8))", tracer is not None, True)
+        with contextlib.redirect_stderr(io.StringIO()) as said:
+            code = confine(malf, ["malf"], [], tally, ["sh", "-c", f"cat {malf / 'unreached.py'} 2>/dev/null"], tracer=tracer)
+        arm("RED: an out-of-closure read is denied, counted, and REFUSES the act, naming the path",
+            (code, tally.read_text().split(), str(malf / "unreached.py") in said.getvalue()),
+            (DENIED, [COUNTED, "1"], True))
+        with contextlib.redirect_stderr(io.StringIO()):
+            code = confine(malf, ["malf"], [], tally,
+                           ["sh", "-c", f"cat {malf / 'unreached.py'} 2>/dev/null || true"], tracer=tracer)
+        arm("RED: the same read behind a silent fallback is refused all the same", (code, tally.read_text().split()),
+            (DENIED, [COUNTED, "1"]))
+        code = confine(malf, ["malf"], [], tally, ["sh", "-c", f"cat {malf / 'helper.py'} >/dev/null"], tracer=tracer)
+        arm("a read inside the closure runs, counted at zero: its records keep denials_counted true",
+            (code, tally.read_text().split(), denials_counted(tally)), (0, [COUNTED, "0"], True))
+        code = confine(malf, ["malf"], [], tally, ["sh", "-c", f"cat {malf / 'unreached.py'} 2>/dev/null"], tracer=None)
+        arm("with no tracer the domain still denies, the act fails as it would, and its tally is uncounted: "
+            "denials_counted false", (code != 0, tally.read_text().split(), denials_counted(tally)),
+            (True, [UNCOUNTED], False))
+        code = confine(malf, ["malf"], [], tally, ["sh", "-c", f"ls {malf.parent} | grep -qx malf"], tracer=tracer)
+        arm("a walk of the workspace lists malf's ancestors, malf's own name among them, and is counted at zero",
+            (code, tally.read_text().split()), (0, [COUNTED, "0"]))
+        (Path(held) / "unconfined-tally").write_text("unconfined\n")
+        guard_probe = ("import sys; sys.path.insert(0, sys.argv[1]); import malf_closure as m; from pathlib import Path; "
+                       "m.guard_driver(Path(sys.argv[2]), {'malf', 'helper.py'}); "
+                       "open(Path(sys.argv[2]) / 'helper.py').read(); name = 'unreached' + '.py'\n"
+                       "try:\n    open(Path(sys.argv[2]) / name).read(); print('read')\n"
+                       "except PermissionError as refused:\n    print('refused', refused)\n"
+                       "open(Path(sys.argv[2]) / '.git' / 'HEAD').read(); print('git read')")
+        guarded = subprocess.run([sys.executable, "-c", guard_probe, str(Path(__file__).resolve().parent), str(malf)],
+                                 capture_output=True, text=True)
+        arm("RED: the driver's audit hook refuses an out-of-closure malf file opened by a computed path, naming "
+            "it; a closure file and malf's .git read", (guarded.stdout.startswith("refused malf driver: "),
+                                                         str(malf / "unreached.py") in guarded.stdout,
+                                                         guarded.stdout.rstrip().endswith("git read")),
+            (True, True, True))
+        arm("an absent or unreadable tally reads false, never true; so does a declared-unconfined act's",
+            (denials_counted(None), denials_counted(Path(held) / "no-tally"),
+             denials_counted(Path(held) / "unconfined-tally")), (False, False, False))
         refused = None
         try:
             closure(tree, {"absent.py"})
@@ -504,6 +719,32 @@ def selftest() -> int:
 
 
 def main(argv: list[str]) -> int:
+    if argv[:1] == ["driver-closure"]:
+        options = argparse.ArgumentParser(prog="malf_closure.py driver-closure")
+        options.add_argument("malf_dir", type=Path)
+        options.add_argument("out", type=Path)
+        options.add_argument("--act-root", action="append", default=[], type=Path)
+        given = options.parse_args(argv[1:])
+        files = member(given.malf_dir, ["malf"], given.act_root)["files"]
+        given.out.write_text("\n".join([str(given.malf_dir.resolve()), *(path for path, _blob in files)]) + "\n")
+        return 0
+    if argv[:1] == ["confine"]:
+        if "--" not in argv:
+            print("malf_closure.py confine: name the command after --", file=sys.stderr)
+            return 2
+        split = argv.index("--")
+        options = argparse.ArgumentParser(prog="malf_closure.py confine")
+        options.add_argument("malf_dir", type=Path)
+        options.add_argument("--argv", action="append", default=[])
+        options.add_argument("--act-root", action="append", default=[], type=Path)
+        options.add_argument("--tally", type=Path, required=True)
+        given = options.parse_args(argv[1:split])
+        try:
+            return confine(given.malf_dir, given.argv, given.act_root, given.tally, argv[split + 1:],
+                           shutil.which("strace"))
+        except ClosureError as unread:
+            print(f"malf_closure.py confine: REFUSED — {unread}", file=sys.stderr)
+            return 2
     parser = argparse.ArgumentParser(prog="malf_closure.py")
     verbs = parser.add_subparsers(dest="verb", required=True)
     shown = verbs.add_parser("member")

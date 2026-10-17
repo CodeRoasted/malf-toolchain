@@ -371,11 +371,35 @@ check "store_manifest selftest: 60 arms, every refusal fired, the green manifest
 
 echo
 
+echo "[7k0] no malf process tree caches Python bytecode in the checkout: PYTHONPYCACHEPREFIX points outside malf (DN-142.D29, R3)"
+pyc_prefix="$(bash -c 'unset PYTHONPYCACHEPREFIX; MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; printf %s "$PYTHONPYCACHEPREFIX"' _ "$MALF_BIN")"
+check "malf exports a PYTHONPYCACHEPREFIX, and it is not under malf" \
+      "set outside" "$([[ -n "$pyc_prefix" ]] && echo set) $([[ "$pyc_prefix" != "$MALF_ROOT"* ]] && echo outside)"
+
+echo "[7k1] a store step's act runs in its domain unless its package declares itself unconfined (DN-142.D29 ruled (v))"
+uc_tmp="$(mktemp -d)"
+uc_act() {   # <unconfined why or empty> — the act's exit reading a tracked malf file no closure of malf reaches, and its tally
+    bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e
+        _MALF_STEP_UNCONFINED="$2"
+        _malf_confined "$3/tally" "$3" sh -c "cat \"$4\" >/dev/null 2>&1" 2>/dev/null
+        echo "rc=$? $(cat "$3/tally")"' _ "$MALF_BIN" "$1" "$uc_tmp" "$MALF_ROOT/README.md"
+}
+check "an undeclared act runs in its domain: a read outside its closure is denied, its tally counted or uncounted" \
+      "denied" "$(out="$(uc_act "")"; [[ "$out" != rc=0* ]] && echo denied || echo "GOT: $out")"
+check "a package declaring itself unconfined runs its act with no domain, tallied unconfined (its records keep denials_counted false)" \
+      "rc=0 unconfined" "$(uc_act "its namespace tests mount a tmpfs")"
+check "artefact_store reads \`unconfined: {why}\` from packages.yml at HEAD, and refuses a malformed declaration" \
+      "its namespace tests|rc=2" "$(git -C "$uc_tmp" init -q && mkdir -p "$uc_tmp/p" \
+          && printf 'packages:\n  pa:\n    path: p\n    unconfined: {why: its namespace tests}\n  pb:\n    path: p\n    unconfined: yes\n' > "$uc_tmp/packages.yml" \
+          && git -C "$uc_tmp" add packages.yml && git -C "$uc_tmp" -c user.name=t -c user.email=t@t commit -qm t \
+          && { python3 "$MALF_ROOT/artefact_store.py" unconfined "$uc_tmp/p" pa; python3 "$MALF_ROOT/artefact_store.py" unconfined "$uc_tmp/p" pb 2>/dev/null; echo "rc=$?"; } | paste -sd'|')"
+rm -rf "$uc_tmp"
+
 echo "[7k] malf_closure carries its own grammar proof (selftest): an anchored reference, a function-level import and a directory reference each reach their target, a bare word and a computed path reach nothing, a consumer's \${MALF_TOOLCHAIN_DIR}/ reference seeds the act, a cycle terminates (DN-142.D29)"
 closure_selftest_output="$(timeout 120 python3 "$MALF_ROOT/malf_closure.py" selftest 2>&1)"
 closure_selftest_status=$?
-check "malf_closure selftest: 16 arms, 0 failed" \
-      "ok" "$([[ $closure_selftest_status -eq 0 ]] && grep -q '^malf_closure selftest: 16 passed, 0 failed$' <<< "$closure_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$closure_selftest_output")")"
+check "malf_closure selftest: 25 arms, 0 failed" \
+      "ok" "$([[ $closure_selftest_status -eq 0 ]] && grep -q '^malf_closure selftest: 25 passed, 0 failed$' <<< "$closure_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$closure_selftest_output")")"
 
 echo
 
@@ -5418,6 +5442,8 @@ check "a test_package requiring only what its tested recipe requires walks" \
       "rc=0 tt_a/0.1" "$(rows="$(python3 "$MALF_ROOT/malf_graph.py" steps "$tt_tmp/ws-ok" 2>&1)"; echo "rc=$? $(cut -f1 <<< "$rows")")"
 check "RED — a test_package requiring a reference its tested recipe does not refuses the walk at exit 2, naming both, and prints no row" \
       "rc=2 1 0" "$(python3 "$MALF_ROOT/malf_graph.py" steps "$tt_tmp/ws-bad" > "$tt_tmp/rows" 2> "$tt_tmp/err"; echo "rc=$? $(grep -c 'tt_b/0.1: .*/test_package/conanfile.py requires gtest/1.17.0, which tt_b/0.1 neither requires nor test-requires' "$tt_tmp/err") $(wc -l < "$tt_tmp/rows" | tr -d ' ')")"
+check "a walk that finds no recipe is refused at exit 2, never an empty walk (a domain that may not list reads empty)" \
+      "rc=2 1" "$(mkdir -p "$tt_tmp/ws-empty"; python3 "$MALF_ROOT/malf_graph.py" steps "$tt_tmp/ws-empty" > /dev/null 2> "$tt_tmp/err"; echo "rc=$? $(grep -c 'refusing an empty walk' "$tt_tmp/err")")"
 tt_recipe repo/with tt_w 'requires = "zlib/1.3.2"' 'self.requires("zlib/1.3.2")'
 printf 'TEST(Tt, Holds) {}\n' > "$tt_tmp/repo/with/test_package/test.cpp"
 tt_recipe repo/without tt_o 'requires = "zlib/1.3.2"'
@@ -5446,6 +5472,7 @@ printf '#!/bin/sh\nprintf "%%s\\n" "$@" > "%s/conan.argv"\n' "$tt_tmp" > "$tt_tm
 tt_create() {   # <test folder argument> — the create's exit and its --test-folder arguments
     PATH="$tt_tmp/bin:$PATH" bash -c 'MALF_SOURCE_ONLY=1 source "$1" > /dev/null 2>&1; set +e
         _MALF_WRITER_PROFILES=(); _MALF_WRITER_ARGS=(); _MALF_SHIP_LOCK=(); MALF_CONFIG=Release; rm -f "$3/conan.argv"
+        _MALF_STEP_TALLY="$3/create.denials"
         _malf_store_create_step tt_w "$3/repo/with" tt_ "$3/graph.json" "$3/create.log" "$2" 2>/dev/null
         echo "rc=$? $( { grep -c -- --test-folder "$3/conan.argv"; grep -- --test-folder "$3/conan.argv"; } 2>/dev/null | paste -sd" ")"' _ "$MALF_BIN" "$1" "$tt_tmp"
 }
@@ -5527,8 +5554,8 @@ echo
 
 echo "[7q7s] gate G4's harness: a command under \`malf sandbox\` reads only beneath its declared roots, and a create whose build() opens an undeclared file reds with EACCES naming it (DN-142.D19 (5))"
 lb_out="$(timeout 120 python3 "$MALF_ROOT/landlock_sandbox.py" selftest 2>&1)"
-check "landlock_sandbox selftest: 9 arms, every denial fired" \
-      "ok" "$(grep -q '^landlock_sandbox selftest: 9 arm(s), 0 failure(s)$' <<< "$lb_out" && echo ok || echo "failed: $(tail -3 <<< "$lb_out")")"
+check "landlock_sandbox selftest: 12 arms, every denial fired" \
+      "ok" "$(grep -q '^landlock_sandbox selftest: 12 arm(s), 0 failure(s)$' <<< "$lb_out" && echo ok || echo "failed: $(tail -3 <<< "$lb_out")")"
 lb_tmp="$(realpath "$(mktemp -d)")"
 mkdir -p "$lb_tmp/src/lb_pkg" "$lb_tmp/outside" "$lb_tmp/tmp"
 printf 'undeclared\n' > "$lb_tmp/outside/secret"
@@ -5760,6 +5787,10 @@ ls_step() {   # <malf dir> <package>
         _MALF_WRITER_PROFILES=(--profile:host="$3" --profile:build="$3")
         _malf_writer_create_args || exit 3
         _malf_ship_lock_args || exit 2
+        # These arms judge the LOCK a create resolves against, over a fixture MALF_DIR holding only its
+        # lock (no tracked malf to derive a closure from); the create runs unconfined here, and the
+        # domain is judged by the malf_closure selftest ([7k]).
+        _malf_confined() { shift 2; "$@"; }
         _malf_store_create_step "$4" "$5" ls_ "$6/graph.json" "$6/create.log" none' \
         _ "$MALF_BIN" "$ls_tmp/$1" "$ls_home/profiles/fixture" "$2" "$ls_tmp/$2" "$ls_tmp" 2> "$ls_tmp/refusal.log"
     local rc=$? revision
@@ -6251,8 +6282,8 @@ ok = found and found.group(1, 2, 3) == ("3", "st_pkg", "PASS") and float(found.g
 print("ok" if ok else repr(line))' "$st_out")"
 st_body="$(sed -n '/^cmd_store_create()/,/^}/p' "$MALF_BIN")"
 st_step="$(sed -n '/^_malf_store_run_step()/,/^}/p' "$MALF_BIN")"
-check "the walk opens every step it runs and closes it on each of its nine exits: its third-party step failed or found the store corrupt, a build passed, failed or found the store corrupt, a declaration unread, its key before the step refused, its step home unwritten, its create and records in that home" \
-      "1 1 9 1" "$(grep -c '_malf_store_clock "$scratch/times"; run_at=' <<< "$st_body") $(grep -c '_malf_store_opened "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total" "$name" SKIPPED' <<< "$st_step")"
+check "the walk opens every step it runs and closes it on each of its ten exits: its third-party step failed or found the store corrupt, its unconfined declaration unread, a build passed, failed or found the store corrupt, a declaration unread, its key before the step refused, its step home unwritten, its create and records in that home" \
+      "1 1 10 1" "$(grep -c '_malf_store_clock "$scratch/times"; run_at=' <<< "$st_body") $(grep -c '_malf_store_opened "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total" "$name" SKIPPED' <<< "$st_step")"
 rm -rf "$st_tmp"
 echo
 

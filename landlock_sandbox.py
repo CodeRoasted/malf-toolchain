@@ -6,12 +6,15 @@ and a declaration is a claim until the kernel enforces it. Landlock (ABI 3 on th
 measured) restricts the filesystem accesses of a process and of everything it executes, for good:
 a domain is never lifted, so each command runs in a process of its own.
 
-    landlock_sandbox.py [--read <root>]... [--write <root>]... -- <command> [<argument>...]
+    landlock_sandbox.py [--reads-only] [--read <root>]... [--list <dir>]... [--write <root>]... -- <command> [<argument>...]
         <command> executed under a domain in which each --read root (a directory, or a file) is
-        readable and executable beneath it, each --write root also writable, created into and
-        removed from, and every other path denied: an open outside them fails with EACCES, which
-        the command sees as its own error. Exit: the command's own, or 2 refused before it ran
-        (no Landlock in this kernel, a root that does not exist, an empty command)
+        readable and executable beneath it, each --list directory listable beneath it and nothing
+        in it readable, each --write root also writable, created into and removed from, and every
+        other path denied: an open outside them fails with EACCES, which the command sees as its
+        own error. --reads-only confines reads alone (the domain handles no write right), so the
+        command writes where it would have: the confinement of a keyed step's INPUTS (DN-142.D29
+        (5)). Exit: the command's own, or 2 refused before it ran (no Landlock in this kernel, a
+        root that does not exist, an empty command)
     landlock_sandbox.py abi
         the kernel's Landlock ABI version, one line; exit 1 when the kernel has none
     landlock_sandbox.py selftest
@@ -86,14 +89,22 @@ def abi() -> int:
         return 0
 
 
-def restrict(read_roots: list[Path], write_roots: list[Path]) -> None:
-    """Restrict THIS process, and everything it executes, to `read_roots` (read and execute) and
-    `write_roots` (every handled right), for good.
+def restrict(read_roots: list[Path], write_roots: list[Path], list_roots: list[Path] | tuple = (),
+             reads_only: bool = False) -> None:
+    """Restrict THIS process, and everything it executes, to `read_roots` (read and execute),
+    `list_roots` (directory listing alone) and `write_roots` (every handled right), for good;
+    `reads_only` handles the read rights alone, leaving every write as it was.
     pre: each root exists. post: the domain is enforced, or Refused names why nothing was."""
     version = abi()
     if version < 1:
         raise Refused("this kernel answers no Landlock ABI, so no read can be confined")
     handled = HANDLED_BY_ABI[min(version, max(HANDLED_BY_ABI))]
+    if reads_only:
+        # REFER is handled too, and granted beneath every read root: a domain that does not handle it
+        # refuses EVERY link or rename across directories with EXDEV (Landlock's ABI 1 semantics),
+        # which a reads-only domain must never do (found running the first confined store-create,
+        # 2026-10-17: the test results' os.link failed with EXDEV inside one /tmp scratch).
+        handled &= READ_RIGHTS | REFER
     attributes = _RulesetAttr(handled)
     try:
         ruleset = _syscall(SYS_LANDLOCK_CREATE_RULESET, ctypes.byref(attributes),
@@ -101,11 +112,14 @@ def restrict(read_roots: list[Path], write_roots: list[Path]) -> None:
     except OSError as failed:
         raise Refused(f"landlock_create_ruleset failed: {failed}") from failed
     try:
-        for roots, rights in ((read_roots, READ_RIGHTS & handled), (write_roots, handled)):
+        for roots, rights in ((read_roots, (READ_RIGHTS | REFER) & handled), (list(list_roots), READ_DIR & handled),
+                              (write_roots, handled)):
             for root in roots:
                 if not root.exists():
                     raise Refused(f"the root {root} does not exist")
                 allowed = rights if root.is_dir() else rights & FILE_RIGHTS
+                if not allowed:
+                    raise Refused(f"the root {root} takes no right of this rule (a listing names a directory)")
                 descriptor = os.open(root, os.O_PATH | os.O_CLOEXEC)
                 try:
                     rule = _PathBeneathAttr(allowed, descriptor)
@@ -126,28 +140,33 @@ def restrict(read_roots: list[Path], write_roots: list[Path]) -> None:
         os.close(ruleset)
 
 
-def parse(argv: list[str]) -> tuple[list[Path], list[Path], list[str]]:
-    """(read roots, write roots, command) of `[--read R | --write W]... -- command...`."""
-    reads: list[Path] = []
-    writes: list[Path] = []
+def parse(argv: list[str]) -> tuple[dict[str, list[Path]], bool, list[str]]:
+    """({--read, --list, --write: roots}, --reads-only, command) of
+    `[--reads-only] [--read R | --list L | --write W]... -- command...`."""
+    roots: dict[str, list[Path]] = {"--read": [], "--list": [], "--write": []}
+    reads_only = False
     index = 0
     while index < len(argv) and argv[index] != "--":
         flag = argv[index]
-        if flag not in ("--read", "--write") or index + 1 >= len(argv):
-            raise Refused(f"expected --read <root>, --write <root> or --, not {flag!r}")
-        (reads if flag == "--read" else writes).append(Path(argv[index + 1]).resolve())
+        if flag == "--reads-only":
+            reads_only = True
+            index += 1
+            continue
+        if flag not in roots or index + 1 >= len(argv):
+            raise Refused(f"expected --read <root>, --list <dir>, --write <root>, --reads-only or --, not {flag!r}")
+        roots[flag].append(Path(argv[index + 1]).resolve())
         index += 2
     command = argv[index + 1:]
     if index >= len(argv) or not command:
         raise Refused("no command after --")
-    return reads, writes, command
+    return roots, reads_only, command
 
 
 def sandboxed(argv: list[str]) -> int:
     """Build the domain, then become the command; returns only when either was refused."""
     try:
-        reads, writes, command = parse(argv)
-        restrict(reads, writes)
+        roots, reads_only, command = parse(argv)
+        restrict(roots["--read"], roots["--write"], roots["--list"], reads_only)
     except Refused as refused:
         print(f"landlock_sandbox: REFUSED — {refused}; the command did not run", file=sys.stderr)
         return REFUSED
@@ -206,6 +225,22 @@ def selftest() -> int:
             (REFUSED, True))
         done = run([inside], [work], ["sh", "-c", f"cat {outside / 'secret'} 2>/dev/null; sh -c 'cat {outside / 'secret'}'"])
         arm("RED: the domain binds every process the command starts", (done.returncode != 0, done.stdout), (True, ""))
+        listed = subprocess.run([sys.executable, "-I", str(here), *sum((["--read", str(path)] for path in system), []),
+                                 "--list", str(outside), "--", "sh", "-c", f"ls {outside}; cat {outside / 'secret'}"],
+                                capture_output=True, text=True, check=False)
+        arm("a --list directory lists its entries, and none of them reads",
+            (listed.stdout, listed.returncode != 0, "Permission denied" in listed.stderr), ("secret\n", True, True))
+        free = subprocess.run([sys.executable, "-I", str(here), "--reads-only", *sum((["--read", str(path)] for path in system), []),
+                               "--", "sh", "-c", f"echo z > {outside / 'written'}; cat {outside / 'secret'}"],
+                              capture_output=True, text=True, check=False)
+        moved = subprocess.run([sys.executable, "-I", str(here), "--reads-only", "--read", "/", "--",
+                                "sh", "-c", f"mkdir -p {work / 'a'} {work / 'b'} && echo m > {work / 'a' / 'f'} && "
+                                            f"ln {work / 'a' / 'f'} {work / 'b' / 'g'} && mv {work / 'b' / 'g'} {work / 'a' / 'h'}"],
+                               capture_output=True, text=True, check=False)
+        arm("--reads-only lets a command link and rename across directories (never EXDEV)",
+            (moved.returncode, moved.stderr), (0, ""))
+        arm("--reads-only confines reads alone: an ungranted write succeeds, an ungranted read is denied",
+            ((outside / "written").exists(), "Permission denied" in free.stderr), (True, True))
     for failure in failures:
         print(f"landlock_sandbox selftest FAILED: {failure}")
     print(f"landlock_sandbox selftest: {armed[0]} arm(s), {len(failures)} failure(s)")

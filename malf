@@ -53,6 +53,11 @@ MALF_BUILD_PROFILE_EXPLICIT="${MALF_BUILD_PROFILE:+1}"
 
 MALF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CWD="$(pwd)"
+# NO PYTHON PROCESS OF MALF READS OR WRITES BYTECODE IN THE CHECKOUT (DN-142.D29, ruled with R3): a
+# `.pyc` under malf/__pycache__ is a generated file no key names, and a confined act reading one is
+# a counted denial. Every malf process tree caches it outside malf; store-create points it at its
+# own scratch.
+export PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-${XDG_CACHE_HOME:-$HOME/.cache}/malf-pycache}"
 MALF_WORKSPACE_ROOT="${MALF_WORKSPACE_ROOT:-$(cd "$MALF_DIR/.." && pwd)}"
 # Build-time codegen reachability. logcraft/core's CMake generates the Intent library by
 # invoking ${MALF_TOOLCHAIN_DIR}/intent_library_codegen.py, resolving cache var -> env ->
@@ -5451,6 +5456,11 @@ _malf_store_parameters() {   # <profile|-> <argv>...
 cmd_store_create() {
     local arg
     for arg in "$@"; do [[ "$arg" != -* ]] || _malf_refuse_option store-create "$arg"; done
+    # THE DRIVER RUNS WITH NO DOMAIN, ITS ACTS EACH IN THEIRS (DN-142.D29 (5), R3): a Landlock domain is
+    # inherited by every child and never lifted, so a confined driver would confine the acts a package
+    # declares `unconfined:` (its tests change mount topology, which no domain allows). The driver's
+    # reads are measured instead: gate M-trace reads them at zero outside D ∪ ⋃A ∪ malf/.git, and
+    # re-runs at every malf re-pin.
     local store
     store="$(_malf_store_root store-create)" || return 2
     local -a bench_args=()
@@ -5460,6 +5470,15 @@ cmd_store_create() {
     local cut_home="${MALF_CUT_VERIFY_CONAN_HOME:-$MALF_CONAN_HOME_BASE/cut-verify}"
     local seed_home="${MALF_TWIN_SEED_HOME:-$cut_home}"
     local scratch; scratch="$(mktemp -d /tmp/malf-store.XXXXXX)"
+    export PYTHONPYCACHEPREFIX="$scratch/pycache"
+    # The driver's closure, D ∪ ⋃A over every step's source, named once for the walk: each driver Python
+    # process (artefact_store.py, malf_graph.py) installs an audit hook refusing any other open under malf.
+    local -a driver_roots=() driver_args=()
+    mapfile -t driver_roots < <(python3 "$MALF_DIR/malf_graph.py" steps "$MALF_WORKSPACE_ROOT" | cut -f2)
+    for arg in "${driver_roots[@]}"; do driver_args+=(--act-root "$arg"); done
+    python3 "$MALF_DIR/malf_closure.py" driver-closure "$MALF_DIR" "$scratch/driver.closure" "${driver_args[@]}" \
+        || { echo "malf store-create: the driver's closure could not be derived (above)" >&2; return 2; }
+    export MALF_DRIVER_CLOSURE="$scratch/driver.closure"
     local steps unstored prefixes
     steps="$(python3 "$MALF_DIR/malf_graph.py" steps "$MALF_WORKSPACE_ROOT")" && [[ -n "$steps" ]] \
         || { echo "malf store-create: malf's walk of $MALF_WORKSPACE_ROOT found no step, or refused it (above)" >&2; return 2; }
@@ -5708,6 +5727,7 @@ _malf_store_run_step() {   # <n> <name> <path> <create|build> <store> <scratch> 
     local total="$1" name="$2" path="$3" kind="$4" store="$5" scratch="$6" prefixes="$7" run_at="$8"
     local -a corpus_args=("${@:9}")
     local step_at step_cpu step_home verdict rc=0
+    _MALF_STEP_UNCONFINED=""
     _malf_store_third_party "$total" "$name" "$path" "$prefixes" "$store" "$scratch" "$run_at" || rc=$?
     if [[ $rc -eq 2 ]]; then
         _malf_store_clock "$scratch/times"; step_at="$_MALF_CLOCK_AT"; step_cpu="$_MALF_CLOCK_CPU"
@@ -5722,6 +5742,16 @@ _malf_store_run_step() {   # <n> <name> <path> <create|build> <store> <scratch> 
     fi
     _malf_store_clock "$scratch/times"; step_at="$_MALF_CLOCK_AT"; step_cpu="$_MALF_CLOCK_CPU"
     _malf_store_opened "$total" "$kind" "$name" "$path" "$run_at" "$step_at"
+    # A PACKAGE WHOSE TESTS CHANGE MOUNT TOPOLOGY DECLARES ITSELF UNCONFINED (DN-142.D29 ruled (v)): a
+    # Landlock domain refuses mount and pivot_root whatever it grants, so such a package's create and
+    # build run with no domain, its records keep denials_counted false, and nothing of it is reused.
+    if ! _MALF_STEP_UNCONFINED="$(python3 "$MALF_DIR/artefact_store.py" unconfined "$path" "$name")"; then
+        echo "malf store-create: the \`unconfined:\` declaration of $name could not be read from its packages.yml at HEAD (DN-142.D29)" >&2
+        _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+        return "$_MALF_STEP_UNRECORDED"
+    fi
+    [[ -z "$_MALF_STEP_UNCONFINED" ]] \
+        || echo "--- store-create: $name runs UNCONFINED (its packages.yml: $_MALF_STEP_UNCONFINED) ---"
     if [[ "$kind" == "build" ]]; then
         rc=0
         _malf_store_build_one "$name" "$path" "${MALF_STORE_BUILD_REV:-HEAD}" "$store" "$scratch" "$prefixes" || rc=$?
@@ -5774,6 +5804,7 @@ _malf_store_create_in() {   # <name> <path> <store> <scratch> <prefixes> <step h
     _malf_store_restore "$store" "$step_home" "$scratch/$name.key-first.json" "$scratch" "$name" \
         "$scratch/$name.key-first.graph.json" || rc=$?
     [[ $rc -eq 0 ]] || { [[ $rc -eq 2 ]] && return "$_MALF_STEP_STOPPED"; return "$_MALF_STEP_UNRECORDED"; }
+    _MALF_STEP_TALLY="$scratch/$name.denials"
     if ! CONAN_HOME="$step_home" _malf_store_create_step "$name" "$path" "$prefixes" "$scratch/$name.graph.json" \
             "$scratch/$name.log" "$_MALF_TEST_FOLDER"; then
         echo "malf store-create: conan create $name failed — $scratch/$name.log" >&2
@@ -5781,6 +5812,7 @@ _malf_store_create_in() {   # <name> <path> <store> <scratch> <prefixes> <step h
         return "$_MALF_STEP_FAILED"
     fi
     if ! MALF_STEP_EXECUTABLES="$scratch/$name.executables.json" MALF_STEP_KEY_FIRST="$scratch/$name.key-first.json" \
+        MALF_STEP_TALLY="$_MALF_STEP_TALLY" \
         MALF_STEP_TEST_FOLDER="$_MALF_TEST_FOLDER" CONAN_HOME="$step_home" python3 "$MALF_DIR/artefact_store.py" conan-step "$store" "$step_home" \
         "$scratch/$name.graph.json" "$name" "$MALF_PROFILE_NAME" "$MALF_DIR" "$scratch/toolchain.json" "$prefixes" \
         "$step_home/malf-test-results" "${corpus_args[@]}"; then
@@ -5874,6 +5906,26 @@ _malf_store_key_first() {   # <name> <prefixes> <store> <scratch> <log> <recipe 
 # it links is one already in the home: a first-party upstream its own step created, a third-party
 # one its own `third-party-create` step built and recorded (_malf_store_third_party). A binary
 # missing from the home fails the create naming it, never builds or downloads inside it.
+# ONE KEYED ACT, IN THE DOMAIN OF ITS CLOSURE (DN-142.D29 (5), build row R3): `malf_closure.py confine`
+# runs the command able to read everything but malf, and in malf only the closure of the driver and of
+# what its source names (and the listings); where `strace` is on the PATH it counts the act's denials,
+# and a counted one REFUSES the act (exit 3, the paths named), so nothing of it is recorded. The tally
+# says `counted <n>` or `uncounted`, which the act's records keep as `denials_counted`.
+# _MALF_STEP_UNCONFINED, the running step's packages.yml `unconfined:` why (empty when it declares
+# none), runs the act with no domain and tallies it `unconfined`: its records keep denials_counted false.
+_malf_confined() {   # <tally> <act root> <command>...
+    local tally="$1" root="$2"
+    shift 2
+    [[ -n "$tally" && -n "$root" ]] \
+        || { echo "malf: a confined act names its tally and its source ('$tally', '$root'), or it does not run" >&2; return 2; }
+    if [[ -n "${_MALF_STEP_UNCONFINED:-}" ]]; then
+        echo "unconfined" > "$tally"
+        "$@"
+        return
+    fi
+    python3 "$MALF_DIR/malf_closure.py" confine "$MALF_DIR" --argv malf --act-root "$root" --tally "$tally" -- "$@"
+}
+
 _malf_store_create_step() {   # <name> <path> <prefixes> <graph> <log> <test folder copy|none>
     local -a build_args test_args=()
     case "${6:-}" in
@@ -5883,7 +5935,7 @@ _malf_store_create_step() {   # <name> <path> <prefixes> <graph> <log> <test fol
            return 1 ;;
     esac
     mapfile -t build_args < <(_malf_store_build_args "$1")
-    conan create "$2" "${_MALF_WRITER_PROFILES[@]}" \
+    _malf_confined "${_MALF_STEP_TALLY:-}" "$2" conan create "$2" "${_MALF_WRITER_PROFILES[@]}" \
         -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${build_args[@]}" "${_MALF_SHIP_LOCK[@]}" \
         "${test_args[@]}" --no-remote --format=json > "$4" 2> "$5"
 }
@@ -6006,13 +6058,13 @@ _malf_store_third_party_in() {   # <name> <path> <prefixes> <store> <scratch> <g
         2) _MALF_THIRD_PARTY_CAUSE="the store is corrupt (STOPPED above)"; return 2 ;;
         *) _MALF_THIRD_PARTY_CAUSE="restoring its phase home was refused (above)"; return 1 ;;
     esac
-    if ! CONAN_HOME="$phase_home" conan install "$path" "${common[@]}" "${builds[@]}" \
+    if ! CONAN_HOME="$phase_home" _malf_confined "$scratch/$name.third-party.denials" "$path" conan install "$path" "${common[@]}" "${builds[@]}" \
             --output-folder="$scratch/$name.third-party" \
             --format=json > "$scratch/$name.third-party.install.json" 2>> "$log"; then
         _MALF_THIRD_PARTY_CAUSE="building ${builds[*]#--build=} failed ($log)"
         _malf_quote_log "$log" "$name:third-party (its install)"; return 1
     fi
-    CONAN_HOME="$phase_home" python3 "$MALF_DIR/artefact_store.py" third-party-step "$store" "$phase_home" \
+    MALF_STEP_TALLY="$scratch/$name.third-party.denials" CONAN_HOME="$phase_home" python3 "$MALF_DIR/artefact_store.py" third-party-step "$store" "$phase_home" \
         "$scratch/$name.third-party.install.json" "$prefixes" "$MALF_PROFILE_NAME" "$MALF_DIR" \
         "$scratch/toolchain.json" || rc=$?
     case $rc in
@@ -6118,7 +6170,7 @@ _malf_store_build_in() {   # <name> <prefix> <tree> <store> <scratch> <prefixes>
     python3 "$MALF_DIR/artefact_store.py" restore "$store" "$CONAN_HOME" "$scratch/$name.key-first.json" \
         "$scratch/restore.jsonl" "$name" "$walk_home" "$scratch/$name.key-first.graph.json" || rc=$?
     [[ $rc -eq 0 ]] || { [[ $rc -eq 2 ]] && return 2; return 1; }
-    if ! conan build "$scratch/$name/$prefix" "${_MALF_WRITER_PROFILES[@]}" \
+    if ! _malf_confined "$scratch/$name.denials" "$scratch/$name/$prefix" conan build "$scratch/$name/$prefix" "${_MALF_WRITER_PROFILES[@]}" \
             -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${_MALF_SHIP_LOCK[@]}" --build=never \
             --format=json > "$scratch/$name.graph.json" 2> "$scratch/$name.log"; then
         echo "malf store-build: conan build $name failed — $scratch/$name.log" >&2
@@ -6130,6 +6182,7 @@ _malf_store_build_in() {   # <name> <prefix> <tree> <store> <scratch> <prefixes>
         return 1
     fi
     MALF_STEP_SOURCE="$scratch/$name/$prefix" MALF_STEP_KEY_FIRST="$scratch/$name.key-first.json" \
+        MALF_STEP_TALLY="$scratch/$name.denials" \
         MALF_STEP_TEST_FOLDER=none python3 "$MALF_DIR/artefact_store.py" build-step "$store" "$CONAN_HOME" "$scratch/$name.graph.json" \
         "$name" "$MALF_PROFILE_NAME" "$MALF_DIR" "$scratch/toolchain.json" "$prefixes" "$tree" \
         "$CONAN_HOME/malf-test-results" || return 1
