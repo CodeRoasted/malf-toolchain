@@ -32,15 +32,21 @@ every corpus root (corpora key through `data`, per mount). Inside that ground it
 share: malf's whole checkout, the step's own repository (its export reads the recipe and derives its
 exports from git), its step home, its scratch, each corpus mount its own `data` names, and the
 parameter files its command line names. Everything else stays readable: it is the `system` member's
-ground, keyed whole. Where `strace` is on the PATH the act's denials are COUNTED, and a counted one
+ground, keyed whole. The act WRITES only into locations of its own, a TMPDIR and a HOME under the walk's
+scratch: every ancestor of a denied root (`$HOME` among them, which holds the workspace, `~/.conan2` and
+the store) is list-only, so a domain whose `/tmp`, TMPDIR or HOME holds denied ground is refused before
+the act (DN-142.D30 (9) R8). Where `strace` is on the PATH the act's denials are COUNTED, and a counted one
 refuses the act: nothing of it is stored, and the refusal names each path.
 
     malf_closure.py confine <malf-dir> --tally <file> --workspace <dir> --store <dir>
                             [--conan-home <dir>]... [--corpus-gates <file> --package <name>]
                             [--parameter-file <file>]... --act-root <dir> --home <dir> --scratch <dir>
-                            -- <command> [<argument>...]
-        <command> in its step's domain; exit the command's own, DENIED (3) refused for a counted
-        denial, or 2 refused before it ran
+                            [--unconfined] -- <command> [<argument>...]
+        <command> in its step's domain, with a TMPDIR and a HOME of its own, empty, under <scratch>
+        (removed when it ends); exit the command's own, DENIED (3) refused for a counted denial, or 2
+        refused before it ran (a domain in which /tmp, that TMPDIR or that HOME is an ancestor of a
+        denied root or lies in the denied ground among them). --unconfined runs it with no domain, in
+        its own locations all the same, its tally `unconfined` (a package declaring itself unconfined)
     malf_closure.py selftest
         every arm over a fixture malf tree and a fixture workspace
 """
@@ -91,10 +97,6 @@ PYTHON_SIBLING = re.compile(r"Path\(__file__\)(?:\.resolve\(\))?\.with_name\(\s*
 SEGMENT = re.compile(r"[\"']([^\"'\n]+)[\"']")
 # A path's tail that is prose, never path: the full stop or comma closing a sentence that named it.
 PROSE_TAIL = ".,"
-
-
-class ClosureError(RuntimeError):
-    """A file the grammar must read could not be read as what it claims to be."""
 
 
 class ClosureError(RuntimeError):
@@ -290,8 +292,13 @@ def closure(tree: Tree, seeds: set[str], pruned=lambda path: False) -> Closure:
 SANDBOX = "landlock_sandbox.py"
 # The exit of an act a counted denial refused: nothing of it is stored (DN-142.D29 (8)).
 DENIED = 3
-# What a tally file says of an act: its denials were counted, and how many; or nothing counted them.
-COUNTED, UNCOUNTED = "counted", "uncounted"
+# The exit of an act refused before it ran: its domain could not be built, nothing was judged.
+REFUSED_BUILD = 2
+# What a tally file says of an act: its denials were counted, and how many; nothing counted them; or it
+# ran with no domain, its package declaring itself unconfined (DN-142.D29 (9)).
+COUNTED, UNCOUNTED, UNCONFINED = "counted", "uncounted", "unconfined"
+# The directory a tool that ignores TMPDIR writes into (DN-142.D30 (9) R8).
+SYSTEM_TMP = Path("/tmp")
 # A Landlock denial as the tracer prints it: the failed call's path, and EACCES.
 TRACED_CALL = re.compile(r"^\d+ +\w+\((?P<args>.*)\) += -1 EACCES")
 TRACED_FD = re.compile(r"^(?:-?\d+|AT_FDCWD)<(?P<base>[^>]*)>")
@@ -424,20 +431,75 @@ def counted_denials(trace: Path, domain: Domain, argv: list[str]) -> list[tuple[
     return denied
 
 
-def confine(domain: Domain, tally: Path, command: list[str], tracer: str | None = None) -> int:
-    """Run `command` in `domain`, counting its denials where a tracer is given: a counted denial REFUSES
-    the act (exit DENIED, the paths named, nothing for its records to store), an uncounted act runs as
-    it would. `tally` receives `counted <n>` or `uncounted`, what the act's records keep as
-    `denials_counted` (DN-142.D29 (8)). The counter judges the very argv the domain was built from."""
+@contextlib.contextmanager
+def act_locations(scratch: Path):
+    """The act's own `TMPDIR` and `HOME` (DN-142.D30 (9) R8, DN-142.D29 (5)): two empty directories of a
+    directory of its own under `scratch`, removed when the act ends. LOCATIONS, never keyed: no parameter
+    document names them. Yields the environment the act runs with."""
+    own = Path(tempfile.mkdtemp(prefix="act.", dir=scratch))
+    try:
+        (own / "tmp").mkdir()
+        (own / "home").mkdir()
+        yield {**os.environ, "TMPDIR": str(own / "tmp"), "HOME": str(own / "home")}
+    finally:
+        shutil.rmtree(own, ignore_errors=True)
+
+
+def location_refusals(domain: Domain, locations: dict[str, Path]) -> list[str]:
+    """One line per location (`/tmp`, the act's `TMPDIR`, its `HOME`) that is an ancestor of a denied root
+    or lies inside the denied ground (DN-142.D29 (5)): every ancestor of a denied root is list-only, so an
+    entry the act creates there after its domain was built is withheld and counted, refusing the act at
+    DENIED after its whole build with a cause that reads like an undeclared input."""
+    found = []
+    for label, path in locations.items():
+        real = Path(os.path.realpath(path))
+        below = [str(root) for root in domain.denied if root != real and _within(root, real)]
+        if below:
+            found.append(f"{label} {path} is an ancestor of the denied root(s) {', '.join(below)}")
+        elif domain.withholds(real):
+            holding = [str(root) for root in domain.denied if _within(real, root)]
+            found.append(f"{label} {path} lies inside the denied ground ({', '.join(holding)})")
+    return found
+
+
+def located(scratch: Path, tally: Path, command: list[str]) -> int:
+    """Run `command` with no domain, in its own locations, its tally `unconfined`: the act of a package
+    declaring itself unconfined (DN-142.D29 (9)), whose records keep denials_counted false."""
+    tally.write_text(f"{UNCONFINED}\n")
+    with act_locations(scratch) as environment:
+        return subprocess.run(command, env=environment, check=False).returncode
+
+
+def confine(domain: Domain, scratch: Path, tally: Path, command: list[str], tracer: str | None = None) -> int:
+    """Run `command` in `domain` and in its own locations under `scratch` (act_locations), counting its
+    denials where a tracer is given: a counted denial REFUSES the act (exit DENIED, the paths named,
+    nothing for its records to store), an uncounted act runs as it would, and a domain in which `/tmp`,
+    the act's TMPDIR or its HOME holds or lies in denied ground is refused before the act runs (exit
+    REFUSED_BUILD, each named). `tally` receives `counted <n>` or `uncounted`, what the act's records keep
+    as `denials_counted` (DN-142.D29 (8)). The counter judges the very argv the domain was built from."""
+    with act_locations(scratch) as environment:
+        refusals = location_refusals(domain, {str(SYSTEM_TMP): SYSTEM_TMP, "TMPDIR": Path(environment["TMPDIR"]),
+                                              "HOME": Path(environment["HOME"])})
+        if refusals:
+            tally.write_text(f"{UNCOUNTED}\n")
+            print("malf_closure: REFUSED before the act ran, nothing judged — an act writes its temporary files and "
+                  "its HOME where no denied root hangs (DN-142.D29 (5), DN-142.D30 (9) R8); move the denied root out, "
+                  "never the act's writes in: " + "; ".join(refusals), file=sys.stderr)
+            return REFUSED_BUILD
+        return _confined(domain, tally, command, tracer, environment)
+
+
+def _confined(domain: Domain, tally: Path, command: list[str], tracer: str | None, environment: dict) -> int:
     argv = domain_argv(domain)
     sandbox = [sys.executable, "-I", str(Path(__file__).resolve().parent / SANDBOX), *argv, "--", *command]
     if tracer is None:
         tally.write_text(f"{UNCOUNTED}\n")
-        return subprocess.run(sandbox, check=False).returncode
-    with tempfile.TemporaryDirectory(prefix="malf_closure.trace.") as scratch:
-        trace = Path(scratch) / "trace"
+        return subprocess.run(sandbox, env=environment, check=False).returncode
+    with tempfile.TemporaryDirectory(prefix="malf_closure.trace.") as trace_dir:
+        trace = Path(trace_dir) / "trace"
         ran = subprocess.run([tracer, "-f", "-qq", "--seccomp-bpf", "-y", "-e", "trace=%file,execve",
-                              "-e", "status=failed", "-s", "4096", "-o", str(trace), *sandbox], check=False)
+                              "-e", "status=failed", "-s", "4096", "-o", str(trace), *sandbox],
+                             env=environment, check=False)
         denied = counted_denials(trace, domain, argv)
     tally.write_text(f"{COUNTED} {len(denied)}\n")
     if denied:
@@ -606,7 +668,7 @@ def selftest() -> int:
 
         def act(script: str, counter: str | None = tracer) -> tuple[int, list[str], str]:
             with contextlib.redirect_stderr(io.StringIO()) as said:
-                code = confine(domain, tally, ["sh", "-c", script], tracer=counter)
+                code = confine(domain, scratch, tally, ["sh", "-c", script], tracer=counter)
             return code, tally.read_text().split(), said.getvalue()
 
         code, counted, said = act(f"cat {sibling / 'secret.txt'} >/dev/null 2>&1")
@@ -619,7 +681,7 @@ def selftest() -> int:
             (DENIED, [COUNTED, "2"], True, True))
         probe = ("import sys\ntry:\n    open(sys.argv[1]).read()\nexcept OSError:\n    pass\n")
         with contextlib.redirect_stderr(io.StringIO()) as said:
-            code = confine(domain, tally, [sys.executable, "-I", "-c", probe, str(sibling / "secret.txt")], tracer=tracer)
+            code = confine(domain, scratch, tally, [sys.executable, "-I", "-c", probe, str(sibling / "secret.txt")], tracer=tracer)
         arm("RED: the same read behind `try/except OSError` is refused all the same",
             (code, tally.read_text().split()), (DENIED, [COUNTED, "1"]))
         code, counted, said = act(f"cat {store / 'records' / 'k.json'} >/dev/null 2>&1; "
@@ -640,7 +702,7 @@ def selftest() -> int:
         _committed(submodule, {"recipe/conanfile.py": "a submodule's own\n"})
         sub_domain = step_domain(malf, workspace, store, [], step_home, scratch, submodule / "recipe")
         with contextlib.redirect_stderr(io.StringIO()):
-            code = confine(sub_domain, tally, ["sh", "-c", f"git -C {submodule} rev-parse HEAD >/dev/null && "
+            code = confine(sub_domain, scratch, tally, ["sh", "-c", f"git -C {submodule} rev-parse HEAD >/dev/null && "
                                                            f"cat {submodule / 'recipe' / 'conanfile.py'} >/dev/null"],
                            tracer=tracer)
         arm("a repository whose git directory lives elsewhere in the workspace (a submodule's, under the "
@@ -652,7 +714,7 @@ def selftest() -> int:
         temporary = ("import sys, tempfile\ntry:\n    tempfile.mkstemp(dir=sys.argv[1])\nexcept OSError:\n"
                      "    sys.exit('Cannot create temporary file in ' + sys.argv[1])\n")
         with contextlib.redirect_stderr(io.StringIO()) as said:
-            code = confine(domain, tally, [sys.executable, "-I", "-c", temporary, str(base)], tracer=tracer)
+            code = confine(domain, scratch, tally, [sys.executable, "-I", "-c", temporary, str(base)], tracer=tracer)
         arm("RED: a file the act creates beside a denied root's ancestor after its domain was built (a temporary file "
             "in the directory holding another conan home) is refused a read by the domain, so it is counted and the act "
             "REFUSED, the directory named: denials_counted is never true over a refusal nobody counted",
@@ -684,6 +746,38 @@ def selftest() -> int:
             ["absent: the step's domain grants root(s) that do not exist",
              f"workspace: the act's repository {repository} is the workspace root itself, so its domain would deny "
              "no sibling repository (DN-142.D29 (5))"])
+        def cli(script: str, *extra: str) -> subprocess.CompletedProcess:
+            """The `confine` verb over this fixture's step, as malf's driver calls it."""
+            return subprocess.run([sys.executable, "-I", str(Path(__file__).resolve()), "confine", str(malf),
+                                   "--tally", str(tally), "--workspace", str(workspace), "--store", str(store),
+                                   "--act-root", str(repository / "recipe"), "--home", str(step_home),
+                                   "--scratch", str(scratch), *extra, "--", "sh", "-c", script],
+                                  capture_output=True, text=True, check=False)
+
+        under_tmp = Path(tempfile.mkdtemp(prefix="malf_closure.selftest.home.", dir="/tmp"))
+        try:
+            ran = base / "ran-beside-a-tmp-home"
+            refused_build = cli(f"touch {ran}", "--conan-home", str(under_tmp))
+            arm("RED: a domain whose conan home lies under /tmp is refused at build, exit 2, /tmp and the home named, "
+                "and the act never runs (DN-142.D30 (9) R8)",
+                (refused_build.returncode, "/tmp " in refused_build.stderr, str(under_tmp) in refused_build.stderr,
+                 ran.exists()), (REFUSED_BUILD, True, True, False))
+        finally:
+            shutil.rmtree(under_tmp)
+        located = cli('[ -z "$(ls -A "$HOME")" ] && [ -z "$(ls -A "$TMPDIR")" ] && [ "$HOME" != "$TMPDIR" ] '
+                      f'&& case "$HOME:$TMPDIR" in {scratch}/*:{scratch}/*) ;; *) exit 9 ;; esac '
+                      '&& mkdir -p "$HOME/.cache" && echo t > "$TMPDIR/x" && echo h > "$HOME/.cache/x" '
+                      '&& cat "$TMPDIR/x" "$HOME/.cache/x" >/dev/null')
+        arm("RED: an act runs with a TMPDIR and a HOME of its own, empty, inside the walk's scratch, and creates then "
+            "reads $TMPDIR/x and $HOME/.cache/x counted at zero (DN-142.D30 (9) R8)",
+            (located.returncode, tally.read_text().split()), (0, [COUNTED, "0"]))
+        arm("an act's locations are removed when it ends: the scratch holds no act directory after it",
+            sorted(path.name for path in scratch.glob("act.*")), [])
+        arm("a TMPDIR or HOME that is an ancestor of a denied root, or lies inside the denied ground, is named; the "
+            "act's own locations are not",
+            [line.split(" ", 1)[0] for line in location_refusals(domain, {"TMPDIR": base, "HOME": sibling,
+                                                                          "own": scratch})],
+            ["TMPDIR", "HOME"])
         (base / "unconfined-tally").write_text("unconfined\n")
         arm("an absent or unreadable tally reads false, never true; so does a declared-unconfined act's",
             (denials_counted(None), denials_counted(base / "no-tally"), denials_counted(base / "unconfined-tally")),
@@ -710,17 +804,20 @@ def main(argv: list[str]) -> int:
         options.add_argument("--act-root", type=Path, required=True)
         options.add_argument("--home", type=Path, required=True)
         options.add_argument("--scratch", type=Path, required=True)
+        options.add_argument("--unconfined", action="store_true")
         given = options.parse_args(argv[1:split])
         if not argv[split + 1:]:
             print("malf_closure.py confine: the command after -- is empty", file=sys.stderr)
             return 2
+        if given.unconfined:
+            return located(given.scratch, given.tally, argv[split + 1:])
         try:
             domain = step_domain(given.malf_dir, given.workspace, given.store, given.conan_home, given.home,
                                  given.scratch, given.act_root, given.corpus_gates, given.package, given.parameter_file)
         except ClosureError as unread:
             print(f"malf_closure.py confine: REFUSED — {unread}", file=sys.stderr)
             return 2
-        return confine(domain, given.tally, argv[split + 1:], shutil.which("strace"))
+        return confine(domain, given.scratch, given.tally, argv[split + 1:], shutil.which("strace"))
     parser = argparse.ArgumentParser(prog="malf_closure.py")
     verbs = parser.add_subparsers(dest="verb", required=True)
     verbs.add_parser("selftest")

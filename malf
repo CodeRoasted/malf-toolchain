@@ -58,6 +58,10 @@ CWD="$(pwd)"
 # bytes no key names. Every malf process tree caches it outside malf; store-create points it at its
 # own scratch.
 export PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-${XDG_CACHE_HOME:-$HOME/.cache}/malf-pycache}"
+# CONAN'S SOURCE DOWNLOAD CACHE IS NAMED BY ITS ABSOLUTE PATH (DN-142.D30 (9) R8): global.conf renders
+# core.sources:download_cache from this variable, fixed here, where HOME is still the user's, so a keyed
+# act that runs with a HOME of its own (malf_closure.py confine) still reads the one shared cache.
+export MALF_CONAN_SOURCES_CACHE="${MALF_CONAN_SOURCES_CACHE:-$HOME/.conan2-sources-backup}"
 MALF_WORKSPACE_ROOT="${MALF_WORKSPACE_ROOT:-$(cd "$MALF_DIR/.." && pwd)}"
 # Build-time codegen reachability. logcraft/core's CMake generates the Intent library by
 # invoking ${MALF_TOOLCHAIN_DIR}/intent_library_codegen.py, resolving cache var -> env ->
@@ -5227,13 +5231,24 @@ cmd_relocate_verify() {
 # recipes the probe exported), and the verb REFUSES at
 # exit 2, naming every third-party binary the seed lacks: a green never rides a silent rebuild.
 #
-# Usage: malf twin-verify      (MALF_TWIN_DIR: where the homes go, default a fresh /tmp dir;
+# WHERE THE HOMES GO: never under /tmp. Each home is denied ground to every other act of the walk, and
+# a denied root under /tmp makes /tmp list-only, so any tool writing a temporary file there would refuse
+# its act; the domain builder refuses such a walk before it starts (DN-142.D30 (9) R8). The default is a
+# fresh directory under the user's state directory, outside every cache, since the stores go there too.
+# Usage: malf twin-verify      (MALF_TWIN_DIR: where the homes go, default a fresh directory under
+#                               ${XDG_STATE_HOME:-$HOME/.local/state}/malf-twin;
 #                               MALF_TWIN_SEED_HOME: the third-party source, default store-create's)
 cmd_twin_verify() {
     [[ $# -eq 0 ]] || _malf_refuse_option twin-verify "$1"
     command -v unshare >/dev/null \
         || { echo "malf twin-verify: unshare(1) not found — the second account cannot be made" >&2; return 1; }
-    local root="${MALF_TWIN_DIR:-$(mktemp -d /tmp/malf-twin.XXXXXX)}"
+    local twin_base="${XDG_STATE_HOME:-$HOME/.local/state}/malf-twin" root
+    if [[ -n "${MALF_TWIN_DIR:-}" ]]; then
+        root="$MALF_TWIN_DIR"
+    else
+        mkdir -p "$twin_base" && root="$(mktemp -d "$twin_base/twin.XXXXXX")" \
+            || { echo "malf twin-verify: no directory for the two homes could be made under $twin_base" >&2; return 1; }
+    fi
     local seed_home="${MALF_TWIN_SEED_HOME:-$MALF_CONAN_HOME_BASE/cut-verify}"
     local first="$root/a" second="$root/second-account/conan-home-b"
     local second_home="$root/second-account/home" second_uid=$(( $(id -u) + 1 ))
@@ -5459,7 +5474,8 @@ _malf_conan_home_fresh() {   # <home>
 # two-producer check), driver and acts together, so the conan that computes a key before its step is
 # the conan that creates. Inside, MALF_SYSTEM names the pinned config digest. The container sees,
 # each at its own absolute path: the workspace, the store, every conan home the walk names, /tmp (where
-# the walk's scratch is made, kept on the host when a step fails), the log archive's directory, the
+# the walk's scratch is made, kept on the host when a step fails), the source download cache, the log
+# archive's directory, the
 # corpus document and its mounts (read-only), and for a walk running benchmarks the bench document and
 # the build slot (read-only) with the host's process ids, so the slot's holder is judged alive or dead
 # as on the host. Its environment is exactly the walk's declared variables. The walk runs as uid 1000 with
@@ -5473,12 +5489,12 @@ _malf_store_create_in_environment() {   # <package>...
     mapfile -t bench_args < <(_malf_store_bench_args) && [[ "${bench_args[0]:-}" != REFUSED ]] || return 2
     store="$(_malf_store_root store-create)" || return 2
     mkdir -p "$store"
-    # The conan source download cache global.conf renders under HOME (core.sources:download_cache): every
-    # third-party source a recipe fetches, verified by the sha256 its conandata pins, since the container
-    # has no network; HOME inside is the caller's path, holding only what is mounted under it.
-    mkdir -p "$HOME/.conan2-sources-backup"
-    local -a args=(--home "$HOME" --mount "$MALF_WORKSPACE_ROOT" --mount "$store" --mount /tmp
-                   --mount "$HOME/.conan2-sources-backup")
+    # The conan source download cache (core.sources:download_cache), named by its absolute path in
+    # MALF_CONAN_SOURCES_CACHE, never through HOME: every third-party source a recipe fetches, verified by
+    # the sha256 its conandata pins, since the container has no network. The container keeps the image's
+    # HOME, and each act inside gets its own (DN-142.D30 (9) R8).
+    mkdir -p "$MALF_CONAN_SOURCES_CACHE"
+    local -a args=(--mount "$MALF_WORKSPACE_ROOT" --mount "$store" --mount /tmp --mount "$MALF_CONAN_SOURCES_CACHE")
     local cut_home="${MALF_CUT_VERIFY_CONAN_HOME:-$MALF_CONAN_HOME_BASE/cut-verify}" home
     for home in "$MALF_CONAN_HOME_BASE" "$cut_home" "${MALF_STORE_CONAN_HOME:-}" "${MALF_TWIN_SEED_HOME:-}"; do
         [[ -n "$home" ]] || continue
@@ -5499,7 +5515,8 @@ _malf_store_create_in_environment() {   # <package>...
         [[ -z "${!name:-}" ]] || args+=(--env "$name")
     done
     export MALF_STORE_DIR="$store" MALF_WORKSPACE_ROOT CONAN_HOME="$MALF_CONAN_HOME_BASE" MALF_BUILD_SLOT_DIR
-    args+=(--env MALF_STORE_DIR --env MALF_WORKSPACE_ROOT --env CONAN_HOME --env MALF_BUILD_SLOT_DIR)
+    args+=(--env MALF_STORE_DIR --env MALF_WORKSPACE_ROOT --env CONAN_HOME --env MALF_BUILD_SLOT_DIR
+           --env MALF_CONAN_SOURCES_CACHE)
     # THE WALK'S BACKENDS (DN-142.D30 (5) E2b): the union of what its steps declare under `backends:` at
     # HEAD, started by the launcher on the walk's internal network; none keeps `--network none`.
     local declared rc=0
@@ -6066,21 +6083,21 @@ _malf_store_key_first() {   # <name> <prefixes> <store> <scratch> <log> <recipe 
 # `denials_counted`. _MALF_STEP_UNCONFINED, the running step's packages.yml `unconfined:` why (empty
 # when it declares none), runs the act with no domain and tallies it `unconfined`: its records keep
 # denials_counted false.
+# EVERY ACT, CONFINED OR NOT, WRITES INTO LOCATIONS OF ITS OWN (DN-142.D30 (9) R8): `confine` hands it a
+# TMPDIR and a HOME, empty, under the walk's scratch, never keyed, and refuses at exit 2 before the act a
+# domain whose /tmp, TMPDIR or HOME holds denied ground.
 _MALF_DOMAIN=()
 _malf_confined() {   # <tally> <package> <act root> <command>...
     local tally="$1" package="$2" root="$3"
     shift 3
     [[ -n "$tally" && -n "$package" && -n "$root" ]] \
         || { echo "malf: a confined act names its tally, its package and its source ('$tally', '$package', '$root'), or it does not run" >&2; return 2; }
-    if [[ -n "${_MALF_STEP_UNCONFINED:-}" ]]; then
-        echo "unconfined" > "$tally"
-        "$@"
-        return
-    fi
     [[ ${#_MALF_DOMAIN[@]} -gt 0 ]] \
         || { echo "malf: a confined act runs inside a walk that named its denied ground (_MALF_DOMAIN), and none was named" >&2; return 2; }
+    local -a unconfined=()
+    [[ -z "${_MALF_STEP_UNCONFINED:-}" ]] || unconfined=(--unconfined)
     python3 "$MALF_DIR/malf_closure.py" confine "$MALF_DIR" "${_MALF_DOMAIN[@]}" --package "$package" \
-        --act-root "$root" --home "$CONAN_HOME" --tally "$tally" -- "$@"
+        --act-root "$root" --home "$CONAN_HOME" --tally "$tally" "${unconfined[@]}" -- "$@"
 }
 
 _malf_store_create_step() {   # <name> <path> <prefixes> <graph> <log> <test folder copy|none>

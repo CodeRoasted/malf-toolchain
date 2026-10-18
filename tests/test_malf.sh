@@ -402,11 +402,11 @@ check "artefact_store reads \`unconfined: {why}\` from packages.yml at HEAD, and
           && { python3 "$MALF_ROOT/artefact_store.py" unconfined "$uc_tmp/p" pa; python3 "$MALF_ROOT/artefact_store.py" unconfined "$uc_tmp/p" pb 2>/dev/null; echo "rc=$?"; } | paste -sd'|')"
 rm -rf "$uc_tmp"
 
-echo "[7k] malf_closure carries its own proof (selftest): an anchored reference, a function-level import and a directory reference each reach their target, a bare word and a computed path reach nothing, a cycle terminates; a store act's domain denies and counts a read of a sibling repository, another conan home, the store and a corpus not its own, behind a try/except too, and every other read its domain refuses (an entry created beside a denied root's ancestor after the act started, a symlink into the denied ground), and lets its own repository, malf whole, its home and a system path read (DN-142.D29 (5), (8))"
+echo "[7k] malf_closure carries its own proof (selftest): an anchored reference, a function-level import and a directory reference each reach their target, a bare word and a computed path reach nothing, a cycle terminates; a store act's domain denies and counts a read of a sibling repository, another conan home, the store and a corpus not its own, behind a try/except too, and every other read its domain refuses (an entry created beside a denied root's ancestor after the act started, a symlink into the denied ground), and lets its own repository, malf whole, its home and a system path read; every act writes into a TMPDIR and a HOME of its own under the walk's scratch, and a domain whose /tmp holds a denied root is refused before the act (DN-142.D29 (5), (8), DN-142.D30 (9) R8)"
 closure_selftest_output="$(timeout 120 python3 "$MALF_ROOT/malf_closure.py" selftest 2>&1)"
 closure_selftest_status=$?
-check "malf_closure selftest: 23 arms, 0 failed" \
-      "ok" "$([[ $closure_selftest_status -eq 0 ]] && grep -q '^malf_closure selftest: 23 passed, 0 failed$' <<< "$closure_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$closure_selftest_output")")"
+check "malf_closure selftest: 27 arms, 0 failed" \
+      "ok" "$([[ $closure_selftest_status -eq 0 ]] && grep -q '^malf_closure selftest: 27 passed, 0 failed$' <<< "$closure_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$closure_selftest_output")")"
 
 echo
 
@@ -5194,6 +5194,8 @@ tq_first ex_t 'requires = "tpt/0.1"'
 # ex_k's export reads the clock: an input `conan graph info` cannot see, which the create's own export
 # then holds at another value (DN-142.D19 (4), gate G2).
 tq_first ex_k 'requires = "tpr/0.1"'
+# ex_h prints the act's own locations while it builds: a TMPDIR it lacks fails its create.
+tq_first ex_h 'requires = "tpr/0.1"' 'self.output.info("act-locations HOME=" + __import__("os").environ["HOME"] + " TMPDIR=" + __import__("os").environ["TMPDIR"])'
 # ex_b is a build-scripts package, which `conan create` builds in the BUILD context.
 mkdir -p "$tq_src/ex_b"
 printf 'from conan import ConanFile\n\n\nclass Fixture(ConanFile):\n    name = "ex_b"\n    version = "0.1"\n    package_type = "build-scripts"\n' > "$tq_src/ex_b/conanfile.py"
@@ -5242,6 +5244,15 @@ print(sum(len(recipe.get("packages", {})) for body in cache.values() if isinstan
 check "(a′) the reproducible control: act 2 MATCHES tpr's third-party-create and the consumer's create at equal keys" \
       "rc=0 rc=0 1 1 2" \
       "$(tq_step a store-r ex_r) $(tq_step a-second-home-at-a-longer-path store-r ex_r) $(tq_has 'artefact_store: MATCH tpr package') $(tq_has 'artefact_store: MATCH ex_r package') $(ls "$tq_tmp/store-r/records" | wc -l | tr -d ' ')"
+
+# (a‴) every act runs with a TMPDIR and a HOME of its own under its walk's scratch, and they are
+# LOCATIONS: two walks whose scratch directories differ give the act two of each and one key.
+tq_locations() {   # <home name> — the HOME and TMPDIR ex_h's create printed in that walk's scratch
+    sed -n 's/.*act-locations HOME=\([^ ]*\) TMPDIR=\([^ ]*\).*/\1 \2/p' "$tq_tmp/scratch-$1/ex_h.log" | head -1
+}
+check "(a‴) RED — an act's HOME and TMPDIR are its own, under its walk's scratch, distinct across two walks, and the act's key is equal: act 2 MATCHES (DN-142.D30 (9) R8)" \
+      "rc=0 rc=0 1 under-a under-second" \
+      "$(tq_step a store-h ex_h) $(tq_step a-second-home-at-a-longer-path store-h ex_h) $(tq_has 'artefact_store: MATCH ex_h package') $(read -r h t <<< "$(tq_locations a)"; [[ "$h" == "$tq_tmp/scratch-a/act."*/home && "$t" == "${h%/home}/tmp" ]] && echo under-a || echo "GOT[$h $t]") $(read -r h t <<< "$(tq_locations a-second-home-at-a-longer-path)"; [[ "$h" == "$tq_tmp/scratch-a-second-home-at-a-longer-path/act."*/home && "$t" == "${h%/home}/tmp" ]] && echo under-second || echo "GOT[$h $t]")"
 
 # (a″) a recipe a remote served carries no export_sources folder (conan 2.28.1 creates one only for
 # a recipe exported from a local path): its step is keyed by its export alone.

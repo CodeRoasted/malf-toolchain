@@ -252,8 +252,8 @@ def run_argv(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], cw
     `network` is `none` unless the act runs beside the walk's backends, on their internal network, and
     `name` names the container so a teardown can remove it whatever happened to its client.
     raises Refused on an unset declared name, a mount that is not an existing absolute directory, or a
-    working directory under no writable mount. `home` is the container's HOME: the image's own unless the
-    act's conf renders a path under the caller's (malf's source download cache)."""
+    working directory under no writable mount. `home` is the container's HOME: the image's own, or a
+    location of the act's own under a mount (DN-142.D30 (9) R8), never the caller's."""
     environ = os.environ if environ is None else environ
     unset = sorted(name for name in names if name not in environ)
     if unset:
