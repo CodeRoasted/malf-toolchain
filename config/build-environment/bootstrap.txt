@@ -1,0 +1,9 @@
+# The build environment's Python, pinned `==` with the sha256 of the one file each version installs from
+# (DN-142.D30 (3)): the versions the desk's venv (~/venvs/common) ran on 2026-10-18, resolved for
+# CPython 3.12 on manylinux x86_64. Installed first: the build backend patch-ng's sdist is built with, under --no-build-isolation.
+setuptools==80.10.2 \
+    --hash=sha256:95b30ddfb717250edb492926c92b5221f7ef3fbcc2b07579bcd4a27da21d0173
+wheel==0.48.0 \
+    --hash=sha256:3217dcc807155e45db462d7ef2431f5ddda0d7273b700d05a67b271ceb1287ab
+packaging==26.0 \
+    --hash=sha256:b36f1fef9334a5588b4166f8bcd26a14e521f2b55e6b9de3aaa80d3ff7a37529

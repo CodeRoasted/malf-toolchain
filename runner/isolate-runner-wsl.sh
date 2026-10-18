@@ -327,10 +327,12 @@ for root in "$BANK_ROOT"/*/; do
 done
 
 # The desk-HOME corpus entries pharos and corpus_storage resolve through `~` (STORAGE.json declares
-# "~/corpora-*" and "~/gcc-corpus-build"). Derived from the desk's home, never listed: a symlink is
-# re-created in the runner's home; a real directory is bound read-only into it.
+# "~/corpora-*" and "~/gcc-corpus-build"), and the build environment's archive directory, from which
+# malf's launcher loads the pinned image into the runner's own daemon (DN-142.D30 (3) *Custody*: read-only,
+# so nothing a step runs can replace the environment it is keyed under). Derived from the desk's home,
+# never listed: a symlink is re-created in the runner's home; a real directory is bound read-only into it.
 mirror_links=(); mirror_dirs=()
-for entry in "$DESK_HOME"/corpora-* "$DESK_HOME"/gcc-corpus-build; do
+for entry in "$DESK_HOME"/corpora-* "$DESK_HOME"/gcc-corpus-build "$DESK_HOME"/build-environment; do
     [[ -e "$entry" || -L "$entry" ]] || continue
     name="$(basename "$entry")"
     if [[ -L "$entry" ]]; then
