@@ -393,10 +393,20 @@ def domain_argv(domain: Domain) -> list[str]:
     return argv
 
 
-def counted_denials(trace: Path, domain: Domain) -> list[str]:
-    """Each path the traced act was denied (EACCES) where its domain withholds a read, or on an ancestor
-    of a denied root (the only places it withholds anything), in order, as the tracer printed it."""
-    ancestors = {ancestor for root in domain.denied for ancestor in root.parents}
+def _read_roots(argv: list[str]) -> tuple[Path, ...]:
+    """The roots `argv` (a `domain_argv`) grants read beneath, each resolved as Landlock resolves it."""
+    return tuple(Path(os.path.realpath(root)) for flag, root in zip(argv, argv[1:]) if flag == "--read")
+
+
+def counted_denials(trace: Path, domain: Domain, argv: list[str]) -> list[tuple[str, bool]]:
+    """Each path the traced act was denied (EACCES) whose real location the domain that ran (`argv`, the
+    `domain_argv` it was built from) grants no read of, in order, as the tracer printed it, with whether
+    that location lies in the domain's denied ground. A domain built from a listing grants each entry
+    beside a denied root's ancestors as it stood when the act started, so an entry created there later
+    (a temporary file in a directory holding another conan home) is withheld too, and so is a read
+    through a symlink resolving into the denied ground: each is counted, never only the denied ground
+    itself. An EACCES at a location the domain grants is the file's own permission, never counted."""
+    readable = _read_roots(argv)
     denied = []
     for line in trace.read_text(errors="replace").splitlines():
         match = TRACED_CALL.match(line)
@@ -406,10 +416,11 @@ def counted_denials(trace: Path, domain: Domain) -> list[str]:
         if not strings:
             continue
         base = TRACED_FD.match(match["args"])
-        path = Path(os.path.normpath(strings[0] if strings[0].startswith("/") or not base
-                                     else os.path.join(base["base"], strings[0])))
-        if domain.withholds(path) or path in ancestors:
-            denied.append(str(path))
+        path = os.path.normpath(strings[0] if strings[0].startswith("/") or not base
+                                else os.path.join(base["base"], strings[0]))
+        real = Path(os.path.realpath(path))
+        if not any(_within(real, root) for root in readable):
+            denied.append((path, domain.withholds(real)))
     return denied
 
 
@@ -417,8 +428,9 @@ def confine(domain: Domain, tally: Path, command: list[str], tracer: str | None 
     """Run `command` in `domain`, counting its denials where a tracer is given: a counted denial REFUSES
     the act (exit DENIED, the paths named, nothing for its records to store), an uncounted act runs as
     it would. `tally` receives `counted <n>` or `uncounted`, what the act's records keep as
-    `denials_counted` (DN-142.D29 (8))."""
-    sandbox = [sys.executable, "-I", str(Path(__file__).resolve().parent / SANDBOX), *domain_argv(domain), "--", *command]
+    `denials_counted` (DN-142.D29 (8)). The counter judges the very argv the domain was built from."""
+    argv = domain_argv(domain)
+    sandbox = [sys.executable, "-I", str(Path(__file__).resolve().parent / SANDBOX), *argv, "--", *command]
     if tracer is None:
         tally.write_text(f"{UNCOUNTED}\n")
         return subprocess.run(sandbox, check=False).returncode
@@ -426,13 +438,22 @@ def confine(domain: Domain, tally: Path, command: list[str], tracer: str | None 
         trace = Path(scratch) / "trace"
         ran = subprocess.run([tracer, "-f", "-qq", "--seccomp-bpf", "-y", "-e", "trace=%file,execve",
                               "-e", "status=failed", "-s", "4096", "-o", str(trace), *sandbox], check=False)
-        denied = counted_denials(trace, domain)
+        denied = counted_denials(trace, domain, argv)
     tally.write_text(f"{COUNTED} {len(denied)}\n")
     if denied:
-        print(f"malf_closure: REFUSED — {len(denied)} read(s) of ground the step's key does not name were denied (a "
-              f"sibling repository, another conan home, the store or a corpus not its own), and an act that reads an "
-              f"undeclared input is never stored (DN-142.D29 (8)); declare the read in the key if it is a real input, "
-              f"or remove it, never widen the grant by hand: " + ", ".join(dict.fromkeys(denied)), file=sys.stderr)
+        ground = list(dict.fromkeys(path for path, in_ground in denied if in_ground))
+        beside = list(dict.fromkeys(path for path, in_ground in denied if not in_ground))
+        print(f"malf_closure: REFUSED — the step's domain refused {len(denied)} read(s), and an act a domain refused "
+              f"is never stored (DN-142.D29 (8))", file=sys.stderr)
+        if ground:
+            print(f"malf_closure:   {len(ground)} path(s) of ground the step's key does not name (a sibling repository, "
+                  f"another conan home, the store or a corpus not its own); declare the read in the key if it is a "
+                  f"real input, or remove it, never widen the grant by hand: " + ", ".join(ground), file=sys.stderr)
+        if beside:
+            print(f"malf_closure:   {len(beside)} path(s) outside that ground the domain still withholds: an entry "
+                  f"created after the act started in a directory that holds a denied root (the domain grants that "
+                  f"directory's entries as listed at its start), or a symlink resolving into the denied ground: "
+                  + ", ".join(beside), file=sys.stderr)
         return DENIED
     return ran.returncode
 
@@ -628,6 +649,20 @@ def selftest() -> int:
         code, counted, _said = act(f"ls {workspace} | grep -qx sibling && ls {sibling} | grep -qx secret.txt")
         arm("a listing of the workspace and of a sibling names their entries and is counted at zero: the domain "
             "withholds file reads, never entry names", (code, counted), (0, [COUNTED, "0"]))
+        temporary = ("import sys, tempfile\ntry:\n    tempfile.mkstemp(dir=sys.argv[1])\nexcept OSError:\n"
+                     "    sys.exit('Cannot create temporary file in ' + sys.argv[1])\n")
+        with contextlib.redirect_stderr(io.StringIO()) as said:
+            code = confine(domain, tally, [sys.executable, "-I", "-c", temporary, str(base)], tracer=tracer)
+        arm("RED: a file the act creates beside a denied root's ancestor after its domain was built (a temporary file "
+            "in the directory holding another conan home) is refused a read by the domain, so it is counted and the act "
+            "REFUSED, the directory named: denials_counted is never true over a refusal nobody counted",
+            (code, tally.read_text().split(), str(base) in said.getvalue(), denials_counted(tally)),
+            (DENIED, [COUNTED, "1"], True, False))
+        (base / "through-link").symlink_to(sibling)
+        code, counted, said = act(f"cat {base / 'through-link' / 'secret.txt'} >/dev/null 2>&1")
+        arm("RED: a read through a symlink beside a denied root, resolving into the denied ground, is counted and "
+            "REFUSED under the path the act named", (code, counted, str(base / "through-link") in said),
+            (DENIED, [COUNTED, "1"], True))
         code, counted, _said = act(f"cat {sibling / 'secret.txt'} 2>/dev/null", counter=None)
         arm("with no tracer the domain still denies, the act fails as it would, and its tally is uncounted: "
             "denials_counted false", (code != 0, counted, denials_counted(tally)), (True, [UNCOUNTED], False))
