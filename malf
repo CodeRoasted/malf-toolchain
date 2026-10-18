@@ -432,12 +432,22 @@ _malf_profile_key() {
 # build-gcc16-release/, build-clang21-asan/, ...): the tree self-documents its
 # toolchain, and the old asymmetry — the default leg squatting on a bare build/
 # while the gcc leg was named — is gone.
+# IN THE BUILD ENVIRONMENT A BUILD TREE IS THE IMAGE'S OWN (DN-142.D30 (9) R7): the key carries
+# `.environment-<the first 12 hex of MALF_SYSTEM>`, so an act in the image never configures over a
+# tree a host compiler wrote, nor a host build over one the image wrote, and a new image starts its
+# trees afresh. `_malf_build_tree_environment` refuses what the name alone cannot rule out.
+_MALF_ENVIRONMENT_KEY_HEX=12
 _malf_build_key() {
-    local name="${MALF_PROFILE_NAME:-$MALF_DEFAULT_PROFILE}"
+    local name="${MALF_PROFILE_NAME:-$MALF_DEFAULT_PROFILE}" key digest
     case "$name" in
-        linux-*) echo "${name#linux-}" ;;
-        *)       echo "$name" ;;
+        linux-*) key="${name#linux-}" ;;
+        *)       key="$name" ;;
     esac
+    if [[ -n "${MALF_SYSTEM:-}" ]]; then
+        digest="${MALF_SYSTEM#sha256:}"
+        key="$key.environment-${digest:0:$_MALF_ENVIRONMENT_KEY_HEX}"
+    fi
+    echo "$key"
 }
 
 # The DEFAULT profile's build root under a directory (what .clangd's
@@ -540,16 +550,45 @@ _malf_conan_homes() {
 # seed stands. Call AFTER the profile is resolved (post arg-parse), BEFORE conan install.
 _malf_use_keyed_cache() {
     local key; key="$(_malf_profile_key)"
-    [[ -z "$key" ]] && return 0
-    export CONAN_HOME="$MALF_CONAN_HOME_BASE/$key"
-    mkdir -p "$CONAN_HOME/profiles"
-    _malf_sync_conan_conf
-    # re-resolve the host + clean-build-context profiles INTO the keyed cache (paths live under
-    # CONAN_HOME/profiles). This used to save and restore MALF_CONFIG around the call, to protect
-    # an explicit --debug/--release from being overwritten by the profile. Those flags are gone
-    # and so is the save: the build type is the profile's, and re-applying the SAME profile
-    # cannot move it.
-    _malf_apply_profile "$MALF_PROFILE_NAME"
+    if [[ -n "$key" ]]; then
+        export CONAN_HOME="$MALF_CONAN_HOME_BASE/$key"
+        mkdir -p "$CONAN_HOME/profiles"
+        _malf_sync_conan_conf
+        # re-resolve the host + clean-build-context profiles INTO the keyed cache (paths live under
+        # CONAN_HOME/profiles). This used to save and restore MALF_CONFIG around the call, to protect
+        # an explicit --debug/--release from being overwritten by the profile. Those flags are gone
+        # and so is the save: the build type is the profile's, and re-applying the SAME profile
+        # cannot move it.
+        _malf_apply_profile "$MALF_PROFILE_NAME"
+    fi
+    _malf_seed_environment_home
+}
+
+# A COMPILING ACT IN THE BUILD ENVIRONMENT LINKS ONLY THIRD-PARTY BINARIES THE IMAGE BUILT (DN-142.D30
+# (9) R7): its conan home (CONAN_HOME, a base of its own per seat account and image, never a desk home)
+# starts with no binary, and MALF_ENVIRONMENT_RECIPES names the homes its RECIPES are restored from,
+# the walk's first, at the revisions malf/conan.lock pins, each checked against its own
+# conanmanifest.txt (package_twin.py seed-recipes). The act's first build then compiles the third-party
+# closure from conan's source download cache and the image's git mirror, with no network, and every
+# later act on that image reuses it. Once per home: the marker names the lock it was seeded from, and
+# a lock edit seeds the new revisions. Outside the image it is refused, since a host compiler would
+# build those binaries.
+# post: exit 0 seeded or already seeded at this lock, or nothing asked; the verb exits 2 on a refusal.
+_MALF_ENVIRONMENT_SEEDED="malf-environment-recipes"
+_malf_seed_environment_home() {
+    [[ -n "${MALF_ENVIRONMENT_RECIPES:-}" ]] || return 0
+    [[ -n "${MALF_SYSTEM:-}" ]] \
+        || { echo "malf: REFUSED — MALF_ENVIRONMENT_RECIPES seeds a compiling act's home, and this act runs outside the build environment, where a host compiler would build its third-party binaries (DN-142.D30 (9) R7)" >&2; exit 2; }
+    local lock="$MALF_DIR/conan.lock" marker="$CONAN_HOME/$_MALF_ENVIRONMENT_SEEDED" digest prefixes
+    digest="$(sha256sum "$lock" | cut -d' ' -f1)"
+    [[ -f "$marker" && "$(cat "$marker")" == "$digest" ]] && return 0
+    prefixes="$(_malf_owned_prefixes)" \
+        || { echo "malf: REFUSED — the owned package namespaces of $MALF_WORKSPACE_ROOT could not be derived, so the third-party recipes of $lock cannot be told apart" >&2; exit 2; }
+    local -a sources=()
+    read -r -a sources <<< "$MALF_ENVIRONMENT_RECIPES"
+    python3 "$MALF_DIR/package_twin.py" seed-recipes "$lock" "$prefixes" "$CONAN_HOME" "${sources[@]}" \
+        || { echo "malf: REFUSED — the recipes of $CONAN_HOME could not be restored and checked (above; DN-142.D30 (9) R7)" >&2; exit 2; }
+    printf '%s\n' "$digest" > "$marker"
 }
 MALF_PROFILE="$(_malf_profile_path)"
 MALF_PROFILE_NAME="$(basename "$MALF_PROFILE")"
@@ -1143,6 +1182,32 @@ _malf_dependency_cmake_args() {
     _malf_cmake_feature_args "$1" OFF OFF
 }
 
+# A BUILD TREE NAMES THE ENVIRONMENT THAT WROTE IT (DN-142.D30 (9) R7): `.malf-environment` in the tree
+# holds MALF_SYSTEM (the image's config digest) or `host`. A tree another environment wrote is REFUSED
+# before anything configures over it, since its objects came from other compilers and other headers.
+# Inside the image a tree with content and no stamp is refused too: it predates the stamp, so it was
+# written on the host. On the host such a tree is stamped `host` and kept.
+# post: exit 0 with the stamp written or matching; 1 naming both environments.
+_MALF_TREE_STAMP=".malf-environment"
+_malf_build_tree_environment() {   # <build dir>
+    local tree="$1" own="${MALF_SYSTEM:-host}" found entry
+    if [[ -f "$tree/$_MALF_TREE_STAMP" ]]; then
+        found="$(cat "$tree/$_MALF_TREE_STAMP")"
+        [[ "$found" == "$own" ]] && return 0
+        echo "malf: REFUSED — the build tree $tree was written by the environment '$found', and this act runs in '$own'; a tree carries the objects of the compilers that wrote it (DN-142.D30 (9) R7). Its name keys the environment, so this is a tree moved or copied by hand: remove it" >&2
+        return 1
+    fi
+    if [[ "$own" != host ]]; then
+        for entry in "$tree"/* "$tree"/.[!.]*; do
+            [[ -e "$entry" ]] || continue
+            case "${entry##*/}" in .malf-build.lock) continue ;; esac
+            echo "malf: REFUSED — the build tree $tree holds files and no $_MALF_TREE_STAMP, so a host build wrote it, and this act runs in the build environment '$own' (DN-142.D30 (9) R7): remove it" >&2
+            return 1
+        done
+    fi
+    printf '%s\n' "$own" > "$tree/$_MALF_TREE_STAMP"
+}
+
 # ── Concurrent-run safety: two malf runs may not build ONE tree at the same time ──
 #
 # Two malf runs started from DIFFERENT repo roots resolve the SAME conan editables, so both run
@@ -1171,6 +1236,7 @@ _malf_dependency_cmake_args() {
 _malf_with_build_lock() {
     local build_dir="$1"; shift
     local rc=0
+    _malf_build_tree_environment "$build_dir" || return 2
     # Opt-out + graceful degradation: an environment with no flock still builds, just unserialized.
     if [[ "${MALF_BUILD_LOCK:-1}" == "0" ]] || ! command -v flock >/dev/null 2>&1; then
         "$@" || rc=$?

@@ -35,9 +35,13 @@ every privileged syscall by the kernel.
     build_environment.py load
         the verified load: the archive checked and loaded when the pinned id is absent, then `check`
     build_environment.py run [--host-pids] [--home <dir>] [--mount <dir>]... [--read-only-mount <dir>]...
-                             [--corpus-gates <file>] [--env <NAME>]... [--backends <file>] -- <argv>...
+                             [--corpus-gates <file>] [--env <NAME>]... [--backends <file>] [--attest <file>]
+                             [--worktree-repository <dir>]... -- <argv>...
         <argv> in the environment, each corpus mount the document names mounted read-only; with
-        --backends <file>, beside those backends on the walk's internal network instead of none; exit the
+        --backends <file>, beside those backends on the walk's internal network instead of none; with
+        --attest <file>, that file receives `{"image", "id"}` once the integrity check passed and before
+        the container starts, the act's system identity (DN-142.D30 (9) E3); with --worktree-repository,
+        refused unless every worktree entry of each named repository lies under a mount (R9); exit the
         command's own, or 2 refused before it ran
     build_environment.py definition-check [--conan-home <dir>]...
         the definition against the lock (DN-142.D30 (5) E2a): every third-party recipe of conan.lock whose
@@ -294,20 +298,53 @@ def corpus_mounts(document: Path) -> list[Path]:
     return sorted(set(every))
 
 
+def worktree_refusals(repositories: list[Path], mounts: list[Path]) -> list[str]:
+    """One line per worktree entry of a repository in `repositories` whose location lies under none of
+    `mounts`, or per repository git cannot name (DN-142.D30 (9) R9). An act that runs `git worktree prune`
+    drops every entry whose directory it cannot see, so an act seeing another `/tmp` than the host's dropped
+    a sibling lane's live candidate (measured 2026-10-19); and a host prune drops an entry the act made where
+    the host cannot see it."""
+    found = []
+    for repository in repositories:
+        common = subprocess.run(["git", "-C", str(repository), "rev-parse", "--path-format=absolute",
+                                 "--git-common-dir"], capture_output=True, text=True, check=False)
+        if common.returncode != 0:
+            found.append(f"{repository} names no git repository ({common.stderr.strip() or 'no stderr'})")
+            continue
+        for gitdir in sorted(Path(common.stdout.strip(), "worktrees").glob("*/gitdir")):
+            named = Path(gitdir.read_text().strip())
+            location = (named if named.is_absolute() else (gitdir.parent / named).resolve()).parent
+            if not any(location == mount or mount in location.parents for mount in mounts):
+                found.append(f"the worktree entry {gitdir.parent.name} of {repository} names {location}, under "
+                             f"no mount of the act")
+    return found
+
+
 def run(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], docker: str = "docker", read_only: list[Path] | tuple = (), host_pids: bool = False,
-        home: str = CONTAINER_HOME, backends: list[Backend] | tuple = ()) -> int:
+        home: str = CONTAINER_HOME, backends: list[Backend] | tuple = (), attest: Path | None = None,
+        worktree_repositories: list[Path] | tuple = ()) -> int:
     """The act in the environment; with `backends`, beside them on the walk's internal network, every
-    backend and the network removed on every exit path."""
+    backend and the network removed on every exit path. A repository of `worktree_repositories` holding
+    an entry outside the mounts refuses the act first; `attest` receives the pin's two digests once the
+    integrity check and every refusal of the container's command passed, just before it starts."""
+    stray = worktree_refusals(list(worktree_repositories), [*mounts, *read_only])
+    if stray:
+        raise Refused("an act that runs git worktree commands sees every location the entries name, at the "
+                      "host's path, or it can drop a sibling's live candidate (DN-142.D30 (9) R9): " + "; ".join(stray))
     load(pin, docker)
+
+    def started(command: list[str]) -> int:
+        if attest is not None:
+            attest.write_text(json.dumps({"image": pin.image, "id": pin.id}, sort_keys=True) + "\n")
+        return subprocess.run(command, stdin=subprocess.DEVNULL, check=False).returncode
+
     if not backends:
-        return subprocess.run(run_argv(pin, argv, mounts, names, Path.cwd(), docker,
-                                       read_only=read_only, host_pids=host_pids, home=home),
-                              stdin=subprocess.DEVNULL, check=False).returncode
+        return started(run_argv(pin, argv, mounts, names, Path.cwd(), docker,
+                                read_only=read_only, host_pids=host_pids, home=home))
     with BackendWalk(docker, backends) as walk:
-        return subprocess.run(run_argv(pin, argv, mounts, names, Path.cwd(), docker,
-                                       read_only=read_only, host_pids=host_pids, home=home,
-                                       network=walk.network, name=walk.act),
-                              stdin=subprocess.DEVNULL, check=False).returncode
+        return started(run_argv(pin, argv, mounts, names, Path.cwd(), docker,
+                                read_only=read_only, host_pids=host_pids, home=home,
+                                network=walk.network, name=walk.act))
 
 
 # ── the walk's backends (DN-142.D30 (5) E2b, (7) R2) ───────────────────────────────────────────────
@@ -1042,6 +1079,30 @@ def selftest() -> int:
         arm("the mirror of a URL is its path without the scheme, under the image's mirror root",
             mirror_path(upstream), f"{MIRROR_ROOT}/git.example.org/config.git")
 
+    with tempfile.TemporaryDirectory(prefix="build_environment.worktrees.") as held:
+        base = Path(held)
+        repository, inside, outside = base / "repository", base / "mounted" / "candidate", base / "elsewhere"
+        quiet = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+        for words in (["init", "-q", "-b", "main", str(repository)],
+                      ["-C", str(repository), "-c", "user.name=f", "-c", "user.email=f@f", "commit", "-q",
+                       "--allow-empty", "-m", "fixture"],
+                      ["-C", str(repository), "worktree", "add", "-q", "--detach", str(inside)]):
+            subprocess.run(["git", *words], check=True, capture_output=True, env=quiet)
+        arm("a repository whose every worktree entry lies under a mount refuses nothing (DN-142.D30 (9) R9)",
+            worktree_refusals([repository], [repository, base / "mounted"]), [])
+        subprocess.run(["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(outside)],
+                       check=True, capture_output=True, env=quiet)
+        refused_entry = refusal(lambda: run(Pin("sha256:" + "0" * 64, "sha256:" + "0" * 64, "absent.tar", 1, "0" * 64),
+                                            ["true"], [repository, base / "mounted"], [], docker="false",
+                                            worktree_repositories=[repository]))
+        arm("RED: a worktree-making act is refused while a mounted repository holds an entry naming a path outside "
+            "its mounts, the entry and the path named, before any image is loaded (DN-142.D30 (9) R9)",
+            (f"names {outside}, under no mount of the act" in refused_entry, "elsewhere" in refused_entry,
+             "absent.tar" in refused_entry), (True, True, False))
+        arm("RED: a directory git cannot name is refused, never read as a repository with no entry",
+            worktree_refusals([base / "mounted"], [base])[0].startswith(f"{base / 'mounted'} names no git repository"),
+            True)
+
     docker = shutil.which("docker") or "docker"
     with tempfile.TemporaryDirectory(prefix="build_environment.selftest.") as held:
         base = Path(held)
@@ -1060,6 +1121,24 @@ def selftest() -> int:
             arm("the verified load: an absent pinned id is loaded from its archive, then checked",
                 load(pin, docker, directory), f"loaded {directory / pin.archive_name} as {pin.id}")
             arm("a second load finds the id held and checks it", load(pin, docker, directory), f"held {pin.id}")
+            attested, unattested = base / "attested.json", base / "unattested.json"
+            mounted_for_attest = base / "attest-mount"
+            mounted_for_attest.mkdir()
+            previous = Path.cwd()
+            os.chdir(mounted_for_attest)
+            try:
+                ran_attested = run(pin, ["/probe"], [mounted_for_attest], [], docker, attest=attested)
+                refusal(lambda: run(Pin("sha256:" + "1" * 64, pin.id, pin.archive_name, pin.archive_bytes,
+                                        pin.archive_sha256), ["/probe"], [mounted_for_attest], [], docker,
+                                    attest=unattested))
+                refusal(lambda: run(pin, ["/probe"], [base / "mounted"], [], docker, attest=unattested))
+            finally:
+                os.chdir(previous)
+            arm("an act the integrity check passed is attested with the pin's two digests; one the check refused, "
+                "and one whose working directory lies under no mount, are not (DN-142.D30 (9) E3: the key's system "
+                "member comes from this file)",
+                (ran_attested, json.loads(attested.read_text()) if attested.is_file() else None, unattested.exists()),
+                (0, {"image": pin.image, "id": pin.id}, False))
             other = "sha256:" + "1" * 64
             arm("RED: an image whose config digest differs from the pin is refused, naming both",
                 f"its config digest is {pin.image}, the pin's {other}" in refusal(
@@ -1127,6 +1206,8 @@ def main(argv: list[str]) -> int:
         options.add_argument("--home", default=CONTAINER_HOME)
         options.add_argument("--env", action="append", default=[])
         options.add_argument("--backends", type=Path)
+        options.add_argument("--attest", type=Path)
+        options.add_argument("--worktree-repository", action="append", default=[], type=Path)
         given = options.parse_args(argv[1:split])
         if not argv[split + 1:]:
             print("build_environment.py run: the command after -- is empty", file=sys.stderr)
@@ -1135,7 +1216,8 @@ def main(argv: list[str]) -> int:
             read_only = [*given.read_only_mount, *(corpus_mounts(given.corpus_gates) if given.corpus_gates else [])]
             return run(read_pin(), argv[split + 1:], given.mount, given.env, docker,
                        read_only, given.host_pids, given.home,
-                       read_backends(given.backends) if given.backends else ())
+                       read_backends(given.backends) if given.backends else (), given.attest,
+                       given.worktree_repository)
         except Refused as refused:
             print(f"build_environment: REFUSED — {refused}; the act did not run (DN-142.D30, OPS-1.S27)", file=sys.stderr)
             return REFUSED

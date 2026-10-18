@@ -10,6 +10,14 @@ ONE home share every path but the per-create folder hash, so they prove less.
         every package of <source home> OUTSIDE the owned namespaces (third-party, recipes and
         binaries) restored into each <target home>, so a create there rebuilds first-party code
         only; a third-party binary the source lacks is built in each target alike
+    package_twin.py seed-recipes <lockfile> <owned prefixes> <target home> <source home>...
+        every third-party recipe revision <lockfile> names (outside the owned namespaces) restored into
+        <target home> from the first <source home> holding it, recipes alone and no binary, then every
+        recipe of <target home> checked against its own conanmanifest.txt (`conan cache check-integrity`):
+        the home of a compiling act in the build environment, which builds every third-party binary
+        itself (DN-142.D30 (9) R7). A recipe whose files differ from its manifest is refused naming it
+        (exit 1); a revision no source holds is named and left to the graph that needs it, which fails
+        naming it, since the act has no network
     package_twin.py missing <home> <released tsv> <owned prefixes> <host profile> <build profile> <lockfile>
         every released recipe exported into <home> (a seeded home, before any create), then its graph resolved
         there strictly against <lockfile>, as the creates resolve it: exit 0 when the home holds every third-party binary the graphs need, 3 naming each
@@ -72,6 +80,65 @@ def seed(source: Path, prefixes: tuple[str, ...], targets: list[Path]) -> None:
             conan(target, "cache", "restore", str(archive))
             print(f"package_twin: seeded {len(third)} third-party reference(s) from {source} into "
                   f"{target}")
+
+
+def lock_recipes(lockfile: Path, prefixes: tuple[str, ...]) -> list[str]:
+    """Every `name/version#revision` the lock names in any of its requirement lists, outside the owned
+    namespaces, sorted; its timestamps dropped (a recipe revision is the digest of its manifest)."""
+    document = json.loads(lockfile.read_text())
+    named = {entry.split("%", 1)[0] for key, entries in document.items() if key.endswith("requires")
+             and isinstance(entries, list) for entry in entries}
+    return sorted(reference for reference in named if not reference.split("/", 1)[0].startswith(prefixes))
+
+
+def seed_recipes(lockfile: Path, prefixes: tuple[str, ...], target: Path, sources: list[Path]) -> int:
+    """Restore into `target` every third-party recipe revision of `lockfile` from the first of `sources`
+    holding it, recipes alone, then check every recipe of `target` against its manifest."""
+    wanted = lock_recipes(lockfile, prefixes)
+    if not wanted:
+        print(f"package_twin: REFUSED — {lockfile} names no third-party recipe to seed", file=sys.stderr)
+        return 1
+    held: dict[Path, dict] = {}
+    for source in sources:
+        listed = json.loads(conan(source, "list", "*#*", "--format=json")).get("Local Cache", {})
+        held[source] = {f"{ref}#{revision}" for ref, body in listed.items()
+                        for revision in (body.get("revisions") or {})}
+    chosen: dict[Path, list[str]] = {}
+    absent = []
+    for reference in wanted:
+        source = next((source for source in sources if reference in held[source]), None)
+        if source is None:
+            absent.append(reference)
+        else:
+            chosen.setdefault(source, []).append(reference)
+    if absent:
+        # note: the lock spans every profile, the MSVC leg's build tools included (msys2, nasm, ...), so a
+        # revision no source holds is named here and refused only by the graph that needs it, which then
+        # fails naming it: the act has no network to fetch it from.
+        print(f"package_twin: {len(absent)} recipe revision(s) of {lockfile.name} held by none of "
+              f"{', '.join(map(str, sources))}, not restored: {', '.join(absent)}")
+    with tempfile.TemporaryDirectory(prefix="package_twin.recipes.") as scratch:
+        for index, (source, references) in enumerate(sorted(chosen.items())):
+            pkglist = Path(scratch) / f"pkglist-{index}.json"
+            pkglist.write_text(json.dumps({"Local Cache": {
+                reference.split("#", 1)[0]: {"revisions": {reference.split("#", 1)[1]: {}}}
+                for reference in references}}))
+            archive = Path(scratch) / f"recipes-{index}.tgz"
+            conan(source, "cache", "save", f"--list={pkglist}", "--no-source", f"--file={archive}",
+                  tmpdir=Path(scratch))
+            conan(target, "cache", "restore", str(archive))
+            print(f"package_twin: restored {len(references)} recipe revision(s) of {lockfile.name} from "
+                  f"{source} into {target}, no binary")
+    env = {**os.environ, "CONAN_HOME": str(target)}
+    checked = subprocess.run(["conan", "cache", "check-integrity", "*#*"], capture_output=True, text=True, env=env)
+    if checked.returncode != 0:
+        print(f"package_twin: REFUSED — a recipe restored into {target} differs from its own conanmanifest.txt, "
+              f"so it is not the revision the lock pins:\n{(checked.stderr or checked.stdout).strip()}",
+              file=sys.stderr)
+        return 1
+    print(f"package_twin: {len(wanted) - len(absent)} recipe revision(s) restored into {target} match their "
+          f"conanmanifest.txt")
+    return 0
 
 
 def missing(home: Path, released: Path, prefixes: tuple[str, ...], host: str, build: str,
@@ -149,6 +216,8 @@ def main(argv: list[str]) -> int:
     if len(argv) >= 4 and argv[0] == "seed":
         seed(Path(argv[1]), tuple(argv[2].split()), [Path(target) for target in argv[3:]])
         return 0
+    if len(argv) >= 5 and argv[0] == "seed-recipes":
+        return seed_recipes(Path(argv[1]), tuple(argv[2].split()), Path(argv[3]), [Path(home) for home in argv[4:]])
     if len(argv) == 7 and argv[0] == "missing":
         return missing(Path(argv[1]), Path(argv[2]), tuple(argv[3].split()), argv[4], argv[5],
                        Path(argv[6]))

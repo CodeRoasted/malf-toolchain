@@ -500,8 +500,9 @@ echo "[7d] _malf_with_build_lock serializes concurrent runs on ONE build tree"
 # (measured 2026-07-22). The lock is therefore load-bearing, and these are its four properties.
 lock_tmp="$(mktemp -d)"
 trap 'rm -rf "$lock_tmp"' EXIT
-# Extract the function under test from malf itself, so this tests the SHIPPED code, not a copy.
-lock_fn="$(sed -n '/^_malf_with_build_lock() {/,/^}/p' "$MALF_BIN")"
+# Extract the function under test from malf itself, so this tests the SHIPPED code, not a copy, with the
+# build tree's environment stamp it checks first (DN-142.D30 (9) R7).
+lock_fn="$(sed -n '/^_MALF_TREE_STAMP=/p; /^_malf_build_tree_environment() {/,/^}/p; /^_malf_with_build_lock() {/,/^}/p' "$MALF_BIN")"
 cat > "$lock_tmp/probe.sh" <<PROBE
 #!/usr/bin/env bash
 set -euo pipefail
@@ -5141,6 +5142,49 @@ check "(b) the replay reds a record whose upstream no record holds any more, nam
       "$(out="$(python3 "$MALF_ROOT/artefact_store.py" upstreams "$as_tmp/ustore")"; rc=$?; printf 'rc=%s %s' "$rc" "$(grep -oE 'ex_low: [0-9]+ of [0-9]+ upstream\(s\) unrecorded' <<< "$out")")"
 rm -rf "$as_tmp"
 echo
+
+echo "[7e3] a compiling act in the build environment builds in trees and a conan home of its own, its recipes restored and checked, never a host's (DN-142.D30 (9) R7)"
+check "outside the image a build tree is keyed by its profile alone; inside, it carries the image's config digest" \
+      "gcc16-release gcc16-release.environment-9efc94c0ea72" \
+      "$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; MALF_PROFILE_NAME=linux-gcc16-release; unset MALF_SYSTEM; printf "%s " "$(_malf_build_key)"; MALF_SYSTEM=sha256:9efc94c0ea72cd5bf7950d0121b7747cac9ec11e1a32193e916ca06b62eb5ec5 _malf_build_key' _ "$MALF_BIN")"
+e3_tmp="$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/test_malf.e3.XXXXXX")"
+e3_stamp() {   # <tree> <MALF_SYSTEM or empty> — the stamp check's exit and the stamp it leaves
+    bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e
+        if [[ -n "$3" ]]; then export MALF_SYSTEM="$3"; else unset MALF_SYSTEM; fi
+        _malf_build_tree_environment "$2" 2>/dev/null; echo "rc=$? $(cat "$2/.malf-environment" 2>/dev/null || echo none)"' _ "$MALF_BIN" "$1" "$2"
+}
+mkdir -p "$e3_tmp/host-tree" "$e3_tmp/new-tree" "$e3_tmp/other-tree" && echo obj > "$e3_tmp/host-tree/a.o"
+printf 'sha256:%s\n' "$(printf '1%.0s' {1..64})" > "$e3_tmp/other-tree/.malf-environment"
+check "RED — a build tree a host compiler wrote (files, no stamp) is refused to an in-image act, and left unstamped" \
+      "rc=1 none" "$(e3_stamp "$e3_tmp/host-tree" sha256:9efc94c0)"
+check "RED — a tree stamped by another environment is refused, in the image and on the host alike" \
+      "rc=1|rc=1" "$(e3_stamp "$e3_tmp/other-tree" sha256:9efc94c0 | cut -d' ' -f1)|$(e3_stamp "$e3_tmp/other-tree" "" | cut -d' ' -f1)"
+check "a new tree is stamped with the environment that writes it, and accepted again; a host tree is stamped host" \
+      "rc=0 sha256:9efc94c0|rc=0 sha256:9efc94c0|rc=0 host" \
+      "$(e3_stamp "$e3_tmp/new-tree" sha256:9efc94c0)|$(e3_stamp "$e3_tmp/new-tree" sha256:9efc94c0)|$(e3_stamp "$e3_tmp/host-tree" "")"
+# seed-recipes over a fixture source home: one third-party recipe, and the lock naming it beside a
+# revision no home holds (the MSVC leg's build tools, in the real lock).
+mkdir -p "$e3_tmp/recipe/tps"
+printf 'from conan import ConanFile\n\n\nclass Fixture(ConanFile):\n    name = "tps"\n    version = "0.1"\n' > "$e3_tmp/recipe/tps/conanfile.py"
+CONAN_HOME="$e3_tmp/source" bash "$MALF_BIN" profiles > /dev/null 2>&1
+e3_rev="$(CONAN_HOME="$e3_tmp/source" conan export "$e3_tmp/recipe/tps" --format=json 2>/dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin)["reference"])')"
+printf '{"version": "0.5", "requires": ["%s%%1.0", "ex_first/0.1"], "build_requires": ["absent/1.0#%s%%2.0"], "python_requires": []}\n' "$e3_rev" "$(printf '0%.0s' {1..32})" > "$e3_tmp/conan.lock"
+e3_seed() {   # <target home> — seed-recipes' exit, and the recipes and packages the target then holds
+    python3 "$MALF_ROOT/package_twin.py" seed-recipes "$e3_tmp/conan.lock" "ex_" "$1" "$e3_tmp/source" > "$e3_tmp/seed.out" 2>&1
+    local rc=$?
+    echo "rc=$rc $(CONAN_HOME="$1" conan list '*#*' --format=json 2>/dev/null | python3 -c 'import json, sys
+cache = json.load(sys.stdin).get("Local Cache", {})
+print(" ".join(f"{ref}#{rev}" for ref, body in sorted(cache.items()) for rev in body.get("revisions", {})) or "none")')"
+}
+check "the lock's third-party recipe revisions are restored from the source home, recipes alone; a revision no home holds is named, not refused" \
+      "rc=0 $e3_rev 1 0" \
+      "$(e3_seed "$e3_tmp/target") $(grep -c 'not restored: absent/1.0#' "$e3_tmp/seed.out") $(CONAN_HOME="$e3_tmp/target" conan list 'tps/0.1:*' --format=json 2>/dev/null | grep -c '"packages": {[^}]')"
+printf '\n# a byte the manifest does not name\n' >> "$(CONAN_HOME="$e3_tmp/source" conan cache path "$e3_rev")/conanfile.py"
+check "RED — a restored recipe whose files differ from its conanmanifest.txt is refused, naming the home" \
+      "rc=1 1" "$(e3_seed "$e3_tmp/target-tampered" | cut -d' ' -f1) $(grep -c 'differs from its own conanmanifest.txt' "$e3_tmp/seed.out")"
+check "RED — a compiling act's home is never seeded outside the build environment, where a host compiler would build its binaries" \
+      "rc=2 1" "$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; unset MALF_SYSTEM; export MALF_ENVIRONMENT_RECIPES="$2/source" CONAN_HOME="$2/never"; ( _malf_seed_environment_home ) 2>"$2/refusal"; echo "rc=$? $(grep -c "outside the build environment" "$2/refusal")"' _ "$MALF_BIN" "$e3_tmp")"
+rm -rf "$e3_tmp"
 
 echo "[7q7n] a third-party binary enters a first-party key only as the output of its OWN step, judged by its whole folder, and a first-party create builds only itself, with no remote (DN-142.D17)"
 # The fixtures are python-only recipes, so no compiler runs. tpv's package holds its own build
