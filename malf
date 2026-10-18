@@ -6141,7 +6141,7 @@ _malf_store_third_party_in() {   # <name> <path> <prefixes> <store> <scratch> <g
         *) _MALF_THIRD_PARTY_CAUSE="restoring its phase home was refused (above)"; return 1 ;;
     esac
     if ! CONAN_HOME="$phase_home" _malf_confined "$scratch/$name.third-party.denials" "$name" "$path" conan install "$path" "${common[@]}" "${builds[@]}" \
-            --output-folder="$scratch/$name.third-party" \
+            --no-remote --output-folder="$scratch/$name.third-party" \
             --format=json > "$scratch/$name.third-party.install.json" 2>> "$log"; then
         _MALF_THIRD_PARTY_CAUSE="building ${builds[*]#--build=} failed ($log)"
         _malf_quote_log "$log" "$name:third-party (its install)"; return 1
