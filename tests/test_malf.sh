@@ -6033,6 +6033,26 @@ check "no verb named cut-verify is left: no dispatch arm, no function, no usage 
 rm -rf "$cv_tmp"
 echo
 
+echo "[7q9b] a store home the host launcher pre-created EMPTY is fresh, so the walk seeds it (W559)"
+
+# note: measured 2026-10-18: the launcher mkdirs every home it mounts before the container starts, so the walk inside judged
+# MALF_STORE_CONAN_HOME by existence, never seeded it, and its third-party resolve went to a network the container lacks.
+fh_tmp="$(realpath "$(mktemp -d)")"
+mkdir -p "$fh_tmp/store-home" "$fh_tmp/used-home"
+touch "$fh_tmp/used-home/settings.yml"
+fh_fresh() {   # <home>
+    bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; _malf_conan_home_fresh "$2" && echo fresh || echo used' \
+        _ "$MALF_BIN" "$1" 2>&1
+}
+check "a home that exists and holds nothing (the launcher's mkdir) is fresh; one holding conan's settings.yml is not" \
+      "fresh used" "$(fh_fresh "$fh_tmp/store-home") $(fh_fresh "$fh_tmp/used-home")"
+fh_body="$(sed -n '/^cmd_store_create()/,/^}/p' "$MALF_BIN")"
+check "store-create judges its home's freshness by its content before the conf sync writes into it, never by the directory's existence" \
+      "before 0" \
+      "$( (( $(grep -n '_malf_conan_home_fresh "$CONAN_HOME" && fresh=true' <<< "$fh_body" | cut -d: -f1 | head -1) < $(grep -n '^ *_malf_sync_conan_conf$' <<< "$fh_body" | cut -d: -f1 | head -1) )) 2>/dev/null && printf before) $(grep -c '\[\[ -d "$CONAN_HOME" \]\]' <<< "$fh_body")"
+rm -rf "$fh_tmp"
+echo
+
 echo "[7q10] the persistent home is handed out only where every job its user runs is the release's"
 
 # note: a runner runs every job as its one user, and its runner group sends it jobs from every

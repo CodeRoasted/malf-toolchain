@@ -5442,6 +5442,18 @@ _malf_store_parameters() {   # <profile|-> <argv>...
     export MALF_STORE_PARAMETERS="$document"
 }
 
+# A CONAN HOME IS FRESH WHEN IT HOLDS NO CONAN STATE: no `settings.yml`, the marker conan writes on its
+# first command in a home and the one malf's home walk identifies a home by. Never the directory's
+# existence: the host launcher creates every home it mounts before the walk's container starts
+# (_malf_store_create_in_environment), so inside, a home this run creates already exists, empty.
+# Judged by existence, that home was never seeded, and its third-party resolve went to the network
+# the container does not have (W559, measured 2026-10-18).
+# pre: called before anything this run does in <home> (the conf sync, the purge), which may create it.
+# post: exit 0 when <home> is fresh, 1 when it already holds conan state.
+_malf_conan_home_fresh() {   # <home>
+    [[ ! -f "$1/settings.yml" ]]
+}
+
 # THE WALK RUNS IN THE BUILD ENVIRONMENT (DN-142.D30 (3)): `malf store-create` on the host re-runs
 # itself as ONE container of the pinned image (build_environment.py run, its verified load and its
 # two-producer check), driver and acts together, so the conan that computes a key before its step is
@@ -5599,8 +5611,8 @@ cmd_store_create() {
     _malf_ship_lock_args || return 2
 
     export CONAN_HOME="${MALF_STORE_CONAN_HOME:-$cut_home}"
-    local fresh=true
-    [[ -d "$CONAN_HOME" ]] && fresh=false
+    local fresh=false
+    _malf_conan_home_fresh "$CONAN_HOME" && fresh=true
     mkdir -p "$CONAN_HOME/profiles"
     _malf_sync_conan_conf
     _malf_apply_profile "$MALF_PROFILE_NAME"
