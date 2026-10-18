@@ -60,6 +60,10 @@ HEX = re.compile(r"^[0-9a-f]{64}$")
 REFUSED = 2
 # The container's own HOME: the image's, never the caller's, which is not mounted.
 CONTAINER_HOME = "/root"
+# The caller's shared-memory tmpfs, whose size the container's /dev/shm takes: Docker's default is 64 MiB,
+# and logcraft's shared-memory gates fallocate 17 MB per shard (measured in the first walk inside the
+# image, 2026-10-18: `posix_fallocate ... No space left on device`).
+SHM = Path("/dev/shm")
 HASH_CHUNK = 1 << 20
 
 
@@ -198,7 +202,9 @@ def run_argv(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], cw
     resolved = list(mounts)
     if not any(cwd == mount or mount in cwd.parents for mount in resolved):
         raise Refused(f"the working directory {cwd} lies under no mount ({', '.join(map(str, resolved)) or 'none'})")
+    shm = os.statvfs(SHM)
     command = [docker, "run", "--rm", "--init", "--network", "none", "--workdir", str(cwd),
+               "--shm-size", str(shm.f_blocks * shm.f_frsize),
                "--env", f"HOME={home}", "--env", f"{SYSTEM_ENV}={pin.image}"]
     if seccomp_unconfined:
         command += ["--security-opt", "seccomp=unconfined"]
@@ -242,10 +248,17 @@ PROBE_SOURCE = r"""
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/statvfs.h>
 extern char **environ;
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "env") == 0) {
         for (char **entry = environ; *entry; ++entry) puts(*entry);
+        return 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "shm") == 0) {
+        struct statvfs fs;
+        if (statvfs("/dev/shm", &fs) != 0) return 1;
+        printf("%llu\n", (unsigned long long)fs.f_blocks * fs.f_frsize);
         return 0;
     }
     if (argc > 1 && strcmp(argv[1], "net") == 0) {
@@ -347,6 +360,11 @@ def selftest() -> int:
             netted = subprocess.run(run_argv(pin, ["/probe", "net"], [mount], [], mount, docker=docker),
                                     capture_output=True, text=True, check=False)
             arm("RED: a container cannot reach the network", (netted.returncode, netted.stdout), (1, ""))
+            sized = subprocess.run(run_argv(pin, ["/probe", "shm"], [mount], [], mount, docker=docker),
+                                   capture_output=True, text=True, check=False)
+            caller = os.statvfs(SHM)
+            arm("RED: the container's /dev/shm is the caller's size, never Docker's 64 MiB default",
+                (sized.returncode, sized.stdout.strip()), (0, str(caller.f_blocks * caller.f_frsize)))
             arm("RED: a declared name unset in the caller is refused, never run with a default",
                 refusal(lambda: run_argv(pin, ["/probe"], [mount], ["UNSET_NAME"], mount, environ={})).startswith(
                     "the act declares UNSET_NAME, unset in its caller"), True)
