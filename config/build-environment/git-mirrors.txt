@@ -1,0 +1,7 @@
+# THE BUILD ENVIRONMENT'S GIT MIRRORS (DN-142.D30 (5) E2a, (7) R1): one row `<upstream url> <commit>` per
+# third-party recipe of conan.lock whose source() fetches with git. The image's build clones each URL bare
+# under /opt/build-environment/git-mirrors/<url without its scheme> and points git at it with a system
+# insteadOf rule, so the recipe's own fetch reads the mirror in a walk that has no network.
+# `malf environment definition-check` refuses a git-sourced recipe with no row, a row at another commit than
+# the recipe's conandata, and a row no recipe fetches.
+https://https.git.savannah.gnu.org/git/config.git 191bcb948f7191c36eefe634336f5fc5c0c4c2be

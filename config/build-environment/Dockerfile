@@ -10,8 +10,22 @@
 # on 2026-10-18 from snapshot.ubuntu.com at that day's index; the ship compiler, the sha256-pinned
 # gcc-16.2 build malf's build-gcc-toolchain.yml publishes, at /opt/gcc-16.2 where the profile names
 # it and behind the system `gcc`/`cc` names as on the desk; and a venv of hashed wheels (conan, cmake,
-# ninja, PyYAML, the jsonschema closure). The clang-21 legs are NOT in it: the desk takes them from
-# apt.llvm.org, which no snapshot serves.
+# ninja, PyYAML, the jsonschema closure). The clang-21 legs come from apt.llvm.org at build time, which
+# no snapshot serves, so they are UNPINNED (DN-142.D30 (7) R3: the key is the image's digest, never this
+# file) and the source is trusted only under the LLVM archive key, checked by fingerprint; the versions
+# installed are read back into the pin's commit. Everything a walk would otherwise fetch from the network
+# is fetched HERE: each git-sourced third-party recipe's upstream is a bare mirror (git-mirrors.txt).
+
+# The LLVM archive key, accepted only when the file holds exactly one primary key, of this fingerprint.
+FROM ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac AS llvm-key
+ARG LLVM_ARCHIVE_FINGERPRINT=6084F3CF814B57C1CF12EFD515CF4D18AF4F7421
+ADD https://apt.llvm.org/llvm-snapshot.gpg.key /llvm.asc
+RUN apt-get update && apt-get install -y --no-install-recommends gnupg \
+ && gpg --batch --show-keys --with-colons /llvm.asc > /llvm.keys \
+ && test "$(grep -c '^pub:' /llvm.keys)" = 1 \
+ && test "$(awk -F: '$1 == "fpr" { print $10; exit }' /llvm.keys)" = "$LLVM_ARCHIVE_FINGERPRINT" \
+ && gpg --batch --dearmor -o /llvm-archive-keyring.gpg /llvm.asc
+
 FROM ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
 
 ARG SNAPSHOT=20261018T000000Z
@@ -62,3 +76,33 @@ RUN python3.12 -m venv /opt/venv \
  && /opt/venv/bin/pip install --no-cache-dir --require-hashes --no-build-isolation -r /opt/build-environment/requirements.txt
 
 ENV PATH=/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# The clang-21 legs (DN-142.D30 (5) E2a): the compiler, libc++ and its ABI library (the `import std` legs),
+# the sanitizer runtimes, clang-tidy and clang-format, behind the bare clang/clang++ names as on the desk;
+# and the libc++.modules.json bridge: its relative source path resolves to /usr/lib/share/libc++, where the
+# package installs nothing (the import-std prerequisite every libc++ profile names).
+COPY --from=llvm-key /llvm-archive-keyring.gpg /usr/share/keyrings/llvm-archive-keyring.gpg
+RUN printf 'Types: deb\nURIs: https://apt.llvm.org/noble/\nSuites: llvm-toolchain-noble-21\nComponents: main\nSigned-By: /usr/share/keyrings/llvm-archive-keyring.gpg\n' \
+      > /etc/apt/sources.list.d/llvm.sources \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      clang-21 clang-format-21 clang-tidy-21 libc++-21-dev libc++abi-21-dev libclang-rt-21-dev llvm-21 \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /usr/lib/share && ln -sfn /usr/lib/llvm-21/share/libc++ /usr/lib/share/libc++ \
+ && ln -sf /usr/bin/clang-21 /usr/bin/clang && ln -sf /usr/bin/clang++-21 /usr/bin/clang++ \
+ && clang++-21 -std=c++23 -stdlib=libc++ -x c++ - -o /dev/null <<'PROBE'
+#include <expected>
+int main() { return std::expected<int, int>{0}.value(); }
+PROBE
+
+# The git mirrors (DN-142.D30 (7) R1): each row of git-mirrors.txt cloned bare, serving any commit id it
+# holds, the row's commit required present, and the upstream URL rewritten to it for every git command.
+COPY git-mirrors.txt /opt/build-environment/
+RUN grep -v '^[[:space:]]*\(#\|$\)' /opt/build-environment/git-mirrors.txt | while read -r url commit; do \
+      mirror="/opt/build-environment/git-mirrors/${url#*://}" \
+      && git clone --bare --quiet "$url" "$mirror" \
+      && git -C "$mirror" config uploadpack.allowAnySHA1InWant true \
+      && git -C "$mirror" cat-file -e "${commit}^{commit}" \
+      && git config --system "url.file://${mirror}.insteadOf" "$url" \
+      || exit 1; \
+    done

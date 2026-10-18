@@ -31,14 +31,31 @@ namespace tests unshare a mount namespace, which the default profile refuses).
                              [--corpus-gates <file>] [--env <NAME>]... -- <argv>...
         <argv> in the environment, each corpus mount the document names mounted read-only; exit the
         command's own, or 2 refused before it ran
+    build_environment.py definition-check [--conan-home <dir>]...
+        the definition against the lock (DN-142.D30 (5) E2a): every third-party recipe of conan.lock whose
+        source() fetches with git, read from the first conan home holding its revision (default: CONAN_HOME
+        and each home under it), has a row in config/build-environment/git-mirrors.txt naming its URL and
+        commit, and no row is left that no recipe fetches; exit 0, or 1 naming each
+    build_environment.py mirror-check
+        each mirror row served by the pinned image: a `--network none` container runs conan's own
+        Git.fetch_commit of the row's URL and commit (the recipe's `git fetch --depth 1 origin <commit>`)
+        and checks out exactly that commit; exit 0, or 1 naming each row that failed
     build_environment.py selftest
         every refusal and the container's isolation, over a throwaway image built here (FROM scratch, no
-        network), never the real archive
+        network), never the real archive; the definition check's refusals over recipes written here
+
+GIT MIRRORS. The walk has no network, and conan's source download cache serves only a downloaded file, so a
+recipe whose source() fetches with git (ConanCenter's gnu-config) is served from a bare mirror built into the
+image while it is built: each row `<upstream url> <commit>` of git-mirrors.txt becomes a bare clone at
+/opt/build-environment/git-mirrors/<url without its scheme>, serving any commit id it holds, and a system
+`url.file://<mirror>.insteadOf <upstream url>` rule, so the recipe's own fetch reads the mirror. The commit id
+is in the recipe's conandata, and git verifies every object it serves against it.
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -51,6 +68,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 PIN = Path(__file__).resolve().parent / "config" / "build-environment.json"
+DEFINITION = Path(__file__).resolve().parent / "config" / "build-environment"
+GIT_MIRRORS = DEFINITION / "git-mirrors.txt"
+LOCK = Path(__file__).resolve().parent / "conan.lock"
+MIRROR_ROOT = "/opt/build-environment/git-mirrors"
+# A source() that fetches with git: conan's Git helper, or a git clone/fetch it runs itself.
+GIT_SOURCE = re.compile(r"\bGit\s*\(|\bgit\s+(?:clone|fetch)\b")
+COMMIT = re.compile(r"^[0-9a-f]{40}$")
 DIRECTORY_ENV = "MALF_BUILD_ENVIRONMENT_DIR"
 DIRECTORY_DEFAULT = "build-environment"
 SYSTEM_ENV = "MALF_SYSTEM"
@@ -240,6 +264,149 @@ def run(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], seccomp
                           stdin=subprocess.DEVNULL, check=False).returncode
 
 
+# ── the definition's git mirrors ──────────────────────────────────────────────────────────────────
+
+def mirror_path(url: str) -> str:
+    """Where the image keeps the bare mirror of `url`: its scheme dropped, under MIRROR_ROOT."""
+    return f"{MIRROR_ROOT}/{url.split('://', 1)[1]}"
+
+
+def read_mirrors(path: Path = GIT_MIRRORS) -> dict[str, str]:
+    """{upstream url: commit} of the definition's mirror rows. raises Refused on a malformed or repeated row."""
+    try:
+        lines = path.read_text().splitlines()
+    except OSError as unread:
+        raise Refused(f"the definition's mirror list {path} cannot be read: {unread!r}") from unread
+    rows: dict[str, str] = {}
+    for number, line in enumerate(lines, 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        fields = line.split()
+        if len(fields) != 2 or "://" not in fields[0] or not COMMIT.match(fields[1]):
+            raise Refused(f"{path}:{number} is not `<url> <40-hex commit>`: {line!r}")
+        if fields[0] in rows:
+            raise Refused(f"{path}:{number} repeats the mirror of {fields[0]}")
+        rows[fields[0]] = fields[1]
+    return rows
+
+
+def lock_third_party(lock: Path = LOCK) -> list[str]:
+    """Every third-party reference of the lock, `name/version#revision`: the ones carrying a revision."""
+    try:
+        document = json.loads(lock.read_text())
+    except (OSError, ValueError) as unread:
+        raise Refused(f"the lock {lock} cannot be read: {unread!r}") from unread
+    references = [*document.get("requires", []), *document.get("build_requires", [])]
+    return sorted(reference.split("%", 1)[0] for reference in references if "#" in reference)
+
+
+def git_source(recipe: Path, version: str) -> tuple[str, str] | None:
+    """(url, commit) the recipe at `recipe` fetches with git in source(), None when its source() does not.
+    raises Refused when it does and its conandata names no URL and commit for `version`."""
+    import yaml
+
+    text = (recipe / "conanfile.py").read_text()
+    sources = [ast.get_source_segment(text, node) or "" for node in ast.walk(ast.parse(text))
+               if isinstance(node, ast.FunctionDef) and node.name == "source"]
+    if not any(GIT_SOURCE.search(source) for source in sources):
+        return None
+    data = yaml.safe_load((recipe / "conandata.yml").read_text()) if (recipe / "conandata.yml").is_file() else None
+    entry = ((data or {}).get("sources") or {}).get(version)
+    if not isinstance(entry, dict) or not entry.get("url") or not COMMIT.match(str(entry.get("commit", ""))):
+        raise Refused(f"{recipe} fetches with git in source(), and its conandata names no url and 40-hex commit "
+                      f"for {version}: no mirror can serve it")
+    return str(entry["url"]), str(entry["commit"])
+
+
+def judge_mirrors(sourced: dict[str, tuple[str, str]], mirrors: dict[str, str]) -> list[str]:
+    """Each disagreement between the git-sourced recipes ({reference: (url, commit)}) and the mirror rows."""
+    findings = []
+    for reference, (url, commit) in sorted(sourced.items()):
+        if url not in mirrors:
+            findings.append(f"{reference} fetches {url} at {commit} with git in source(), and the definition "
+                            f"mirrors no such URL ({GIT_MIRRORS.name}): the walk has no network to fetch it")
+        elif mirrors[url] != commit:
+            findings.append(f"{reference} fetches {url} at {commit}, and the definition's row names {mirrors[url]}")
+    fetched = {url for url, _commit in sourced.values()}
+    findings += [f"the mirror row {url} {commit} serves no git-sourced recipe of the lock" for url, commit in
+                 sorted(mirrors.items()) if url not in fetched]
+    return findings
+
+
+def conan_homes(given: list[Path]) -> list[Path]:
+    """The homes searched for a recipe: those given, else CONAN_HOME and each home directly under it."""
+    if given:
+        return given
+    base = Path(os.environ.get("CONAN_HOME") or Path.home() / ".conan2")
+    return [base, *sorted(child for child in base.iterdir() if (child / "p").is_dir())] if base.is_dir() else []
+
+
+def recipe_folder(reference: str, homes: list[Path]) -> Path | None:
+    """The export folder of `reference` in the first home holding it."""
+    for home in homes:
+        done = subprocess.run(["conan", "cache", "path", reference], capture_output=True, text=True, check=False,
+                              env={**os.environ, "CONAN_HOME": str(home)})
+        if done.returncode == 0 and Path(done.stdout.strip(), "conanfile.py").is_file():
+            return Path(done.stdout.strip())
+    return None
+
+
+def definition_check(homes: list[Path], lock: Path = LOCK, mirrors_path: Path = GIT_MIRRORS) -> list[str]:
+    """Each finding of the definition against the lock (definition-check)."""
+    mirrors = read_mirrors(mirrors_path)
+    sourced: dict[str, tuple[str, str]] = {}
+    findings = []
+    for reference in lock_third_party(lock):
+        folder = recipe_folder(reference, homes)
+        if folder is None:
+            findings.append(f"{reference} is in no conan home searched ({', '.join(map(str, homes)) or 'none'}): "
+                            "its source() cannot be judged")
+            continue
+        try:
+            fetched = git_source(folder, reference.split("#", 1)[0].split("/", 1)[1])
+        except Refused as refused:
+            findings.append(str(refused))
+            continue
+        if fetched is not None:
+            sourced[reference] = fetched
+    return findings + judge_mirrors(sourced, mirrors)
+
+
+MIRROR_PROBE = """from conan import ConanFile
+from conan.tools.scm import Git
+
+
+class MirrorProbe(ConanFile):
+    name = "mirror-probe"
+    version = "0"
+
+    def source(self):
+        Git(self).fetch_commit(url={url!r}, commit={commit!r})
+"""
+
+
+def mirror_check(pin: Pin, docker: str) -> list[str]:
+    """Each mirror row the pinned image fails to serve to conan's own fetch under `--network none`."""
+    load(pin, docker)
+    findings = []
+    for url, commit in sorted(read_mirrors().items()):
+        with tempfile.TemporaryDirectory(prefix="build_environment.mirror.") as held:
+            scratch = Path(held)
+            (scratch / "conanfile.py").write_text(MIRROR_PROBE.format(url=url, commit=commit))
+            script = (f"conan source {scratch} >{scratch}/source.log 2>&1 || {{ cat {scratch}/source.log; exit 1; }}; "
+                      f"git -C {scratch} rev-parse HEAD")
+            done = subprocess.run(run_argv(pin, ["sh", "-c", script], [scratch], ["CONAN_HOME"], scratch,
+                                           docker=docker, environ={"CONAN_HOME": f"{scratch}/home"}),
+                                  capture_output=True, text=True, check=False)
+            head = done.stdout.strip().splitlines()[-1:] if done.stdout.strip() else []
+            if done.returncode != 0 or head != [commit]:
+                findings.append(f"{url} at {commit}: exit {done.returncode}, HEAD {head or 'none'}: "
+                                f"{(done.stdout + done.stderr).strip()[-1500:]}")
+            else:
+                print(f"  ok   {url} served at {commit} under --network none")
+    return findings
+
+
 # ── selftest────────────────────────────────────────────────────────────────────────────────────
 
 PROBE_SOURCE = r"""
@@ -316,6 +483,44 @@ def selftest() -> int:
         except Refused as refused:
             return str(refused)
         return "no refusal"
+
+    with tempfile.TemporaryDirectory(prefix="build_environment.definition.") as held:
+        recipes = Path(held)
+        upstream, commit = "https://git.example.org/config.git", "1" * 40
+        for name, source in (("fetched", "        Git(self).fetch_commit(**self.conan_data['sources'][self.version])\n"),
+                             ("cloned", "        self.run('git clone https://git.example.org/other.git src')\n"),
+                             ("downloaded", "        get(self, **self.conan_data['sources'][self.version])\n")):
+            (recipes / name).mkdir()
+            (recipes / name / "conanfile.py").write_text(
+                "from conan import ConanFile\n\n\nclass Recipe(ConanFile):\n    def build(self):\n"
+                "        Git(self)\n\n    def source(self):\n" + source)
+            (recipes / name / "conandata.yml").write_text(f"sources:\n  '1.0':\n    url: {upstream}\n"
+                                                          f"    commit: '{commit}'\n")
+        arm("a recipe whose source() calls conan's Git helper is git-sourced, at its conandata url and commit",
+            git_source(recipes / "fetched", "1.0"), (upstream, commit))
+        arm("a recipe whose source() runs git clone itself is git-sourced",
+            git_source(recipes / "cloned", "1.0"), (upstream, commit))
+        arm("a recipe whose source() downloads is not git-sourced, though another method names Git",
+            git_source(recipes / "downloaded", "1.0"), None)
+        arm("RED: a git-sourced recipe whose conandata names no commit for its version is refused",
+            refusal(lambda: git_source(recipes / "fetched", "2.0")).endswith("no mirror can serve it"), True)
+        arm("RED: a git-sourced recipe of the lock whose URL the definition does not mirror is named and refused",
+            judge_mirrors({"config/1.0#abc": (upstream, commit)}, {}),
+            [f"config/1.0#abc fetches {upstream} at {commit} with git in source(), and the definition mirrors no "
+             f"such URL ({GIT_MIRRORS.name}): the walk has no network to fetch it"])
+        arm("RED: a mirror row at another commit than the recipe's is refused, naming both",
+            judge_mirrors({"config/1.0#abc": (upstream, commit)}, {upstream: "2" * 40}),
+            [f"config/1.0#abc fetches {upstream} at {commit}, and the definition's row names {'2' * 40}"])
+        arm("RED: a mirror row no recipe fetches is refused as stale",
+            judge_mirrors({}, {upstream: commit}), [f"the mirror row {upstream} {commit} serves no git-sourced recipe "
+                                                    "of the lock"])
+        arm("a git-sourced recipe mirrored at its commit passes", judge_mirrors({"c#a": (upstream, commit)},
+                                                                                {upstream: commit}), [])
+        (recipes / "mirrors.txt").write_text(f"# comment\n{upstream} {commit}\n{upstream} {commit}\n")
+        arm("RED: a mirror list repeating a URL is refused",
+            refusal(lambda: read_mirrors(recipes / "mirrors.txt")).endswith(f"repeats the mirror of {upstream}"), True)
+        arm("the mirror of a URL is its path without the scheme, under the image's mirror root",
+            mirror_path(upstream), f"{MIRROR_ROOT}/git.example.org/config.git")
 
     docker = shutil.which("docker") or "docker"
     with tempfile.TemporaryDirectory(prefix="build_environment.selftest.") as held:
@@ -413,12 +618,22 @@ def main(argv: list[str]) -> int:
             return REFUSED
     parser = argparse.ArgumentParser(prog="build_environment.py")
     verbs = parser.add_subparsers(dest="verb", required=True)
-    for verb in ("check", "load", "selftest"):
+    for verb in ("check", "load", "mirror-check", "selftest"):
         verbs.add_parser(verb)
+    verbs.add_parser("definition-check").add_argument("--conan-home", action="append", default=[], type=Path)
     args = parser.parse_args(argv)
     if args.verb == "selftest":
         return selftest()
     try:
+        if args.verb in ("definition-check", "mirror-check"):
+            findings = (definition_check(conan_homes(args.conan_home)) if args.verb == "definition-check"
+                        else mirror_check(read_pin(), docker))
+            for finding in findings:
+                print(f"build_environment: {args.verb}: {finding}", file=sys.stderr)
+            judged = (f" over {len(lock_third_party())} third-party reference(s) of {LOCK.name}"
+                      if args.verb == "definition-check" else f" over {len(read_mirrors())} mirror row(s)")
+            print(f"build_environment {args.verb}: {len(findings)} finding(s){judged}")
+            return 1 if findings else 0
         pin = read_pin()
         if args.verb == "check":
             check(pin, docker)
