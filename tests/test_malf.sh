@@ -405,8 +405,8 @@ rm -rf "$uc_tmp"
 echo "[7k] malf_closure carries its own proof (selftest): an anchored reference, a function-level import and a directory reference each reach their target, a bare word and a computed path reach nothing, a cycle terminates; a store act's domain denies and counts a read of a sibling repository, another conan home, the store and a corpus not its own, behind a try/except too, and lets its own repository, malf whole, its home and a system path read (DN-142.D29 (5), (8))"
 closure_selftest_output="$(timeout 120 python3 "$MALF_ROOT/malf_closure.py" selftest 2>&1)"
 closure_selftest_status=$?
-check "malf_closure selftest: 20 arms, 0 failed" \
-      "ok" "$([[ $closure_selftest_status -eq 0 ]] && grep -q '^malf_closure selftest: 20 passed, 0 failed$' <<< "$closure_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$closure_selftest_output")")"
+check "malf_closure selftest: 21 arms, 0 failed" \
+      "ok" "$([[ $closure_selftest_status -eq 0 ]] && grep -q '^malf_closure selftest: 21 passed, 0 failed$' <<< "$closure_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$closure_selftest_output")")"
 
 echo
 
@@ -6329,8 +6329,8 @@ sr_verb() {   # <verb> <arg>... -> rc=<status> <R-2 refusal count> <conan called
 check "store-create, store-build and store-verdict each refuse a cache root before conan is ever called" \
       "rc=2 1 none|rc=2 1 none|rc=2 1 none" \
       "$(sr_verb store-create some_pkg)|$(sr_verb store-build some_pkg)|$(sr_verb store-verdict format "$MALF_ROOT")"
-check "no store verb spells a store default of its own: the root has one definition" \
-      "1 1 3" "$(grep -c 'MALF_STORE_DIR:-' "$MALF_BIN") $(sed -n '/^_malf_store_root()/,/^}/p' "$MALF_BIN" | grep -c 'MALF_STORE_DIR:-') $(grep -cE 'store="\$\(_malf_store_root store-(create|build|verdict)\)"' "$MALF_BIN")"
+check "no store verb spells a store default of its own: the root has one definition (store-create resolves it twice, on the host before its container and inside it)" \
+      "1 1 4" "$(grep -c 'MALF_STORE_DIR:-' "$MALF_BIN") $(sed -n '/^_malf_store_root()/,/^}/p' "$MALF_BIN" | grep -c 'MALF_STORE_DIR:-') $(grep -cE 'store="\$\(_malf_store_root store-(create|build|verdict)\)"' "$MALF_BIN")"
 rm -rf "$sr_tmp"
 echo
 

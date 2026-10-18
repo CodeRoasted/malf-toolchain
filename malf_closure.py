@@ -320,11 +320,14 @@ class Domain:
         return any(_within(path, root) for root in self.denied) and not any(_within(path, root) for root in self.granted)
 
 
-def repository_of(act_root: Path) -> Path:
-    """The git checkout holding `act_root` (a create's recipe), else `act_root` itself (a `conan build`
+def repository_of(act_root: Path) -> list[Path]:
+    """The git checkout holding `act_root` (a create's recipe) and its git directory, wherever that lives
+    (a submodule's lies under its superproject's `.git/modules`), else `act_root` itself (a `conan build`
     step's source, materialized outside every checkout)."""
-    found = subprocess.run(["git", "-C", str(act_root), "rev-parse", "--show-toplevel"], capture_output=True, text=True)
-    return Path(found.stdout.strip()) if found.returncode == 0 and found.stdout.strip() else act_root
+    found = subprocess.run(["git", "-C", str(act_root), "rev-parse", "--path-format=absolute", "--show-toplevel",
+                            "--git-common-dir"], capture_output=True, text=True)
+    lines = found.stdout.split()
+    return [Path(line) for line in lines] if found.returncode == 0 and len(lines) == 2 else [act_root]
 
 
 def corpus_mounts(document: Path, package: str | None) -> tuple[list[Path], list[Path]]:
@@ -353,11 +356,11 @@ def step_domain(malf_dir: Path, workspace: Path, store: Path, conan_homes: list[
     own_home = home.resolve()
     denied = [path.resolve() for path in [workspace, store, *conan_homes, *every_mount]
               if path.exists() and path.resolve() != own_home]
-    repository = repository_of(act_root)
+    repository, *git_dir = repository_of(act_root)
     if repository.resolve() == workspace.resolve():
         raise ClosureError(f"the act's repository {repository} is the workspace root itself, so its domain would "
                            "deny no sibling repository (DN-142.D29 (5))")
-    granted = [malf_dir, repository, home, scratch, *own_mounts, *parameter_files]
+    granted = [malf_dir, repository, *git_dir, home, scratch, *own_mounts, *parameter_files]
     absent = sorted(str(path) for path in granted if not path.exists())
     if absent:
         raise ClosureError(f"the step's domain grants root(s) that do not exist: {', '.join(absent)}")
@@ -609,6 +612,19 @@ def selftest() -> int:
         arm("an act reading its own repository and its git, any malf file, its home, its own corpus mount, its "
             "parameter file and a system path runs, counted at zero: its records keep denials_counted true",
             (code, counted, denials_counted(tally)), (0, [COUNTED, "0"], True))
+        submodule = workspace / "submodule"
+        (workspace / ".git-modules").mkdir()
+        subprocess.run(["git", "init", "-q", f"--separate-git-dir={workspace / '.git-modules' / 'submodule'}", str(submodule)],
+                       check=True, env={**os.environ, **GIT_FIXTURE_ENV})
+        _committed(submodule, {"recipe/conanfile.py": "a submodule's own\n"})
+        sub_domain = step_domain(malf, workspace, store, [], step_home, scratch, submodule / "recipe")
+        with contextlib.redirect_stderr(io.StringIO()):
+            code = confine(sub_domain, tally, ["sh", "-c", f"git -C {submodule} rev-parse HEAD >/dev/null && "
+                                                           f"cat {submodule / 'recipe' / 'conanfile.py'} >/dev/null"],
+                           tracer=tracer)
+        arm("a repository whose git directory lives elsewhere in the workspace (a submodule's, under the "
+            "superproject's .git/modules) reads its git: the directory is part of its grant",
+            (code, tally.read_text().split()), (0, [COUNTED, "0"]))
         code, counted, _said = act(f"ls {workspace} | grep -qx sibling && ls {sibling} | grep -qx secret.txt")
         arm("a listing of the workspace and of a sibling names their entries and is counted at zero: the domain "
             "withholds file reads, never entry names", (code, counted), (0, [COUNTED, "0"]))

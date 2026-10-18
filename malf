@@ -5428,6 +5428,56 @@ _malf_store_parameters() {   # <profile|-> <argv>...
     export MALF_STORE_PARAMETERS="$document"
 }
 
+# THE WALK RUNS IN THE BUILD ENVIRONMENT (DN-142.D30 (3)): `malf store-create` on the host re-runs
+# itself as ONE container of the pinned image (build_environment.py run, its verified load and its
+# two-producer check), driver and acts together, so the conan that computes a key before its step is
+# the conan that creates. Inside, MALF_SYSTEM names the pinned config digest. The container sees,
+# each at its own absolute path: the workspace, the store, every conan home the walk names, /tmp (where
+# the walk's scratch is made, kept on the host when a step fails), the log archive's directory, the
+# corpus document and its mounts (read-only), and for a walk running benchmarks the bench document and
+# the build slot (read-only) with the host's process ids, so the slot's holder is judged alive or dead
+# as on the host. Its environment is exactly the walk's declared variables. The store-create container
+# lifts Docker's default seccomp profile: its declared-unconfined namespace tests unshare a mount
+# namespace (DN-142.D29 (9)).
+# post: the container's exit, or 2 refused before it ran.
+_malf_store_create_in_environment() {   # <package>...
+    local store name
+    local -a bench_args=()
+    # The slot's refusals come first, on the host, before any container starts (the walk inside judges
+    # the slot again, through the host's process ids).
+    mapfile -t bench_args < <(_malf_store_bench_args) && [[ "${bench_args[0]:-}" != REFUSED ]] || return 2
+    store="$(_malf_store_root store-create)" || return 2
+    mkdir -p "$store"
+    # The conan source download cache global.conf renders under HOME (core.sources:download_cache): every
+    # third-party source a recipe fetches, verified by the sha256 its conandata pins, since the container
+    # has no network; HOME inside is the caller's path, holding only what is mounted under it.
+    mkdir -p "$HOME/.conan2-sources-backup"
+    local -a args=(--seccomp-unconfined --home "$HOME" --mount "$MALF_WORKSPACE_ROOT" --mount "$store" --mount /tmp
+                   --mount "$HOME/.conan2-sources-backup")
+    local cut_home="${MALF_CUT_VERIFY_CONAN_HOME:-$MALF_CONAN_HOME_BASE/cut-verify}" home
+    for home in "$MALF_CONAN_HOME_BASE" "$cut_home" "${MALF_STORE_CONAN_HOME:-}" "${MALF_TWIN_SEED_HOME:-}"; do
+        [[ -n "$home" ]] || continue
+        mkdir -p "$home" && args+=(--mount "$home")
+    done
+    [[ -z "${MALF_STORE_LOG_ARCHIVE:-}" ]] || args+=(--mount "$(dirname "$(realpath -m "$MALF_STORE_LOG_ARCHIVE")")")
+    if [[ -n "${MALF_CORPUS_GATES:-}" ]]; then
+        [[ -f "$MALF_CORPUS_GATES" ]] || { echo "malf store-create: MALF_CORPUS_GATES='$MALF_CORPUS_GATES' names no file" >&2; return 2; }
+        args+=(--read-only-mount "$(dirname "$(realpath "$MALF_CORPUS_GATES")")" --corpus-gates "$(realpath "$MALF_CORPUS_GATES")")
+    fi
+    if [[ -n "${MALF_BENCH:-}" ]]; then
+        [[ -f "$MALF_BENCH" ]] || { echo "malf store-create: MALF_BENCH='$MALF_BENCH' names no file" >&2; return 2; }
+        args+=(--read-only-mount "$(dirname "$(realpath "$MALF_BENCH")")" --read-only-mount "$(dirname "$MALF_BUILD_SLOT_DIR")" --host-pids)
+    fi
+    for name in MALF_STORE_PARAMETERS MALF_STORE_LOG_ARCHIVE MALF_CORPUS_GATES MALF_BENCH MALF_BENCH_SLOT_TOKEN \
+                MALF_CUT_VERIFY_CONAN_HOME MALF_CUT_VERIFY_PROFILE MALF_STORE_CONAN_HOME MALF_TWIN_SEED_HOME \
+                MALF_STORE_BUILD_REV; do
+        [[ -z "${!name:-}" ]] || args+=(--env "$name")
+    done
+    export MALF_STORE_DIR="$store" MALF_WORKSPACE_ROOT CONAN_HOME="$MALF_CONAN_HOME_BASE" MALF_BUILD_SLOT_DIR
+    args+=(--env MALF_STORE_DIR --env MALF_WORKSPACE_ROOT --env CONAN_HOME --env MALF_BUILD_SLOT_DIR)
+    python3 "$MALF_DIR/build_environment.py" run "${args[@]}" -- "$MALF_DIR/malf" store-create "$@"
+}
+
 # malf store-create [<package>...] — ROADMAP N358's ONE build act (DN-142.D5 (1), (4), (7) M2): every
 # step of the workspace, in malf's own walk order (`malf_graph.py steps` at the workspace root, the
 # recipes `malf test` there reaches), built and tested ONCE and recorded in a local store
@@ -5464,6 +5514,8 @@ _malf_store_parameters() {   # <profile|-> <argv>...
 # creates is seeded with the B2 home's third-party packages (MALF_TWIN_SEED_HOME names another).
 # THE STORE is a directory standing in for the remote one until its transport and its writer
 # credential are ruled; nothing here publishes anywhere.
+# THE ENVIRONMENT: called on the host (no MALF_SYSTEM), the walk runs as one container of the pinned
+# build environment (_malf_store_create_in_environment, DN-142.D30 (3)).
 #
 # Exit 0 every step green and every output stored or matching; 1 a step failed, was skipped, or
 # rebuilt at an equal key differs; 2 refused before any step.
@@ -5473,6 +5525,10 @@ _malf_store_parameters() {   # <profile|-> <argv>...
 cmd_store_create() {
     local arg
     for arg in "$@"; do [[ "$arg" != -* ]] || _malf_refuse_option store-create "$arg"; done
+    if [[ -z "${MALF_SYSTEM:-}" ]]; then
+        _malf_store_create_in_environment "$@"
+        return
+    fi
     # THE DRIVER RUNS WITH NO DOMAIN, ITS ACTS EACH IN THEIRS (DN-142.D29 (5), (9)): a Landlock domain is
     # inherited by every child and never lifted, so a confined driver would confine the acts a package
     # declares `unconfined:` (its tests change mount topology, which no domain allows). Its malf reads
@@ -6831,6 +6887,7 @@ case "$COMMAND" in
     store-build)      cmd_store_build "$@" ;;
     store-verdict)    cmd_store_verdict "$@" ;;
     sandbox)          cmd_sandbox "$@" ;;
+    environment)      exec python3 "$MALF_DIR/build_environment.py" "$@" ;;
     relocate-verify)  cmd_relocate_verify "$@" ;;
     lock)             cmd_lock "$@" ;;
     slot)             cmd_slot "$@" ;;
