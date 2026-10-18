@@ -1831,10 +1831,24 @@ _malf_test_run() {                  # <build_dir> <verbose> <regex> <corpus_only
     local junit="$build_dir/malf-test.junit.xml" status=0 source filtered=false
     [[ -n "$3" || "$4" == true ]] && filtered=true
     rm -f "$junit"
-    ctest "${ctest_args[@]}" --output-junit "$junit" < /dev/null || status=$?
-    [[ $status -eq 0 ]] || return "$status"
-    # note: a tree with no CMakeCache.txt names no source, so it declares nothing, every skip red.
+    # note: a tree with no CMakeCache.txt names no source, so it declares nothing: no backend, every skip red.
     source="$(python3 "$MALF_DIR/malf_recipe_tests.py" tree-source "$build_dir")" || source=""
+    # THE PACKAGE'S DECLARED BACKENDS (DN-142.D30 (5) E2b) come up for the run through the same launcher code
+    # a walk uses, published on the host's 127.0.0.1, each address in its CODEROAST_BACKEND_<NAME>: the test
+    # fixture has ONE path, the variable, on the desk and in the image.
+    local declared="[]" beside_file=""
+    local -a beside=()
+    if [[ -n "$source" ]]; then
+        declared="$(python3 "$MALF_DIR/build_environment.py" backends-at "$source")" \
+            || { echo "malf test: the \`backends:\` declaration of $source could not be read (above)" >&2; exit 1; }
+    fi
+    if [[ "$declared" != "[]" ]]; then
+        beside_file="$(mktemp)" && printf '%s\n' "$declared" > "$beside_file"
+        beside=(python3 "$MALF_DIR/build_environment.py" with-backends --backends "$beside_file" --)
+    fi
+    "${beside[@]}" ctest "${ctest_args[@]}" --output-junit "$junit" < /dev/null || status=$?
+    [[ -z "$beside_file" ]] || rm -f "$beside_file"
+    [[ $status -eq 0 ]] || return "$status"
     python3 "$MALF_DIR/malf_recipe_tests.py" judge-skips "$junit" "$source" "$MALF_PROFILE_NAME" "$filtered"
 }
 
@@ -5475,7 +5489,37 @@ _malf_store_create_in_environment() {   # <package>...
     done
     export MALF_STORE_DIR="$store" MALF_WORKSPACE_ROOT CONAN_HOME="$MALF_CONAN_HOME_BASE" MALF_BUILD_SLOT_DIR
     args+=(--env MALF_STORE_DIR --env MALF_WORKSPACE_ROOT --env CONAN_HOME --env MALF_BUILD_SLOT_DIR)
-    python3 "$MALF_DIR/build_environment.py" run "${args[@]}" -- "$MALF_DIR/malf" store-create "$@"
+    # THE WALK'S BACKENDS (DN-142.D30 (5) E2b): the union of what its steps declare under `backends:` at
+    # HEAD, started by the launcher on the walk's internal network; none keeps `--network none`.
+    local declared rc=0
+    declared="$(mktemp /tmp/malf-backends.XXXXXX)"
+    _malf_store_walk_backends "$declared" "$@" || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        [[ "$(cat "$declared")" == "[]" ]] || args+=(--backends "$declared")
+        python3 "$MALF_DIR/build_environment.py" run "${args[@]}" -- "$MALF_DIR/malf" store-create "$@" || rc=$?
+    fi
+    rm -f "$declared"
+    return "$rc"
+}
+
+# THE BACKENDS A WALK DECLARES, computed on the host before its container starts: the walk's steps
+# (malf's own walk at the workspace root, its selection), and each one's `backends:` at HEAD.
+# post: <out> holds the JSON list `build_environment.py run --backends` reads (`[]` for none); exit 2
+#       naming the refusal (a malformed declaration, one name declared two ways).
+_malf_store_walk_backends() {   # <out> [<package>...]
+    local out="$1" steps unstored wanted name path _deps _kind
+    shift
+    local -a pairs=()
+    steps="$(python3 "$MALF_DIR/malf_graph.py" steps "$MALF_WORKSPACE_ROOT")" && [[ -n "$steps" ]] \
+        || { echo "malf store-create: malf's walk of $MALF_WORKSPACE_ROOT found no step, or refused it (above)" >&2; return 2; }
+    unstored="$(python3 "$MALF_WORKSPACE_ROOT/scripts/version_line.py" unstored "$MALF_WORKSPACE_ROOT")" \
+        || { echo "malf store-create: failed to resolve the stored: false packages" >&2; return 2; }
+    wanted="$(_malf_store_walk "$steps" "$unstored" "$@")" || return 2
+    while IFS=$'\t' read -r name path _deps _kind; do
+        [[ -n "$name" ]] && pairs+=("$path" "$name")
+    done <<< "$wanted"
+    python3 "$MALF_DIR/build_environment.py" backends "${pairs[@]}" > "$out" \
+        || { echo "malf store-create: the walk's \`backends:\` declarations could not be read (above; DN-142.D30 (5) E2b)" >&2; return 2; }
 }
 
 # malf store-create [<package>...] — ROADMAP N358's ONE build act (DN-142.D5 (1), (4), (7) M2): every
@@ -5826,6 +5870,28 @@ _malf_store_run_step() {   # <n> <name> <path> <create|build> <store> <scratch> 
     fi
     [[ -z "$_MALF_STEP_UNCONFINED" ]] \
         || echo "--- store-create: $name runs UNCONFINED (its packages.yml: $_MALF_STEP_UNCONFINED) ---"
+    # A STEP DECLARING BACKENDS (DN-142.D30 (5) E2b) is handed each one's address, CODEROAST_BACKEND_<NAME>=
+    # <name>:<port> on the walk's internal network, through its own parameter document (checked against
+    # the act like the walk's), and its declaration enters its key's `step` member (MALF_STEP_BACKENDS).
+    # All of it is local to this step: no other step, nor this step's third-party phase above, sees any.
+    local -x MALF_STEP_BACKENDS="$scratch/$name.backends.json"
+    if ! python3 "$MALF_DIR/build_environment.py" backends "$path" "$name" > "$MALF_STEP_BACKENDS"; then
+        echo "malf store-create: the \`backends:\` declaration of $name could not be read from its packages.yml at HEAD (DN-142.D30 (5) E2b)" >&2
+        _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+        return "$_MALF_STEP_UNRECORDED"
+    fi
+    if [[ "$(cat "$MALF_STEP_BACKENDS")" != "[]" ]]; then
+        local variable step_parameters
+        while IFS= read -r variable; do
+            local -x "${variable%%=*}=${variable#*=}"
+        done < <(python3 "$MALF_DIR/build_environment.py" backends --variables "$path" "$name")
+        step_parameters="$(python3 "$MALF_DIR/build_environment.py" backends --parameters "$MALF_STORE_PARAMETERS" "$path" "$name")" \
+            && step_parameters="$(MALF_STORE_PARAMETERS="$step_parameters" python3 "$MALF_DIR/artefact_store.py" parameters "$MALF_PROFILE_NAME" malf store-create)" \
+            || { _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+                 return "$_MALF_STEP_UNRECORDED"; }
+        local -x MALF_STORE_PARAMETERS="$step_parameters"
+        echo "--- store-create: $name reaches its backends: $(python3 "$MALF_DIR/build_environment.py" backends --variables "$path" "$name" | paste -sd ' ') ---"
+    fi
     if [[ "$kind" == "build" ]]; then
         rc=0
         _malf_store_build_one "$name" "$path" "${MALF_STORE_BUILD_REV:-HEAD}" "$store" "$scratch" "$prefixes" || rc=$?

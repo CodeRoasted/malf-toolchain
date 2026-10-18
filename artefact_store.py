@@ -202,6 +202,11 @@ executable entry the map does not name, a map key naming no executable entry, an
 ELF carrying a symbol table (`.symtab` or `.debug_*`), a runpath (DT_RPATH or DT_RUNPATH) or no
 build-id; a `run-from-cache` entry keeps its runpath.
 
+A step's BACKENDS (DN-142.D30 (5) E2b): a package whose tests need a server declares it under
+`backends:` in the recorded `packages.yml`; `malf store-create` hands the declaration over in a JSON file
+named by MALF_STEP_BACKENDS, and a non-empty one enters the step's key as `step.backends` (absent for a
+step declaring none), so a backend's image bump re-keys exactly the steps that declare it.
+
 A step other than a package create may carry, in an output, OBJECTS (DN-142.D25 (1)): `objects:
 {<member>: <sha256>}`, each member held under `objects/<sha256>` (a verdict's named files are this
 field). Two such steps live here. The TRACKED step `<package>/tracked` holds a package's committed
@@ -941,10 +946,22 @@ def test_package_member() -> str | None:
     return hashlib.sha256(canonical_json(entries)).hexdigest()
 
 
+BACKENDS_ENV = "MALF_STEP_BACKENDS"
+
+
+def step_backends() -> list:
+    """The backends the running step declares (DN-142.D30 (5) E2b), the JSON list MALF_STEP_BACKENDS names
+    (`build_environment.py backends`); [] when it names none or the step declares none."""
+    named = os.environ.get(BACKENDS_ENV)
+    return json.loads(Path(named).read_text()) if named else []
+
+
 def _step_document(kind: str, package: str, profile: str, home: Path, malf_dir: Path,
                    toolchain: Path, sources: dict, upstream: dict, third_party: dict) -> dict:
+    backends = step_backends()
     return {
-        "step": {"kind": kind, "package": package, "profile": profile},
+        "step": {"kind": kind, "package": package, "profile": profile,
+                 **({"backends": backends} if backends else {})},
         "definition": definition_member(malf_dir, step_parameters(profile)),
         "sources": sources,
         "test_package": test_package_member(),
@@ -2776,6 +2793,23 @@ def selftest() -> int:
            key_of({"definition": definition}) != key_of({"definition": other}), True)
     expect("RED: a step run at another profile than its act's is refused",
            handed(own, lambda: _raises(lambda: step_parameters("linux-clang21"))), True)
+
+    # A STEP'S BACKENDS (DN-142.D30 (5) E2b): the declaration MALF_STEP_BACKENDS names is the step's, and a
+    # backend's image bump re-keys the step that declares it.
+    with tempfile.TemporaryDirectory(prefix="artefact_store.backends.") as scratch:
+        declared = [{"name": "redis", "image": "ghcr.io/x/redis:7@sha256:" + "1" * 64, "port": 6379,
+                     "health": "true", "command": [], "environment": {}}]
+        (Path(scratch) / "one.json").write_text(json.dumps(declared))
+        (Path(scratch) / "bumped.json").write_text(json.dumps([{**declared[0], "image": "ghcr.io/x/redis:7@sha256:" + "2" * 64}]))
+        (Path(scratch) / "none.json").write_text("[]")
+        expect("a step declaring no backend has none, whether the variable is unset or names an empty list",
+               (handed(None, step_backends), handed(None, step_backends, MALF_STEP_BACKENDS=f"{scratch}/none.json")), ([], []))
+        expect("a step's declared backends are its own",
+               handed(None, step_backends, MALF_STEP_BACKENDS=f"{scratch}/one.json"), declared)
+        expect("RED: a backend's image bump gives the declaring step another key",
+               key_of({"step": {"backends": handed(None, step_backends, MALF_STEP_BACKENDS=f"{scratch}/one.json")}})
+               != key_of({"step": {"backends": handed(None, step_backends, MALF_STEP_BACKENDS=f"{scratch}/bumped.json")}}),
+               True)
 
     # THE MALF MEMBER IS MALF WHOLE (DN-142.D29 (2), RUL-167): over a fixture malf tree, the member is
     # the tree id of HEAD on a clean checkout, a commit touching only `.github/` re-keys a create, an

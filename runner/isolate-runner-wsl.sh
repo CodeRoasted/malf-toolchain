@@ -68,7 +68,7 @@
 #
 # WHAT STAYS, stated so nobody reads more into this: localhost TCP services on this box (ollama,
 # the desk's dev servers, and any port another runner's job listens on) remain reachable from a job —
-# a network namespace would break the container fixtures, which publish on 127.0.0.1; an AF_VSOCK
+# a network namespace would break the backends `malf test` starts, which publish on 127.0.0.1; an AF_VSOCK
 # path to the Windows host that bypasses /init is not closable by any configuration here; the
 # boundary between two runner accounts is a Unix account on one kernel, so a local privilege
 # escalation crosses it; and the ci runner still sees every process's argv under /proc.

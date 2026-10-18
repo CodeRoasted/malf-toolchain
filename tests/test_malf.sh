@@ -6293,8 +6293,8 @@ ok = found and found.group(1, 2, 3) == ("3", "st_pkg", "PASS") and float(found.g
 print("ok" if ok else repr(line))' "$st_out")"
 st_body="$(sed -n '/^cmd_store_create()/,/^}/p' "$MALF_BIN")"
 st_step="$(sed -n '/^_malf_store_run_step()/,/^}/p' "$MALF_BIN")"
-check "the walk opens every step it runs and closes it on each of its ten exits: its third-party step failed or found the store corrupt, its unconfined declaration unread, a build passed, failed or found the store corrupt, a declaration unread, its key before the step refused, its step home unwritten, its create and records in that home" \
-      "1 1 10 1" "$(grep -c '_malf_store_clock "$scratch/times"; run_at=' <<< "$st_body") $(grep -c '_malf_store_opened "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total" "$name" SKIPPED' <<< "$st_step")"
+check "the walk opens every step it runs and closes it on each of its twelve exits: its third-party step failed or found the store corrupt, its unconfined declaration unread, its backends declaration unread or its parameter document refused, a build passed, failed or found the store corrupt, a declaration unread, its key before the step refused, its step home unwritten, its create and records in that home" \
+      "1 1 12 1" "$(grep -c '_malf_store_clock "$scratch/times"; run_at=' <<< "$st_body") $(grep -c '_malf_store_opened "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total" "$name" SKIPPED' <<< "$st_step")"
 rm -rf "$st_tmp"
 echo
 

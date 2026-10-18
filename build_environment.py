@@ -28,8 +28,9 @@ namespace tests unshare a mount namespace, which the default profile refuses).
     build_environment.py load
         the verified load: the archive checked and loaded when the pinned id is absent, then `check`
     build_environment.py run [--seccomp-unconfined] [--host-pids] [--home <dir>] [--mount <dir>]... [--read-only-mount <dir>]...
-                             [--corpus-gates <file>] [--env <NAME>]... -- <argv>...
-        <argv> in the environment, each corpus mount the document names mounted read-only; exit the
+                             [--corpus-gates <file>] [--env <NAME>]... [--backends <file>] -- <argv>...
+        <argv> in the environment, each corpus mount the document names mounted read-only; with
+        --backends <file>, beside those backends on the walk's internal network instead of none; exit the
         command's own, or 2 refused before it ran
     build_environment.py definition-check [--conan-home <dir>]...
         the definition against the lock (DN-142.D30 (5) E2a): every third-party recipe of conan.lock whose
@@ -40,9 +41,31 @@ namespace tests unshare a mount namespace, which the default profile refuses).
         each mirror row served by the pinned image: a `--network none` container runs conan's own
         Git.fetch_commit of the row's URL and commit (the recipe's `git fetch --depth 1 origin <commit>`)
         and checks out exactly that commit; exit 0, or 1 naming each row that failed
+    build_environment.py backends [--worktree] [--variables] <package dir> <package> [<package dir> <package>]...
+        the backends the named packages declare under `backends:` in their repository's packages.yml (at HEAD,
+        or the working tree), one per name (two packages declaring one name differently are refused), as
+        the JSON list `run --backends` and `with-backends --backends` read; --variables prints instead each
+        CODEROAST_BACKEND_<NAME>=<name>:<port> an act beside the walk's network reaches it by
+        --parameters <document> prints instead the walk's parameter document with each such variable added
+        to its `env`, the document a declaring step's act is keyed under
+    build_environment.py backends-at <package dir>
+        the backends the package at that directory declares in its working-tree packages.yml, as JSON
+    build_environment.py with-backends --backends <file> -- <argv>...
+        <argv> on the host beside those backends published on 127.0.0.1 at ports the daemon allocates, each
+        address in its CODEROAST_BACKEND_<NAME> (the desk's `malf test`); exit the command's, 2 refused
     build_environment.py selftest
         every refusal and the container's isolation, over a throwaway image built here (FROM scratch, no
         network), never the real archive; the definition check's refusals over recipes written here
+
+BACKENDS (DN-142.D30 (5) E2b, (7) R2). A package whose tests need a server declares it under `backends:`
+in its packages.yml: `{name, image: <ref>@sha256:<64 hex>, port, health, command, environment}`. A walk
+holding a declaring step runs its container on ONE `docker network create --internal` network the launcher
+creates, each backend started on it under its name with its healthcheck as the barrier, bounded, and
+removes the backends and the network on every exit path (a dead launcher's leftovers, labelled with its
+pid, are reaped by the next); a walk with no declaring step keeps `--network none`. A declaring step's act
+reaches each backend as CODEROAST_BACKEND_<NAME>=<name>:<port>, keyed in its parameter document, the
+declaration itself in its key's `step` member. No container the launcher starts holds a Docker socket.
+The desk's `malf test` starts the same backends through the same code, published on 127.0.0.1.
 
 GIT MIRRORS. The walk has no network, and conan's source download cache serves only a downloaded file, so a
 recipe whose source() fetches with git (ConanCenter's gnu-config) is served from a bare mirror built into the
@@ -60,10 +83,13 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -209,9 +235,12 @@ def load(pin: Pin, docker: str, directory: Path | None = None) -> str:
 
 def run_argv(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], cwd: Path,
              seccomp_unconfined: bool = False, docker: str = "docker", environ: dict | None = None,
-             read_only: list[Path] | tuple = (), host_pids: bool = False, home: str = CONTAINER_HOME) -> list[str]:
+             read_only: list[Path] | tuple = (), host_pids: bool = False, home: str = CONTAINER_HOME,
+             network: str = "none", name: str | None = None) -> list[str]:
     """The `docker run` command of one act: `mounts` writable and `read_only` read-only, each at its own
-    path; `host_pids` shares the host's process ids (a bench walk judging the build slot's holder).
+    path; `host_pids` shares the host's process ids (a bench walk judging the build slot's holder);
+    `network` is `none` unless the act runs beside the walk's backends, on their internal network, and
+    `name` names the container so a teardown can remove it whatever happened to its client.
     raises Refused on an unset declared name, a mount that is not an existing absolute directory, or a
     working directory under no writable mount. `home` is the container's HOME: the image's own unless the
     act's conf renders a path under the caller's (malf's source download cache)."""
@@ -227,7 +256,8 @@ def run_argv(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], cw
     if not any(cwd == mount or mount in cwd.parents for mount in resolved):
         raise Refused(f"the working directory {cwd} lies under no mount ({', '.join(map(str, resolved)) or 'none'})")
     shm = os.statvfs(SHM)
-    command = [docker, "run", "--rm", "--init", "--network", "none", "--workdir", str(cwd),
+    command = [docker, "run", "--rm", "--init", "--network", network, *(["--name", name] if name else []),
+               "--workdir", str(cwd),
                "--shm-size", str(shm.f_blocks * shm.f_frsize),
                "--env", f"HOME={home}", "--env", f"{SYSTEM_ENV}={pin.image}"]
     if seccomp_unconfined:
@@ -257,11 +287,303 @@ def corpus_mounts(document: Path) -> list[Path]:
 
 def run(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], seccomp_unconfined: bool,
         docker: str = "docker", read_only: list[Path] | tuple = (), host_pids: bool = False,
-        home: str = CONTAINER_HOME) -> int:
+        home: str = CONTAINER_HOME, backends: list[Backend] | tuple = ()) -> int:
+    """The act in the environment; with `backends`, beside them on the walk's internal network, every
+    backend and the network removed on every exit path."""
     load(pin, docker)
-    return subprocess.run(run_argv(pin, argv, mounts, names, Path.cwd(), seccomp_unconfined, docker,
-                                   read_only=read_only, host_pids=host_pids, home=home),
-                          stdin=subprocess.DEVNULL, check=False).returncode
+    if not backends:
+        return subprocess.run(run_argv(pin, argv, mounts, names, Path.cwd(), seccomp_unconfined, docker,
+                                       read_only=read_only, host_pids=host_pids, home=home),
+                              stdin=subprocess.DEVNULL, check=False).returncode
+    with BackendWalk(docker, backends) as walk:
+        return subprocess.run(run_argv(pin, argv, mounts, names, Path.cwd(), seccomp_unconfined, docker,
+                                       read_only=read_only, host_pids=host_pids, home=home,
+                                       network=walk.network, name=walk.act),
+                              stdin=subprocess.DEVNULL, check=False).returncode
+
+
+# ── the walk's backends (DN-142.D30 (5) E2b, (7) R2) ───────────────────────────────────────────────
+
+BACKEND_LABEL = "malf.build-environment.owner"
+BACKEND_VARIABLE = "CODEROAST_BACKEND_"
+BACKEND_NAME = re.compile(r"^[a-z][a-z0-9]*$")
+BACKEND_MEMBERS = ("name", "image", "port", "health", "command", "environment")
+PINNED_IMAGE = re.compile(r"^[^@\s]+@sha256:[0-9a-f]{64}$")
+READY_DEADLINE_S = 90
+READY_POLL_S = 0.1
+LOG_TAIL_LINES = "40"
+# Docker evaluates a healthcheck only on its interval, so the interval floors how late readiness is seen;
+# the retry count is far above any real wait, the bounded deadline being the limit.
+HEALTH_FLAGS = ("--health-interval", "250ms", "--health-timeout", "2s", "--health-retries", "600",
+                "--health-start-period", "0s")
+
+
+@dataclass(frozen=True)
+class Backend:
+    """One declared backend: a digest-pinned image serving `port`, ready when `health` (a shell command run
+    inside it) exits 0; its address reaches an act as CODEROAST_BACKEND_<NAME>."""
+    name: str
+    image: str
+    port: int
+    health: str
+    command: tuple[str, ...]
+    environment: tuple[tuple[str, str], ...]
+
+    @property
+    def variable(self) -> str:
+        return BACKEND_VARIABLE + self.name.upper()
+
+    def document(self) -> dict:
+        """The declaration as the step's key holds it, every member explicit."""
+        return {"name": self.name, "image": self.image, "port": self.port, "health": self.health,
+                "command": list(self.command), "environment": dict(self.environment)}
+
+
+def parse_backends(declared: object, where: str) -> list[Backend]:
+    """The backends of a `backends:` declaration. raises Refused naming each malformed entry."""
+    if not isinstance(declared, list) or not declared:
+        raise Refused(f"{where}: `backends:` is a non-empty list of {{{', '.join(BACKEND_MEMBERS)}}}, not {declared!r}")
+    parsed, wrong = [], []
+    for entry in declared:
+        if not isinstance(entry, dict) or not {"name", "image", "port", "health"} <= set(entry) \
+                or not set(entry) <= set(BACKEND_MEMBERS):
+            wrong.append(f"{entry!r} is not a mapping of name, image, port, health and optionally command, environment")
+            continue
+        name, image, port, health = entry["name"], entry["image"], entry["port"], entry["health"]
+        command, environment = entry.get("command", []), entry.get("environment", {})
+        problems = []
+        if not BACKEND_NAME.match(str(name)):
+            problems.append(f"name {name!r} is not lowercase letters and digits")
+        if not PINNED_IMAGE.match(str(image)):
+            problems.append(f"image {image!r} is not pinned by digest (<ref>@sha256:<64 hex>)")
+        if not isinstance(port, int) or isinstance(port, bool) or not 0 < port < 65536:
+            problems.append(f"port {port!r} is not 1..65535")
+        if not isinstance(health, str) or not health.strip():
+            problems.append(f"health {health!r} is not a non-empty command")
+        if not isinstance(command, list) or not all(isinstance(word, str) for word in command):
+            problems.append(f"command {command!r} is not a list of strings")
+        if not isinstance(environment, dict) or not all(isinstance(key, str) and isinstance(value, str)
+                                                        for key, value in environment.items()):
+            problems.append(f"environment {environment!r} is not a mapping of strings")
+        if problems:
+            wrong.append(f"{name!r}: " + ", ".join(problems))
+            continue
+        parsed.append(Backend(name, image, port, health, tuple(command), tuple(sorted(environment.items()))))
+    names = [backend.name for backend in parsed]
+    wrong += [f"the name {name!r} is declared twice" for name in sorted(set(names)) if names.count(name) > 1]
+    if wrong:
+        raise Refused(f"{where}: `backends:` is malformed: " + "; ".join(wrong))
+    return parsed
+
+
+def declared_backends(package_dir: Path, package: str, at_head: bool = True) -> list[Backend]:
+    """The backends `package` declares in the packages.yml of the repository holding `package_dir`, read
+    from HEAD (a walk's recorded commit) or from the working tree (the desk's `malf test`); [] for none."""
+    import yaml
+
+    top = subprocess.run(["git", "-C", str(package_dir), "rev-parse", "--show-toplevel"], capture_output=True,
+                         text=True, check=False)
+    if top.returncode != 0:
+        raise Refused(f"{package_dir} is in no git repository: {top.stderr.strip()}")
+    root = Path(top.stdout.strip())
+    if at_head:
+        shown = subprocess.run(["git", "-C", str(root), "show", "HEAD:packages.yml"], capture_output=True,
+                               text=True, check=False)
+        if shown.returncode != 0:
+            raise Refused(f"{root}: HEAD holds no packages.yml: {shown.stderr.strip()}")
+        text = shown.stdout
+    else:
+        text = (root / "packages.yml").read_text()
+    entry = ((yaml.safe_load(text) or {}).get("packages") or {}).get(package) or {}
+    if "backends" not in entry:
+        return []
+    return parse_backends(entry["backends"], f"{root / 'packages.yml'} ({package})")
+
+
+def backends_at(directory: Path) -> list[Backend]:
+    """The backends the package at `directory` declares in its repository's working-tree packages.yml
+    (the desk's `malf test`): the package whose `path:` is `directory` relative to the repository; [] for a
+    directory no package names."""
+    import yaml
+
+    top = subprocess.run(["git", "-C", str(directory), "rev-parse", "--show-toplevel"], capture_output=True,
+                         text=True, check=False)
+    if top.returncode != 0 or not (Path(top.stdout.strip()) / "packages.yml").is_file():
+        return []
+    root = Path(top.stdout.strip())
+    relative = directory.resolve().relative_to(root.resolve()).as_posix()
+    packages = (yaml.safe_load((root / "packages.yml").read_text()) or {}).get("packages") or {}
+    named = [name for name, entry in packages.items() if isinstance(entry, dict) and entry.get("path") == relative]
+    return declared_backends(directory, named[0], at_head=False) if named else []
+
+
+def read_backends(path: Path) -> list[Backend]:
+    """The backends a walk's declaration file holds (`backends-of` wrote it)."""
+    try:
+        declared = json.loads(path.read_text())
+    except (OSError, ValueError) as unread:
+        raise Refused(f"the backend declaration {path} cannot be read: {unread!r}") from unread
+    return parse_backends(declared, str(path)) if declared else []
+
+
+def walk_backends(declarations: list[tuple[str, list[Backend]]]) -> list[Backend]:
+    """The union of the backends the walk's steps declare ([(package, backends)]): one backend per name,
+    refused when two steps declare one name differently."""
+    held: dict[str, tuple[str, Backend]] = {}
+    wrong = []
+    for package, backends in declarations:
+        for backend in backends:
+            if backend.name in held and held[backend.name][1] != backend:
+                wrong.append(f"{held[backend.name][0]} and {package} declare the backend {backend.name!r} differently")
+            held.setdefault(backend.name, (package, backend))
+    if wrong:
+        raise Refused("the walk's backends disagree: " + "; ".join(wrong))
+    return [held[name][1] for name in sorted(held)]
+
+
+class Interrupted(BaseException):
+    """A signal reached the launcher while it held backends: the walk unwinds through its teardown."""
+
+
+def _interrupt(signum: int, _frame: object) -> None:
+    raise Interrupted(f"signal {signum}")
+
+
+def _owner_alive(text: str) -> bool:
+    """Whether the owner pid a label names may still run: a dead one is reaped, an unreadable or
+    unsignalable one (another account's) is left alone."""
+    try:
+        os.kill(int(text), 0)
+    except ValueError:
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def reap_backends(docker: str) -> list[str]:
+    """Remove every backend container, act container and network a dead launcher left (labelled with its
+    pid): the crashed launcher runs no teardown, so the next one does. Returns what was removed."""
+    removed = []
+    for kind, listing in (("container", ["ps", "--all"]), ("network", ["network", "ls"])):
+        done = _docker(docker, *listing, "--filter", f"label={BACKEND_LABEL}", "--format",
+                       f'{{{{.ID}}}} {{{{.Label "{BACKEND_LABEL}"}}}}')
+        for line in done.stdout.splitlines() if done.returncode == 0 else []:
+            ident, _sep, owner = line.partition(" ")
+            if ident and not _owner_alive(owner):
+                gone = _docker(docker, *(["rm", "--force", "--volumes"] if kind == "container" else ["network", "rm"]),
+                               ident)
+                if gone.returncode == 0:
+                    removed.append(f"{kind} {ident}")
+    return removed
+
+
+class BackendWalk:
+    """The walk's backends, up for the walk and gone after it (DN-142.D30 (5) E2b).
+
+    Internal (a walk): ONE `docker network create --internal` named by the walk, each backend on it under
+    its declared name, so an act attached to the network reaches each by `<name>:<port>` and nothing else;
+    `addresses` maps each CODEROAST_BACKEND_<NAME> to that. Published (the desk's `malf test`): each backend
+    publishes its port on the host's 127.0.0.1 at a port the daemon allocates, `addresses` naming it.
+    Entering pulls each image by digest when the daemon lacks it, reaps a dead launcher's leftovers, starts
+    each backend and waits for its healthcheck, bounded; any failure tears down what was started and
+    raises Refused naming the image, the port and the container's log tail. Leaving removes the act
+    container (`act`, when the act ran under that name), every backend and the network, on every exit path,
+    a signal included."""
+
+    def __init__(self, docker: str, backends: list[Backend] | tuple, publish: bool = False,
+                 ready_deadline_s: float = READY_DEADLINE_S):
+        self.docker, self.backends, self.publish, self.deadline = docker, list(backends), publish, ready_deadline_s
+        token = f"{os.getpid()}-{secrets.token_hex(4)}"
+        self.network = None if publish else f"malf-walk-{token}"
+        self.act = None if publish else f"malf-act-{token}"
+        self.token = token
+        self.addresses: dict[str, str] = {}
+        self.started: list[str] = []
+        self.signals: dict[int, object] = {}
+
+    def __enter__(self) -> "BackendWalk":
+        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            self.signals[signum] = signal.signal(signum, _interrupt)
+        try:
+            reap_backends(self.docker)
+            for backend in self.backends:
+                if inspected(self.docker, backend.image) is None:
+                    pulled = _docker(self.docker, "pull", "--quiet", backend.image)
+                    if pulled.returncode != 0:
+                        raise Refused(f"the backend {backend.name}'s image {backend.image} is not held and its pull "
+                                      f"failed: {pulled.stderr.strip()}")
+            label = ["--label", f"{BACKEND_LABEL}={os.getpid()}"]
+            if self.network:
+                created = _docker(self.docker, "network", "create", "--internal", *label, self.network)
+                if created.returncode != 0:
+                    raise Refused(f"`docker network create --internal {self.network}` failed: {created.stderr.strip()}")
+            for backend in self.backends:
+                self._start(backend, label)
+            return self
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
+
+    def _start(self, backend: Backend, label: list[str]) -> None:
+        name = f"malf-backend-{backend.name}-{self.token}"
+        placement = (["--publish", f"127.0.0.1::{backend.port}"] if self.publish
+                     else ["--network", self.network, "--network-alias", backend.name])
+        environment = [word for key, value in backend.environment for word in ("--env", f"{key}={value}")]
+        started = _docker(self.docker, "run", "--detach", "--quiet", "--name", name, *label, *placement,
+                          "--health-cmd", backend.health, *HEALTH_FLAGS, *environment, backend.image,
+                          *backend.command)
+        if started.returncode != 0:
+            raise Refused(f"the backend {backend.name} ({backend.image}) did not start: {started.stderr.strip()}")
+        self.started.append(name)
+        deadline = time.monotonic() + self.deadline
+        state = "<never observed>"
+        while time.monotonic() < deadline:
+            seen = _docker(self.docker, "inspect", "--format",
+                           "{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}", name)
+            state = seen.stdout.strip() if seen.returncode == 0 else f"inspect failed: {seen.stderr.strip()}"
+            if state == "running healthy":
+                break
+            if not state.startswith("running"):
+                raise Refused(f"the backend {backend.name} ({backend.image}, port {backend.port}) stopped during "
+                              f"startup (state: {state}); its last {LOG_TAIL_LINES} log lines:\n{self._tail(name)}")
+            time.sleep(READY_POLL_S)
+        else:
+            raise Refused(f"the backend {backend.name} ({backend.image}, port {backend.port}) never reported healthy "
+                          f"within {self.deadline:g} s (last state: {state}; healthcheck: {backend.health}); its last "
+                          f"{LOG_TAIL_LINES} log lines:\n{self._tail(name)}")
+        if self.publish:
+            port = _docker(self.docker, "port", name, f"{backend.port}/tcp")
+            host_port = port.stdout.strip().splitlines()[0].rpartition(":")[2] if port.returncode == 0 and port.stdout.strip() else ""
+            if not host_port.isdigit():
+                raise Refused(f"the backend {backend.name} ({backend.image}) publishes no host port for "
+                              f"{backend.port}/tcp: {(port.stdout + port.stderr).strip()}")
+            self.addresses[backend.variable] = f"127.0.0.1:{host_port}"
+        else:
+            self.addresses[backend.variable] = f"{backend.name}:{backend.port}"
+
+    def _tail(self, name: str) -> str:
+        logs = _docker(self.docker, "logs", "--tail", LOG_TAIL_LINES, name)
+        return (logs.stdout + logs.stderr).strip()
+
+    def __exit__(self, *_exc: object) -> None:
+        for name in ([self.act] if self.act else []) + self.started:
+            _docker(self.docker, "rm", "--force", "--volumes", name)
+        self.started = []
+        if self.network:
+            _docker(self.docker, "network", "rm", self.network)
+        for signum, previous in self.signals.items():
+            signal.signal(signum, previous)
+        self.signals = {}
+
+
+def with_backends(docker: str, backends: list[Backend], argv: list[str]) -> int:
+    """`argv` run on the host beside the backends published on 127.0.0.1, each address in its
+    CODEROAST_BACKEND_<NAME> (the desk's `malf test`, the same start, barrier and teardown as a walk's)."""
+    with BackendWalk(docker, backends, publish=True) as walk:
+        return subprocess.run(argv, env={**os.environ, **walk.addresses}, check=False).returncode
 
 
 # ── the definition's git mirrors ──────────────────────────────────────────────────────────────────
@@ -465,6 +787,159 @@ def _throwaway(base: Path, docker: str) -> tuple[Pin, Path]:
     return Pin(seen[1], seen[0], archive.name, archive.stat().st_size, _sha256(archive)), directory
 
 
+NETWORK_PROBE_SOURCE = r"""
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <sys/un.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+    if (argc == 3 && strcmp(argv[1], "serve") == 0) {
+        int sock = socket(AF_INET, SOCK_STREAM, 0), one = 1;
+        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+        struct sockaddr_in at;
+        memset(&at, 0, sizeof at);
+        at.sin_family = AF_INET;
+        at.sin_port = htons(atoi(argv[2]));
+        at.sin_addr.s_addr = htonl(INADDR_ANY);
+        if (bind(sock, (struct sockaddr *)&at, sizeof at) != 0 || listen(sock, 16) != 0) { perror("serve"); return 1; }
+        for (;;) { int peer = accept(sock, NULL, NULL); if (peer >= 0) close(peer); }
+    }
+    if (argc == 3 && strcmp(argv[1], "unix") == 0) {
+        int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+        struct sockaddr_un at;
+        memset(&at, 0, sizeof at);
+        at.sun_family = AF_UNIX;
+        strncpy(at.sun_path, argv[2], sizeof at.sun_path - 1);
+        if (connect(sock, (struct sockaddr *)&at, sizeof at) == 0) { printf("reached %s\n", argv[2]); return 0; }
+        printf("unreachable %s: %s\n", argv[2], strerror(errno));
+        return 1;
+    }
+    if (argc >= 3 && (strcmp(argv[1], "connect") == 0 || strcmp(argv[1], "resolve") == 0)) {
+        struct addrinfo hints, *found;
+        memset(&hints, 0, sizeof hints);
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        int failed = getaddrinfo(argv[2], argc > 3 ? argv[3] : "1", &hints, &found);
+        if (failed) { printf("unresolved %s: %s\n", argv[2], gai_strerror(failed)); return 2; }
+        if (strcmp(argv[1], "resolve") == 0) { printf("resolved %s\n", argv[2]); return 0; }
+        int sock = socket(AF_INET, SOCK_STREAM, 0);
+        struct timeval bound = {2, 0};
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &bound, sizeof bound);
+        if (connect(sock, found->ai_addr, found->ai_addrlen) == 0) { printf("reached %s:%s\n", argv[2], argv[3]); return 0; }
+        printf("unreachable %s:%s: %s\n", argv[2], argv[3], strerror(errno));
+        return 1;
+    }
+    return 3;
+}
+"""
+BASE_IMAGE = re.compile(r"^FROM (\S+@sha256:[0-9a-f]{64})", re.MULTILINE)
+
+
+def _network_throwaway(base: Path, docker: str) -> tuple[Pin, str, Path]:
+    """A throwaway image for the backend arms: the definition's own base image (a shell for the
+    healthcheck, the resolver for names) plus a network probe, built with the pin's flags and never saved:
+    (its pin, its `<repository>@<manifest digest>` reference, the probe built for the host)."""
+    context = base / "network"
+    context.mkdir()
+    (context / "probe.c").write_text(NETWORK_PROBE_SOURCE)
+    subprocess.run(["cc", "-O1", "-o", str(context / "probe"), str(context / "probe.c")], check=True)
+    found = BASE_IMAGE.search((DEFINITION / "Dockerfile").read_text())
+    assert found, "the definition's Dockerfile names no digest-pinned base image"
+    (context / "Dockerfile").write_text(f"FROM {found.group(1)}\nCOPY probe /probe\n")
+    tag = f"malf-build-environment-network:{os.getpid()}"
+    subprocess.run([docker, "buildx", "build", "--platform", "linux/amd64", "--provenance=false", "--sbom=false",
+                    "--load", "--quiet", "-t", tag, str(context)], check=True, capture_output=True)
+    seen = inspected(docker, tag)
+    assert seen is not None, f"the throwaway image {tag} was built and is not inspectable"
+    return Pin(seen[1], seen[0], "unsaved.tar", 1, "0" * 64), f"malf-build-environment-network@{seen[0]}", context / "probe"
+
+
+def _backend_arms(arm, refusal, base: Path, docker: str) -> None:
+    """The walk's backends (DN-142.D30 (5) E2b): reached by name and nothing else, torn down, reaped."""
+    import socket
+
+    pin, reference, host_probe = _network_throwaway(base, docker)
+    mount = base / "network-act"
+    mount.mkdir()
+    probe = Backend("probe", reference, 7000, "/probe connect 127.0.0.1 7000", ("/probe", "serve", "7000"), ())
+    socket_path = re.sub(r"^unix://", "", os.environ.get("DOCKER_HOST") or f"unix:///run/user/{os.getuid()}/docker.sock")
+    try:
+        with socket.create_server(("0.0.0.0", 0)) as listener, \
+                BackendWalk(docker, [Backend("published", reference, 7000, "/probe connect 127.0.0.1 7000",
+                                             ("/probe", "serve", "7000"), ())], publish=True) as published:
+            host_port = int(listener.getsockname()[1])
+            loopback_port = published.addresses["CODEROAST_BACKEND_PUBLISHED"].rpartition(":")[2]
+            arm("the host reaches the port a backend publishes on its loopback, and its docker socket (the controls)",
+                (subprocess.run([str(host_probe), "connect", "127.0.0.1", loopback_port], capture_output=True).returncode,
+                 subprocess.run([str(host_probe), "unix", socket_path], capture_output=True).returncode), (0, 0))
+            with BackendWalk(docker, [probe]) as walk:
+                gateway = _docker(docker, "network", "inspect", walk.network, "--format",
+                                  "{{range .IPAM.Config}}{{.Gateway}}{{end}}").stdout.strip()
+
+                def act(*words: str) -> tuple[int, str]:
+                    done = subprocess.run(run_argv(pin, ["/probe", *words], [mount], [], mount, docker=docker,
+                                                   environ={}, network=walk.network),
+                                          capture_output=True, text=True, check=False)
+                    return done.returncode, done.stdout.strip()
+
+                arm("a walk's act reaches its backend by name, at the address CODEROAST_BACKEND_PROBE names",
+                    (walk.addresses, act("connect", "probe", "7000")[0]), ({"CODEROAST_BACKEND_PROBE": "probe:7000"}, 0))
+                arm("RED: a walk's act reaches no external address", act("connect", "1.1.1.1", "53")[0], 1)
+                arm("RED: a walk's act reaches no listener of the host through the network's gateway",
+                    (bool(gateway), act("connect", gateway, str(host_port))[0]), (True, 1))
+                arm("RED: a walk's act reaches no port the host publishes on its loopback, by the gateway or its own",
+                    (act("connect", gateway, loopback_port)[0], act("connect", "127.0.0.1", loopback_port)[0]), (1, 1))
+                arm("RED: a walk's act resolves its backend's name and no name outside the network",
+                    (act("resolve", "probe")[0], act("resolve", "example.com")[0], act("resolve", "host.docker.internal")[0]),
+                    (0, 2, 2))
+                arm("RED: a walk's act holds no Docker socket: the daemon's socket the host reaches is absent inside",
+                    act("unix", socket_path)[0], 1)
+                held = _docker(docker, "ps", "--filter", f"label={BACKEND_LABEL}={os.getpid()}", "--format",
+                               "{{.Names}}").stdout.split()
+            left = [name for name in _docker(docker, "ps", "--all", "--format", "{{.Names}}").stdout.split()
+                    if walk.token in name]
+            arm("the walk's backends and its network are removed when it ends",
+                (any(walk.token in name for name in held), left,
+                 _docker(docker, "network", "inspect", walk.network).returncode != 0), (True, [], True))
+        said = refusal(lambda: BackendWalk(docker, [Backend("sick", reference, 7000, "/probe connect 127.0.0.1 7001",
+                                                            ("/probe", "serve", "7000"), ())],
+                                           ready_deadline_s=3).__enter__())
+        arm("RED: a backend whose healthcheck never passes is refused within its bound, naming the image, the port "
+            "and the log tail", (f"({reference}, port 7000) never reported healthy within 3 s" in said,
+                                 "log lines" in said), (True, True))
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        _docker(docker, "network", "create", "--internal", "--label", f"{BACKEND_LABEL}={dead.pid}",
+                f"malf-walk-reap-{dead.pid}")
+        _docker(docker, "run", "--detach", "--label", f"{BACKEND_LABEL}={dead.pid}", "--name",
+                f"malf-backend-reap-{dead.pid}", reference, "/probe", "serve", "7000")
+        reaped = reap_backends(docker)
+        arm("a dead launcher's leftover backend and network are reaped by the next walk",
+            (sum(line.startswith("container ") for line in reaped) >= 1, sum(line.startswith("network ") for line in reaped) >= 1,
+             _docker(docker, "network", "inspect", f"malf-walk-reap-{dead.pid}").returncode != 0), (True, True, True))
+        script = base / "desk.sh"
+        script.write_text(f'#!/bin/sh\nexec {host_probe} connect "${{CODEROAST_BACKEND_PROBE%:*}}" "${{CODEROAST_BACKEND_PROBE#*:}}"\n')
+        script.chmod(0o755)
+        arm("the desk's with-backends hands the command each backend published on 127.0.0.1, by its variable",
+            with_backends(docker, [probe], [str(script)]), 0)
+        arm("RED: a declaration whose image is not pinned by digest is refused",
+            refusal(lambda: parse_backends([{"name": "redis", "image": "redis:7", "port": 6379, "health": "true"}],
+                                           "packages.yml")).endswith("image 'redis:7' is not pinned by digest "
+                                                                     "(<ref>@sha256:<64 hex>)"), True)
+        arm("RED: two steps declaring one backend name differently are refused, naming both",
+            refusal(lambda: walk_backends([("one", [probe]), ("two", [Backend("probe", reference, 7001, "true", (), ())])]))
+            .endswith("one and two declare the backend 'probe' differently"), True)
+    finally:
+        _docker(docker, "rmi", "--force", reference)
+
+
 def selftest() -> int:
     passed = failed = 0
 
@@ -586,6 +1061,7 @@ def selftest() -> int:
                 "id is 'latest'" in refusal(lambda: read_pin(base / "pin.json")), True)
         finally:
             subprocess.run([docker, "rmi", "--force", pin.id], capture_output=True, check=False)
+        _backend_arms(arm, refusal, base, docker)
     print(f"build_environment selftest: {passed} passed, {failed} failed")
     return 1 if failed else 0
 
@@ -605,6 +1081,7 @@ def main(argv: list[str]) -> int:
         options.add_argument("--host-pids", action="store_true")
         options.add_argument("--home", default=CONTAINER_HOME)
         options.add_argument("--env", action="append", default=[])
+        options.add_argument("--backends", type=Path)
         given = options.parse_args(argv[1:split])
         if not argv[split + 1:]:
             print("build_environment.py run: the command after -- is empty", file=sys.stderr)
@@ -612,19 +1089,63 @@ def main(argv: list[str]) -> int:
         try:
             read_only = [*given.read_only_mount, *(corpus_mounts(given.corpus_gates) if given.corpus_gates else [])]
             return run(read_pin(), argv[split + 1:], given.mount, given.env, given.seccomp_unconfined, docker,
-                       read_only, given.host_pids, given.home)
+                       read_only, given.host_pids, given.home,
+                       read_backends(given.backends) if given.backends else ())
         except Refused as refused:
             print(f"build_environment: REFUSED — {refused}; the act did not run (DN-142.D30, OPS-1.S27)", file=sys.stderr)
+            return REFUSED
+        except Interrupted as interrupted:
+            print(f"build_environment: INTERRUPTED by {interrupted}; the walk's backends and network were removed",
+                  file=sys.stderr)
+            return REFUSED
+    if argv[:1] == ["with-backends"]:
+        if "--" not in argv or argv[1:2] != ["--backends"] or argv.index("--") != 3 or not argv[4:]:
+            print("build_environment.py with-backends: --backends <file> -- <argv>...", file=sys.stderr)
+            return REFUSED
+        try:
+            return with_backends(docker, read_backends(Path(argv[2])), argv[4:])
+        except Refused as refused:
+            print(f"build_environment: REFUSED — {refused}; the command did not run (DN-142.D30 (5) E2b)", file=sys.stderr)
+            return REFUSED
+        except Interrupted as interrupted:
+            print(f"build_environment: INTERRUPTED by {interrupted}; the backends were removed", file=sys.stderr)
             return REFUSED
     parser = argparse.ArgumentParser(prog="build_environment.py")
     verbs = parser.add_subparsers(dest="verb", required=True)
     for verb in ("check", "load", "mirror-check", "selftest"):
         verbs.add_parser(verb)
     verbs.add_parser("definition-check").add_argument("--conan-home", action="append", default=[], type=Path)
+    declared = verbs.add_parser("backends")
+    declared.add_argument("--worktree", action="store_true")
+    declared.add_argument("--variables", action="store_true")
+    declared.add_argument("--parameters")
+    declared.add_argument("steps", nargs="+")
+    verbs.add_parser("backends-at").add_argument("directory", type=Path)
     args = parser.parse_args(argv)
     if args.verb == "selftest":
         return selftest()
     try:
+        if args.verb == "backends":
+            if len(args.steps) % 2:
+                print("build_environment.py backends: name <package dir> <package> pairs", file=sys.stderr)
+                return REFUSED
+            pairs = list(zip(args.steps[0::2], args.steps[1::2]))
+            union = walk_backends([(package, declared_backends(Path(folder), package, not args.worktree))
+                                   for folder, package in pairs])
+            if args.variables:
+                for backend in union:
+                    print(f"{backend.variable}={backend.name}:{backend.port}")
+            elif args.parameters is not None:
+                document = json.loads(args.parameters)
+                document["env"] = {**document["env"], **{backend.variable: f"{backend.name}:{backend.port}"
+                                                         for backend in union}}
+                print(json.dumps(document, sort_keys=True, separators=(",", ":")))
+            else:
+                print(json.dumps([backend.document() for backend in union], sort_keys=True))
+            return 0
+        if args.verb == "backends-at":
+            print(json.dumps([backend.document() for backend in backends_at(args.directory)], sort_keys=True))
+            return 0
         if args.verb in ("definition-check", "mirror-check"):
             findings = (definition_check(conan_homes(args.conan_home)) if args.verb == "definition-check"
                         else mirror_check(read_pin(), docker))

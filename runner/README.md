@@ -557,9 +557,11 @@ refusal in that run is then meaningless. `UNCLEAR` is an answer the probe does n
   required version), so after the first run, builds skip the cold-cache dependency rebuild
   that dominates the GitHub-hosted runs.
 - **CI binds no fixed host port for its backends.** No workflow attaches GitHub `services:`
-  containers: the `coderoast-server` infra tests start their own digest-pinned containers
-  (`infra/tests_support/local_container.hpp`) on a host port the **docker daemon allocates** and
-  the test reads back, so a host service on 5432/6379 cannot collide with a CI job. The port
+  containers: malf starts the `coderoast-server` infra tests' digest-pinned backends from their
+  `backends:` declarations (`build_environment.py`, DN-142.D30 (5) E2b) — on a host port the
+  **docker daemon allocates** for `malf test`, handed to the test in `CODEROAST_BACKEND_<NAME>`, and
+  on a walk's internal network for `malf store-create` — so a host service on 5432/6379 cannot
+  collide with a CI job. The port
   preference belongs to local dev only — `bash coderoast-server/scripts/start_postgres_dev.sh`
   (`pg_coderoast_dev`) prefers host 5432 and `start_redis_dev.sh` prefers 6379; each takes
   `POSTGRES_HOST_PORT` / `REDIS_HOST_PORT` when set, otherwise falls back to the next free port,
