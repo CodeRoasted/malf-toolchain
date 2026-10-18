@@ -62,7 +62,9 @@
 # seat, and both units run inside it; then, under --prove only, an allocation past the seat's cap is
 # OOM-killed at that cap (memory.events), never swapping on release, and on release desk pressure
 # leaves the page cache the seat holds under its memory.min. Run on a box whose runners still sit in
-# system.slice, every arm reds: that is the arm's red-first.
+# system.slice, every arm reds: that is the arm's red-first. The page-cache arm also redded on a seat
+# whose cgroup2 mount lacked memory_recursiveprot (2026-10-18: 2064 -> 20 MiB kept under memory.min
+# 10 GiB): the cache is charged to a leaf with memory.min 0, so the partition script now adds it.
 #
 # WHAT STAYS, stated so nobody reads more into this: localhost TCP services on this box (ollama,
 # the desk's dev servers, and any port another runner's job listens on) remain reachable from a job —
@@ -527,10 +529,19 @@ render_partition_script() {
 #!/usr/bin/env python3
 # Written by malf/runner/isolate-runner-wsl.sh (DN-119.D9); run by seat-partition@<instance>.service.
 # Makes <slice> a cpuset partition root and exits 1 unless the kernel reads it back as one, over the
-# CPUs the slice's AllowedCPUs= names, every one of them a CPU this VM has online.
+# CPUs the slice's AllowedCPUs= names, every one of them a CPU this VM has online. First it makes the
+# seat's memory protection reach the cgroups that hold its pages: a page is charged to the LEAF cgroup
+# that faulted it (the runner's service, its docker unit, a transient unit), each with memory.min 0, and
+# without memory_recursiveprot on the cgroup2 mount a leaf's effective protection is its own 0, so the
+# slice's MemoryMin=/MemoryLow= protects nothing. WSL's /init mounts cgroup2 before systemd with
+# nsdelegate only, so systemd's default never applies; the remount names every option the mount has,
+# because a cgroup2 remount clears each flag it does not name. Exits 1 unless the mount reads it back.
 import subprocess
 import sys
 from pathlib import Path
+
+ROOT = Path("/")
+CGROUP = ROOT / "sys/fs/cgroup"
 
 
 def cpus(text):
@@ -546,8 +557,28 @@ def refuse(why):
     sys.exit(1)
 
 
+def cgroup2_options():
+    for line in (ROOT / "proc/mounts").read_text().splitlines():
+        fields = line.split()
+        if len(fields) >= 4 and fields[1] == "/sys/fs/cgroup" and fields[2] == "cgroup2":
+            return fields[3].split(",")
+    refuse("no cgroup2 mount at /sys/fs/cgroup in /proc/mounts")
+
+
 slice_name = sys.argv[1]
-group = Path("/sys/fs/cgroup") / slice_name
+group = CGROUP / slice_name
+options = cgroup2_options()
+if "memory_recursiveprot" not in options:
+    remount = subprocess.run(["mount", "-o", ",".join(["remount", *options, "memory_recursiveprot"]), str(CGROUP)],
+                             capture_output=True, text=True)
+    if remount.returncode != 0:
+        refuse(f"remounting cgroup2 with memory_recursiveprot failed (exit {remount.returncode}): {remount.stderr.strip()}")
+    after = cgroup2_options()
+    if "memory_recursiveprot" not in after:
+        refuse(f"cgroup2 reads '{','.join(after)}' after a remount with memory_recursiveprot: the seat's memory protection would reach no cgroup holding its pages")
+    lost = [option for option in options if option not in after]
+    if lost:
+        refuse(f"the remount dropped {','.join(lost)} from the cgroup2 mount (now '{','.join(after)}')")
 wanted_text = subprocess.run(["systemctl", "show", "-p", "AllowedCPUs", "--value", slice_name],
                              capture_output=True, text=True, check=True).stdout.strip()
 wanted = cpus(wanted_text)
@@ -566,7 +597,7 @@ if state != "root":
 effective = (group / "cpuset.cpus.effective").read_text().strip()
 if cpus(effective) != wanted:
     refuse(f"a partition root whose cpuset.cpus.effective reads '{effective}', not {wanted_text}")
-print(f"seat-partition: {slice_name} is a partition root over CPUs {effective}")
+print(f"seat-partition: {slice_name} is a partition root over CPUs {effective}; cgroup2 carries memory_recursiveprot")
 EOF
 }
 
@@ -645,6 +676,8 @@ for unit in "$UNIT" "$DOCKER_UNIT"; do
 done
 partition_now="$(cat "/sys/fs/cgroup/$SEAT_SLICE/cpuset.cpus.partition" 2>/dev/null)" || partition_now="<no such cgroup>"
 printf '  %-20s %s cpuset.cpus.partition: %s%s\n' "partition now" "$SEAT_SLICE" "$partition_now" "$([[ "$partition_now" == root ]] || echo " — DRIFT")"
+cgroup2_now="$(awk '$2=="/sys/fs/cgroup" && $3=="cgroup2" {print $4}' /proc/mounts)"
+printf '  %-20s cgroup2 mount options: %s%s\n' "protection now" "${cgroup2_now:-<no cgroup2 mount>}" "$([[ ",$cgroup2_now," == *,memory_recursiveprot,* ]] || echo " — DRIFT: no memory_recursiveprot, the seat's memory protection reaches no cgroup holding its pages")"
 if [[ -e "$RETIRED_SLOT_ROOT" ]]; then
     printf '  %-20s %s is still on the box — retired (DN-119.D9 (3)); remove it once every instance is re-applied (README § Seats)\n' "retired slot root" "$RETIRED_SLOT_ROOT"
 fi

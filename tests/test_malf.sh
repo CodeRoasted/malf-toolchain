@@ -6434,6 +6434,69 @@ check "no printf format in a runner script opens a quote it does not close on th
 rm -rf "$rp_tmp"
 echo
 
+echo "[7r3] a seat's memory protection reaches the cgroups that hold its pages: seat-partition.py mounts cgroup2 with memory_recursiveprot, or refuses (W556, 2026-10-18)"
+# Measured 2026-10-18 by the release seat's --prove: memory.min = 10 GiB on seat_release.slice, and its page
+# cache fell 2064 -> 20 MiB under desk pressure. The pages are charged to the LEAF cgroup that read them
+# (the runner's service, its docker unit, a probe's transient unit), each with memory.min 0, and without
+# memory_recursiveprot on the cgroup2 mount a leaf's effective protection is min(its own memory.min, ...) = 0:
+# the slice's guarantee protected nothing. WSL's /init mounts cgroup2 before systemd, with nsdelegate only,
+# so systemd's own default (memory_recursiveprot) never applies. The rendered script runs here against a
+# fixture root (its one ROOT line rewritten), with a fake systemctl and a fake mount on PATH.
+pp_tmp="$(mktemp -d)"
+pp_render() {   # <dest>
+    local body
+    body="$(awk '$0 ~ "^render_partition_script\\(\\) \\{" {on=1} on {print} on && /^}/ {exit}' "$MALF_ROOT/runner/isolate-runner-wsl.sh")"
+    bash -c "$body"$'\n'render_partition_script > "$1.orig"
+    sed "s|^ROOT = Path(\"/\")\$|ROOT = Path(\"$pp_tmp/fx\")|" "$1.orig" > "$1"
+}
+pp_fixture() {   # <mount options> <mode: honour|ignore>
+    rm -rf "$pp_tmp/fx" "$pp_tmp/bin"
+    mkdir -p "$pp_tmp/fx/sys/fs/cgroup/seat_release.slice" "$pp_tmp/fx/sys/devices/system/cpu" "$pp_tmp/fx/proc" "$pp_tmp/bin"
+    printf '10-15\n' > "$pp_tmp/fx/sys/fs/cgroup/seat_release.slice/cpuset.cpus"
+    printf '10-15\n' > "$pp_tmp/fx/sys/fs/cgroup/seat_release.slice/cpuset.cpus.effective"
+    printf 'member\n' > "$pp_tmp/fx/sys/fs/cgroup/seat_release.slice/cpuset.cpus.partition"
+    printf '0-15\n' > "$pp_tmp/fx/sys/devices/system/cpu/online"
+    printf 'none /mnt/wsl tmpfs rw,relatime 0 0\ncgroup2 /sys/fs/cgroup cgroup2 %s 0 0\n' "$1" > "$pp_tmp/fx/proc/mounts"
+    printf '#!/bin/bash\necho 10-15\n' > "$pp_tmp/bin/systemctl"
+    cat > "$pp_tmp/bin/mount" <<EOF
+#!/bin/bash
+echo "\$*" >> "$pp_tmp/mount.log"
+[[ "$2" == honour ]] || exit 0
+opts="\${2#remount,}"
+sed -i "s|^cgroup2 /sys/fs/cgroup cgroup2 [^ ]* |cgroup2 /sys/fs/cgroup cgroup2 \$opts |" "$pp_tmp/fx/proc/mounts"
+EOF
+    chmod +x "$pp_tmp/bin/systemctl" "$pp_tmp/bin/mount"
+    rm -f "$pp_tmp/mount.log"
+}
+pp_run() {   # -> "rc=<n>" and the script's output on stdout
+    local out rc
+    out="$(PATH="$pp_tmp/bin:$PATH" python3 -I "$pp_tmp/seat-partition.py" seat_release.slice 2>&1)"; rc=$?
+    printf 'rc=%s %s' "$rc" "$out"
+}
+pp_render "$pp_tmp/seat-partition.py"
+check "the rendered script carries exactly one ROOT line, so the fixture reaches every path it reads" \
+      "1" "$(grep -c '^ROOT = Path("/")$' "$pp_tmp/seat-partition.py.orig")"
+pp_fixture "rw,nosuid,nodev,noexec,relatime,nsdelegate" honour
+pp_out="$(pp_run)"
+check "WSL's mount (nsdelegate, no memory_recursiveprot): the script remounts and succeeds" \
+      "rc=0" "${pp_out%% *}"
+check "the remount keeps every option the mount had and adds memory_recursiveprot (a remount drops a cgroup2 flag it does not name)" \
+      "-o remount,rw,nosuid,nodev,noexec,relatime,nsdelegate,memory_recursiveprot $pp_tmp/fx/sys/fs/cgroup" \
+      "$(cat "$pp_tmp/mount.log" 2>&1)"
+check "the success line names the recursive protection" \
+      "yes" "$([[ "$pp_out" == *"memory_recursiveprot"* ]] && echo yes || echo "GOT: $pp_out")"
+pp_fixture "rw,nosuid,nodev,noexec,relatime,nsdelegate" ignore
+pp_out="$(pp_run)"
+check "a remount the kernel did not take (the option still absent on read-back): exit 1, the seat stays offline" \
+      "rc=1 memory_recursiveprot" \
+      "${pp_out%% *} $([[ "$pp_out" == *"memory_recursiveprot"* ]] && echo memory_recursiveprot || echo "GOT: $pp_out")"
+pp_fixture "rw,nosuid,nodev,noexec,relatime,nsdelegate,memory_recursiveprot" honour
+pp_out="$(pp_run)"
+check "a mount that already carries memory_recursiveprot: no remount, exit 0" \
+      "rc=0 no-mount" "${pp_out%% *} $([[ -e "$pp_tmp/mount.log" ]] && cat "$pp_tmp/mount.log" || echo no-mount)"
+rm -rf "$pp_tmp"
+echo
+
 echo
 echo
 echo "malf selftest: $pass_count passed, $fail_count failed"

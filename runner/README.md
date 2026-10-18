@@ -67,6 +67,16 @@ queued, never running unpartitioned. The sizes are the seat table in `runner-ins
 the Founder (desk first): of the VM's 16 vCPUs and 23.47 GiB, desk 0–7, ci 8–9 (`MemoryMax` and
 `MemoryLow` 5 GiB), release 10–15 (`MemoryMax` and `MemoryMin` 10 GiB, `MemorySwapMax=0`).
 
+A slice's `MemoryMin`/`MemoryLow` protects nothing by itself: a page is charged to the LEAF cgroup
+that faulted it in (the runner's service, its docker unit, a transient unit), each with `memory.min`
+0, and a leaf's effective protection is its own setting unless the cgroup2 mount carries
+`memory_recursiveprot`. systemd mounts it so by default, but WSL's `/init` mounts cgroup2 first, with
+`nsdelegate` only. So the partition oneshot also remounts cgroup2 with `memory_recursiveprot`, naming
+every option the mount already has (a cgroup2 remount clears each flag it does not name), and fails
+— the seat offline — unless the mount reads it back. Only the seats carry a protection, so the flag
+changes nothing for the desk. Measured 2026-10-18 before it: the release seat's `--prove` kept 20 of
+2 064 MiB of its page cache under desk pressure with `memory.min` at 10 GiB.
+
 Each seat keeps its **build slot in its own account's state**, `~/.local/state/coderoast-build/slot`
 (mode 700), named in the runner's `.env`: no account can open another seat's slot, so the stall class
 of a shared lock (a ci job holding step 0's mutex through a read-only descriptor) is gone by

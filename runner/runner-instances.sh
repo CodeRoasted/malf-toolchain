@@ -41,6 +41,9 @@ INSTANCES=(ci release)
 #   SEAT_MEM_MAX   the hard cap (MemoryMax=)
 #   SEAT_MEM_MIN   a guarantee the kernel never reclaims (MemoryMin=), release only
 #   SEAT_MEM_LOW   a best-effort protection (MemoryLow=), ci only
+#                  Both reach the leaves that hold the seat's pages (the runner, its docker unit,
+#                  their children) only through memory_recursiveprot on the cgroup2 mount, which the
+#                  seat's partition script adds: WSL mounts cgroup2 before systemd, without it.
 #   SEAT_SWAP_MAX  MemorySwapMax=; 0 on release, so an overshoot is an OOM kill inside the seat, a
 #                  loud red and never a slow thrash; empty leaves the seat's swap unbounded
 # THE SIZES ARE THE FOUNDER'S RULING (RUL-3, 2026-10-14: the desk gets the larger share, a slower

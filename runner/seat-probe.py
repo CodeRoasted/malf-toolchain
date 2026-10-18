@@ -36,7 +36,9 @@ SAMPLE_PERIOD_S = 0.002
 OVERSHOOT_BYTES = 512 * MIB
 # The page cache the memory.min arm parks in the seat, and the share of it that must survive desk
 # pressure. Below the slice's memory.min the kernel reclaims none of it; the slack is for pages the
-# holder itself never touched again (its interpreter, the file's metadata).
+# holder itself never touched again (its interpreter, the file's metadata). The pages are charged to
+# the holder's own transient unit, a leaf with memory.min 0, so the arm also proves the slice's
+# guarantee reaches its leaves (memory_recursiveprot on the cgroup2 mount), as a job's pages need.
 HOLD_BYTES = 2 * GIB
 PROTECTED_SHARE = 0.95
 # The desk pressure exceeds what the kernel calls available by this much, so every reclaimable
@@ -199,6 +201,14 @@ def memory_stat(slice_cg: Path, key: str) -> int:
     return -1
 
 
+def recursive_protection() -> bool:
+    for line in Path("/proc/mounts").read_text(encoding="ascii").splitlines():
+        fields = line.split()
+        if len(fields) >= 4 and fields[1] == str(CGROUP_ROOT) and fields[2] == "cgroup2":
+            return "memory_recursiveprot" in fields[3].split(",")
+    return False
+
+
 def mem_available() -> int:
     for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
         if line.startswith("MemAvailable:"):
@@ -267,7 +277,8 @@ def memory_arms(slice_name: str, cap: int, guarantee: int | None, swap_zero: boo
             verdict.judge(held > 0 and kept >= held * PROTECTED_SHARE,
                           f"{slice_name} page cache under {pressure_bytes // MIB} MiB of desk pressure: "
                           f"{held // MIB} MiB held, {kept // MIB} MiB kept (want at least {int(PROTECTED_SHARE * 100)} %; "
-                          f"memory.min reads {read(slice_cg / 'memory.min')})")
+                          f"memory.min reads {read(slice_cg / 'memory.min')}; cgroup2 mount "
+                          f"{'carries' if recursive_protection() else 'LACKS'} memory_recursiveprot)")
         finally:
             subprocess.run(["systemctl", "stop", f"{hold_unit}.service"], check=False)
             hold_file.unlink(missing_ok=True)
