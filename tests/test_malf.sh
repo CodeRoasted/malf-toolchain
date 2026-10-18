@@ -377,15 +377,22 @@ check "malf exports a PYTHONPYCACHEPREFIX, and it is not under malf" \
       "set outside" "$([[ -n "$pyc_prefix" ]] && echo set) $([[ "$pyc_prefix" != "$MALF_ROOT"* ]] && echo outside)"
 
 echo "[7k1] a store step's act runs in its domain unless its package declares itself unconfined (DN-142.D29 ruled (v))"
-uc_tmp="$(mktemp -d)"
-uc_act() {   # <unconfined why or empty> — the act's exit reading a tracked malf file no closure of malf reaches, and its tally
+# The fixture workspace lives under the user's cache, never /tmp: each ancestor of a denied root has its
+# entries granted one by one, and /tmp's come and go (malf_closure.py's selftest says why).
+mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}"
+uc_tmp="$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/test_malf.uc.XXXXXX")"
+mkdir -p "$uc_tmp/ws/repo/recipe" "$uc_tmp/ws/sibling" "$uc_tmp/store" "$uc_tmp/scratch/home"
+git -C "$uc_tmp/ws/repo" init -q
+echo "a sibling's source" > "$uc_tmp/ws/sibling/secret.txt"
+uc_act() {   # <unconfined why or empty> — the act's exit reading a SIBLING repository of its workspace, and its tally
     bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e
         _MALF_STEP_UNCONFINED="$2"
-        _malf_confined "$3/tally" "$3" sh -c "cat \"$4\" >/dev/null 2>&1" 2>/dev/null
-        echo "rc=$? $(cat "$3/tally")"' _ "$MALF_BIN" "$1" "$uc_tmp" "$MALF_ROOT/README.md"
+        _MALF_DOMAIN=(--workspace "$3/ws" --store "$3/store" --scratch "$3/scratch")
+        CONAN_HOME="$3/scratch/home" _malf_confined "$3/tally" pkg "$3/ws/repo/recipe" sh -c "cat \"$3/ws/sibling/secret.txt\" >/dev/null 2>&1" 2>/dev/null
+        echo "rc=$? $(cat "$3/tally")"' _ "$MALF_BIN" "$1" "$uc_tmp"
 }
-check "an undeclared act runs in its domain: a read outside its closure is denied, its tally counted or uncounted" \
-      "denied" "$(out="$(uc_act "")"; [[ "$out" != rc=0* ]] && echo denied || echo "GOT: $out")"
+check "an undeclared act runs in its domain: a read of a sibling repository is denied, its tally counted or uncounted" \
+      "denied" "$(out="$(uc_act "")"; [[ "$out" == "rc=3 counted 1" || "$out" == "rc=1 uncounted" ]] && echo denied || echo "GOT: $out")"
 check "a package declaring itself unconfined runs its act with no domain, tallied unconfined (its records keep denials_counted false)" \
       "rc=0 unconfined" "$(uc_act "its namespace tests mount a tmpfs")"
 check "artefact_store reads \`unconfined: {why}\` from packages.yml at HEAD, and refuses a malformed declaration" \
@@ -395,11 +402,11 @@ check "artefact_store reads \`unconfined: {why}\` from packages.yml at HEAD, and
           && { python3 "$MALF_ROOT/artefact_store.py" unconfined "$uc_tmp/p" pa; python3 "$MALF_ROOT/artefact_store.py" unconfined "$uc_tmp/p" pb 2>/dev/null; echo "rc=$?"; } | paste -sd'|')"
 rm -rf "$uc_tmp"
 
-echo "[7k] malf_closure carries its own grammar proof (selftest): an anchored reference, a function-level import and a directory reference each reach their target, a bare word and a computed path reach nothing, a consumer's \${MALF_TOOLCHAIN_DIR}/ reference seeds the act, a cycle terminates; the driver-read watch reports a cmp, a source and a subshell cat, a write event, and refuses an overflow and zero opens (DN-142.D29)"
+echo "[7k] malf_closure carries its own proof (selftest): an anchored reference, a function-level import and a directory reference each reach their target, a bare word and a computed path reach nothing, a cycle terminates; a store act's domain denies and counts a read of a sibling repository, another conan home, the store and a corpus not its own, behind a try/except too, and lets its own repository, malf whole, its home and a system path read (DN-142.D29 (5), (8))"
 closure_selftest_output="$(timeout 120 python3 "$MALF_ROOT/malf_closure.py" selftest 2>&1)"
 closure_selftest_status=$?
-check "malf_closure selftest: 32 arms, 0 failed" \
-      "ok" "$([[ $closure_selftest_status -eq 0 ]] && grep -q '^malf_closure selftest: 32 passed, 0 failed$' <<< "$closure_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$closure_selftest_output")")"
+check "malf_closure selftest: 20 arms, 0 failed" \
+      "ok" "$([[ $closure_selftest_status -eq 0 ]] && grep -q '^malf_closure selftest: 20 passed, 0 failed$' <<< "$closure_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$closure_selftest_output")")"
 
 echo
 
@@ -5140,7 +5147,9 @@ echo "[7q7n] a third-party binary enters a first-party key only as the output of
 # package folder each time it runs; tpp carries a python_requires. The first-party consumers (the
 # `ex_` namespace) are header libraries. Each act runs malf's own step function, in the walk's
 # environment, over a fixture home: its third-party steps, its create, its records.
-tq_tmp="$(realpath "$(mktemp -d)")"
+# Under the user's cache, never /tmp: each act runs in its domain, whose denied ground is under here
+# (malf_closure.py's selftest says why /tmp cannot hold it).
+tq_tmp="$(realpath "$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/test_malf.tq.XXXXXX")")"
 tq_src="$tq_tmp/src"; mkdir -p "$tq_src"
 tq_third() {   # <name> <package() body line> [<class line>...]
     mkdir -p "$tq_src/$1"
@@ -5200,6 +5209,7 @@ tq_step() {   # <home name> <store name> <package> — malf's step function over
     bash -c 'MALF_SOURCE_ONLY=1 source "$1" > /dev/null 2>&1; set +e
         export CONAN_HOME="$2"; MALF_PROFILE="$2/profiles/fixture"; MALF_BUILD_PROFILE="$MALF_PROFILE"
         MALF_CONFIG=Release; MALF_PROFILE_NAME=fixture; _MALF_WRITER_ARGS=(); _MALF_SHIP_LOCK=(${TQ_LOCK:+--lockfile=$TQ_LOCK})
+        _MALF_DOMAIN=(--workspace "$(dirname "$2")" --store "$3" --scratch "$4" --conan-home "$2")
         _malf_writer_environment || exit 9
         _malf_store_run_step 1 "$5" "$6/$5" create "$3" "$4" ex_ 0' \
         _ "$MALF_BIN" "$tq_tmp/$1" "$tq_tmp/$2" "$tq_tmp/scratch-$1" "$3" "$tq_src" > "$tq_tmp/out" 2>&1
@@ -5365,12 +5375,13 @@ check "(k′) RED — a step keyed from a directory holding a stray conan.lock c
       "rc=0 1" \
       "$(cd "$tq_tmp/stray" && tq_step k store-k3 ex_r) $(tq_has 'artefact_store: KEY-FIRST ex_r equal [0-9a-f]\{64\}')"
 # (k‴) a step the strict lock names as nobody's requirement (a leaf the walk builds as a root, as
-# coderoast_server is) keys over its recipe path, as its create resolves, never `--requires`.
+# coderoast_server is) keys over its recipe path, as its create resolves, never `--requires`. The
+# lock sits in the step's scratch, a root its domain grants, as malf's own conan.lock is in a walk.
 CONAN_HOME="$tq_tmp/k" conan lock create --requires=tpr/0.1 -pr:a "$tq_tmp/k/profiles/fixture" \
-    --lockfile-out="$tq_tmp/tpr.lock" > /dev/null 2>&1
+    --lockfile-out="$tq_tmp/scratch-k/tpr.lock" > /dev/null 2>&1
 check "(k‴) RED — a root step the strict lock does not name is keyed before and after its create, equal" \
       "rc=0 1" \
-      "$(TQ_LOCK="$tq_tmp/tpr.lock" tq_step k store-k4 ex_r) $(tq_has 'artefact_store: KEY-FIRST ex_r equal [0-9a-f]\{64\}')"
+      "$(TQ_LOCK="$tq_tmp/scratch-k/tpr.lock" tq_step k store-k4 ex_r) $(tq_has 'artefact_store: KEY-FIRST ex_r equal [0-9a-f]\{64\}')"
 # (k⁗) a build-scripts package: its create builds it in the build context, and its key says so.
 check "(k⁗) RED — a build-scripts package's key before the step names its source in the build context, as its create does" \
       "rc=0 1" \
@@ -5428,7 +5439,7 @@ rm -rf "$tq_tmp"
 echo
 
 echo "[7q7t] a create's test folder is keyed and read from a copy of its tracked files, and a test_package requires nothing its tested recipe does not (DN-142.D26)"
-tt_tmp="$(realpath "$(mktemp -d)")"
+tt_tmp="$(realpath "$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/test_malf.tt.XXXXXX")")"
 tt_recipe() {   # <dir> <name> <requirement line> [<test_package requirement line>]
     mkdir -p "$tt_tmp/$1"
     printf 'from conan import ConanFile\n\n\nclass Fixture(ConanFile):\n    name = "%s"\n    version = "0.1"\n    %s\n' "$2" "$3" > "$tt_tmp/$1/conanfile.py"
@@ -5472,7 +5483,8 @@ printf '#!/bin/sh\nprintf "%%s\\n" "$@" > "%s/conan.argv"\n' "$tt_tmp" > "$tt_tm
 tt_create() {   # <test folder argument> — the create's exit and its --test-folder arguments
     PATH="$tt_tmp/bin:$PATH" bash -c 'MALF_SOURCE_ONLY=1 source "$1" > /dev/null 2>&1; set +e
         _MALF_WRITER_PROFILES=(); _MALF_WRITER_ARGS=(); _MALF_SHIP_LOCK=(); MALF_CONFIG=Release; rm -f "$3/conan.argv"
-        _MALF_STEP_TALLY="$3/create.denials"
+        _MALF_STEP_TALLY="$3/create.denials"; mkdir -p "$3/ws" "$3/store" "$3/scratch/home"
+        _MALF_DOMAIN=(--workspace "$3/ws" --store "$3/store" --scratch "$3/scratch"); export CONAN_HOME="$3/scratch/home"
         _malf_store_create_step tt_w "$3/repo/with" tt_ "$3/graph.json" "$3/create.log" "$2" 2>/dev/null
         echo "rc=$? $( { grep -c -- --test-folder "$3/conan.argv"; grep -- --test-folder "$3/conan.argv"; } 2>/dev/null | paste -sd" ")"' _ "$MALF_BIN" "$1" "$tt_tmp"
 }
@@ -5788,9 +5800,8 @@ ls_step() {   # <malf dir> <package>
         _malf_writer_create_args || exit 3
         _malf_ship_lock_args || exit 2
         # These arms judge the LOCK a create resolves against, over a fixture MALF_DIR holding only its
-        # lock (no tracked malf to derive a closure from); the create runs unconfined here, and the
-        # domain is judged by the malf_closure selftest ([7k]).
-        _malf_confined() { shift 2; "$@"; }
+        # lock; the create runs unconfined here, and the domain is judged by the malf_closure selftest ([7k]).
+        _malf_confined() { shift 3; "$@"; }
         _malf_store_create_step "$4" "$5" ls_ "$6/graph.json" "$6/create.log" none' \
         _ "$MALF_BIN" "$ls_tmp/$1" "$ls_home/profiles/fixture" "$2" "$ls_tmp/$2" "$ls_tmp" 2> "$ls_tmp/refusal.log"
     local rc=$? revision

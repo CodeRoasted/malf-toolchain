@@ -309,7 +309,7 @@ def judge(store: Path, steps: list[dict], package: str, entry: str, repository: 
                                                   artefact_store.parameter_document(JUDGE_ARGV, None))
     document = {
         "step": {"kind": "verdict", "id": NAME, "subject": package,
-                 "predicate": {"id": "malf consumer_verdict.py", "version": artefact_store.key_of(definition["malf"])},
+                 "predicate": {"id": "malf consumer_verdict.py", "version": definition["malf"]},
                  "params": {"glibc_ceiling": baseline["glibc_ceiling"], "entry": entry}},
         "definition": definition,
         "judged": {entry: held[entry]},

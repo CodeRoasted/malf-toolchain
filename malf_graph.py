@@ -33,7 +33,6 @@ lines on stdout.
 """
 
 import ast
-import os
 import pathlib
 import sys
 
@@ -372,11 +371,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    # The driver's reads under malf are its closure's alone (DN-142.D29): an audit hook, installed for
-    # good when the walk names its closure, refuses any other open.
-    if os.environ.get("MALF_DRIVER_CLOSURE"):
-        sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-        import malf_closure
-
-        malf_closure.guard_from_environment()
     sys.exit(main())

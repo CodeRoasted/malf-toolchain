@@ -213,8 +213,8 @@ this step-0 run, the dated exception and `inputs_key`; an executable among those
 published (DN-142.D22 (4): a PE with no COFF symbol table and no CodeView debug entry, a linked ELF
 in the published form). `object` resolves a row: step -> record -> output -> member -> bytes.
 
-A key's `definition` is the step's malf CLOSURE (`malf_closure.py`, DN-142.D29: the malf files the
-step executes, never malf's whole tree) plus the PARAMETER DOCUMENT of the act that ran the step
+A key's `definition` is malf WHOLE, the git tree of the malf the step runs (DN-142.D29 (2): a malf
+commit re-keys every step), plus the PARAMETER DOCUMENT of the act that ran the step
 (DN-142.D2, DN-142.D19 (1)): `{argv, env, profile}`, the program and verb, each variable the driver
 hands the act that is not a location, and the profile name. A driver hands it in
 MALF_STORE_PARAMETERS and it is CHECKED against the act it keys (`parameters`); an act no driver ran
@@ -431,7 +431,7 @@ def step_parameters(profile: str | None) -> dict:
 # Provenance, never a key member and never compared (DN-142.D29 (8), ruled (c)): whether the act that
 # produced a record ran in its Landlock domain with its denials counted at zero. Every record carries
 # it, false unless its act's tally (MALF_STEP_TALLY, written by `malf_closure.py confine`) says so: an
-# act no domain confined (a Pharos verdict act today) is false, explicitly.
+# act no domain confined (a Pharos verdict act today, a declared-unconfined package's) is false, explicitly.
 DENIALS_FIELD = "denials_counted"
 TALLY_ENV = "MALF_STEP_TALLY"
 
@@ -454,43 +454,18 @@ def servable(record: dict) -> str | None:
 
 
 def _closure():
-    """malf's closure grammar, beside this file (`malf_closure.py`, DN-142.D29)."""
+    """malf's step domain and its tally reader, beside this file (`malf_closure.py`, DN-142.D29 (8))."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import malf_closure
 
     return malf_closure
 
 
-def definition_member(malf_dir: Path, parameters: dict, act_roots: list[Path] | tuple = ()) -> dict[str, object]:
-    """DN-142.D2's `definition` member: the malf files the step executes and the act's parameter
-    document, and nothing of the driver's own code (DN-142.D19 (1)). The malf member is the CLOSURE of
-    the act's driver (the malf file its argv runs) and of what its own inputs under `act_roots` name
-    (DN-142.D29 (2)): `{files: [[path, blob]…], listings: {dir: [names]…}}`, read from malf's tracked
-    files as they are on disk, never malf's whole tree, so a commit to a file no step executes re-keys
-    nothing."""
-    closure = _closure()
-    try:
-        malf = closure.member(malf_dir, list(parameters.get("argv") or []), [Path(root) for root in act_roots])
-    except closure.ClosureError as unread:
-        raise Refused(f"the step's malf closure cannot be derived, so it has no key (DN-142.D29): {unread}") from unread
-    return {"malf": malf, "parameters": parameters}
-
-
-def export_roots(home: Path, recipe: str) -> list[Path]:
-    """A recipe's exported set on disk, the act seeds' roots (DN-142.D29 (2)): its export folder and,
-    when it has one, the export_sources folder beside it (`_export_digest`'s two halves)."""
-    export = _cache_path(home, recipe)
-    return [folder for folder in (export, export.parent / "es") if folder.is_dir()]
-
-
-def step_source() -> Path:
-    """The materialized source of a `conan build` step, which MALF_STEP_SOURCE names.
-    raises Refused when it names none: the step's act seeds would be read from nothing."""
-    source = os.environ.get(STEP_SOURCE_ENV)
-    if not source or not Path(source).is_dir():
-        raise Refused(f"{STEP_SOURCE_ENV} names no source directory ({source!r}), so the step's closure "
-                      "cannot read what its own source names (DN-142.D29 (2))")
-    return Path(source)
+def definition_member(malf_dir: Path, parameters: dict) -> dict[str, object]:
+    """DN-142.D2's `definition` member: malf's tracked tree as the step runs it and the act's parameter
+    document, and nothing of the driver's own code (DN-142.D19 (1)). The tree is malf WHOLE
+    (DN-142.D29 (2)): every malf byte the step can execute is in it, so no derivation can miss one."""
+    return {"malf": worktree_tree_id(malf_dir), "parameters": parameters}
 
 
 def measure_toolchain(compiler_root: Path) -> dict[str, object]:
@@ -967,11 +942,10 @@ def test_package_member() -> str | None:
 
 
 def _step_document(kind: str, package: str, profile: str, home: Path, malf_dir: Path,
-                   toolchain: Path, sources: dict, upstream: dict, third_party: dict,
-                   act_roots: list[Path]) -> dict:
+                   toolchain: Path, sources: dict, upstream: dict, third_party: dict) -> dict:
     return {
         "step": {"kind": kind, "package": package, "profile": profile},
-        "definition": definition_member(malf_dir, step_parameters(profile), act_roots),
+        "definition": definition_member(malf_dir, step_parameters(profile)),
         "sources": sources,
         "test_package": test_package_member(),
         "upstream": upstream,
@@ -1051,11 +1025,11 @@ def key_first_document(store: Path, home: Path, graph_json: Path, package: str, 
     if kind == "tree":
         sources[f"{package}/host"] = value
         return _step_document("conan-build", package, profile, home, malf_dir, toolchain,
-                              sources, upstream, third_party, [step_source()])
+                              sources, upstream, third_party)
     context = "build" if root.get("package_type") == "build-scripts" else "host"
     sources[f"{package}/{context}"] = _export_digest(home, value)
     document = _step_document("conan-create", package, profile, home, malf_dir, toolchain,
-                              sources, upstream, third_party, export_roots(home, value))
+                              sources, upstream, third_party)
     document["step"]["executables"] = executable_classes(_declared_executables_env())
     return document
 
@@ -1711,7 +1685,7 @@ def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile:
     sources, upstream, third_party, target, folders = _step_inputs(home, graph_json, package,
                                                                    prefixes, True)
     document = _step_document("conan-create", package, profile, home, malf_dir, toolchain,
-                              sources, upstream, third_party, export_roots(home, target[0].split(":", 1)[0]))
+                              sources, upstream, third_party)
     declared = executable_classes(_declared_executables_env())
     unclassed = sorted(path for path, kind in declared.items() if kind is None)
     if unclassed:
@@ -1773,7 +1747,7 @@ def build_step(store: Path, home: Path, graph_json: Path, package: str, profile:
                                                                     prefixes, False)
     sources[f"{package}/host"] = source_tree
     document = _step_document("conan-build", package, profile, home, malf_dir, toolchain,
-                              sources, upstream, third_party, [step_source()])
+                              sources, upstream, third_party)
     refused = _refuse_unrecorded(store, document) | _refuse_unheld_third_party(store, document, folders)
     if not key_first_agrees(document) or refused:
         return 1
@@ -2171,7 +2145,7 @@ def verdict_step(store: Path, predicate: str, malf_dir: Path, clang_format: Path
     mismatch, 2 when a run judged nothing (no record is written for it)."""
     if predicate not in PREDICATES:
         sys.exit(f"artefact_store: no verdict predicate `{predicate}` (known: {' '.join(sorted(PREDICATES))})")
-    malf_tree = worktree_tree_id(malf_dir)
+    definition = definition_member(malf_dir, step_parameters(None))
     toolchain = {"clang-format": _executable_member(clang_format),
                  "python3": _executable_member(Path(sys.executable))}
     system = system_member()
@@ -2181,10 +2155,9 @@ def verdict_step(store: Path, predicate: str, malf_dir: Path, clang_format: Path
     for repository in repositories:
         name = repository.resolve().name
         tree = worktree_tree_id(repository)
-        definition = definition_member(malf_dir, step_parameters(None), [repository])
         with tempfile.TemporaryDirectory(prefix="artefact_store.") as scratch:
             root = Path(scratch) / "workspace"
-            _export(malf_dir, malf_tree, root / "malf")
+            _export(malf_dir, definition["malf"], root / "malf")
             _export(repository, tree, root / name)
             judged = subprocess.run(["bash", str(root / "malf" / "malf"), *PREDICATES[predicate]],
                                     cwd=root / name, env=environment, capture_output=True, text=True,
@@ -2206,7 +2179,7 @@ def verdict_step(store: Path, predicate: str, malf_dir: Path, clang_format: Path
             document = {
                 "step": {"kind": "verdict", "id": f"{predicate}/{name}", "subject": name,
                          "predicate": {"id": f"malf {' '.join(PREDICATES[predicate])}",
-                                       "version": key_of(definition["malf"])},
+                                       "version": definition["malf"]},
                          "params": {}},
                 "definition": definition,
                 "judged": {name: tree},
@@ -2804,50 +2777,40 @@ def selftest() -> int:
     expect("RED: a step run at another profile than its act's is refused",
            handed(own, lambda: _raises(lambda: step_parameters("linux-clang21"))), True)
 
-    # THE MALF MEMBER IS THE STEP'S CLOSURE (DN-142.D29 (2), build row R2): over a fixture malf tree, a
-    # commit touching only `.github/` leaves a create's definition unchanged, a commit touching a file
-    # its closure holds changes it, a commit adding a top-level file changes it (the root's listing),
-    # and a consumer file naming `${MALF_TOOLCHAIN_DIR}/<path>` brings that path into the act's member.
+    # THE MALF MEMBER IS MALF WHOLE (DN-142.D29 (2), RUL-167): over a fixture malf tree, the member is
+    # the tree id of HEAD on a clean checkout, a commit touching only `.github/` re-keys a create, an
+    # uncommitted edit of a tracked file re-keys it, and a reworded commit over identical files moves nothing.
     with tempfile.TemporaryDirectory(prefix="artefact_store.selftest.") as scratch:
         fixture = _closure()._fixture(Path(scratch))
         create = {"argv": ["malf", "store-create"], "env": {}, "profile": "linux-gcc16-release"}
         git_env = {**os.environ, "GIT_AUTHOR_NAME": "f", "GIT_AUTHOR_EMAIL": "f@f", "GIT_COMMITTER_NAME": "f",
                    "GIT_COMMITTER_EMAIL": "f@f", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
 
-        def committed(path: str, text: str) -> dict:
-            (fixture / path).parent.mkdir(parents=True, exist_ok=True)
-            (fixture / path).write_text(text)
-            for args in (["add", "--", path], ["commit", "-q", "-m", path]):
-                subprocess.run(["git", "-C", str(fixture), *args], check=True, env=git_env, capture_output=True)
-            return definition_member(fixture, create)
+        def git(*args: str) -> str:
+            return subprocess.run(["git", "-C", str(fixture), *args], check=True, env=git_env, capture_output=True,
+                                  text=True).stdout.strip()
 
         before = definition_member(fixture, create)
-        expect("a commit touching only `.github/` leaves a create's definition unchanged",
-               committed(".github/workflows/ci.yml", "run: ./malf lint\n") == before, True)
-        expect("a commit touching a file the create's closure holds changes its definition",
-               committed("helper.py", "VALUE = 2\n") != before, True)
-        touched = definition_member(fixture, create)
-        expect("a commit adding a top-level file changes its definition, through the root's listing",
-               committed("NEWS", "x\n") != touched, True)
-        bare = Path(scratch) / "bare"
-        bare.mkdir()
-        (bare / "README.md").write_text("x\n")
-        for args in (["init", "-q", "-b", "main"], ["add", "-A"], ["commit", "-q", "-m", "bare"]):
-            subprocess.run(["git", "-C", str(bare), *args], check=True, env=git_env, capture_output=True)
-        try:
-            definition_member(bare, create)
-            untracked = "no refusal"
-        except Refused as refused:
-            untracked = str(refused)
-        expect("RED: a toolchain that tracks no `malf` gives a step run by `malf` no key: a refusal naming the "
-               "seed, never an empty member", untracked.endswith("seed(s) not tracked in malf: malf"), True)
+        expect("the malf member is the tree id of HEAD on a clean checkout",
+               before["malf"], git("rev-parse", "HEAD^{tree}"))
+        (fixture / ".github" / "workflows" / "ci.yml").write_text("run: ./malf lint\n")
+        git("commit", "-q", "-am", "ci only")
+        expect("RED: a commit touching only `.github/` re-keys a create (malf is keyed whole, never per file)",
+               definition_member(fixture, create) != before, True)
+        committed = definition_member(fixture, create)
+        git("commit", "-q", "--amend", "-m", "reworded")
+        expect("a reworded commit over identical files moves no key (a tree, never a commit id)",
+               definition_member(fixture, create) == committed, True)
+        (fixture / "helper.py").write_text("VALUE = 'edited, not committed'\n")
+        expect("an uncommitted edit of a tracked file re-keys it: the key names the bytes that ran",
+               definition_member(fixture, create) != committed, True)
         # A RECORD SAYS WHETHER ITS ACT'S READS WERE COUNTED IN ITS DOMAIN (DN-142.D29 (8), ruled (c)), and
         # the reuse path serves only a counted one. A Pharos verdict act runs no domain before its own
         # traced walk: its record is false, explicitly, and is never served.
         verdict_store = Path(scratch) / "verdict-store"
         verdict_body = {"step": {"kind": "verdict", "id": "B4/clang-tidy/fixture", "subject": "fixture",
                                  "predicate": {"id": "malf lint", "version": "1"}, "params": {}},
-                        "definition": {"malf": {"files": [], "listings": {}}, "parameters": create},
+                        "definition": {"malf": "0" * 40, "parameters": create},
                         "judged": {}, "data": {}, "toolchain": {}, "system": "s", "context": {}}
 
         def committed_with(tally: str | None, salt: str) -> dict:
@@ -2875,10 +2838,6 @@ def selftest() -> int:
         expect("RED: an uncounted act's record is false and never served; an absent field reads false",
                (committed_with("uncounted\n", "uncounted")["produced_by"][DENIALS_FIELD],
                 servable({"key": "k", "produced_by": {}}) is None), (False, False))
-        acted = definition_member(fixture, {"argv": [], "env": {}, "profile": None}, [Path(scratch) / "consumer"])["malf"]
-        expect("a consumer file naming ${MALF_TOOLCHAIN_DIR}/codegen.py brings it into the act's member",
-               [path for path, _blob in acted["files"]] if isinstance(acted, dict) else acted,
-               ["codegen.py", "cycle_a.py", "cycle_b.py"])
 
     with tempfile.TemporaryDirectory(prefix="artefact_store.selftest.") as scratch:
         root = Path(scratch)
@@ -3420,9 +3379,6 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    # The driver's reads under malf are its closure's alone (DN-142.D29): an audit hook, installed for
-    # good when the walk names its closure, refuses any other open.
-    _closure().guard_from_environment()
     try:
         sys.exit(main(sys.argv[1:]))
     except KeyError_ as refused:
