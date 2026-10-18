@@ -6295,6 +6295,9 @@ st_body="$(sed -n '/^cmd_store_create()/,/^}/p' "$MALF_BIN")"
 st_step="$(sed -n '/^_malf_store_run_step()/,/^}/p' "$MALF_BIN")"
 check "the walk opens every step it runs and closes it on each of its twelve exits: its third-party step failed or found the store corrupt, its unconfined declaration unread, its backends declaration unread or its parameter document refused, a build passed, failed or found the store corrupt, a declaration unread, its key before the step refused, its step home unwritten, its create and records in that home" \
       "1 1 12 1" "$(grep -c '_malf_store_clock "$scratch/times"; run_at=' <<< "$st_body") $(grep -c '_malf_store_opened "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total" "$name" SKIPPED' <<< "$st_step")"
+st_build="$(sed -n '/^_malf_store_build_in()/,/^}/p' "$MALF_BIN")"
+check "a stored: false step's conan build runs with --no-remote, as its key before the step resolved it: inside the build environment there is no network, and on the host a remote would be consulted silently (W559 G-env-1, insight_twin)" \
+      "1" "$(grep -c -- '--build=never --no-remote' <<< "$st_build")"
 rm -rf "$st_tmp"
 echo
 

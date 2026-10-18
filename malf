@@ -6320,7 +6320,7 @@ _malf_store_build_in() {   # <name> <prefix> <tree> <store> <scratch> <prefixes>
     [[ $rc -eq 0 ]] || { [[ $rc -eq 2 ]] && return 2; return 1; }
     _malf_home_profiles "$CONAN_HOME"
     if ! _malf_confined "$scratch/$name.denials" "$name" "$scratch/$name/$prefix" conan build "$scratch/$name/$prefix" "${_MALF_HOME_PROFILES[@]}" \
-            -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${_MALF_SHIP_LOCK[@]}" --build=never \
+            -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${_MALF_SHIP_LOCK[@]}" --build=never --no-remote \
             --format=json > "$scratch/$name.graph.json" 2> "$scratch/$name.log"; then
         echo "malf store-build: conan build $name failed — $scratch/$name.log" >&2
         _malf_quote_log "$scratch/$name.log" "$name (its build)"; return 1
