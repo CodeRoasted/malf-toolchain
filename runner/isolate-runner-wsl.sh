@@ -162,8 +162,7 @@ for spec in targets:
 sys.exit(1 if bad else 0)
 PY
 )" || rc=1
-        printf '%s
-' "$verdict"
+        printf '%s\n' "$verdict"
     done
     return "$rc"
 }
@@ -560,8 +559,7 @@ if wanted - online:
 configured = (group / "cpuset.cpus").read_text().strip()
 if cpus(configured) != wanted:
     refuse(f"cpuset.cpus reads '{configured}', not AllowedCPUs={wanted_text}")
-(group / "cpuset.cpus.partition").write_text("root
-")
+(group / "cpuset.cpus.partition").write_text("root\n")
 state = (group / "cpuset.cpus.partition").read_text().strip()
 if state != "root":
     refuse(f"cpuset.cpus.partition reads '{state}' after writing root")

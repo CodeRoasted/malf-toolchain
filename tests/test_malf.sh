@@ -59,7 +59,7 @@ check() {
 
 echo "[1] syntax — every shell script parses"
 
-for script in "$MALF_BIN" "$MALF_ROOT"/*.sh "$MALF_TEST_DIR"/*.sh; do
+for script in "$MALF_BIN" "$MALF_ROOT"/*.sh "$MALF_ROOT"/runner/*.sh "$MALF_TEST_DIR"/*.sh; do
     [[ -f "$script" ]] || continue
     if bash -n "$script" 2>/dev/null; then
         check "bash -n $(basename "$script")" "ok" "ok"
@@ -6387,6 +6387,51 @@ check "unset, nothing is archived and nothing is said" "none rc=0 0" "$(ql_keep 
 check "an archive that cannot be written is said, leaves no file, and is never a failure of the walk" \
       "none rc=0 1" "$(ql_keep "$ql_tmp/no-such-dir/logs.tar.gz")"
 rm -rf "$ql_tmp"
+echo
+
+echo "[7r1] every Python program a runner script carries compiles, and no printf format is split by a literal newline (the seat-partition.py SyntaxError of 2026-10-18)"
+# A runner script carries Python three ways: a render_* function whose heredoc writes a Python file, a
+# `python3 -` fed by a <<'PY' heredoc, and a `python3 ... -c '` block. `bash -n` sees none of them as code, so a
+# "\n" written out as a real newline inside a string literal passed every gate and failed only under sudo, at
+# the apply's step 5 (seat-partition@release.service). Each snippet is read from the source and compiled
+# without writing a .pyc; the counts guard a silent zero.
+rp_tmp="$(mktemp -d)"
+rp_compile() {   # <label> <file>
+    local err
+    if err="$(python3 -I -c 'import sys; compile(open(sys.argv[1]).read(), sys.argv[1], "exec")' "$2" 2>&1)"; then
+        check "compiles: $1" "ok" "ok"
+    else
+        check "compiles: $1" "ok" "$(tail -3 <<< "$err")"
+    fi
+}
+rp_rendered=0 rp_stdin=0 rp_inline=0
+for script in "$MALF_ROOT"/runner/*.sh; do
+    base="$(basename "$script")"
+    while read -r fn; do
+        body="$(awk -v fn="$fn" '$0 ~ "^" fn "\\(\\) \\{" {on=1} on {print} on && /^}/ {exit}' "$script")"
+        bash -c "$body"$'\n'"$fn" > "$rp_tmp/$fn.py" 2>/dev/null
+        head -1 "$rp_tmp/$fn.py" | grep -q '^#!.*python3' || continue
+        rp_rendered=$((rp_rendered + 1))
+        rp_compile "$base $fn (rendered file)" "$rp_tmp/$fn.py"
+    done < <(grep -oE '^render_[a-z_]+' "$script" | sort -u)
+    n=0
+    while IFS= read -r -d '' snippet; do
+        n=$((n + 1)); rp_stdin=$((rp_stdin + 1))
+        printf '%s' "$snippet" > "$rp_tmp/$base.stdin$n.py"
+        rp_compile "$base <<'PY' heredoc #$n" "$rp_tmp/$base.stdin$n.py"
+    done < <(awk '/<<'\''PY'\''/ {on=1; next} on && /^PY$/ {on=0; printf "%c", 0; next} on {print}' "$script")
+    n=0
+    while IFS= read -r -d '' snippet; do
+        n=$((n + 1)); rp_inline=$((rp_inline + 1))
+        printf '%s' "$snippet" > "$rp_tmp/$base.inline$n.py"
+        rp_compile "$base python3 -c block #$n" "$rp_tmp/$base.inline$n.py"
+    done < <(awk '/python3 .*-c '\''$/ {on=1; next} on && /'\''/ {sub(/'\''.*/, ""); print; on=0; printf "%c", 0; next} on {print}' "$script")
+done
+check "the runner scripts' Python was found in all three shapes (rendered file, <<'PY' heredoc, -c block)" \
+      "yes yes yes" "$( ((rp_rendered)) && echo yes || echo no) $( ((rp_stdin)) && echo yes || echo no) $( ((rp_inline)) && echo yes || echo no)"
+check "no printf format in a runner script opens a quote it does not close on the same line (a \\n written as a newline)" \
+      "" "$(grep -nE "printf '[^']*\$" "$MALF_ROOT"/runner/*.sh)"
+rm -rf "$rp_tmp"
 echo
 
 echo
