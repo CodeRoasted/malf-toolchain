@@ -1674,9 +1674,10 @@ check "detector — without the benchmark pattern the bench TU is MISSED (proves
 
 # AN UNREADABLE TU IS A REFUSAL, NEVER "NO FRAMEWORK". grep exits 2 on it; the scan used to read
 # through a process substitution that dropped every status, so the guard passed it. chmod 000 does
-# not deny root, so the arm states that rather than passing vacuously.
-if [ "$(id -u)" -ne 0 ]; then
-    printf 'int g(){return 0;}\n' > "$dt_tmp/src/locked.cpp"; chmod 000 "$dt_tmp/src/locked.cpp"
+# not deny a process holding CAP_DAC_READ_SEARCH, so the arm probes its own fixture and states it
+# rather than passing vacuously.
+printf 'int g(){return 0;}\n' > "$dt_tmp/src/locked.cpp"; chmod 000 "$dt_tmp/src/locked.cpp"
+if ! cat "$dt_tmp/src/locked.cpp" >/dev/null 2>&1; then
     dt_out="$(CWD="$dt_tmp" _malf_lint_assert_no_test_tu "$dt_tmp/src/engine.cpp" "$dt_tmp/src/locked.cpp" 2>&1)"
     dt_rc=$?
     chmod 644 "$dt_tmp/src/locked.cpp"
@@ -1684,7 +1685,8 @@ if [ "$(id -u)" -ne 0 ]; then
     check "detector — the refusal says the scan could not read a TU" "1" \
           "$(grep -c 'could not read every selected TU' <<< "$dt_out")"
 else
-    check "detector — the unreadable-TU arm needs a non-root user (chmod 000 does not deny root)" "non-root" "root"
+    chmod 644 "$dt_tmp/src/locked.cpp"
+    check "detector — the unreadable-TU arm's fixture: a file of mode 000 this process cannot read" "unreadable" "readable"
 fi
 
 rm -rf "$dt_tmp"

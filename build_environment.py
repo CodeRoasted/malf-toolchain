@@ -19,15 +19,22 @@ archive is refused and nothing is loaded.
 A CONTAINER is started with `docker run --rm --init --network none` by the pinned ID, never by a tag;
 each mount at its own absolute path; the environment it receives is exactly the declared names (each
 read from this process and refused when unset) plus MALF_SYSTEM, the pinned config digest, and nothing
-is inherited; its working directory is the caller's, which must lie under a mount. `--seccomp-unconfined`
-lifts Docker's default seccomp profile, for the store-create container alone (its declared-unconfined
-namespace tests unshare a mount namespace, which the default profile refuses).
+is inherited; its working directory is the caller's, which must lie under a mount.
+
+THE ACT'S USER (DN-142.D30 (8) R4). Every container starts its argv under `unshare --user
+--map-user=1000 --map-group=1000 --`: the act is uid 1000 (the image's `ubuntu`) with no capability, in a
+nested user namespace where uid 1000 is the container's root, which rootless Docker maps to the account
+running the launcher. So the act writes the mounted trees by owner permission as on the host, a mode-0500
+directory refuses it, and tar restores no archive member's owner. The uid is a constant, never the
+caller's, so the desk and the seat present one uid to an act. Every container therefore lifts Docker's
+default seccomp profile, which refuses CLONE_NEWUSER; holding no capability, the act is still refused
+every privileged syscall by the kernel.
 
     build_environment.py check
         the daemon's store, the pinned id present and its config digest the pin's; exit 0, or 1 naming each
     build_environment.py load
         the verified load: the archive checked and loaded when the pinned id is absent, then `check`
-    build_environment.py run [--seccomp-unconfined] [--host-pids] [--home <dir>] [--mount <dir>]... [--read-only-mount <dir>]...
+    build_environment.py run [--host-pids] [--home <dir>] [--mount <dir>]... [--read-only-mount <dir>]...
                              [--corpus-gates <file>] [--env <NAME>]... [--backends <file>] -- <argv>...
         <argv> in the environment, each corpus mount the document names mounted read-only; with
         --backends <file>, beside those backends on the walk's internal network instead of none; exit the
@@ -101,6 +108,7 @@ MIRROR_ROOT = "/opt/build-environment/git-mirrors"
 # A source() that fetches with git: conan's Git helper, or a git clone/fetch it runs itself.
 GIT_SOURCE = re.compile(r"\bGit\s*\(|\bgit\s+(?:clone|fetch)\b")
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
+BASE_IMAGE = re.compile(r"^FROM (\S+@sha256:[0-9a-f]{64})", re.MULTILINE)
 DIRECTORY_ENV = "MALF_BUILD_ENVIRONMENT_DIR"
 DIRECTORY_DEFAULT = "build-environment"
 SYSTEM_ENV = "MALF_SYSTEM"
@@ -108,6 +116,8 @@ CONTAINERD_STORE = "io.containerd.snapshotter.v1"
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 HEX = re.compile(r"^[0-9a-f]{64}$")
 REFUSED = 2
+# The act's uid and gid inside its nested user namespace: the image's `ubuntu` (DN-142.D30 (8) R4).
+ACT_UID = 1000
 # The container's own HOME: the image's, never the caller's, which is not mounted.
 CONTAINER_HOME = "/root"
 # The caller's shared-memory tmpfs, whose size the container's /dev/shm takes: Docker's default is 64 MiB,
@@ -234,7 +244,7 @@ def load(pin: Pin, docker: str, directory: Path | None = None) -> str:
 
 
 def run_argv(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], cwd: Path,
-             seccomp_unconfined: bool = False, docker: str = "docker", environ: dict | None = None,
+             docker: str = "docker", environ: dict | None = None,
              read_only: list[Path] | tuple = (), host_pids: bool = False, home: str = CONTAINER_HOME,
              network: str = "none", name: str | None = None) -> list[str]:
     """The `docker run` command of one act: `mounts` writable and `read_only` read-only, each at its own
@@ -259,9 +269,8 @@ def run_argv(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], cw
     command = [docker, "run", "--rm", "--init", "--network", network, *(["--name", name] if name else []),
                "--workdir", str(cwd),
                "--shm-size", str(shm.f_blocks * shm.f_frsize),
+               "--security-opt", "seccomp=unconfined",
                "--env", f"HOME={home}", "--env", f"{SYSTEM_ENV}={pin.image}"]
-    if seccomp_unconfined:
-        command += ["--security-opt", "seccomp=unconfined"]
     if host_pids:
         command += ["--pid", "host"]
     for mount in resolved:
@@ -270,7 +279,7 @@ def run_argv(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], cw
         command += ["--volume", f"{mount}:{mount}:ro"]
     for name in names:
         command += ["--env", f"{name}={environ[name]}"]
-    return [*command, pin.id, *argv]
+    return [*command, pin.id, "unshare", "--user", f"--map-user={ACT_UID}", f"--map-group={ACT_UID}", "--", *argv]
 
 
 def corpus_mounts(document: Path) -> list[Path]:
@@ -285,18 +294,17 @@ def corpus_mounts(document: Path) -> list[Path]:
     return sorted(set(every))
 
 
-def run(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], seccomp_unconfined: bool,
-        docker: str = "docker", read_only: list[Path] | tuple = (), host_pids: bool = False,
+def run(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], docker: str = "docker", read_only: list[Path] | tuple = (), host_pids: bool = False,
         home: str = CONTAINER_HOME, backends: list[Backend] | tuple = ()) -> int:
     """The act in the environment; with `backends`, beside them on the walk's internal network, every
     backend and the network removed on every exit path."""
     load(pin, docker)
     if not backends:
-        return subprocess.run(run_argv(pin, argv, mounts, names, Path.cwd(), seccomp_unconfined, docker,
+        return subprocess.run(run_argv(pin, argv, mounts, names, Path.cwd(), docker,
                                        read_only=read_only, host_pids=host_pids, home=home),
                               stdin=subprocess.DEVNULL, check=False).returncode
     with BackendWalk(docker, backends) as walk:
-        return subprocess.run(run_argv(pin, argv, mounts, names, Path.cwd(), seccomp_unconfined, docker,
+        return subprocess.run(run_argv(pin, argv, mounts, names, Path.cwd(), docker,
                                        read_only=read_only, host_pids=host_pids, home=home,
                                        network=walk.network, name=walk.act),
                               stdin=subprocess.DEVNULL, check=False).returncode
@@ -766,14 +774,22 @@ int main(int argc, char **argv) {
 """
 
 
+def _base_image() -> str:
+    """The definition's own digest-pinned base image, already held by the daemon that built the pin."""
+    found = BASE_IMAGE.search((DEFINITION / "Dockerfile").read_text())
+    assert found, "the definition's Dockerfile names no digest-pinned base image"
+    return found.group(1)
+
+
 def _throwaway(base: Path, docker: str) -> tuple[Pin, Path]:
-    """A throwaway image (FROM scratch, one static probe), built with the pin's flags, saved, and the pin
-    its own daemon reports: (the pin, the archive's directory)."""
+    """A throwaway image (the definition's base image, whose util-linux and tar the act's user arms run,
+    plus one static probe), built with the pin's flags, saved, and the pin its own daemon reports: (the
+    pin, the archive's directory)."""
     context = base / "context"
     context.mkdir()
     (context / "probe.c").write_text(PROBE_SOURCE)
     subprocess.run(["cc", "-static", "-O1", "-o", str(context / "probe"), str(context / "probe.c")], check=True)
-    (context / "Dockerfile").write_text("FROM scratch\nCOPY probe /probe\nENTRYPOINT []\n")
+    (context / "Dockerfile").write_text(f"FROM {_base_image()}\nCOPY probe /probe\nENTRYPOINT []\n")
     tag = f"malf-build-environment-selftest:{os.getpid()}"
     subprocess.run([docker, "buildx", "build", "--platform", "linux/amd64", "--provenance=false", "--sbom=false",
                     "--load", "--quiet", "-t", tag, str(context)], check=True, capture_output=True)
@@ -839,9 +855,6 @@ int main(int argc, char **argv) {
     return 3;
 }
 """
-BASE_IMAGE = re.compile(r"^FROM (\S+@sha256:[0-9a-f]{64})", re.MULTILINE)
-
-
 def _network_throwaway(base: Path, docker: str) -> tuple[Pin, str, Path]:
     """A throwaway image for the backend arms: the definition's own base image (a shell for the
     healthcheck, the resolver for names) plus a network probe, built with the pin's flags and never saved:
@@ -850,9 +863,7 @@ def _network_throwaway(base: Path, docker: str) -> tuple[Pin, str, Path]:
     context.mkdir()
     (context / "probe.c").write_text(NETWORK_PROBE_SOURCE)
     subprocess.run(["cc", "-O1", "-o", str(context / "probe"), str(context / "probe.c")], check=True)
-    found = BASE_IMAGE.search((DEFINITION / "Dockerfile").read_text())
-    assert found, "the definition's Dockerfile names no digest-pinned base image"
-    (context / "Dockerfile").write_text(f"FROM {found.group(1)}\nCOPY probe /probe\n")
+    (context / "Dockerfile").write_text(f"FROM {_base_image()}\nCOPY probe /probe\n")
     tag = f"malf-build-environment-network:{os.getpid()}"
     subprocess.run([docker, "buildx", "build", "--platform", "linux/amd64", "--provenance=false", "--sbom=false",
                     "--load", "--quiet", "-t", tag, str(context)], check=True, capture_output=True)
@@ -938,6 +949,40 @@ def _backend_arms(arm, refusal, base: Path, docker: str) -> None:
             .endswith("one and two declare the backend 'probe' differently"), True)
     finally:
         _docker(docker, "rmi", "--force", reference)
+
+
+def _act_user_arms(arm, pin: Pin, mount: Path, docker: str) -> None:
+    """The act's user (DN-142.D30 (8) R4, row E2c): uid 1000 with no capability, writing the mounts by owner
+    permission, refused where the host account is refused, restoring no archive owner, able to nest the
+    namespaces the declared-unconfined tests create."""
+    import tarfile
+
+    def act(script: str) -> subprocess.CompletedProcess:
+        return subprocess.run(run_argv(pin, ["sh", "-c", script], [mount], [], mount, docker=docker, environ={}),
+                              capture_output=True, text=True, check=False)
+
+    who = act("id -u; grep '^CapEff:' /proc/self/status")
+    arm("RED: the act is uid 1000 holding no capability", (who.returncode, who.stdout.split()),
+        (0, ["1000", "CapEff:", "0000000000000000"]))
+    made = act("touch made-by-the-act")
+    arm("a file the act creates in a mount is owned, on the host, by the account that runs the launcher",
+        (made.returncode, (mount / "made-by-the-act").stat().st_uid), (0, os.getuid()))
+    locked = act("mkdir locked && chmod 0500 locked && { touch locked/written; echo $?; }; chmod 0700 locked")
+    arm("RED: a directory of mode 0500 the act creates refuses the act's write",
+        (locked.stdout.strip() != "0", (mount / "locked" / "written").exists()), (True, False))
+    member = tarfile.TarInfo("owned-by-another-uid")
+    member.uid = member.gid = 4242
+    with tarfile.open(mount / "foreign.tar", "w") as archive:
+        archive.addfile(member, None)
+    (mount / "extracted").mkdir()
+    extracted = act("tar -xf foreign.tar -C extracted")
+    owner = (mount / "extracted" / "owned-by-another-uid").stat().st_uid
+    act("rm -rf extracted")
+    arm("RED: an archive member owned by another uid extracts as the act's own uid, never as that uid",
+        (extracted.returncode, owner), (0, os.getuid()))
+    nested = act("unshare -Urpfm --mount-proc sh -c 'mount -t tmpfs none /mnt && grep -c \" /mnt tmpfs \" /proc/self/mounts'")
+    arm("RED: a nested unshare -Urpfm --mount-proc mounts a tmpfs (DN-142.D29 (ix)'s namespace tests)",
+        (nested.returncode, nested.stdout.strip()), (0, "1"))
 
 
 def selftest() -> int:
@@ -1051,10 +1096,11 @@ def selftest() -> int:
             arm("RED: a working directory under no mount is refused",
                 refusal(lambda: run_argv(pin, ["/probe"], [mount], [], base, environ={})).startswith(
                     f"the working directory {base} lies under no mount"), True)
-            arm("the store-create container alone lifts the default seccomp profile",
-                ("seccomp=unconfined" in run_argv(pin, ["/probe"], [mount], [], mount, True, environ={}),
-                 "seccomp=unconfined" in run_argv(pin, ["/probe"], [mount], [], mount, False, environ={})),
-                (True, False))
+            _act_user_arms(arm, pin, mount, docker)
+            started = run_argv(pin, ["/probe"], [mount], [], mount, environ={})
+            arm("every act container lifts the default seccomp profile and starts its argv as uid 1000 in a nested "
+                "user namespace", ("seccomp=unconfined" in started, started[started.index(pin.id) + 1:]),
+                (True, ["unshare", "--user", "--map-user=1000", "--map-group=1000", "--", "/probe"]))
             (base / "pin.json").write_text(json.dumps({"image": pin.image, "id": "latest", "archive": {
                 "name": pin.archive_name, "bytes": pin.archive_bytes, "sha256": pin.archive_sha256}}))
             arm("RED: a pin naming its id by anything but a digest is refused",
@@ -1074,7 +1120,6 @@ def main(argv: list[str]) -> int:
             return REFUSED
         split = argv.index("--")
         options = argparse.ArgumentParser(prog="build_environment.py run")
-        options.add_argument("--seccomp-unconfined", action="store_true")
         options.add_argument("--mount", action="append", default=[], type=Path)
         options.add_argument("--read-only-mount", action="append", default=[], type=Path)
         options.add_argument("--corpus-gates", type=Path)
@@ -1088,7 +1133,7 @@ def main(argv: list[str]) -> int:
             return REFUSED
         try:
             read_only = [*given.read_only_mount, *(corpus_mounts(given.corpus_gates) if given.corpus_gates else [])]
-            return run(read_pin(), argv[split + 1:], given.mount, given.env, given.seccomp_unconfined, docker,
+            return run(read_pin(), argv[split + 1:], given.mount, given.env, docker,
                        read_only, given.host_pids, given.home,
                        read_backends(given.backends) if given.backends else ())
         except Refused as refused:

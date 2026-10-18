@@ -5450,9 +5450,8 @@ _malf_store_parameters() {   # <profile|-> <argv>...
 # the walk's scratch is made, kept on the host when a step fails), the log archive's directory, the
 # corpus document and its mounts (read-only), and for a walk running benchmarks the bench document and
 # the build slot (read-only) with the host's process ids, so the slot's holder is judged alive or dead
-# as on the host. Its environment is exactly the walk's declared variables. The store-create container
-# lifts Docker's default seccomp profile: its declared-unconfined namespace tests unshare a mount
-# namespace (DN-142.D29 (9)).
+# as on the host. Its environment is exactly the walk's declared variables. The walk runs as uid 1000 with
+# no capability in a nested user namespace, as every act container does (DN-142.D30 (8) R4).
 # post: the container's exit, or 2 refused before it ran.
 _malf_store_create_in_environment() {   # <package>...
     local store name
@@ -5466,7 +5465,7 @@ _malf_store_create_in_environment() {   # <package>...
     # third-party source a recipe fetches, verified by the sha256 its conandata pins, since the container
     # has no network; HOME inside is the caller's path, holding only what is mounted under it.
     mkdir -p "$HOME/.conan2-sources-backup"
-    local -a args=(--seccomp-unconfined --home "$HOME" --mount "$MALF_WORKSPACE_ROOT" --mount "$store" --mount /tmp
+    local -a args=(--home "$HOME" --mount "$MALF_WORKSPACE_ROOT" --mount "$store" --mount /tmp
                    --mount "$HOME/.conan2-sources-backup")
     local cut_home="${MALF_CUT_VERIFY_CONAN_HOME:-$MALF_CONAN_HOME_BASE/cut-verify}" home
     for home in "$MALF_CONAN_HOME_BASE" "$cut_home" "${MALF_STORE_CONAN_HOME:-}" "${MALF_TWIN_SEED_HOME:-}"; do
