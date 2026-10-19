@@ -570,25 +570,34 @@ _malf_use_keyed_cache() {
 # the walk's first, at the revisions malf/conan.lock pins, each checked against its own
 # conanmanifest.txt (package_twin.py seed-recipes). The act's first build then compiles the third-party
 # closure from conan's source download cache and the image's git mirror, with no network, and every
-# later act on that image reuses it. Once per home: the marker names the lock it was seeded from, and
-# a lock edit seeds the new revisions. Outside the image it is refused, since a host compiler would
-# build those binaries.
-# post: exit 0 seeded or already seeded at this lock, or nothing asked; the verb exits 2 on a refusal.
-_MALF_ENVIRONMENT_SEEDED="malf-environment-recipes"
+# later act on that image reuses it. AT EVERY ACT (DN-142.D30 (10) R17): each run restores every lock
+# revision the home lacks that a source holds, so a revision a later walk exports reaches the next act;
+# a once-per-lock marker skipped that, and after a lock bump every act failed on the new revision until
+# the marker was deleted by hand. Outside the image it is refused, since a host compiler would build
+# those binaries.
+# post: exit 0 restored and checked, or nothing asked; the verb exits 2 on a refusal.
 _malf_seed_environment_home() {
     [[ -n "${MALF_ENVIRONMENT_RECIPES:-}" ]] || return 0
     [[ -n "${MALF_SYSTEM:-}" ]] \
         || { echo "malf: REFUSED — MALF_ENVIRONMENT_RECIPES seeds a compiling act's home, and this act runs outside the build environment, where a host compiler would build its third-party binaries (DN-142.D30 (9) R7)" >&2; exit 2; }
-    local lock="$MALF_DIR/conan.lock" marker="$CONAN_HOME/$_MALF_ENVIRONMENT_SEEDED" digest prefixes
-    digest="$(sha256sum "$lock" | cut -d' ' -f1)"
-    [[ -f "$marker" && "$(cat "$marker")" == "$digest" ]] && return 0
+    local lock="$MALF_DIR/conan.lock" prefixes
     prefixes="$(_malf_owned_prefixes)" \
         || { echo "malf: REFUSED — the owned package namespaces of $MALF_WORKSPACE_ROOT could not be derived, so the third-party recipes of $lock cannot be told apart" >&2; exit 2; }
     local -a sources=()
     read -r -a sources <<< "$MALF_ENVIRONMENT_RECIPES"
     python3 "$MALF_DIR/package_twin.py" seed-recipes "$lock" "$prefixes" "$CONAN_HOME" "${sources[@]}" \
         || { echo "malf: REFUSED — the recipes of $CONAN_HOME could not be restored and checked (above; DN-142.D30 (9) R7)" >&2; exit 2; }
-    printf '%s\n' "$digest" > "$marker"
+}
+
+# INSIDE THE BUILD ENVIRONMENT AN EDITABLE VERB COMPILES ONLY IN AN IMAGE HOME (DN-142.D30 (10) R14): the
+# seam declares an act compiling by handing it MALF_ENVIRONMENT_RECIPES with a conan home of the image's
+# own. A compiling act the seam did not declare would resolve in whatever CONAN_HOME it inherited and
+# fail later as a network refusal from an empty home, a cause naming the wrong thing; so the verb exits
+# 2 before it configures, naming the home. The compiling set is enforced here, never listed.
+_malf_refuse_undeclared_compiling_act() {   # <verb>
+    [[ -n "${MALF_SYSTEM:-}" && -z "${MALF_ENVIRONMENT_RECIPES:-}" ]] || return 0
+    echo "malf $1: REFUSED — inside the build environment (MALF_SYSTEM=$MALF_SYSTEM) a compiling act runs only in a conan home of the image's own, and this act was given none: MALF_ENVIRONMENT_RECIPES is unset and CONAN_HOME is ${CONAN_HOME:-unset}. The seam declares an act compiling by its profile (DN-142.D30 (10) R14)" >&2
+    exit 2
 }
 MALF_PROFILE="$(_malf_profile_path)"
 MALF_PROFILE_NAME="$(basename "$MALF_PROFILE")"
@@ -1869,6 +1878,8 @@ cmd_build() {
         shift
     done
 
+    _malf_refuse_undeclared_compiling_act build
+
     _malf_resolve_target_or_sweep build "$subdir" "${fwd[@]}"
     local target="$MALF_TARGET"
 
@@ -1979,6 +1990,8 @@ cmd_test() {
         shift
     done
 
+    _malf_refuse_undeclared_compiling_act test
+
     _malf_resolve_target_or_sweep test "$subdir" "${fwd[@]}"
     local target="$MALF_TARGET"
 
@@ -2088,6 +2101,7 @@ cmd_lint() {
         esac
         shift
     done
+    _malf_refuse_undeclared_compiling_act lint
 
     # The file-selection mode, spelled out rather than named, because the summary below is read by
     # someone who does not have this file open: "default" alone does not say that the subject is a
@@ -4320,6 +4334,8 @@ cmd_bench() {
         esac
         shift
     done
+
+    _malf_refuse_undeclared_compiling_act bench
 
     _malf_resolve_target_or_sweep bench "$subdir" "${fwd[@]}"
     local target="$MALF_TARGET"

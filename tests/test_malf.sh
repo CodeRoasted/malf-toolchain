@@ -5185,11 +5185,56 @@ print(" ".join(f"{ref}#{rev}" for ref, body in sorted(cache.items()) for rev in 
 check "the lock's third-party recipe revisions are restored from the source home, recipes alone; a revision no home holds is named, not refused" \
       "rc=0 $e3_rev 1 0" \
       "$(e3_seed "$e3_tmp/target") $(grep -c 'not restored: absent/1.0#' "$e3_tmp/seed.out") $(CONAN_HOME="$e3_tmp/target" conan list 'tps/0.1:*' --format=json 2>/dev/null | grep -c '"packages": {[^}]')"
+# THE SEED RUNS AT EVERY ACT (DN-142.D30 (10) R17): a revision the source lacks at one act and holds at the
+# next is restored then. The shell half: two acts, two seeds, whatever the first restored.
+check "RED — every compiling act in the image runs the seed, the second at an unchanged lock included" \
+      "2" "$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; export MALF_SYSTEM=sha256:9efc94c0 MALF_ENVIRONMENT_RECIPES="$2/source" CONAN_HOME="$2/every-act"; mkdir -p "$CONAN_HOME"
+    seeds="$2/seeds"; _malf_owned_prefixes() { echo ex_; }; python3() { echo seeded >> "$seeds"; }
+    _malf_seed_environment_home; _malf_seed_environment_home; wc -l < "$seeds"' _ "$MALF_BIN" "$e3_tmp")"
+mkdir -p "$e3_tmp/recipe/tpl"
+printf 'from conan import ConanFile\n\n\nclass Later(ConanFile):\n    name = "tpl"\n    version = "0.1"\n' > "$e3_tmp/recipe/tpl/conanfile.py"
+e3_later="$(CONAN_HOME="$e3_tmp/scratch-export" conan export "$e3_tmp/recipe/tpl" --format=json 2>/dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin)["reference"])')"
+python3 - "$e3_tmp/conan.lock" "$e3_later" <<'PY'
+import json, sys
+lock = json.load(open(sys.argv[1]))
+lock["requires"].append(f"{sys.argv[2]}%3.0")
+json.dump(lock, open(sys.argv[1], "w"))
+PY
+e3_seed "$e3_tmp/target-later" > /dev/null
+e3_before="$(grep -c "not restored: .*${e3_later%%#*}" "$e3_tmp/seed.out")"
+CONAN_HOME="$e3_tmp/source" conan export "$e3_tmp/recipe/tpl" > /dev/null 2>&1
+check "a revision no source held at one seed is restored by the next once the source holds it; a revision the target already holds is not restored again" \
+      "1 rc=0 1 1" \
+      "$e3_before $(e3_seed "$e3_tmp/target-later" | grep -o '^rc=[0-9]*') $(CONAN_HOME="$e3_tmp/target-later" conan list "$e3_later" --format=json 2>/dev/null | grep -c "${e3_later#*#}") $(grep -c '; 1 restored by this run' "$e3_tmp/seed.out")"
 printf '\n# a byte the manifest does not name\n' >> "$(CONAN_HOME="$e3_tmp/source" conan cache path "$e3_rev")/conanfile.py"
 check "RED — a restored recipe whose files differ from its conanmanifest.txt is refused, naming the home" \
       "rc=1 1" "$(e3_seed "$e3_tmp/target-tampered" | cut -d' ' -f1) $(grep -c 'differs from its own conanmanifest.txt' "$e3_tmp/seed.out")"
 check "RED — a compiling act's home is never seeded outside the build environment, where a host compiler would build its binaries" \
       "rc=2 1" "$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; unset MALF_SYSTEM; export MALF_ENVIRONMENT_RECIPES="$2/source" CONAN_HOME="$2/never"; ( _malf_seed_environment_home ) 2>"$2/refusal"; echo "rc=$? $(grep -c "outside the build environment" "$2/refusal")"' _ "$MALF_BIN" "$e3_tmp")"
+# A folder and its manifest edited together pass `conan cache check-integrity`, which compares the two
+# and never the manifest with the revision: the conanfile.py tampered above, its manifest line rewritten.
+python3 - "$(CONAN_HOME="$e3_tmp/source" conan cache path "$e3_rev")" <<'PY'
+import hashlib, pathlib, sys
+folder = pathlib.Path(sys.argv[1])
+manifest = folder / "conanmanifest.txt"
+digest = hashlib.md5((folder / "conanfile.py").read_bytes()).hexdigest()
+manifest.write_text("".join(f"conanfile.py: {digest}\n" if line.startswith("conanfile.py: ") else line + "\n"
+                            for line in manifest.read_text().splitlines()))
+PY
+check "RED — a restored recipe whose files and conanmanifest.txt were edited together is refused: the manifest no longer digests to the revision the lock pins" \
+      "0 rc=1 1" \
+      "$(CONAN_HOME="$e3_tmp/source" conan cache check-integrity "$e3_rev" > /dev/null 2>&1; echo $?) $(e3_seed "$e3_tmp/target-forged" | cut -d' ' -f1) $(grep -c 'carries a conanmanifest.txt that is not its revision' "$e3_tmp/seed.out")"
+# AN EDITABLE VERB INSIDE THE IMAGE COMPILES ONLY WHERE THE SEAM DECLARED IT COMPILING (DN-142.D30 (10) R14).
+mkdir -p "$e3_tmp/pkg"
+printf 'from conan import ConanFile\n\n\nclass Pkg(ConanFile):\n    name = "ex_pkg"\n    version = "0.1"\n' > "$e3_tmp/pkg/conanfile.py"
+printf 'cmake_minimum_required(VERSION 3.30)\nproject(ex_pkg CXX)\n' > "$e3_tmp/pkg/CMakeLists.txt"
+e3_verb() {   # <verb> — its exit, whether it named the home, and the build trees it left
+    (cd "$e3_tmp/pkg" && env -u MALF_ENVIRONMENT_RECIPES MALF_SYSTEM=sha256:9efc94c0 CONAN_HOME="$e3_tmp/undeclared" bash "$MALF_BIN" "$1" > /dev/null 2> "$e3_tmp/verb.err")
+    echo "$1:rc=$?:$(grep -c "CONAN_HOME is $e3_tmp/undeclared" "$e3_tmp/verb.err"):$(find "$e3_tmp/pkg" -maxdepth 1 -name 'build-*' | wc -l | tr -d ' ')"
+}
+check "RED — inside the environment with no image home, malf build, test, bench and lint exit 2 naming the home, before anything configures" \
+      "build:rc=2:1:0 test:rc=2:1:0 bench:rc=2:1:0 lint:rc=2:1:0" \
+      "$(for e3_v in build test bench lint; do e3_verb "$e3_v"; done | paste -sd' ')"
 rm -rf "$e3_tmp"
 
 echo "[7q7n] a third-party binary enters a first-party key only as the output of its OWN step, judged by its whole folder, and a first-party create builds only itself, with no remote (DN-142.D17)"
@@ -5928,6 +5973,32 @@ check "an application's executables resolve through the loader: /bin/true passes
       "$(python3 -I -c 'import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import package_relocate as r
 print(r.loads("ls_app", r.binary_of(Path(sys.argv[2]), "ls_app")[1]), (r.loads("ls_app", Path(sys.argv[3])) or "").split(" (")[0], r.loads("ls_app", Path(sys.argv[4])), sep="|")' "$MALF_ROOT" "$ls_home" "$ls_tmp/bad" "$ls_tmp/empty" 2>&1)"
 chmod 755 "$ls_tmp/producer"
+# relocate-verify's consumer install names no remote (DN-142.D30 (10) R12): measured 2026-10-19, all 21
+# consumers refused in the build environment, whose container has no network, because conan checks a
+# build tool's binary against every remote before it marks the tool skipped. The fixture: an application
+# whose recipe tool_requires lr_tool, a fresh home holding the application's binary and the tool's recipe
+# alone, and one remote that cannot be reached.
+mkdir -p "$ls_tmp/lr_tool" "$ls_tmp/lr_app" "$ls_tmp/lr-fresh/profiles" "$ls_tmp/lr-scratch"
+printf 'from conan import ConanFile\n\n\nclass LrTool(ConanFile):\n    name = "lr_tool"\n    version = "0.1"\n    package_type = "application"\n    settings = "os", "arch", "build_type"\n' \
+       > "$ls_tmp/lr_tool/conanfile.py"
+printf 'from conan import ConanFile\nfrom conan.tools.files import copy\n\n\nclass LrApp(ConanFile):\n    name = "lr_app"\n    version = "0.1"\n    package_type = "application"\n    settings = "os", "arch", "build_type"\n    tool_requires = "lr_tool/0.1"\n    exports_sources = "lr_app"\n\n    def package(self):\n        copy(self, "lr_app", self.source_folder, self.package_folder + "/bin")\n' \
+       > "$ls_tmp/lr_app/conanfile.py"
+cp /bin/true "$ls_tmp/lr_app/lr_app"
+ls_conan create "$ls_tmp/lr_tool" -pr:a fixture
+ls_conan create "$ls_tmp/lr_app" -pr:a fixture --build=missing
+ls_conan lock create --requires=lr_app/0.1 -pr:a fixture --lockfile-out="$ls_tmp/lr.lock"
+CONAN_HOME="$ls_home" conan list 'lr_app/0.1#*:*#*' --format=json > "$ls_tmp/lr-app.json" 2>/dev/null
+CONAN_HOME="$ls_home" conan list 'lr_tool/0.1#*' --format=json > "$ls_tmp/lr-tool.json" 2>/dev/null
+CONAN_HOME="$ls_home" conan pkglist merge -l "$ls_tmp/lr-app.json" -l "$ls_tmp/lr-tool.json" --format=json > "$ls_tmp/lr.json" 2>/dev/null
+ls_conan cache save --list="$ls_tmp/lr.json" --file="$ls_tmp/lr.tgz"
+cp "$ls_home/profiles/fixture" "$ls_tmp/lr-fresh/profiles/fixture"
+CONAN_HOME="$ls_tmp/lr-fresh" conan cache restore "$ls_tmp/lr.tgz" > /dev/null 2>&1
+CONAN_HOME="$ls_tmp/lr-fresh" conan remote remove '*' > /dev/null 2>&1
+CONAN_HOME="$ls_tmp/lr-fresh" conan remote add unreachable http://127.0.0.1:9 > /dev/null 2>&1
+check "RED — relocate-verify's consumer install of a package whose graph holds a skipped build tool, with no binary of it in the fresh home, is green with an unreachable remote configured: it names no remote" \
+      "tool-binaries=0 None" \
+      "tool-binaries=$(CONAN_HOME="$ls_tmp/lr-fresh" conan list 'lr_tool/0.1:*' --format=json 2>/dev/null | python3 -c 'import json, sys; print(sum(len(r.get("packages", {})) for v in json.load(sys.stdin)["Local Cache"].values() for r in v.get("revisions", {}).values()))') $(python3 -I -c 'import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import package_relocate as r
+print(r.consume(Path(sys.argv[2]), "fixture", "lr_app", "lr_app/0.1", Path(sys.argv[3]), Path(sys.argv[4]), "", "application"))' "$MALF_ROOT" "$ls_tmp/lr-fresh" "$ls_tmp/lr.lock" "$ls_tmp/lr-scratch" 2>&1 | tail -1)"
 # Every other resolution of the ship leg splices the same arguments, read from malf's source: the
 # store-build step, and the lockfile twin-verify's probe and relocate-verify
 # resolve against. Each verb takes it before its first conan call and refuses without it.

@@ -11,13 +11,15 @@ ONE home share every path but the per-create folder hash, so they prove less.
         binaries) restored into each <target home>, so a create there rebuilds first-party code
         only; a third-party binary the source lacks is built in each target alike
     package_twin.py seed-recipes <lockfile> <owned prefixes> <target home> <source home>...
-        every third-party recipe revision <lockfile> names (outside the owned namespaces) restored into
-        <target home> from the first <source home> holding it, recipes alone and no binary, then every
-        recipe of <target home> checked against its own conanmanifest.txt (`conan cache check-integrity`):
-        the home of a compiling act in the build environment, which builds every third-party binary
-        itself (DN-142.D30 (9) R7). A recipe whose files differ from its manifest is refused naming it
-        (exit 1); a revision no source holds is named and left to the graph that needs it, which fails
-        naming it, since the act has no network
+        every third-party recipe revision <lockfile> names (outside the owned namespaces) that <target
+        home> lacks restored from the first <source home> holding it, recipes alone and no binary, then
+        every recipe of <target home> checked against its own conanmanifest.txt (`conan cache
+        check-integrity`) and every lock revision it holds against the digest of that manifest: the home
+        of a compiling act in the build environment, which builds every third-party binary itself
+        (DN-142.D30 (9) R7) and runs this at every act ((10) R17). A recipe whose files differ from its
+        manifest, or whose manifest is not its revision, is refused naming it (exit 1); a revision no
+        source holds is named and left to the graph that needs it, which fails naming it, since the act
+        has no network
     package_twin.py missing <home> <released tsv> <owned prefixes> <host profile> <build profile> <lockfile>
         every released recipe exported into <home> (a seeded home, before any create), then its graph resolved
         there strictly against <lockfile>, as the creates resolve it: exit 0 when the home holds every third-party binary the graphs need, 3 naming each
@@ -43,6 +45,7 @@ a consumer pins and what N358's compare reads.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -91,21 +94,50 @@ def lock_recipes(lockfile: Path, prefixes: tuple[str, ...]) -> list[str]:
     return sorted(reference for reference in named if not reference.split("/", 1)[0].startswith(prefixes))
 
 
+def held_revisions(home: Path) -> set[str]:
+    """Every `name/version#revision` recipe `home` holds."""
+    listed = json.loads(conan(home, "list", "*#*", "--format=json")).get("Local Cache", {})
+    return {f"{ref}#{revision}" for ref, body in listed.items() for revision in (body.get("revisions") or {})}
+
+
+def manifest_revision(manifest: Path) -> str:
+    """The recipe revision conan derives from `manifest` (`FileTreeManifest.summary_hash`): the md5 of its
+    `path: md5` lines sorted by path, each closed by a newline; its first line, the export timestamp, is
+    no input."""
+    sums = dict(line.rpartition(": ")[::2] for line in manifest.read_text(encoding="utf-8").splitlines()[1:]
+                if line.strip())
+    return hashlib.md5("".join(f"{path}: {digest}\n" for path, digest in sorted(sums.items()))
+                       .encode("utf-8")).hexdigest()
+
+
+def forged_revisions(home: Path, references: list[str]) -> list[str]:
+    """Each of `references` whose recipe manifest in `home` does not digest to its own revision. `conan
+    cache check-integrity` compares the files with the manifest and never the manifest with the revision,
+    so a folder and a manifest edited together pass it."""
+    forged = []
+    for reference in references:
+        folder = Path(conan(home, "cache", "path", reference).strip())
+        derived = manifest_revision(folder / "conanmanifest.txt")
+        if derived != reference.split("#", 1)[1]:
+            forged.append(f"{reference} (its conanmanifest.txt digests to {derived})")
+    return forged
+
+
 def seed_recipes(lockfile: Path, prefixes: tuple[str, ...], target: Path, sources: list[Path]) -> int:
-    """Restore into `target` every third-party recipe revision of `lockfile` from the first of `sources`
-    holding it, recipes alone, then check every recipe of `target` against its manifest."""
+    """Restore into `target` every third-party recipe revision of `lockfile` it lacks from the first of
+    `sources` holding it, recipes alone, then check every recipe of `target` against its manifest and every
+    lock revision it holds against that manifest's digest."""
     wanted = lock_recipes(lockfile, prefixes)
     if not wanted:
         print(f"package_twin: REFUSED — {lockfile} names no third-party recipe to seed", file=sys.stderr)
         return 1
-    held: dict[Path, dict] = {}
-    for source in sources:
-        listed = json.loads(conan(source, "list", "*#*", "--format=json")).get("Local Cache", {})
-        held[source] = {f"{ref}#{revision}" for ref, body in listed.items()
-                        for revision in (body.get("revisions") or {})}
+    present = held_revisions(target)
+    held = {source: held_revisions(source) for source in sources}
     chosen: dict[Path, list[str]] = {}
     absent = []
     for reference in wanted:
+        if reference in present:
+            continue
         source = next((source for source in sources if reference in held[source]), None)
         if source is None:
             absent.append(reference)
@@ -136,8 +168,14 @@ def seed_recipes(lockfile: Path, prefixes: tuple[str, ...], target: Path, source
               f"so it is not the revision the lock pins:\n{(checked.stderr or checked.stdout).strip()}",
               file=sys.stderr)
         return 1
-    print(f"package_twin: {len(wanted) - len(absent)} recipe revision(s) restored into {target} match their "
-          f"conanmanifest.txt")
+    holding = sorted(set(wanted) & held_revisions(target))
+    forged = forged_revisions(target, holding)
+    if forged:
+        print(f"package_twin: REFUSED — a recipe of {target} carries a conanmanifest.txt that is not its "
+              f"revision, so it is not the revision the lock pins: {', '.join(forged)}", file=sys.stderr)
+        return 1
+    print(f"package_twin: {len(holding)} lock recipe revision(s) of {target} match their conanmanifest.txt, "
+          f"each manifest digesting to its revision; {sum(map(len, chosen.values()))} restored by this run")
     return 0
 
 

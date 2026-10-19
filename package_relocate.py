@@ -243,8 +243,9 @@ def consume(fresh: Path, profile: str, name: str, ref: str, lock: Path, scratch:
     (folder / "CMakeLists.txt").write_text(CONSUMER_LISTS.format(name=name, tu=CONSUMER_TU,
                                                                   import_std=import_std))
     profile_path = fresh / "profiles" / profile
+    # note: `--no-remote` because the claim is that the released closure in the fresh home alone serves a consumer; a remote would supply what it lacks, a build tool's binary first (DN-142.D30 (10) R12)
     install = ["conan", "install", f"--requires={ref}", f"--profile:host={profile_path}",
-               f"--profile:build={profile_path}", f"--lockfile={lock}", "--build=never", "-g",
+               f"--profile:build={profile_path}", f"--lockfile={lock}", "--build=never", "--no-remote", "-g",
                "CMakeToolchain", "-g",
                "CMakeDeps", "-c", "tools.cmake.cmaketoolchain:generator=Ninja", "-of",
                str(folder / "conan")]
