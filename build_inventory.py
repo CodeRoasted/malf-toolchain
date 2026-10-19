@@ -368,6 +368,10 @@ def run_cell_tests(name: str, label: str, build_dir: Path, conan_out: Path) -> i
     return 0
 
 
+# The variable naming a compiling act's recipe homes in the build environment (malf `_malf_seed_environment_home`).
+ENVIRONMENT_RECIPES_ENV = "MALF_ENVIRONMENT_RECIPES"
+
+
 def run_build(workspace: Path, repo_root: Path, build_key: str, profile: str,
               build_type: str, run_tests: bool) -> int:
     inventory = load_inventory(repo_root)
@@ -406,10 +410,14 @@ def run_build(workspace: Path, repo_root: Path, build_key: str, profile: str,
         print(f"── malf inventory: {repo_root.name}/{entry['path']} "
               f"(target {entry['target']}, {profile}) ──")
         conan_out = build_dir / "conan"
+        # A compiling act in the build environment resolves with no remote: its container has no
+        # network, and its home holds every recipe it may use (DN-142.D30 (9) R7, malf's
+        # `_malf_conan_install_args` beside it).
+        remote = ["--no-remote"] if os.environ.get(ENVIRONMENT_RECIPES_ENV) else []
         install = subprocess.run(
             ["conan", "install", str(toolchain_pkg),
              f"--profile:host={profile}", f"--profile:build={profile}",
-             "--build=missing", "-of", str(conan_out)],
+             "--build=missing", "-of", str(conan_out), *remote],
             capture_output=True, text=True)
         if install.returncode != 0:
             print(f"malf inventory: conan install FAILED for {name}", file=sys.stderr)
