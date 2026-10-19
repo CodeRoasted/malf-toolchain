@@ -388,11 +388,16 @@ drvfs_mounts="$(awk '$3=="9p" && $4 ~ /aname=drvfs/ {print $2}' /proc/mounts | t
 
 # The sandbox both units of an instance carry. ONE definition, printed into each unit, so the runner
 # and the daemon that runs its containers cannot drift apart: a container's bind mount is resolved in
-# dockerd's namespace, so a daemon outside the sandbox would reopen every door it closes. Each unit
-# gets its OWN private /tmp (and, for release, its own /dev/shm and IPC namespace): the two are not
-# joined. N214's units carried `JoinsNamespaceOf=` under [Service], where systemd ignores it
-# (systemd-analyze verify, 2026-09-29: "Unknown key name 'JoinsNamespaceOf' in section 'Service'"),
-# so separate namespaces are the measured shape every CI run since 2026-09-26 has had.
+# dockerd's namespace, so a daemon outside the sandbox would reopen every door it closes. For the same
+# reason the runner unit JOINS its dockerd's private /tmp and /var/tmp (`JoinsNamespaceOf=` under
+# [Unit], render_runner_unit; DN-142.D30 (9) R9): a container an act starts with the host's /tmp or a
+# scratch directory under it bind-mounted must see the runner's /tmp, never an empty directory dockerd
+# made in a /tmp of its own (step 0 run 38296956741: `sh: 1: ./sift: not found`), and an in-image
+# `git worktree prune` must see the candidates the runner's acts made there. The join also shares the
+# IPC namespace, the instance's own, and no network namespace (neither unit has PrivateNetwork). Each
+# unit keeps its own /dev/shm, a TemporaryFileSystem of its mount namespace. N214's units carried the
+# key under [Service], where systemd ignores it (systemd-analyze verify, 2026-09-29: "Unknown key name
+# 'JoinsNamespaceOf' in section 'Service'"), so until this line every seat ran with two /tmp.
 sandbox_lines() {
     cat <<EOF
 PrivateTmp=yes
@@ -471,6 +476,7 @@ render_runner_unit() {
 Description=GitHub Actions Runner ($ORG.$RUNNER_NAME) as $RUNNER_USER
 After=network-online.target $DOCKER_UNIT
 Wants=$DOCKER_UNIT
+JoinsNamespaceOf=$DOCKER_UNIT
 
 [Service]
 ExecStart=$NEW_DIR/runsvc.sh

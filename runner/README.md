@@ -242,10 +242,15 @@ control writes succeeded; and as `ghrelease`, all 7 targets of `malf-runner` ref
 **What the job-side refusal cannot see** (`setup-build-env`'s `conan-home.sh`): who the group admits.
 Read it back from the desk with the three commands above after any change to the group.
 
-The ci instance's live unit carries `JoinsNamespaceOf=` under `[Service]`, where systemd ignores it
-(`systemd-analyze verify`: "Unknown key name"); the runner and its dockerd have never shared a
-namespace. The script no longer writes the line, so the ci plan shows exactly that one line as drift
-until the ci instance is next applied — which changes no behaviour.
+**The runner and its dockerd share ONE private `/tmp`** (DN-142.D30 (9) R9): the runner unit carries
+`JoinsNamespaceOf=<its docker unit>` under `[Unit]`, because a container's bind source is resolved in
+dockerd's namespace, and a container mounting the host's `/tmp` (an in-image `git worktree` act) or a
+scratch directory under it must see the runner's. Before this line the two held separate private
+`/tmp` directories on both seats (read from the desk without root on 2026-10-19: four
+`/tmp/systemd-private-*-{actions.runner.*,coderoast-*-docker}.service-*` directories; the earlier
+`JoinsNamespaceOf=` line of N214 sat under `[Service]`, where systemd ignores it), and a bind of a
+scratch directory showed the container an empty directory (step 0 run 38296956741). The change takes
+effect when each instance is next applied, a root act, which restarts both units of the seat.
 
 ## Setup (on the warehouse box)
 
