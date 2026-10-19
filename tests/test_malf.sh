@@ -5237,6 +5237,94 @@ check "RED — inside the environment with no image home, malf build, test, benc
       "$(for e3_v in build test bench lint; do e3_verb "$e3_v"; done | paste -sd' ')"
 rm -rf "$e3_tmp"
 
+echo "[7e3c] an in-image compiling act refuses to build over a build graph naming a tree or a conan home not its own (DN-142.D30 (10) R20)"
+# Fixtures under the user's cache: a repository with a consumer and a dependency, each with a host tree
+# and this environment's, the act's conan home (a base, with a profile's home nested in it) and a second
+# home. A conan home is a directory holding p/ and version.txt.
+pv_tmp="$(realpath "$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/test_malf.pv.XXXXXX")")"
+pv_system=sha256:9efc94c0ea72cd5bf7950d0121b7747cac9ec11e1a32193e916ca06b62eb5ec5
+pv_own="build-clang21-asan.environment-9efc94c0ea72"
+pv_tree="$pv_tmp/repo/pkg/$pv_own"
+for pv_home in home home/clang21-asan other-home; do mkdir -p "$pv_tmp/$pv_home/p/b/fmt0123456789abc/p/lib" && echo 2 > "$pv_tmp/$pv_home/version.txt"; done
+mkdir -p "$pv_tree" "$pv_tmp/repo/dep/build-clang21-asan" "$pv_tmp/repo/dep/$pv_own"
+pv_graph() {   # <the dependency's archive path> [extra link word] — writes the tree's build.ninja and compile_commands.json
+    printf 'cmake_ninja_workdir = %s/\nbuild parse_fuzzer: CXX_EXECUTABLE_LINKER__parse_fuzzer CMakeFiles/parse_fuzzer.dir/main.cpp.o | %s\n  LINK_FLAGS = -Wl,--build-id -fsanitize=address\n  LINK_LIBRARIES = %s %s/home/p/b/fmt0123456789abc/p/lib/libfmt.a %s\n' \
+        "$pv_tree" "$1" "$1" "$pv_tmp" "${2:-}" > "$pv_tree/build.ninja"
+    printf '[{"directory": "%s", "command": "clang++ -I%s/repo/dep/include -isystem %s/home/p/b/fmt0123456789abc/p/include -o CMakeFiles/x.o -c %s/repo/pkg/main.cpp", "file": "%s/repo/pkg/main.cpp"}]\n' \
+        "$pv_tree" "$pv_tmp" "$pv_tmp" "$pv_tmp" "$pv_tmp" > "$pv_tree/compile_commands.json"
+}
+pv_check() {   # <MALF_SYSTEM or empty> [CONAN_HOME] — the check's exit, its count and the first path it names
+    bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e
+        if [[ -n "$3" ]]; then export MALF_SYSTEM="$3"; else unset MALF_SYSTEM; fi
+        CONAN_HOME="$4" _malf_build_provenance build "$2/build.ninja" "$2/compile_commands.json" 2> "$2.err"
+        echo "rc=$? $(grep -oE "names [0-9]+ path\(s\)" "$2.err") $(grep -oE "the first: [^ ]+" "$2.err" | sed "s#$5#<t>#")"' \
+        _ "$MALF_BIN" "$pv_tree" "$1" "${2:-$pv_tmp/home}" "$pv_tmp"
+}
+pv_graph "$pv_tmp/repo/dep/build-clang21-asan/libx.a"
+check "RED — under MALF_SYSTEM, a build.ninja linking a dependency's host tree (build-clang21-asan) is refused, exit 2, the path named" \
+      "rc=2 names 1 path(s) the first: <t>/repo/dep/build-clang21-asan/libx.a" "$(pv_check "$pv_system")"
+check "the same graph is not judged on the host: a desk build owns its trees" "rc=0  " "$(pv_check "")"
+pv_graph "$pv_tmp/repo/dep/$pv_own/libx.a"
+check "the same fixture over this environment's suffixed tree passes; --build-id and a path into the act's own home are its own" \
+      "rc=0  " "$(pv_check "$pv_system")"
+check "RED — another image's tree (another suffix) is refused" \
+      "rc=2 names 1 path(s) the first: <t>/repo/dep/build-clang21-asan.environment-0123456789ab/libx.a" \
+      "$(pv_graph "$pv_tmp/repo/dep/build-clang21-asan.environment-0123456789ab/libx.a"; pv_check "$pv_system")"
+check "RED — a path into a second conan home is refused" \
+      "rc=2 names 1 path(s) the first: <t>/other-home/p/b/fmt0123456789abc/p/lib/libfmt.a" \
+      "$(pv_graph "$pv_tmp/repo/dep/$pv_own/libx.a" "$pv_tmp/other-home/p/b/fmt0123456789abc/p/lib/libfmt.a"; pv_check "$pv_system")"
+check "RED — a path into a profile's home nested under the act's home base is another home, and refused" \
+      "rc=2 names 1 path(s) the first: <t>/home/clang21-asan/p/b/fmt0123456789abc/p/lib/libfmt.a" \
+      "$(pv_graph "$pv_tmp/repo/dep/$pv_own/libx.a" "$pv_tmp/home/clang21-asan/p/b/fmt0123456789abc/p/lib/libfmt.a"; pv_check "$pv_system")"
+pv_graph "$pv_tmp/repo/dep/$pv_own/libx.a"
+sed -i "s#-I$pv_tmp/repo/dep/include#-I../../dep/build-clang21-asan/include#" "$pv_tree/compile_commands.json"
+check "RED — a relative include in compile_commands.json resolving into a host tree is refused, resolved against the entry's directory" \
+      "rc=2 names 1 path(s) the first: <t>/repo/dep/build-clang21-asan/include" "$(pv_check "$pv_system")"
+pv_graph "$pv_tmp/repo/dep/$pv_own/libx.a"
+# THE CHECK SITS BETWEEN CONFIGURE AND THE FIRST COMPILE: configure is stubbed to write the graph, and the
+# compile to leave a mark.
+pv_configure() {   # <the dependency's archive path> [the build tool's exit] — the configure-and-build's exit, and whether anything compiled
+    bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; export MALF_SYSTEM="$3" CONAN_HOME="$4/home"
+        PV_TREE="$2" PV_ARCHIVE="$5" PV_BUILD_RC="$6"
+        cmake() { if [[ "$1" == --preset ]]; then sed -i "s#[^ ]*/libx\.a#$PV_ARCHIVE#g" "$PV_TREE/build.ninja"; else echo compiled >> "$PV_TREE.compiled"; return "$PV_BUILD_RC"; fi; }
+        _malf_preset() { echo fixture; }; _malf_assert_tree_matches_profile() { :; }; _malf_build_width() { :; }
+        _MALF_BUILD_WIDTH_LINE=fixture _MALF_BUILD_JOBS=1 _MALF_BUILD_CAP_KB=1
+        python3() { case "$1" in *ninja_deps_guard.py) return 0 ;; esac; command python3 "$@"; }
+        _malf_run_measured() { shift; "$@"; }
+        rm -f "$2.compiled"; _malf_configure_and_build "$4/repo/pkg" "$2" 2>/dev/null; echo "rc=$? compiled=$(cat "$2.compiled" 2>/dev/null | wc -l)"' \
+        _ "$MALF_BIN" "$pv_tree" "$pv_system" "$pv_tmp" "$1" "${2:-0}"
+}
+check "RED — configure-and-build over a graph naming a host tree returns 2 and never compiles; over its own trees it compiles" \
+      "rc=2 compiled=0|rc=0 compiled=1" \
+      "$(pv_configure "$pv_tmp/repo/dep/build-clang21-asan/libx.a")|$(pv_configure "$pv_tmp/repo/dep/$pv_own/libx.a")"
+check "a compile red is 1 whatever the build tool exited (ninja's 2 on an interrupt included): only the refusal is 2" \
+      "rc=1 compiled=1" "$(pv_configure "$pv_tmp/repo/dep/$pv_own/libx.a" 2)"
+pv_graph "$pv_tmp/repo/dep/$pv_own/libx.a"
+# THE REFUSAL REACHES THE VERB'S EXIT AS 2 through the target flow, an editable dependency's build and a sweep.
+check "RED — a refused configure stays exit 2 through the target build, an editable dependency's build and a sweep member" \
+      "2 2 2" \
+      "$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e
+        conan() { :; }; _malf_conan_install_args() { :; }; _malf_cmake_feature_args() { :; }; _malf_dependency_cmake_args() { :; }
+        _malf_configure_and_build() { return 2; }; _malf_merge_compile_commands() { :; }
+        _malf_build_flow_locked "$2/repo/pkg" "$2/repo/pkg/b" > /dev/null 2>&1; printf "%s " "$?"
+        _malf_build_editable_package_locked "$2/repo/dep" "$2/repo/dep/b" > /dev/null 2>&1; printf "%s " "$?"
+        mkdir -p "$2/fake-malf"; printf "#!/bin/sh\nexit 2\n" > "$2/fake-malf/malf"; chmod +x "$2/fake-malf/malf"
+        PV_REPO="$2/repo"; _malf_member_packages() { :; }; _malf_graph_rows() { printf "ex_a/0.1\t%s\nex_b/0.1\t%s\n" "$PV_REPO/dep" "$PV_REPO/pkg"; }
+        ( MALF_DIR="$2/fake-malf"; _malf_resolve_target_or_sweep build "$2/repo" ) > /dev/null 2>&1; echo "$?"' _ "$MALF_BIN" "$pv_tmp")"
+# `malf lint` READS THE ENVIRONMENT'S DATABASE AND JUDGES IT before clang-tidy starts.
+check "inside the environment lint's default database is the image's tree, on the host the profile's" \
+      "$pv_tmp/repo/build-clang21-libcxx-release.environment-9efc94c0ea72 $pv_tmp/repo/build-clang21-libcxx-release" \
+      "$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; printf "%s %s" "$(MALF_SYSTEM="$3" _malf_default_build_root "$2/repo")" "$(unset MALF_SYSTEM; _malf_default_build_root "$2/repo")"' _ "$MALF_BIN" "$pv_tmp" "$pv_system")"
+mkdir -p "$pv_tmp/repo/build-clang21-libcxx-release.environment-9efc94c0ea72"
+sed "s#-I$pv_tmp/repo/dep/include#-I$pv_tmp/repo/dep/build-clang21-libcxx-release/include#" "$pv_tree/compile_commands.json" \
+    > "$pv_tmp/repo/build-clang21-libcxx-release.environment-9efc94c0ea72/compile_commands.json"
+check "RED — malf lint inside the environment refuses a database naming a host tree, exit 2, before clang-tidy runs" \
+      "rc=2 1 0" \
+      "$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; export MALF_SYSTEM="$3" MALF_ENVIRONMENT_RECIPES=/walk CONAN_HOME="$2/home"
+        CWD="$2/repo"; clang-tidy() { echo ran >> "$2/tidy.ran"; }; run-clang-tidy() { clang-tidy; }
+        ( cmd_lint --all-files ) > /dev/null 2> "$2/lint.err"; echo "rc=$? $(grep -c "build-clang21-libcxx-release/include" "$2/lint.err") $(cat "$2/tidy.ran" 2>/dev/null | wc -l)"' _ "$MALF_BIN" "$pv_tmp" "$pv_system")"
+rm -rf "$pv_tmp"
+
 echo "[7q7n] a third-party binary enters a first-party key only as the output of its OWN step, judged by its whole folder, and a first-party create builds only itself, with no remote (DN-142.D17)"
 # The fixtures are python-only recipes, so no compiler runs. tpv's package holds its own build
 # folder, so it differs between two homes; tpr's is constant; tpd's also holds its build folder, so

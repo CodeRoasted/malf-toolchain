@@ -437,23 +437,47 @@ _malf_profile_key() {
 # tree a host compiler wrote, nor a host build over one the image wrote, and a new image starts its
 # trees afresh. `_malf_build_tree_environment` refuses what the name alone cannot rule out.
 _MALF_ENVIRONMENT_KEY_HEX=12
+# post: `.environment-<the first 12 hex of MALF_SYSTEM>` inside the build environment, empty outside.
+_malf_environment_suffix() {
+    [[ -n "${MALF_SYSTEM:-}" ]] || return 0
+    local digest="${MALF_SYSTEM#sha256:}"
+    echo ".environment-${digest:0:$_MALF_ENVIRONMENT_KEY_HEX}"
+}
 _malf_build_key() {
-    local name="${MALF_PROFILE_NAME:-$MALF_DEFAULT_PROFILE}" key digest
+    local name="${MALF_PROFILE_NAME:-$MALF_DEFAULT_PROFILE}" key
     case "$name" in
         linux-*) key="${name#linux-}" ;;
         *)       key="$name" ;;
     esac
-    if [[ -n "${MALF_SYSTEM:-}" ]]; then
-        digest="${MALF_SYSTEM#sha256:}"
-        key="$key.environment-${digest:0:$_MALF_ENVIRONMENT_KEY_HEX}"
-    fi
-    echo "$key"
+    echo "$key$(_malf_environment_suffix)"
 }
 
-# The DEFAULT profile's build root under a directory (what .clangd's
-# CompilationDatabase points at, whatever profile the CURRENT command runs).
+# The DEFAULT profile's build root under a directory (what .clangd's CompilationDatabase points at,
+# whatever profile the CURRENT command runs, and what `malf lint` reads). Inside the build environment it
+# is the image's tree, which the environment's own build wrote: the host's database names host trees and
+# host module interfaces (DN-142.D30 (10) R20).
 _malf_default_build_root() {
-    echo "$1/build-${MALF_DEFAULT_PROFILE#linux-}"
+    echo "$1/build-${MALF_DEFAULT_PROFILE#linux-}$(_malf_environment_suffix)"
+}
+
+# THE BUILD GRAPH NAMES ONLY THE ACT'S OWN TREES AND HOME (DN-142.D30 (10) R20): inside the build
+# environment, after configure and before the first compile (and before clang-tidy reads a database),
+# every path of the graph naming a malf build tree must name this environment's, and every path into a
+# conan home must be into CONAN_HOME. Measured 2026-10-19: a fuzz tree in the image linked its editables'
+# host archives through a recipe's layout (malf 19fa219), and an arm over one install argument could not
+# see it. On the host the check does not run: a desk build owns its trees.
+# post: 0 when the graph is the act's own or the act runs on the host; 2 refused, the first path named.
+_malf_build_provenance() {   # <verb> <graph file>...
+    [[ -n "${MALF_SYSTEM:-}" ]] || return 0
+    local verb="$1" profile suffix
+    shift
+    local -a keys=()
+    for profile in "$MALF_DIR"/profiles/*; do
+        keys+=("$(unset MALF_SYSTEM; MALF_PROFILE_NAME="${profile##*/}" _malf_build_key)")
+    done
+    suffix="$(_malf_environment_suffix)"
+    python3 "$MALF_DIR/build_provenance.py" --verb "$verb" --environment "${suffix#.}" \
+        --conan-home "$CONAN_HOME" --keys "${keys[*]}" "$@" || return 2
 }
 
 # Sync the in-tree conan config (the source of truth) into the active CONAN_HOME, OVERWRITING when
@@ -795,13 +819,17 @@ _malf_resolve_target_or_sweep() {
         # for the inventory (run once per repo, never per member), which is a different question
         # from "may I sweep?". Conflating them would hide the recursion guard inside a flag whose
         # name is about something else.
-        if ! MALF_SWEEP=1 MALF_ONLY=1 "$MALF_DIR/malf" "$verb" "$member" "$@"; then
+        # note: a member's exit 2 (refused before it compiled, nothing judged) stays 2; any other red is 1.
+        local member_rc=0
+        MALF_SWEEP=1 MALF_ONLY=1 "$MALF_DIR/malf" "$verb" "$member" "$@" || member_rc=$?
+        if [[ $member_rc -ne 0 ]]; then
             echo "malf $verb: sweep FAILED at $label ($((i-1))/${#members[@]} completed)" >&2
+            [[ $member_rc -eq 2 ]] && exit 2
             exit 1
         fi
     done
     echo "=== malf $verb: all ${#members[@]} packages done ==="
-    _malf_sweep_settle_db "$root" "${members[@]}" || exit 1
+    _malf_sweep_settle_db "$root" "${members[@]}" || exit
     if [[ "$verb" == "build" || "$verb" == "test" ]]; then
         _malf_run_inventory "$verb" "$root" "${members[@]}" || exit 1
     fi
@@ -832,7 +860,7 @@ _malf_sweep_settle_db() {            # <sweep_root> <member_dir>...
             echo "malf: settling $(_malf_pkg_ref "$member/conanfile.py") in target role" \
                  "(was: $_MALF_TREE_ROLE${_MALF_TREE_ROLE_VARS:+, $_MALF_TREE_ROLE_VARS OFF})"
             _malf_with_build_lock "$build_dir" _malf_settle_target_role_locked "$member" "$build_dir" \
-                || return 1
+                || return
             _malf_commands_tree_role "$build_dir"
             if [[ "$_MALF_TREE_ROLE" != "target" ]]; then
                 echo "malf: FATAL: $build_dir is still in $_MALF_TREE_ROLE role after a target configure" \
@@ -1333,12 +1361,10 @@ _malf_build_editable_package_locked() {
 
     local cmake_args=()
     mapfile -t cmake_args < <(_malf_dependency_cmake_args "$pkg_dir")
-    if ! _malf_configure_and_build "$pkg_dir" "$build_dir" "${cmake_args[@]}"; then
-        _malf_restore_user_presets "$pkg_dir" "$user_presets_backup"
-        return 1
-    fi
-
+    local rc=0
+    _malf_configure_and_build "$pkg_dir" "$build_dir" "${cmake_args[@]}" || rc=$?
     _malf_restore_user_presets "$pkg_dir" "$user_presets_backup"
+    return "$rc"
 }
 
 # ONE list drives BOTH loops below, and it is the BUILD closure — every member this run
@@ -1693,11 +1719,13 @@ _malf_configure_and_build() {
     # previous configuration and malf exited 0 in every form — the [7q13] selftest arm.
     cmake --preset "$preset" -S "$target" -B "$build_dir" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-        "$@" || return
+        "$@" || return 1
     _malf_assert_tree_matches_profile "$build_dir"
+    # note: the one exit 2 of this function (refused before the first compile); every other red is 1.
+    _malf_build_provenance build "$build_dir/build.ninja" "$build_dir/compile_commands.json" || return 2
     # An object with no record in .ninja_deps can be linked stale while every test passes; the
     # guard deletes it so ninja must recompile it, and refuses the build when it cannot check.
-    python3 "$MALF_DIR/ninja_deps_guard.py" "$build_dir" || return
+    python3 "$MALF_DIR/ninja_deps_guard.py" "$build_dir" || return 1
     _malf_build_width
     echo "$_MALF_BUILD_WIDTH_LINE" >&2
     if [[ "${MALF_IS_SANITIZER:-0}" == "1" ]]; then
@@ -1714,7 +1742,7 @@ _malf_configure_and_build() {
     _malf_run_measured "$peak_file" cmake --build "$build_dir" -j"$_MALF_BUILD_JOBS" || build_rc=$?
     _malf_cap_note "malf build" "$(cat "$peak_file" 2>/dev/null)" "$_MALF_BUILD_CAP_KB" "$cap_variable"
     rm -f "$peak_file"
-    return "$build_rc"
+    (( build_rc == 0 )) || return 1
 }
 
 _malf_repo_root() {
@@ -1844,13 +1872,13 @@ _malf_build_flow_locked() {
         _malf_write_user_presets "$target" "$build_dir"
         local cmake_args=()
         mapfile -t cmake_args < <(_malf_cmake_feature_args "$target" ON ON)
-        _malf_configure_and_build "$target" "$build_dir" "${cmake_args[@]}" || rc=1
+        _malf_configure_and_build "$target" "$build_dir" "${cmake_args[@]}" || rc=$?
     else
         rc=1
     fi
     if [[ $rc -ne 0 ]]; then
         _malf_restore_user_presets "$target" "$user_presets_backup"
-        return 1
+        return "$rc"
     fi
     [[ -n "$user_presets_backup" ]] && rm -f "$user_presets_backup"
     _malf_merge_compile_commands "$build_dir" "$target"
@@ -2173,6 +2201,9 @@ cmd_lint() {
         echo "malf lint: build the package ('malf build') or index it ('malf commands') first." >&2
         exit 1
     fi
+    # Inside the build environment clang-tidy reads only a database of the act's own trees and home
+    # (DN-142.D30 (10) R20): a host database names host module interfaces another compiler wrote.
+    _malf_build_provenance lint "$comp_db/compile_commands.json" || exit 2
 
     # ── ...and the database's TOOLCHAIN must be clang's, for the SAME reason. ──────────
     # The guard above refuses an ABSENT database because clang-tidy without flags reports
