@@ -68,7 +68,7 @@ class Judge:
 
     def offence(self, path: str) -> str | None:
         """Why `path` is not the act's own, or None when it is."""
-        ancestor = os.path.dirname(path)
+        ancestor = path
         while ancestor not in ("/", ""):
             if self.is_home(ancestor):
                 if os.path.realpath(ancestor) == self.own_home:

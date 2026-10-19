@@ -5276,6 +5276,15 @@ check "RED — a path into a second conan home is refused" \
 check "RED — a path into a profile's home nested under the act's home base is another home, and refused" \
       "rc=2 names 1 path(s) the first: <t>/home/clang21-asan/p/b/fmt0123456789abc/p/lib/libfmt.a" \
       "$(pv_graph "$pv_tmp/repo/dep/$pv_own/libx.a" "$pv_tmp/home/clang21-asan/p/b/fmt0123456789abc/p/lib/libfmt.a"; pv_check "$pv_system")"
+# A HOME NAMED BARE (a prefix map's left side) is judged as the home it is, never by its parent: an act
+# whose home is a profile's home nested under the base names its own home, and the base is not its home.
+pv_graph "$pv_tmp/repo/dep/$pv_own/libx.a" "-ffile-prefix-map=$pv_tmp/home/clang21-asan=/malf-home"
+sed -i "s#$pv_tmp/home/p/b/#$pv_tmp/home/clang21-asan/p/b/#g" "$pv_tree/build.ninja" "$pv_tree/compile_commands.json"
+check "an act in a profile's home nested under the base names that home bare: it is the act's own, never the base's" \
+      "rc=0  " "$(pv_check "$pv_system" "$pv_tmp/home/clang21-asan")"
+check "RED — a second conan home named bare is refused" \
+      "rc=2 names 1 path(s) the first: <t>/other-home" \
+      "$(pv_graph "$pv_tmp/repo/dep/$pv_own/libx.a" "-ffile-prefix-map=$pv_tmp/other-home=/malf-home"; pv_check "$pv_system")"
 pv_graph "$pv_tmp/repo/dep/$pv_own/libx.a"
 sed -i "s#-I$pv_tmp/repo/dep/include#-I../../dep/build-clang21-asan/include#" "$pv_tree/compile_commands.json"
 check "RED — a relative include in compile_commands.json resolving into a host tree is refused, resolved against the entry's directory" \
