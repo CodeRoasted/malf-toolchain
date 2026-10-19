@@ -1103,6 +1103,13 @@ _malf_ship_lock_args() {
 # every recipe it may use (_malf_seed_environment_home), its container has no network, and a binary
 # it lacks is built there from the source cache; a remote lookup would only fail the act on a host
 # that cannot resolve (measured in the first inventory run, 2026-10-19: `remote not available`).
+# THE INSTALL NAMES EVERY EDITABLE'S BUILD TREE TO CONAN (DN-142.D30 (9) R7, (10) R18): a recipe's layout
+# reads `user.malf:editable_build_dir` for the libraries and build-tree config a consumer links, and the
+# profile carries it WITHOUT the environment's suffix. Inside the image the consumer then linked each
+# editable's HOST tree beside BMIs it synthesised from the current sources: measured 2026-10-19, the
+# sanitizer replay's parse_fuzzer linked an Oct 12 host libinsight_sift.a (RankedChange 448 bytes) with
+# a 472-byte RankedChange destructor, and ASan reported a stack-buffer-overflow in emit_level.
+# MALF_EDITABLE_BUILD_DIR is malf's own tree name, so the two cannot disagree.
 _malf_conan_install_args() {
     local build_type="${MALF_CONFIG:-Release}" remote=""
     [[ -z "${MALF_ENVIRONMENT_RECIPES:-}" ]] || remote="--no-remote"
@@ -1112,6 +1119,7 @@ _malf_conan_install_args() {
          "--profile:build=$MALF_BUILD_PROFILE" \
          "-s" "build_type=$build_type" \
          "-c" "user.malf:profile=$MALF_PROFILE_NAME" \
+         "-c" "user.malf:editable_build_dir=$MALF_EDITABLE_BUILD_DIR" \
          $(_malf_lockfile_args) $remote
 }
 

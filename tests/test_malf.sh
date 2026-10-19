@@ -5150,6 +5150,9 @@ check "outside the image a build tree is keyed by its profile alone; inside, it 
 check "RED — a compiling act in the image resolves with no remote (its container has no network); a desk build keeps its remotes" \
       "1 0" \
       "$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; MALF_ENVIRONMENT_RECIPES=/walk _malf_conan_install_args | tr " " "\n" | grep -cx -- --no-remote; unset MALF_ENVIRONMENT_RECIPES; _malf_conan_install_args | tr " " "\n" | grep -cx -- --no-remote' _ "$MALF_BIN" | paste -sd' ')"
+check "RED — the install names malf's own build tree to every editable's layout: the image's tree inside it, the profile's outside (DN-142.D30 (10) R18: a consumer in the image linked its editables' host trees)" \
+      "user.malf:editable_build_dir=build-gcc16-release.environment-9efc94c0ea72 user.malf:editable_build_dir=build-gcc16-release" \
+      "$(for e3_system in sha256:9efc94c0ea72cd5bf7950d0121b7747cac9ec11e1a32193e916ca06b62eb5ec5 ""; do bash -c 'if [[ -n "$2" ]]; then export MALF_SYSTEM="$2"; else unset MALF_SYSTEM; fi; MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; _malf_apply_profile linux-gcc16-release >/dev/null 2>&1; _malf_conan_install_args | tr " " "\n" | grep -x "user.malf:editable_build_dir=.*"' _ "$MALF_BIN" "$e3_system"; done | paste -sd' ')"
 e3_tmp="$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/test_malf.e3.XXXXXX")"
 e3_stamp() {   # <tree> <MALF_SYSTEM or empty> — the stamp check's exit and the stamp it leaves
     bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e
