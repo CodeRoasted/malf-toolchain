@@ -5147,6 +5147,9 @@ echo "[7e3] a compiling act in the build environment builds in trees and a conan
 check "outside the image a build tree is keyed by its profile alone; inside, it carries the image's config digest" \
       "gcc16-release gcc16-release.environment-9efc94c0ea72" \
       "$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; MALF_PROFILE_NAME=linux-gcc16-release; unset MALF_SYSTEM; printf "%s " "$(_malf_build_key)"; MALF_SYSTEM=sha256:9efc94c0ea72cd5bf7950d0121b7747cac9ec11e1a32193e916ca06b62eb5ec5 _malf_build_key' _ "$MALF_BIN")"
+check "RED — a compiling act in the image resolves with no remote (its container has no network); a desk build keeps its remotes" \
+      "1 0" \
+      "$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; MALF_ENVIRONMENT_RECIPES=/walk _malf_conan_install_args | tr " " "\n" | grep -cx -- --no-remote; unset MALF_ENVIRONMENT_RECIPES; _malf_conan_install_args | tr " " "\n" | grep -cx -- --no-remote' _ "$MALF_BIN" | paste -sd' ')"
 e3_tmp="$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/test_malf.e3.XXXXXX")"
 e3_stamp() {   # <tree> <MALF_SYSTEM or empty> — the stamp check's exit and the stamp it leaves
     bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e

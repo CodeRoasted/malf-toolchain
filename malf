@@ -1099,15 +1099,20 @@ _malf_ship_lock_args() {
 # the one a writer create names: measured at insight-metalog's v1.10.7 Release (run 38861801791),
 # where `malf build` inside measure-benchmark built the vendored insight_canon from source and
 # died "user.malf:profile names no profile". A `user.*` conf is never a package-id input.
+# A COMPILING ACT IN THE BUILD ENVIRONMENT RESOLVES WITH NO REMOTE (DN-142.D30 (9) R7): its home holds
+# every recipe it may use (_malf_seed_environment_home), its container has no network, and a binary
+# it lacks is built there from the source cache; a remote lookup would only fail the act on a host
+# that cannot resolve (measured in the first inventory run, 2026-10-19: `remote not available`).
 _malf_conan_install_args() {
-    local build_type="${MALF_CONFIG:-Release}"
+    local build_type="${MALF_CONFIG:-Release}" remote=""
+    [[ -z "${MALF_ENVIRONMENT_RECIPES:-}" ]] || remote="--no-remote"
     # shellcheck disable=SC2046
     echo "--build=missing" \
          "--profile:host=$MALF_PROFILE" \
          "--profile:build=$MALF_BUILD_PROFILE" \
          "-s" "build_type=$build_type" \
          "-c" "user.malf:profile=$MALF_PROFILE_NAME" \
-         $(_malf_lockfile_args)
+         $(_malf_lockfile_args) $remote
 }
 
 _malf_editable_add() {
