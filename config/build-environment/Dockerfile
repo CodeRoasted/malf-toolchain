@@ -10,7 +10,12 @@
 # on 2026-10-18 from snapshot.ubuntu.com at that day's index; the ship compiler, the sha256-pinned
 # gcc-16.2 build malf's build-gcc-toolchain.yml publishes, at /opt/gcc-16.2 where the profile names
 # it and behind the system `gcc`/`cc` names as on the desk; and a venv of hashed wheels (conan, cmake,
-# ninja, PyYAML, the jsonschema closure). The clang-21 legs come from apt.llvm.org at build time, which
+# ninja, PyYAML, the jsonschema closure); the tools the keyed acts execute (DN-142.D30 (10) R19): ripgrep,
+# openssh-client (ssh-keygen, which in the image only verifies or makes a throwaway key), valgrind and
+# shellcheck as snapshot-pinned apt packages, and actionlint at the ACTIONLINT_VERSION of
+# .github/workflows/coderoast-lint.yml (definition-check reds a drift), its release tarball checked against
+# the sha256 below, the value the release's own checksums.txt names, at
+# /opt/build-environment/actionlint/<version>/actionlint. The clang-21 legs come from apt.llvm.org at build time, which
 # no snapshot serves, so they are UNPINNED (DN-142.D30 (7) R3: the key is the image's digest, never this
 # file) and the source is trusted only under the LLVM archive key, checked by fingerprint; the versions
 # installed are read back into the pin's commit. Everything a walk would otherwise fetch from the network
@@ -31,6 +36,8 @@ FROM ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f57
 ARG SNAPSHOT=20261018T000000Z
 ARG GCC_ASSET=https://github.com/CodeRoasted/malf-toolchain/releases/download/gcc-16.2.0/gcc-16.2-noble-x64.tar.zst
 ARG GCC_SHA256=736331ecc8b4cf433b916b2be5d618b87811cf881ee6b5f0d6bab1cad199a70b
+ARG ACTIONLINT_VERSION=1.7.12
+ARG ACTIONLINT_SHA256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
 
 ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8
 
@@ -53,13 +60,17 @@ RUN apt-get update \
       libzstd1=1.5.5+dfsg2-2build1.1 \
       linux-libc-dev=6.8.0-147.147 \
       make=4.3-4.1build2 \
+      openssh-client=1:9.6p1-3ubuntu13.20 \
       patchelf=0.18.0-1.1build1 \
       perl=5.38.2-3.2ubuntu0.6 \
       python3.12=3.12.3-1ubuntu0.17 \
       python3.12-venv=3.12.3-1ubuntu0.17 \
+      ripgrep=14.1.0-1 \
+      shellcheck=0.9.0-1 \
       strace=6.8-0ubuntu2 \
       unzip=6.0-28ubuntu4.1 \
       util-linux=2.39.3-9ubuntu6.6 \
+      valgrind=1:3.22.0-0ubuntu3 \
       xz-utils=5.6.1+really5.4.5-1ubuntu0.3 \
       zstd=1.5.5+dfsg2-2build1.1 \
  && rm -rf /var/lib/apt/lists/*
@@ -69,6 +80,12 @@ RUN tar -C /opt -I zstd -xf /tmp/gcc.tar.zst && rm /tmp/gcc.tar.zst \
  && test -x /opt/gcc-16.2/bin/g++ \
  && ln -sf /opt/gcc-16.2/bin/gcc /usr/bin/cc && ln -sf /opt/gcc-16.2/bin/g++ /usr/bin/c++ \
  && ln -sf /opt/gcc-16.2/bin/gcc /usr/bin/gcc && ln -sf /opt/gcc-16.2/bin/g++ /usr/bin/g++
+
+ADD --checksum=sha256:${ACTIONLINT_SHA256} https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz /tmp/actionlint.tar.gz
+RUN mkdir -p /opt/build-environment/actionlint/${ACTIONLINT_VERSION} \
+ && tar -C /opt/build-environment/actionlint/${ACTIONLINT_VERSION} -xzf /tmp/actionlint.tar.gz actionlint \
+ && rm /tmp/actionlint.tar.gz \
+ && test "$(/opt/build-environment/actionlint/${ACTIONLINT_VERSION}/actionlint -version | head -n 1)" = "${ACTIONLINT_VERSION}"
 
 COPY bootstrap.txt requirements.txt /opt/build-environment/
 RUN python3.12 -m venv /opt/venv \

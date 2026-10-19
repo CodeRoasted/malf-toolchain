@@ -47,7 +47,9 @@ every privileged syscall by the kernel.
         the definition against the lock (DN-142.D30 (5) E2a): every third-party recipe of conan.lock whose
         source() fetches with git, read from the first conan home holding its revision (default: CONAN_HOME
         and each home under it), has a row in config/build-environment/git-mirrors.txt naming its URL and
-        commit, and no row is left that no recipe fetches; exit 0, or 1 naming each
+        commit, and no row is left that no recipe fetches; and the definition's one `ARG ACTIONLINT_VERSION`
+        equals the one `ACTIONLINT_VERSION` of .github/workflows/coderoast-lint.yml (DN-142.D30 (10) R19), so a
+        workflow bump without a rebuild reds here, not in a walk; exit 0, or 1 naming each
     build_environment.py mirror-check
         each mirror row served by the pinned image: a `--network none` container runs conan's own
         Git.fetch_commit of the row's URL and commit (the recipe's `git fetch --depth 1 origin <commit>`)
@@ -107,6 +109,11 @@ from pathlib import Path
 PIN = Path(__file__).resolve().parent / "config" / "build-environment.json"
 DEFINITION = Path(__file__).resolve().parent / "config" / "build-environment"
 GIT_MIRRORS = DEFINITION / "git-mirrors.txt"
+DOCKERFILE = DEFINITION / "Dockerfile"
+LINT_WORKFLOW = Path(__file__).resolve().parent / ".github" / "workflows" / "coderoast-lint.yml"
+ACTIONLINT_KEY = "ACTIONLINT_VERSION"
+ACTIONLINT_ARG = re.compile(rf"^ARG {ACTIONLINT_KEY}=(\S*)", re.MULTILINE)
+VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 LOCK = Path(__file__).resolve().parent / "conan.lock"
 MIRROR_ROOT = "/opt/build-environment/git-mirrors"
 # A source() that fetches with git: conan's Git helper, or a git clone/fetch it runs itself.
@@ -718,11 +725,42 @@ def recipe_folder(reference: str, homes: list[Path]) -> Path | None:
     return None
 
 
+def _workflow_values(node: object, key: str) -> list[str]:
+    """Every scalar value under `key` anywhere in a parsed workflow document."""
+    if isinstance(node, dict):
+        return [found for name, value in node.items()
+                for found in ([str(value)] if name == key and isinstance(value, (str, int, float)) else [])
+                + _workflow_values(value, key)]
+    if isinstance(node, list):
+        return [found for item in node for found in _workflow_values(item, key)]
+    return []
+
+
+def actionlint_findings(dockerfile: Path = DOCKERFILE, workflow: Path = LINT_WORKFLOW) -> list[str]:
+    """The finding when the definition's actionlint version is not the one the lint workflow pins
+    (DN-142.D30 (10) R19): each must carry exactly one X.Y.Z, and the two must be equal."""
+    import yaml
+
+    try:
+        defined = sorted(set(ACTIONLINT_ARG.findall(dockerfile.read_text())))
+        pinned = sorted(set(_workflow_values(yaml.safe_load(workflow.read_text()), ACTIONLINT_KEY)))
+    except (OSError, yaml.YAMLError) as unread:
+        return [f"the actionlint pin cannot be compared: {unread!r}"]
+    findings = [f"{where} must carry exactly one {spelling} of the form X.Y.Z, and carries {values or 'none'}"
+                for where, spelling, values in ((dockerfile, f"ARG {ACTIONLINT_KEY}", defined),
+                                                (workflow, ACTIONLINT_KEY, pinned))
+                if len(values) != 1 or not VERSION.match(values[0])]
+    if not findings and defined != pinned:
+        findings.append(f"the definition installs actionlint {defined[0]} ({dockerfile.name}) and {workflow.name} "
+                        f"pins {pinned[0]}: rebuild and re-pin the image at the workflow's version")
+    return findings
+
+
 def definition_check(homes: list[Path], lock: Path = LOCK, mirrors_path: Path = GIT_MIRRORS) -> list[str]:
-    """Each finding of the definition against the lock (definition-check)."""
+    """Each finding of the definition against the lock and the lint workflow (definition-check)."""
     mirrors = read_mirrors(mirrors_path)
     sourced: dict[str, tuple[str, str]] = {}
-    findings = []
+    findings = actionlint_findings()
     for reference in lock_third_party(lock):
         folder = recipe_folder(reference, homes)
         if folder is None:
@@ -1078,6 +1116,22 @@ def selftest() -> int:
             refusal(lambda: read_mirrors(recipes / "mirrors.txt")).endswith(f"repeats the mirror of {upstream}"), True)
         arm("the mirror of a URL is its path without the scheme, under the image's mirror root",
             mirror_path(upstream), f"{MIRROR_ROOT}/git.example.org/config.git")
+        defined, pinned = recipes / "Dockerfile", recipes / "coderoast-lint.yml"
+        pinned.write_text("jobs:\n  lint:\n    steps:\n      - env:\n          ACTIONLINT_VERSION: '1.7.12'\n")
+        defined.write_text("FROM scratch\nARG ACTIONLINT_VERSION=1.7.12\n")
+        arm("a definition installing the lint workflow's actionlint version passes (DN-142.D30 (10) R19)",
+            actionlint_findings(defined, pinned), [])
+        defined.write_text("FROM scratch\nARG ACTIONLINT_VERSION=1.7.11\n")
+        arm("RED: a definition installing another actionlint version than the workflow pins is named, both versions",
+            actionlint_findings(defined, pinned),
+            [f"the definition installs actionlint 1.7.11 (Dockerfile) and coderoast-lint.yml pins 1.7.12: rebuild "
+             "and re-pin the image at the workflow's version"])
+        defined.write_text("FROM scratch\n")
+        arm("RED: a definition installing no actionlint is named",
+            actionlint_findings(defined, pinned),
+            [f"{defined} must carry exactly one ARG ACTIONLINT_VERSION of the form X.Y.Z, and carries none"])
+        arm("the definition in this tree installs the actionlint version coderoast-lint.yml pins",
+            actionlint_findings(), [])
 
     with tempfile.TemporaryDirectory(prefix="build_environment.worktrees.") as held:
         base = Path(held)
