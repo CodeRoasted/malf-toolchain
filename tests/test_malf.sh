@@ -5276,6 +5276,21 @@ check "RED — a path into a second conan home is refused" \
 check "RED — a path into a profile's home nested under the act's home base is another home, and refused" \
       "rc=2 names 1 path(s) the first: <t>/home/clang21-asan/p/b/fmt0123456789abc/p/lib/libfmt.a" \
       "$(pv_graph "$pv_tmp/repo/dep/$pv_own/libx.a" "$pv_tmp/home/clang21-asan/p/b/fmt0123456789abc/p/lib/libfmt.a"; pv_check "$pv_system")"
+# G-ENV-3'S HOST SEAM HANDS MALF_SYSTEM=host (DN-142.D30 (10) R16): its trees are `.environment-host`, and its
+# graph is judged as an image's, so the desk's bare tree and a second home are refused on the host too.
+pv_host_tree="$pv_tmp/repo/pkg/build-clang21-asan.environment-host"
+mkdir -p "$pv_host_tree" && echo "[]" > "$pv_host_tree/compile_commands.json"
+pv_host_check() {   # <a linked archive> — under MALF_SYSTEM=host: the suffix, the check's exit and the first path it names
+    printf 'cmake_ninja_workdir = %s/\nbuild x: CXX_EXECUTABLE_LINKER__x | %s\n  LINK_LIBRARIES = %s\n' "$pv_host_tree" "$1" "$1" \
+        > "$pv_host_tree/build.ninja"
+    bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; export MALF_SYSTEM=host CONAN_HOME="$3/home"
+        _malf_build_provenance build "$2/build.ninja" "$2/compile_commands.json" 2> "$2.err"; rc=$?
+        echo "$(_malf_environment_suffix) rc=$rc $(grep -oE "the first: [^ ]+" "$2.err" | sed "s#$3#<t>#")"' \
+        _ "$MALF_BIN" "$pv_host_tree" "$pv_tmp"
+}
+check "RED — under the host seam (MALF_SYSTEM=host) a graph linking the desk's bare host tree is refused; its own .environment-host tree passes; a second conan home is refused" \
+      ".environment-host rc=2 the first: <t>/repo/dep/build-clang21-asan/libx.a|.environment-host rc=0 |.environment-host rc=2 the first: <t>/other-home/p/b/fmt0123456789abc/p/lib/libfmt.a" \
+      "$(pv_host_check "$pv_tmp/repo/dep/build-clang21-asan/libx.a")|$(pv_host_check "$pv_tmp/repo/dep/build-clang21-asan.environment-host/libx.a")|$(pv_host_check "$pv_tmp/other-home/p/b/fmt0123456789abc/p/lib/libfmt.a")"
 # A HOME NAMED BARE (a prefix map's left side) is judged as the home it is, never by its parent: an act
 # whose home is a profile's home nested under the base names its own home, and the base is not its home.
 pv_graph "$pv_tmp/repo/dep/$pv_own/libx.a" "-ffile-prefix-map=$pv_tmp/home/clang21-asan=/malf-home"
