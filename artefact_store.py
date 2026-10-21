@@ -121,7 +121,7 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
         stored, matching, or diverging
         from an earlier run at an equal `inputs_key` (written under `divergences/`, never a red),
         1 refused with nothing stored
-    artefact_store.py parameters <profile|-> <argv>...
+    artefact_store.py parameters <profile> <argv>...
         the act's parameter document (DN-142.D19 (1)), canonical JSON on one line: MALF_STORE_PARAMETERS
         when a driver hands one, checked equal to the act's argv and profile, every `env` member equal
         to the act's environment; else the act's own, `env` empty. Exit 2 refusing a document that
@@ -135,12 +135,6 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
     artefact_store.py toolchain <compiler root> <out.json>
         the measured toolchain member, written once per run (hashing the compiler tree is the
         expensive part of a key)
-    artefact_store.py verdict-step <store> <predicate> <malf dir> <clang-format> <repository>...
-        the verdict record of one source predicate (`format`: `malf format --check`) over each
-        repository's tracked tree, judged in an export of that tree beside an export of malf's
-        (DN-142.D7): stored when the key is new, compared when it is not; exit 0 when every
-        verdict is a pass and agrees with its record, 1 on a fail or a mismatch, 2 when the
-        predicate ran but judged nothing
 
 A package record's output carries `build_ids` (DN-142.D15): for every linked ELF file of the
 package tree (an executable or a shared object) its GNU build-id, the NT_GNU_BUILD_ID note the
@@ -2093,33 +2087,6 @@ def _transport(home: Path, binary: str, scratch: Path, sources: bool = True) -> 
     return archive
 
 
-# A source predicate's verb in malf, and the lines that say it JUDGED: `malf format --check` prints
-# one SUMMARY for clang-format and one CCC SUMMARY for the comment grammar. A run missing either, or
-# whose clang-format summary checked nothing or failed with zero violations counted, judged nothing.
-PREDICATES = {"format": ["format", "--check"]}
-FORMAT_SUMMARY = re.compile(r"^malf format: SUMMARY · mode=check-\S+ · dir=\S+ · selected \d+, "
-                            r"checked (\d+), (\d+) misformatted, \d+ skipped · rc=(\d+)$")
-CCC_SUMMARY = re.compile(r"^malf format: CCC SUMMARY · .* · rc=\d+$")
-FINDING = re.compile(r": (error|warning): | CCC (?!SUMMARY)")
-JUDGED_ROOT = "<judged>"
-
-
-def _export(repository: Path, tree: str, into: Path) -> None:
-    """Write git tree `tree` of `repository` into `into`: the judged bytes, never the disk's."""
-    into.mkdir(parents=True)
-    archive = subprocess.run(["git", "-C", str(repository), "archive", "--format=tar", tree],
-                             capture_output=True, check=False)
-    if archive.returncode != 0:
-        sys.exit(f"artefact_store: `git archive {tree}` in {repository} failed:\n"
-                 f"{archive.stderr.decode(errors='replace').strip()}")
-    subprocess.run(["tar", "-x", "-C", str(into)], input=archive.stdout, check=True)
-
-
-def _executable_member(executable: Path) -> dict[str, str]:
-    return {"version": _run([str(executable), "--version"]).splitlines()[0].strip(),
-            "executable": file_sha256(executable.resolve())}
-
-
 # THE GENERALIZED VERDICT KIND (DN-142.D19 (10)): every keyed step that is not a package's tests.
 # Its document names the step and its predicate with the predicate's parameters, the definition,
 # what it judged, the data it read (content digests), the toolchain and system, and `context`, only
@@ -2167,74 +2134,6 @@ def judged_verdict(store: Path, document: dict, outputs: dict, objects: dict[str
               "entries": outputs["entries"], "record": outputs["record"]}
     return LocalStore(store).commit(document, {name: output},
                                     {name: ("objects", lambda: dict(objects))})
-
-
-def verdict_step(store: Path, predicate: str, malf_dir: Path, clang_format: Path,
-                 repositories: list[Path]) -> int:
-    """DN-142.D7's verdict record of `predicate` over each repository's tracked tree.
-
-    The predicate runs in an export: the repository's tree beside malf's, under a scratch root with
-    every MALF_* variable cleared, so what was judged is exactly the keyed trees and a repository's
-    `.clang-format` link into `../malf/config/` resolves to the keyed malf. Its findings are the
-    finding lines sorted, each path relative to the repository and the scratch root replaced by a
-    token: the export's walk order is the filesystem's, so the log's line order is not an output.
-    post: exit 0 when every repository passed and agreed with its record, 1 on a fail or a
-    mismatch, 2 when a run judged nothing (no record is written for it)."""
-    if predicate not in PREDICATES:
-        sys.exit(f"artefact_store: no verdict predicate `{predicate}` (known: {' '.join(sorted(PREDICATES))})")
-    definition = definition_member(malf_dir, step_parameters(None))
-    toolchain = {"clang-format": _executable_member(clang_format),
-                 "python3": _executable_member(Path(sys.executable))}
-    system = system_member()
-    environment = {name: value for name, value in os.environ.items() if not name.startswith("MALF_")}
-    local = LocalStore(store)
-    worst = 0
-    for repository in repositories:
-        name = repository.resolve().name
-        tree = worktree_tree_id(repository)
-        with tempfile.TemporaryDirectory(prefix="artefact_store.") as scratch:
-            root = Path(scratch) / "workspace"
-            _export(malf_dir, definition["malf"], root / "malf")
-            _export(repository, tree, root / name)
-            judged = subprocess.run(["bash", str(root / "malf" / "malf"), *PREDICATES[predicate]],
-                                    cwd=root / name, env=environment, capture_output=True, text=True,
-                                    check=False)
-            lines = ((judged.stdout + judged.stderr).replace(f"{root / name}/", "")
-                     .replace(str(root), JUDGED_ROOT).splitlines())
-            log = Path(scratch) / "verdict.log"
-            log.write_text("\n".join(lines) + "\n")
-            summary = next((match for line in lines if (match := FORMAT_SUMMARY.match(line))), None)
-            if (summary is None or not any(CCC_SUMMARY.match(line) for line in lines)
-                    or int(summary.group(1)) == 0
-                    or (summary.group(3) != "0" and summary.group(2) == "0")):
-                print(f"artefact_store: UNJUDGED {name} {predicate}: `malf {' '.join(PREDICATES[predicate])}` "
-                      f"exited {judged.returncode} without a verdict — {lines[-1] if lines else 'no output'}")
-                worst = max(worst, 2)
-                continue
-            findings = sorted(line for line in lines if FINDING.search(line))
-            verdict = "pass" if judged.returncode == 0 else "fail"
-            document = {
-                "step": {"kind": "verdict", "id": f"{predicate}/{name}", "subject": name,
-                         "predicate": {"id": f"malf {' '.join(PREDICATES[predicate])}",
-                                       "version": definition["malf"]},
-                         "params": {}},
-                "definition": definition,
-                "judged": {name: tree},
-                "data": {},
-                "toolchain": toolchain,
-                "system": system,
-                "context": {},
-            }
-            rc = judged_verdict(local.root, document,
-                                {"verdict": verdict, "findings": findings,
-                                 "entries": [[finding] for finding in findings], "record": {}},
-                                {"log": log})
-            if verdict == "fail":
-                print(f"artefact_store: FAIL {name} {predicate}: {len(findings)} finding(s); first "
-                      f"{findings[0] if findings else lines[-1]}")
-                rc = 1
-            worst = max(worst, rc)
-    return worst
 
 
 class LocalStore:
@@ -2807,8 +2706,8 @@ def selftest() -> int:
     expect("a declared variable the act was handed is a parameter",
            handed({**own, "env": {"KNOB": "on"}}, lambda: parameter_document(act, "linux-gcc16-release"),
                   KNOB="on"), {**own, "env": {"KNOB": "on"}})
-    refused_document("RED: a document naming another verb is refused", {**own, "argv": ["malf", "store-build"]},
-                     "argv is ['malf', 'store-build']")
+    refused_document("RED: a document naming another verb is refused", {**own, "argv": ["malf", "twin-verify"]},
+                     "argv is ['malf', 'twin-verify']")
     refused_document("RED: a document naming another profile is refused", {**own, "profile": "linux-clang21"},
                      "profile is 'linux-clang21'")
     refused_document("RED: a variable the act was not handed is refused", {**own, "env": {"KNOB": "on"}},
@@ -3346,7 +3245,7 @@ def main(argv: list[str]) -> int:
         return 1
     if len(argv) >= 3 and argv[0] == "parameters":
         try:
-            document = parameter_document(argv[2:], None if argv[1] == "-" else argv[1])
+            document = parameter_document(argv[2:], argv[1])
         except KeyError_ as refused:
             print(f"artefact_store: REFUSED — {refused}", file=sys.stderr)
             return 2
@@ -3407,9 +3306,6 @@ def main(argv: list[str]) -> int:
     if len(argv) == 3 and argv[0] == "toolchain":
         Path(argv[2]).write_text(json.dumps(measure_toolchain(Path(argv[1])), sort_keys=True))
         return 0
-    if len(argv) >= 6 and argv[0] == "verdict-step":
-        return verdict_step(Path(argv[1]), argv[2], Path(argv[3]), Path(argv[4]),
-                            [Path(repository) for repository in argv[5:]])
     if len(argv) in (9, 10, 11) and argv[0] == "conan-step":
         return conan_step(Path(argv[1]), Path(argv[2]), Path(argv[3]), argv[4], argv[5],
                           Path(argv[6]), Path(argv[7]), tuple(argv[8].split()),

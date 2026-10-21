@@ -1110,7 +1110,7 @@ _malf_lockfile_args() {
     [[ -n "${MALF_LOCKFILE_STRICT:-}" ]] || echo "--lockfile-partial"
 }
 
-# The lockfile of an act on the SHIP leg (store-create, store-build, twin-verify, relocate-verify): malf/conan.lock, STRICT, whatever MALF_LOCKFILE_STRICT says. Measured 2026-10-10
+# The lockfile of an act on the SHIP leg (store-create, twin-verify, relocate-verify): malf/conan.lock, STRICT, whatever MALF_LOCKFILE_STRICT says. Measured 2026-10-10
 # (W486 G2): the first DN-142.D16 store-create resolved with no lockfile and took the home's own
 # boost recipe revision, cmake 4.4.2, hiredis 1.3.0 and libpq 17.7 where the lock names others, so
 # libpqxx, redis-plus-plus and drogon changed package id. With a lockfile a requirement the lock
@@ -3331,7 +3331,7 @@ _malf_format_summary() {
     fi
 }
 
-# The clang-format `malf format` runs, and `malf store-verdict format` keys: the one from the SAME
+# The clang-format `malf format` runs: the one from the SAME
 # install as the build compiler (clang-21). clang-format is a pure formatter — a version skew can't
 # error like clang-tidy's BMI mismatch — but different clang-format versions reflow code differently
 # (churn), so match the toolchain. Derive from clang-21; fall back to PATH.
@@ -5050,15 +5050,6 @@ Commands:
                                    skipped step or a differing output at an equal key. A failed step's
                                    log is quoted (ctest's roll-up, its last 200 lines); a red walk
                                    archives its logs into MALF_STORE_LOG_ARCHIVE when set
-    store-build <pkg>...           DN-142.D14's step of a `stored: false` package: a `conan build`
-                                   of its tracked tree at MALF_STORE_BUILD_REV (default HEAD) in the
-                                   store's home, writer confs, --build=never, tests run in build();
-                                   no package of it is ever left in the cache
-    store-verdict format <repo>... DN-142.D7's verdict record over the same local store: `malf format
-                                   --check` over each repository's tracked tree in an export beside
-                                   malf's, keyed by both trees and the tools that ran; a new key is
-                                   stored, a stored one re-judged and compared — exit 1 on a fail or
-                                   on a differing verdict at an equal key, 2 when nothing was judged
     sandbox [--read <root>]... [--write <root>]... -- <command>...
                                    run <command> under a Landlock domain (gate G4): readable only
                                    beneath each --read root, writable only beneath each --write
@@ -5080,7 +5071,7 @@ Commands:
                                    Builds pass --lockfile automatically when the file exists;
                                    MALF_LOCKFILE_STRICT=1 drops --lockfile-partial so an
                                    unlocked dependency is a hard error (CI / release legs).
-                                   The ship-leg acts (store-create, store-build, twin-verify,
+                                   The ship-leg acts (store-create, twin-verify,
                                    relocate-verify) always resolve strictly against
                                    it and refuse when it is absent.
     slot    [status|acquire|release]
@@ -5460,37 +5451,11 @@ cmd_exports_verify() {
 }
 
 
-# malf store-verdict <predicate> <repository>... — DN-142.D7's verdict record over a local store:
-# the predicate (`format`: `malf format --check`) judges each repository's TRACKED tree in an export
-# beside an export of malf's own tracked tree, and the verdict is keyed by those trees, the
-# clang-format and python3 that ran and the build environment's config digest (refused outside it,
-# DN-142.D30 E4). A new key is STORED; a stored key
-# is still re-judged and COMPARED (phase 1, ROADMAP N358), and a differing verdict or finding set
-# at an equal key is a defect of the gate (exit 1). A failing verdict is stored too, and exits 1.
-#
-# Usage: malf store-verdict format <repository>...   (MALF_STORE_DIR: the store, as store-create)
 # malf sandbox [--read <root>]... [--write <root>]... -- <command>... — gate G4's harness
 # (DN-142.D19 (5)): <command> runs under a Landlock domain built by landlock_sandbox.py, which says
 # what ABI 3 enforces and what it cannot see (the network, a daemon's reads).
 cmd_sandbox() {
     exec python3 "$MALF_DIR/landlock_sandbox.py" "$@"
-}
-
-cmd_store_verdict() {
-    [[ $# -ge 2 ]] || { echo "malf store-verdict: name a predicate (format) and at least one repository" >&2; return 2; }
-    local arg
-    for arg in "$@"; do [[ "$arg" != -* ]] || _malf_refuse_option store-verdict "$arg"; done
-    local predicate="$1"; shift
-    for arg in "$@"; do
-        git -C "$arg" rev-parse --show-toplevel > /dev/null 2>&1 \
-            || { echo "malf store-verdict: $arg is not a git repository" >&2; return 2; }
-    done
-    local store
-    store="$(_malf_store_root store-verdict)" || return 2
-    _malf_store_parameters - malf store-verdict "$predicate" || return 2
-    local clang_format_bin
-    clang_format_bin="$(_malf_clang_format_bin)" || return 1
-    python3 "$MALF_DIR/artefact_store.py" verdict-step "$store" "$predicate" "$MALF_DIR" "$clang_format_bin" "$@"
 }
 
 # THE WRITER'S CONF SET (DN-142.D13 (1)) is malf_recipe_tests.py's, defined there once beside the
@@ -5575,10 +5540,10 @@ _malf_store_root() {
 # variable the driver handed, the profile name. A driver (Pharos at step 0) hands it in
 # MALF_STORE_PARAMETERS, and artefact_store.py checks it against this act; an act no driver ran
 # composes its own with `env` empty, so a desk run and a driven one at the same parameters share keys.
-# pre: $1 is the act's profile name (`-` for none), $2... its program and verb.
+# pre: $1 is the act's profile name, $2... its program and verb.
 # post: MALF_STORE_PARAMETERS is exported as the checked canonical document, or exit 2 naming the
 #       disagreement and nothing ran.
-_malf_store_parameters() {   # <profile|-> <argv>...
+_malf_store_parameters() {   # <profile> <argv>...
     local document
     document="$(python3 "$MALF_DIR/artefact_store.py" parameters "$@")" || return 2
     export MALF_STORE_PARAMETERS="$document"
@@ -6441,20 +6406,20 @@ PY
 # cache. The build and its record run in a step home of its own (_malf_step_home, DN-142.D25 (5) call
 # F), restored from the store with what the key before the step names; CONAN_HOME, the walk's home,
 # is where it resolves. pre: CONAN_HOME, the profile, _MALF_WRITER_ARGS and _MALF_SHIP_LOCK are set
-# (store-create, store-build).
+# (store-create).
 # post: exit 0 built, tested and recorded; 1 otherwise; 2 a corrupt store (the walk stops).
 _malf_store_build_one() {   # <name> <path> <rev> <store> <scratch> <prefixes>
     local name="$1" path="$2" rev="$3" store="$4" scratch="$5" prefixes="$6" repo prefix tree step_home rc
     repo="$(git -C "$path" rev-parse --show-toplevel)" && prefix="$(git -C "$path" rev-parse --show-prefix)" \
-        || { echo "malf store-build: $path is not in a git checkout" >&2; return 1; }
+        || { echo "malf store-create: $path is not in a git checkout" >&2; return 1; }
     tree="$(git -C "$repo" rev-parse "$rev:$prefix")" \
-        || { echo "malf store-build: $rev holds no tree at $prefix in $repo" >&2; return 1; }
+        || { echo "malf store-create: $rev holds no tree at $prefix in $repo" >&2; return 1; }
     mkdir -p "$scratch/$name"
     git -C "$repo" archive "$rev" -- "$prefix" | tar -x -C "$scratch/$name" \
-        || { echo "malf store-build: git archive $rev -- $prefix failed in $repo" >&2; return 1; }
-    echo "--- store-build: conan build $name ($repo at $(git -C "$repo" rev-parse --short=12 "$rev"):$prefix) ---"
+        || { echo "malf store-create: git archive $rev -- $prefix failed in $repo" >&2; return 1; }
+    echo "--- store-create: conan build $name ($repo at $(git -C "$repo" rev-parse --short=12 "$rev"):$prefix) ---"
     if ! _malf_store_key_first "$name" "$prefixes" "$store" "$scratch" "$scratch/$name.log" "$scratch/$name/$prefix" "$tree"; then
-        echo "malf store-build: the key of $name could not be computed before its build (above, or $scratch/$name.log)" >&2
+        echo "malf store-create: the key of $name could not be computed before its build (above, or $scratch/$name.log)" >&2
         _malf_quote_log "$scratch/$name.log" "$name (its key before the build)"; return 1
     fi
     step_home="$(_malf_step_home "$scratch" "$name")" || return 1
@@ -6477,12 +6442,12 @@ _malf_store_build_in() {   # <name> <prefix> <tree> <store> <scratch> <prefixes>
     if ! _malf_confined "$scratch/$name.denials" "$name" "$scratch/$name/$prefix" conan build "$scratch/$name/$prefix" "${_MALF_HOME_PROFILES[@]}" \
             -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${_MALF_SHIP_LOCK[@]}" --build=never --no-remote \
             --format=json > "$scratch/$name.graph.json" 2> "$scratch/$name.log"; then
-        echo "malf store-build: conan build $name failed — $scratch/$name.log" >&2
+        echo "malf store-create: conan build $name failed — $scratch/$name.log" >&2
         _malf_quote_log "$scratch/$name.log" "$name (its build)"; return 1
     fi
     left="$(conan list "$name/*" --format=json | python3 -c 'import json, sys; print(sum(len(v) for v in json.load(sys.stdin).get("Local Cache", {}).values()))')"
     if [[ "$left" != "0" ]]; then
-        echo "malf store-build: $name left $left revision(s) in $CONAN_HOME — a stored: false step stores no package (DN-142.D14)" >&2
+        echo "malf store-create: $name left $left revision(s) in $CONAN_HOME — a stored: false step stores no package (DN-142.D14)" >&2
         return 1
     fi
     MALF_STEP_SOURCE="$scratch/$name/$prefix" MALF_STEP_KEY_FIRST="$scratch/$name.key-first.json" \
@@ -6490,58 +6455,7 @@ _malf_store_build_in() {   # <name> <prefix> <tree> <store> <scratch> <prefixes>
         MALF_STEP_TEST_FOLDER=none python3 "$MALF_DIR/artefact_store.py" build-step "$store" "$CONAN_HOME" "$scratch/$name.graph.json" \
         "$name" "$MALF_PROFILE_NAME" "$MALF_DIR" "$scratch/toolchain.json" "$prefixes" "$tree" \
         "$CONAN_HOME/malf-test-results" || return 1
-    echo "malf store-build: $name built and tested from its tracked tree $tree; no package of it in the cache"
-}
-
-# malf store-build <package>... — DN-142.D14: the step of a package whose packages.yml entry declares
-# `stored: false` (today insight_twin alone), run alone: what `malf store-create`'s walk runs for
-# it, in the store's home (MALF_STORE_CONAN_HOME, which must already hold the stored upstreams).
-# Exit 0 green, 1 the build or a test failed or a package was left in the cache, 2 refused.
-# Usage: malf store-build <package>...
-cmd_store_build() {
-    [[ $# -ge 1 ]] || { echo "malf store-build: name at least one stored: false package" >&2; return 2; }
-    local arg
-    for arg in "$@"; do [[ "$arg" != -* ]] || _malf_refuse_option store-build "$arg"; done
-    _malf_apply_profile "${MALF_CUT_VERIFY_PROFILE:-linux-gcc16-release}"
-    _malf_store_parameters "$MALF_PROFILE_NAME" malf store-build || return 2
-    local unstored store
-    store="$(_malf_store_root store-build)" || return 2
-    unstored="$(python3 "$MALF_WORKSPACE_ROOT/scripts/version_line.py" unstored "$MALF_WORKSPACE_ROOT")" \
-        || { echo "malf store-build: failed to resolve the stored: false packages" >&2; return 2; }
-    local name
-    for name in "$@"; do
-        grep -q "^$name"$'\t' <<< "$unstored" || {
-            echo "malf store-build: $name declares no \`stored: false\` in its packages.yml — a stored package's step is \`malf store-create\` (DN-142.D14)" >&2
-            return 2; }
-    done
-    export CONAN_HOME="${MALF_STORE_CONAN_HOME:-}"
-    [[ -n "$CONAN_HOME" && -f "$CONAN_HOME/settings.yml" ]] \
-        || { echo "malf store-build: MALF_STORE_CONAN_HOME must name the store's conan home, which holds the stored upstreams" >&2; return 2; }
-    _malf_sync_conan_conf
-    _malf_apply_profile "$MALF_PROFILE_NAME"
-    rm -f "$CONAN_HOME/editable_packages.json"
-    unset MALF_EDITABLE_BUILD_DIR
-    _malf_writer_create_args || return 2
-    _malf_writer_environment || return 2
-    _malf_ship_lock_args || return 2
-    local scratch prefixes compiler rc=0
-    scratch="$(mktemp -d /tmp/malf-store-build.XXXXXX)"
-    prefixes="$(_malf_owned_prefixes)" || { echo "malf store-build: the owned package namespaces could not be derived" >&2; return 2; }
-    compiler="$(sed -n 's/^CXX=//p' "$MALF_PROFILE")"
-    python3 "$MALF_DIR/artefact_store.py" toolchain "$(dirname "$(dirname "$compiler")")" "$scratch/toolchain.json" || return 2
-    local path index=0 run_at
-    _malf_store_clock "$scratch/times"; run_at="$_MALF_CLOCK_AT"
-    for name in "$@"; do
-        index=$((index+1))
-        path="$(awk -F'\t' -v n="$name" '$1 == n {print $2}' <<< "$unstored")"
-        if ! _malf_store_third_party "$index" "$name" "$path" "$prefixes" "$store" "$scratch" "$run_at"; then
-            echo "malf store-build: SKIP $name — its third-party step: $_MALF_THIRD_PARTY_CAUSE (DN-142.D17 (5))" >&2
-            rc=1; continue
-        fi
-        _malf_store_build_one "$name" "$path" "${MALF_STORE_BUILD_REV:-HEAD}" "$store" "$scratch" "$prefixes" || rc=1
-    done
-    [[ $rc -eq 0 ]] && rm -rf "$scratch"
-    return "$rc"
+    echo "malf store-create: $name built and tested from its tracked tree $tree; no package of it in the cache"
 }
 
 # malf inventory [dir] — the ADR-3.D9 gate, standalone. Lints the WHOLE workspace (an orphan
@@ -7105,8 +7019,6 @@ case "$COMMAND" in
     twin-verify)      cmd_twin_verify "$@" ;;
     exports-verify)   cmd_exports_verify "$@" ;;
     store-create)     cmd_store_create "$@" ;;
-    store-build)      cmd_store_build "$@" ;;
-    store-verdict)    cmd_store_verdict "$@" ;;
     sandbox)          cmd_sandbox "$@" ;;
     environment)      exec python3 "$MALF_DIR/build_environment.py" "$@" ;;
     relocate-verify)  cmd_relocate_verify "$@" ;;

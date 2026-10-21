@@ -3399,21 +3399,6 @@ check "a test_package source spelling __FILE__ FAILS the writer's create, whatev
 rm -f "$cs_pkg/test_package/probe.cpp"
 check "with every spelling gone the writer's create passes again" "rc=0" "$(cs_create)"
 
-# DN-142.D14: a `stored: false` package is never created — its step is a conan build that stores no
-# package, which store-create's walk and store-build run through one function — and store-build
-# takes nothing else. The refusal is driven over a fixture workspace whose version_line answers the
-# two lists and a conan stub that records every call it gets.
-sf_ws="$cs_tmp/sfws"; mkdir -p "$sf_ws/scripts" "$cs_tmp/sfbin"
-cat > "$sf_ws/scripts/version_line.py" <<'PYV'
-import sys
-print({"released": "rel_pkg\t/nowhere\t", "unstored": "leaf_pkg\t/nowhere/leaf"}[sys.argv[1]])
-PYV
-printf '#!/usr/bin/env bash\necho "$*" >> %s/sf-conan.log\nexit 0\n' "$cs_tmp" > "$cs_tmp/sfbin/conan"; chmod +x "$cs_tmp/sfbin/conan"
-sf_malf() {   # <verb> <package> -> rc=<status> and the refusal's DN-142.D14 line count
-    local out rc
-    out="$(cd "$cs_tmp" && PATH="$cs_tmp/sfbin:$PATH" MALF_WORKSPACE_ROOT="$sf_ws" CONAN_HOME="$cs_tmp/sfhome" bash "$MALF_BIN" "$1" "$2" 2>&1)"; rc=$?
-    printf 'rc=%s %s' "$rc" "$(grep -c 'DN-142.D14' <<< "$out")"
-}
 # The merged act's walk (DN-142.D5 (7) M2): malf_graph's steps in walk order, a `stored: false`
 # step marked `build` (a conan build, never a create), every other `create`; named packages select
 # their closure through every first-party requirement, test ones included; an unknown name refuses.
@@ -3428,10 +3413,8 @@ check "the walk keeps malf's order, marks the stored: false step build and every
 check "named packages select their closure in walk order; a name that is no step refuses, naming it" \
       "$(printf 'a_core\t/w/a\t\tcreate|b_lib\t/w/b\ta_core\tcreate|d_app\t/w/d\tb_lib\tcreate')|malf store-create: no step of malf's walk is named zz_none" \
       "$(sf_walk d_app)|$(sf_walk zz_none)"
-check "the act never conan-creates a step it marked build: the create branch is the only create, in the step's own home, and a build step goes to store-build's one function" \
+check "the act never conan-creates a step it marked build: the create branch is the only create, in the step's own home, and a build step goes to the one build function" \
       "1 1 0 1" "$(grep -c 'if \[\[ "$kind" == "build" \]\]; then' "$MALF_BIN") $(awk '/^_malf_store_create_in\(\)/,/^}/' "$MALF_BIN" | grep -c '^ *if ! CONAN_HOME="$step_home" _malf_store_create_step ') $(awk '/^(cmd_store_create|_malf_store_run_step|_malf_store_create_in)\(\)/,/^}/' "$MALF_BIN" | grep -cE '^ *(if ! )?conan create ') $(awk '/^cmd_store_create\(\)/,/^}/' "$MALF_BIN" | grep -c '^ *_malf_store_run_step ')"
-check "store-build REFUSES a package that is stored, naming store-create, before conan is ever called" \
-      "rc=2 1 none" "$(sf_malf store-build rel_pkg) $([[ -s "$cs_tmp/sf-conan.log" ]] && echo called || echo none)"
 
 # A bench walk runs its benchmarks only while it holds the machine's build slot (DN-142.D25 (5) call
 # E), and refuses before any step otherwise: no file, a slot nobody holds, a slot held under another
@@ -5706,73 +5689,6 @@ check "RED — an empty or relative test folder argument is refused before conan
 rm -rf "$tt_tmp"
 echo
 
-echo "[7q7h] a verdict is a keyed record binding the trees it judged; a fail is stored, a flip at an equal key fails, and a run that judged nothing writes no record (DN-142.D7; ROADMAP N358)"
-# The predicate is `malf format --check`, judged in an export of the fixture's TRACKED tree beside
-# an export of this malf's, so an untracked file is never judged. The definition is malf's tree plus
-# the driver's PARAMETER DOCUMENT (MALF_STORE_PARAMETERS, DN-142.D19 (1)), never the driver's own tree:
-# another document moves the key, an edited driver tree does not, and a document that disagrees with
-# the act it keys is refused rather than ignored.
-sv_tmp="$(realpath "$(mktemp -d)")"
-sv_repo="$sv_tmp/fixture-repo"; mkdir -p "$sv_repo/src"
-git -C "$sv_repo" init -q && git -C "$sv_repo" config user.email t@t && git -C "$sv_repo" config user.name t
-printf 'int main() { return 0; }\n' > "$sv_repo/src/main.cpp"
-(cd "$sv_repo" && bash "$MALF_BIN" format > /dev/null 2>&1)   # the clean fixture is malf's own style
-git -C "$sv_repo" add -A && git -C "$sv_repo" commit -qm clean
-sv_step() {   # [env assignments...] — the verdict lines and the exit, keys and digests elided
-    local out rc
-    out="$(env "$@" MALF_SYSTEM="$MALF_TEST_SYSTEM" MALF_STORE_DIR="$sv_tmp/store" bash "$MALF_BIN" store-verdict format "$sv_repo" 2>&1)"; rc=$?
-    printf 'rc=%s %s' "$rc" "$(grep -oE 'artefact_store: (STORED|MATCH|MISMATCH|FAIL|UNJUDGED) fixture-repo (verdict|format)|verdict (pass|fail) findings|first src/[a-z]+\.cpp|REFUSED — MALF_STORE_PARAMETERS' <<< "$out" | sed 's/artefact_store: //' | tr '\n' ' ')"
-}
-sv_records() { ls "$sv_tmp/store/records" 2>/dev/null | wc -l | tr -d ' '; }
-check "a clean tracked tree is judged: its pass is STORED under a new key" \
-      "rc=0 STORED fixture-repo verdict verdict pass findings |1" "$(sv_step)|$(sv_records)"
-printf 'int   bad(  ) {return 1;}\n' > "$sv_repo/src/untracked.cpp"
-check "an untracked file is never judged: the same key, and the pass MATCHES" \
-      "rc=0 MATCH fixture-repo verdict verdict pass findings |1" "$(sv_step)|$(sv_records)"
-rm "$sv_repo/src/untracked.cpp"
-sv_params() {   # <argv json> <profile json> -> a parameter document
-    printf '{"argv": %s, "env": {}, "profile": %s}' "$1" "$2"
-}
-mkdir -p "$sv_tmp/driver/sub" && git -C "$sv_tmp/driver" init -q
-printf 'a\n' > "$sv_tmp/driver/sub/code.py"
-git -C "$sv_tmp/driver" add -A && git -C "$sv_tmp/driver" -c user.email=t@t -c user.name=t commit -qm driver
-check "the act's own parameter document, handed by a driver, is the act's key: it MATCHES the undriven run" \
-      "rc=0 MATCH fixture-repo verdict verdict pass findings |1" \
-      "$(sv_step MALF_STORE_PARAMETERS="$(sv_params '["malf", "store-verdict", "format"]' null)")|$(sv_records)"
-printf 'b\n' > "$sv_tmp/driver/sub/code.py"; git -C "$sv_tmp/driver" -c user.email=t@t -c user.name=t commit -qam edited
-check "a driver's own tree never joins the definition: an edited driver leaves the key, and the pass MATCHES" \
-      "rc=0 MATCH fixture-repo verdict verdict pass findings |1" \
-      "$(cd "$sv_tmp/driver" && sv_step MALF_STORE_PARAMETERS="$(sv_params '["malf", "store-verdict", "format"]' null)")|$(sv_records)"
-check "a parameter document naming another act is refused, never ignored, and writes no record" \
-      "rc=2 REFUSED — MALF_STORE_PARAMETERS |1" \
-      "$(sv_step MALF_STORE_PARAMETERS="$(sv_params '["malf", "store-create"]' null)")|$(sv_records)"
-check "a parameter document declaring a variable the act was not handed is refused" \
-      "rc=2 REFUSED — MALF_STORE_PARAMETERS |1" \
-      "$(sv_step MALF_STORE_PARAMETERS='{"argv": ["malf", "store-verdict", "format"], "env": {"SV_KNOB": "on"}, "profile": null}')|$(sv_records)"
-check "a declared variable the act WAS handed is a parameter: it moves the key, STORED under a new one" \
-      "rc=0 STORED fixture-repo verdict verdict pass findings |2" \
-      "$(sv_step SV_KNOB=on MALF_STORE_PARAMETERS='{"argv": ["malf", "store-verdict", "format"], "env": {"SV_KNOB": "on"}, "profile": null}')|$(sv_records)"
-printf 'int   bad(  ) {return 1;}\n' > "$sv_repo/src/bad.cpp"
-git -C "$sv_repo" add -A && git -C "$sv_repo" commit -qm misformatted
-check "a misformatted tracked file is a FAIL, stored under its own key, exit 1, naming the file" \
-      "rc=1 STORED fixture-repo verdict verdict fail findings FAIL fixture-repo format first src/bad.cpp |3" \
-      "$(sv_step)|$(sv_records)"
-sv_fail="$(grep -l '"verdict": "fail"' "$sv_tmp"/store/records/*.json)"
-python3 - "$sv_fail" <<'PYF'
-import json, sys
-record = json.load(open(sys.argv[1]))
-record["outputs"]["verdict"]["verdict"] = "pass"
-json.dump(record, open(sys.argv[1], "w"))
-PYF
-check "a verdict that flips at an equal key is a MISMATCH, exit 1, and an event is written beside" \
-      "rc=1 MISMATCH fixture-repo verdict verdict pass findings verdict fail findings FAIL fixture-repo format first src/bad.cpp |1" \
-      "$(sv_step)|$(ls "$sv_tmp/store/mismatches" | wc -l | tr -d ' ')"
-git -C "$sv_repo" rm -rq src && printf 'no C++ here\n' > "$sv_repo/README" && git -C "$sv_repo" add README && git -C "$sv_repo" commit -qm empty
-check "a tree with no C++ is UNJUDGED, exit 2, and writes no record" \
-      "rc=2 UNJUDGED fixture-repo format |3" "$(sv_step)|$(sv_records)"
-rm -rf "$sv_tmp"
-echo
-
 echo "[7q7s] gate G4's harness: a command under \`malf sandbox\` reads only beneath its declared roots, and a create whose build() opens an undeclared file reds with EACCES naming it (DN-142.D19 (5))"
 lb_out="$(timeout 120 python3 "$MALF_ROOT/landlock_sandbox.py" selftest 2>&1)"
 check "landlock_sandbox selftest: 12 arms, every denial fired" \
@@ -6101,14 +6017,14 @@ check "RED — relocate-verify's consumer install of a package whose graph holds
       "tool-binaries=$(CONAN_HOME="$ls_tmp/lr-fresh" conan list 'lr_tool/0.1:*' --format=json 2>/dev/null | python3 -c 'import json, sys; print(sum(len(r.get("packages", {})) for v in json.load(sys.stdin)["Local Cache"].values() for r in v.get("revisions", {}).values()))') $(python3 -I -c 'import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import package_relocate as r
 print(r.consume(Path(sys.argv[2]), "fixture", "lr_app", "lr_app/0.1", Path(sys.argv[3]), Path(sys.argv[4]), "", "application"))' "$MALF_ROOT" "$ls_tmp/lr-fresh" "$ls_tmp/lr.lock" "$ls_tmp/lr-scratch" 2>&1 | tail -1)"
 # Every other resolution of the ship leg splices the same arguments, read from malf's source: the
-# store-build step, and the lockfile twin-verify's probe and relocate-verify
+# stored: false step's build, and the lockfile twin-verify's probe and relocate-verify
 # resolve against. Each verb takes it before its first conan call and refuses without it.
 ls_body() { awk "/^$1\\(\\)/,/^}/" "$MALF_BIN"; }
-check "store-create's create and store-build's build splice the ship lockfile, and malf passes --lockfile-partial nowhere on the ship leg" \
+check "store-create's create and its stored: false build splice the ship lockfile, and malf passes --lockfile-partial nowhere on the ship leg" \
       "1 1 0" \
-      "$(ls_body _malf_store_create_step | grep -c '"${_MALF_SHIP_LOCK\[@\]}"') $(ls_body _malf_store_build_in | grep -c '"${_MALF_SHIP_LOCK\[@\]}"') $(for fn in cmd_store_create _malf_store_create_step _malf_store_build_one _malf_store_build_in cmd_store_build cmd_twin_verify cmd_relocate_verify; do ls_body "$fn"; done | grep -c -- '--lockfile-partial')"
-check "store-create, store-build, twin-verify and relocate-verify each take the ship lockfile and refuse without it" \
-      "4" "$(for fn in cmd_store_create cmd_store_build cmd_twin_verify cmd_relocate_verify; do ls_body "$fn" | grep -cE '_malf_ship_lock_args \|\| (return|exit)'; done | awk '{n += $1} END {print n}')"
+      "$(ls_body _malf_store_create_step | grep -c '"${_MALF_SHIP_LOCK\[@\]}"') $(ls_body _malf_store_build_in | grep -c '"${_MALF_SHIP_LOCK\[@\]}"') $(for fn in cmd_store_create _malf_store_create_step _malf_store_build_one _malf_store_build_in cmd_twin_verify cmd_relocate_verify; do ls_body "$fn"; done | grep -c -- '--lockfile-partial')"
+check "store-create, twin-verify and relocate-verify each take the ship lockfile and refuse without it" \
+      "3" "$(for fn in cmd_store_create cmd_twin_verify cmd_relocate_verify; do ls_body "$fn" | grep -cE '_malf_ship_lock_args \|\| (return|exit)'; done | awk '{n += $1} END {print n}')"
 check "twin-verify's probe and relocate-verify resolve against the lockfile malf took" \
       "1 1" "$(ls_body cmd_twin_verify | grep -c 'package_twin.py" missing .*"${_MALF_SHIP_LOCK\[0\]#--lockfile=}"') $(ls_body cmd_relocate_verify | grep -c '"${_MALF_SHIP_LOCK\[0\]#--lockfile=}"')"
 rm -rf "$ls_tmp"
@@ -6584,11 +6500,10 @@ sr_verb() {   # <verb> <arg>... -> rc=<status> <R-2 refusal count> <conan called
         MALF_STORE_DIR="$sr_tmp/home/.cache/store" CONAN_HOME="$sr_tmp/conanhome" bash "$MALF_BIN" "$@" 2>&1)"; rc=$?
     printf 'rc=%s %s %s' "$rc" "$(grep -c "malf $1: REFUSED.*R-2" <<< "$out")" "$([[ -s "$sr_tmp/conan.log" ]] && echo called || echo none)"
 }
-check "store-create, store-build and store-verdict each refuse a cache root before conan is ever called" \
-      "rc=2 1 none|rc=2 1 none|rc=2 1 none" \
-      "$(sr_verb store-create some_pkg)|$(sr_verb store-build some_pkg)|$(sr_verb store-verdict format "$MALF_ROOT")"
+check "store-create refuses a cache root before conan is ever called" \
+      "rc=2 1 none" "$(sr_verb store-create some_pkg)"
 check "no store verb spells a store default of its own: the root has one definition (store-create resolves it twice, on the host before its container and inside it)" \
-      "1 1 4" "$(grep -c 'MALF_STORE_DIR:-' "$MALF_BIN") $(sed -n '/^_malf_store_root()/,/^}/p' "$MALF_BIN" | grep -c 'MALF_STORE_DIR:-') $(grep -cE 'store="\$\(_malf_store_root store-(create|build|verdict)\)"' "$MALF_BIN")"
+      "1 1 2" "$(grep -c 'MALF_STORE_DIR:-' "$MALF_BIN") $(sed -n '/^_malf_store_root()/,/^}/p' "$MALF_BIN" | grep -c 'MALF_STORE_DIR:-') $(grep -cE 'store="\$\(_malf_store_root store-create\)"' "$MALF_BIN")"
 rm -rf "$sr_tmp"
 echo
 

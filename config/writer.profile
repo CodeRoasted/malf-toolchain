@@ -1,4 +1,4 @@
-# writer.profile — the layer every malf writer act (store-create, store-build) composes over its
+# writer.profile — the layer malf's writer act (store-create) composes over its
 # profile, host and build alike, and nothing else does (DN-142.D17 (8), commit B). A build compiles
 # through malf's wrapper, reached by NAME on the PATH below, so a build that records its compiler
 # records `malf-cc`, never a path of the seat; the act exports the real compilers it wraps
