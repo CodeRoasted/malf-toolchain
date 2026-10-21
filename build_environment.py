@@ -43,6 +43,12 @@ every privileged syscall by the kernel.
         the container starts, the act's system identity (DN-142.D30 (9) E3); with --worktree-repository,
         refused unless every worktree entry of each named repository lies under a mount (R9); exit the
         command's own, or 2 refused before it ran
+    build_environment.py probe --image <ref>@sha256:<digest> --stdin <file> --capture <file> -- <argv>...
+        <argv> in that image, never the build environment's: pulled by digest when the daemon lacks it and
+        verified held as that digest, `--network none`, a read-only root, a tmpfs at /tmp and at its working
+        directory, no mount and no variable, <file>'s bytes on its stdin; <capture> receives its exit code and
+        both streams (DN-142.D30 (11) R21); exit 0 the probe ran, 3 the image could not be held as its digest
+        (nothing ran, the act is unjudged), 2 refused
     build_environment.py definition-check [--conan-home <dir>]...
         the definition against the lock (DN-142.D30 (5) E2a): every third-party recipe of conan.lock whose
         source() fetches with git, read from the first conan home holding its revision (default: CONAN_HOME
@@ -93,6 +99,7 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import io
 import json
 import os
 import re
@@ -101,6 +108,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 from dataclasses import dataclass
@@ -643,6 +651,62 @@ def with_backends(docker: str, backends: list[Backend], argv: list[str]) -> int:
         return subprocess.run(argv, env={**os.environ, **walk.addresses}, check=False).returncode
 
 
+# ── the probe: a digest-pinned image the launcher runs for an act (DN-142.D30 (11) R21) ─────────────
+#
+# An act that needs another image than the build environment's (B2 act 5's consumer container) never
+# holds a Docker socket: it writes what the probe reads into its scratch, and the launcher runs the
+# probe by digest, pulled when the daemon lacks it and verified to be held as that digest, with no
+# network, a read-only root, a tmpfs at /tmp and at its working directory, no mount and no variable.
+# Its input is one file streamed on its stdin, so the container reads what the caller holds in any
+# mount namespace (a bind mount resolves in dockerd's, whose /tmp is private on the release seat). Its
+# exit code and both streams are captured into one file the act reads back.
+
+PROBE_WORK = "/w"
+PROBE_HEADROOM = 1 << 20
+UNJUDGED = 3
+
+
+def probe_held(docker: str, image: str) -> str | None:
+    """Why `image` cannot run as itself: not pinned by digest, absent with a failed pull, or held under
+    another ID than the digest it names; None when the daemon holds exactly that digest."""
+    if not PINNED_IMAGE.match(image):
+        return f"the probe image {image!r} is not pinned by digest (<ref>@sha256:<64 hex>)"
+    digest = image.rpartition("@")[2]
+    if inspected(docker, image) is None:
+        pulled = _docker(docker, "pull", "--quiet", image)
+        if pulled.returncode != 0:
+            return f"the probe image {image} is not held and its pull failed: {pulled.stderr.strip()}"
+    seen = inspected(docker, image)
+    if seen is None or seen[0] != digest:
+        return f"the probe image {image} is held as {seen[0] if seen else 'nothing'}, not as {digest}"
+    return None
+
+
+def probe_argv(image: str, argv: list[str], stdin_bytes: int, docker: str = "docker") -> list[str]:
+    """The probe's `docker run`: its stdin open, no network, a read-only root, a tmpfs at /tmp and one at
+    its working directory sized for the stream twice over, and no mount and no variable."""
+    return [docker, "run", "-i", "--rm", "--network", "none", "--read-only", "--hostname", ACT_HOSTNAME,
+            "--tmpfs", "/tmp", "--tmpfs", f"{PROBE_WORK}:rw,exec,size={2 * stdin_bytes + PROBE_HEADROOM}",
+            "--workdir", PROBE_WORK, image, *argv]
+
+
+def run_probe(docker: str, image: str, argv: list[str], stdin: Path, capture: Path) -> int:
+    """`argv` in the probe image, `stdin`'s bytes on its stdin; `capture` receives `{image, code, stdout,
+    stderr}`. post: exit 0 the probe ran (its own exit is in the capture), UNJUDGED when the image could not
+    be held as its digest (no capture is written)."""
+    held = probe_held(docker, image)
+    if held is not None:
+        print(f"build_environment: UNJUDGED — {held}; the probe did not run (DN-142.D30 (11) R21)", file=sys.stderr)
+        return UNJUDGED
+    stream = stdin.read_bytes()
+    done = subprocess.run(probe_argv(image, argv, len(stream), docker), input=stream, capture_output=True,
+                          check=False)
+    capture.write_text(json.dumps({"image": image, "code": done.returncode,
+                                   "stdout": done.stdout.decode(errors="replace"),
+                                   "stderr": done.stderr.decode(errors="replace")}, sort_keys=True) + "\n")
+    return 0
+
+
 # ── the definition's git mirrors ──────────────────────────────────────────────────────────────────
 
 def mirror_path(url: str) -> str:
@@ -1027,6 +1091,18 @@ def _backend_arms(arm, refusal, base: Path, docker: str) -> None:
         script.chmod(0o755)
         arm("the desk's with-backends hands the command each backend published on 127.0.0.1, by its variable",
             with_backends(docker, [probe], [str(script)]), 0)
+        streamed, captured = base / "probe.tar", base / "probe.json"
+        with tarfile.open(streamed, "w") as bundle:
+            member = tarfile.TarInfo("hello")
+            member.size = 3
+            bundle.addfile(member, io.BytesIO(b"hi\n"))
+        script = (f"tar -x -f - && cat hello && {{ touch /written 2>/dev/null && echo writable || echo read-only; }} "
+                  f"&& {{ test -e {base} && echo seen || echo unseen; }} && /probe connect 1.1.1.1 53")
+        arm("RED: the probe container reads its stdin stream, cannot write its root, sees no host path and reaches "
+            "no network (DN-142.D30 (11) R21)",
+            (run_probe(docker, reference, ["sh", "-c", script], streamed, captured),
+             (lambda held: (held["code"], held["stdout"].splitlines()[:3]))(json.loads(captured.read_text()))),
+            (0, (1, ["hi", "read-only", "unseen"])))
         arm("RED: a declaration whose image is not pinned by digest is refused",
             refusal(lambda: parse_backends([{"name": "redis", "image": "redis:7", "port": 6379, "health": "true"}],
                                            "packages.yml")).endswith("image 'redis:7' is not pinned by digest "
@@ -1036,6 +1112,65 @@ def _backend_arms(arm, refusal, base: Path, docker: str) -> None:
             .endswith("one and two declare the backend 'probe' differently"), True)
     finally:
         _docker(docker, "rmi", "--force", reference)
+
+
+FAKE_DOCKER = """#!/bin/sh
+state={state}
+case "$1" in
+  image) [ -f "$state/held" ] && {{ cat "$state/held"; exit 0; }}; exit 1 ;;
+  pull) printf '%s\\n' "$@" > "$state/pulled"; [ -f "$state/pullable" ] && {{ cp "$state/pullable" "$state/held"; exit 0; }}
+        echo "pull access denied" >&2; exit 1 ;;
+  run) printf '%s\\n' "$@" > "$state/argv"; cat > "$state/stdin"; echo ran; echo said >&2; exit 7 ;;
+esac
+exit 64
+"""
+
+
+def _probe_arms(arm, base: Path) -> None:
+    """The probe (DN-142.D30 (11) R21) over a fake daemon: pulled by digest and verified or unjudged, its
+    stdin streamed whole, its exit and streams captured, its container holding no mount and no network."""
+    state, docker = base / "fake-daemon", base / "fake-docker"
+    state.mkdir()
+    docker.write_text(FAKE_DOCKER.format(state=state))
+    docker.chmod(0o755)
+    digest = "sha256:" + "5" * 64
+    image = f"ubuntu:24.04@{digest}"
+    stdin, capture = base / "probe-stdin.tar", base / "probe-capture.json"
+    stdin.write_bytes(b"x" * 4096)
+
+    def ran() -> tuple[int, object, bool, bool]:
+        for name in ("argv", "pulled"):
+            (state / name).unlink(missing_ok=True)
+        capture.unlink(missing_ok=True)
+        code = run_probe(str(docker), image, ["sh", "-c", "true"], stdin, capture)
+        return (code, json.loads(capture.read_text()) if capture.is_file() else None, (state / "argv").is_file(),
+                (state / "pulled").is_file())
+
+    (state / "held").write_text(f"{digest}|\n")
+    arm("a probe image the daemon holds as its digest runs, its stdin streamed whole, its exit and both streams "
+        "captured, nothing pulled",
+        (ran(), (state / "stdin").read_bytes() == stdin.read_bytes()),
+        ((0, {"image": image, "code": 7, "stdout": "ran\n", "stderr": "said\n"}, True, False), True))
+    (state / "held").unlink()
+    arm("RED: a probe image the daemon lacks and cannot pull is UNJUDGED: nothing runs, nothing is captured",
+        ran(), (UNJUDGED, None, False, True))
+    (state / "pullable").write_text("sha256:" + "6" * 64 + "|\n")
+    arm("RED: a probe image pulled under another ID than its digest is UNJUDGED, never run",
+        (ran(), (state / "pulled").read_text().split()), ((UNJUDGED, None, False, True), ["pull", "--quiet", image]))
+    (state / "held").unlink()
+    (state / "pullable").write_text(f"{digest}|\n")
+    arm("a probe image the daemon lacks is pulled by its digest, verified, then run",
+        ran()[0::2], (0, True))
+    arm("RED: a probe image named by a tag alone is UNJUDGED before any pull",
+        (run_probe(str(docker), "ubuntu:24.04", ["true"], stdin, capture), probe_held(str(docker), "ubuntu:24.04")),
+        (UNJUDGED, "the probe image 'ubuntu:24.04' is not pinned by digest (<ref>@sha256:<64 hex>)"))
+    argv = probe_argv(image, ["sh", "-c", "true"], 4096)
+    arm("RED: the probe container has no mount, no network, a read-only root and the tmpfs pair, its stdin open",
+        ([word for word in argv if word in ("-v", "--volume", "--mount", "--env", "-e", "--privileged")],
+         argv[argv.index("--network") + 1], "--read-only" in argv, "-i" in argv,
+         [argv[at + 1].split(":")[0] for at, word in enumerate(argv) if word == "--tmpfs"],
+         argv[argv.index(image):]),
+        ([], "none", True, True, ["/tmp", PROBE_WORK], [image, "sh", "-c", "true"]))
 
 
 def _act_user_arms(arm, pin: Pin, mount: Path, docker: str) -> None:
@@ -1169,6 +1304,9 @@ def selftest() -> int:
             worktree_refusals([base / "mounted"], [base])[0].startswith(f"{base / 'mounted'} names no git repository"),
             True)
 
+    with tempfile.TemporaryDirectory(prefix="build_environment.probe.") as held:
+        _probe_arms(arm, Path(held))
+
     docker = shutil.which("docker") or "docker"
     with tempfile.TemporaryDirectory(prefix="build_environment.selftest.") as held:
         base = Path(held)
@@ -1295,6 +1433,20 @@ def main(argv: list[str]) -> int:
             print(f"build_environment: INTERRUPTED by {interrupted}; the walk's backends and network were removed",
                   file=sys.stderr)
             return REFUSED
+    if argv[:1] == ["probe"]:
+        if "--" not in argv or not argv[argv.index("--") + 1:]:
+            print("build_environment.py probe: --image <ref> --stdin <file> --capture <file> -- <argv>...",
+                  file=sys.stderr)
+            return REFUSED
+        split = argv.index("--")
+        options = argparse.ArgumentParser(prog="build_environment.py probe")
+        for name in ("--image", "--stdin", "--capture"):
+            options.add_argument(name, required=True)
+        given = options.parse_args(argv[1:split])
+        if not Path(given.stdin).is_file():
+            print(f"build_environment.py probe: --stdin {given.stdin} names no file", file=sys.stderr)
+            return REFUSED
+        return run_probe(docker, given.image, argv[split + 1:], Path(given.stdin), Path(given.capture))
     if argv[:1] == ["with-backends"]:
         if "--" not in argv or argv[1:2] != ["--backends"] or argv.index("--") != 3 or not argv[4:]:
             print("build_environment.py with-backends: --backends <file> -- <argv>...", file=sys.stderr)

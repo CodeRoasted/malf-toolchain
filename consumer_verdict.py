@@ -23,13 +23,17 @@ passed, so a probe that could not run is a fail, never a pass:
 Every ELF reading is Python over the bytes (PT_DYNAMIC, the dynamic string table, the version
 needs), never `readelf | grep`, so no pipe can turn a hit into a miss.
 
-THE BYTES REACH THE CONTAINER AS A TAR ON ITS STDIN, NEVER A BIND MOUNT. A bind mount's source is
-resolved in dockerd's mount namespace, not the caller's: on the release runner the runner and its
-rootless dockerd each hold a PRIVATE /tmp (malf runner/isolate-runner-wsl.sh, sandbox_lines), so a
-mount of the scratch directory showed the container an empty directory dockerd made in its own
-/tmp, and the row read `exit 127: sh: 1: ./sift: not found` (step 0 run 38296956741). The stream
-goes through the daemon's API, so the container reads what the caller holds in any namespace, and
-the in-container digest check reds a container that ran anything else.
+THE ACT RUNS IN THE BUILD ENVIRONMENT, AND ITS CONSUMER CONTAINER IS THE LAUNCHER'S PROBE (DN-142.D30 (11)
+R21): `prepare` runs in the attested image, extracts the entry from the store by digest, judges rows A to D
+and writes the work directory, its tar and the probe (the consumer image by digest and its script) into the
+act's scratch; malf's launcher then runs the probe (`build_environment.py probe`: pulled by digest and
+verified, `--network none`, a read-only root, no mount, the tar on its stdin) and captures its exit and
+both streams there; `conclude` runs in the image, judges rows E and F from that capture and stores the
+verdict, its `system` member `{image: <the pinned config digest>}` and its `toolchain` the one the seam
+measured in that image. No `docker` argv is built here. A bind mount's source would resolve in dockerd's
+mount namespace, which on the release runner holds a private /tmp (step 0 run 38296956741: `exit 127:
+sh: 1: ./sift: not found`); the stdin stream reaches the container from any namespace, and the
+in-container digest check reds a container that ran anything else.
 
 THE CONSUMER BASELINE IS THE PRODUCT'S DECLARATION, read at the commit step 0 recorded from
 `<package path>/consumer/` of the package's repository: `baseline.json` (`container`, an image
@@ -37,20 +41,26 @@ reference pinned by digest; `glibc_ceiling`; `smoke`: the two log files, the lin
 change and the line that must not) and the two logs. Its git tree id and the container reference
 are key members, so a new baseline re-keys the verdict.
 
-    consumer_verdict.py judge <store> <steps.json> <package> <entry> <repository dir> <commit> <package path> <scratch>
-        stores the verdict record (output `consumer`, step id `<package>/consumer`); exit 0 when it
-        passed and agrees with its record, 1 on a fail or a mismatch
+    consumer_verdict.py prepare <store> <steps.json> <package> <entry> <repository dir> <commit> <package path> <scratch>
+        in the build environment: rows A to D, the work directory, its tar and the probe written under <scratch>;
+        exit 0 prepared, 1 refused (nothing is written for the launcher to run)
+    consumer_verdict.py conclude <store> <scratch> <member.json>
+        in the build environment, after the launcher's probe: rows E and F from its capture, the verdict
+        stored (output `consumer`, step id `<package>/consumer`) under the `system` and `toolchain` the
+        member file names, the system refused unless it is this container's MALF_SYSTEM; exit 0 when it
+        passed and agrees with its record, 1 on a fail, a mismatch or a refusal
     consumer_verdict.py selftest
-        every row red on a fixture executable built here, the container rows over a fake runner
+        every row red on a fixture executable built here, the container rows over fixture captures
 
 Exit 0 pass, 1 fail or refused, 2 a usage error.
 """
 
 from __future__ import annotations
 
-import hashlib
+import ast
 import io
 import json
+import os
 import re
 import struct
 import subprocess
@@ -59,14 +69,13 @@ import tarfile
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import artefact_store  # noqa: E402 — a sibling module, located from this file
 import store_manifest  # noqa: E402 — a sibling module, located from this file
 
 NAME = "consumer"
-JUDGE_ARGV = ["consumer_verdict.py", "judge"]
+ACT_ARGV = ["consumer_verdict.py", "prepare", "conclude"]
 BASELINE_DIR = "consumer"
 BASELINE_FILE = "baseline.json"
 ROWS = ("libstdcxx-needed", "cxx-version-needs", "runpath", "glibc-floor", "consumer-container",
@@ -77,11 +86,15 @@ DT_NULL, DT_NEEDED, DT_STRTAB, DT_RPATH, DT_RUNPATH = 0, 1, 5, 15, 29
 DT_VERNEED, DT_VERNEEDNUM = 0x6FFFFFFE, 0x6FFFFFFF
 GLIBC_NEED = re.compile(r"^GLIBC_(\d+(?:\.\d+)*)$")
 CONTAINER_REF = re.compile(r"^[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$")
+# `docker run`'s own exit when the container could not be started: the probe did not run.
 DOCKER_UNREACHABLE = 125
-WORK_MOUNT = "/w"
-WORK_HEADROOM = 1 << 20
-
-Runner = Callable[[list[str], bytes], "tuple[int, str, str]"]
+# The files of the act's scratch: what `prepare` writes, what the launcher's probe reads and captures,
+# and what `conclude` reads back.
+WORK, WORK_TAR, PROBE, PREPARED, CAPTURE = "consumer", "work.tar", "probe.json", "prepared.json", "capture.json"
+# The line the probe prints between the container's glibc reading and the executable's report.
+REPORT_MARK = "consumer-verdict: report"
+SYSTEM_ENV = "MALF_SYSTEM"
+PINNED_SYSTEM = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class Refused(Exception):
@@ -192,14 +205,6 @@ def byte_rows(data: bytes, ceiling: str) -> list[list[str]]:
     return rows
 
 
-def docker_runner(argv: list[str], stdin: bytes) -> tuple[int, str, str]:
-    try:
-        done = subprocess.run(argv, capture_output=True, input=stdin, check=False)
-    except FileNotFoundError as missing:
-        return DOCKER_UNREACHABLE, "", str(missing)
-    return (done.returncode, done.stdout.decode(errors="replace"), done.stderr.decode(errors="replace"))
-
-
 def work_stream(work: Path) -> bytes:
     """Every file of `work` as an uncompressed tar, modes kept, owned by root."""
     buffer = io.BytesIO()
@@ -213,44 +218,40 @@ def work_stream(work: Path) -> bytes:
     return buffer.getvalue()
 
 
-def container_rows(work: Path, executable: str, digest: str, baseline: dict, runner: Runner) -> list[list[str]]:
-    """Rows E and the consistency arm, each `[row, outcome, detail]`; a docker that cannot run the
-    image is NOT JUDGED, never passed."""
-    image, smoke = baseline["container"], baseline["smoke"]
-    rows = []
-    code, out, err = runner(["docker", "run", "--rm", "--network", "none", image, "ldd", "--version"], b"")
-    if code == DOCKER_UNREACHABLE:
-        rows.append(["container-glibc", NOT_JUDGED, f"docker could not run {image}: {err.strip()[-200:]}"])
-    else:
-        first = (out.splitlines() or [""])[0].split()
-        found = first[-1] if first else ""
-        rows.append(["container-glibc", PASSED if code == 0 and found == baseline["glibc_ceiling"] else FAILED,
-                     f"the container's glibc is {found or 'unread'}, the ceiling {baseline['glibc_ceiling']}"])
-    stream = work_stream(work)
-    script = (f"tar -x -f - && echo '{digest}  {executable}' | sha256sum -c --quiet - && "
-              f"./{executable} --help >/dev/null && ./{executable} {smoke['baseline']} {smoke['changed']} "
-              f"--format json -o /tmp/report.json --transport none >/dev/null && cat /tmp/report.json")
-    code, out, err = runner(["docker", "run", "-i", "--rm", "--network", "none", "--read-only", "--tmpfs", "/tmp",
-                             "--tmpfs", f"{WORK_MOUNT}:rw,exec,size={2 * len(stream) + WORK_HEADROOM}",
-                             "-w", WORK_MOUNT, image, "sh", "-c", script], stream)
-    if code == DOCKER_UNREACHABLE:
-        rows.append(["consumer-container", NOT_JUDGED, f"docker could not run {image}: {err.strip()[-200:]}"])
-        return rows
+def probe_script(executable: str, digest: str, smoke: dict) -> str:
+    """The consumer container's one script: its glibc's version line, the mark, then the work directory
+    unpacked from stdin, the executable hashed against the judged digest, `--help` and the two-log diff."""
+    return (f"ldd --version 2>&1 | head -n 1; echo '{REPORT_MARK}'; "
+            f"tar -x -f - && echo '{digest}  {executable}' | sha256sum -c --quiet - && "
+            f"./{executable} --help >/dev/null && ./{executable} {smoke['baseline']} {smoke['changed']} "
+            f"--format json -o /tmp/report.json --transport none >/dev/null && cat /tmp/report.json")
+
+
+def container_rows(capture: dict, baseline: dict) -> list[list[str]]:
+    """Rows E and the consistency arm from the probe's capture, each `[row, outcome, detail]`: a probe
+    that could not run (docker's own exit, or no mark printed) is NOT JUDGED in both, never passed."""
+    code, out, err = capture["code"], capture["stdout"], capture["stderr"]
+    smoke, ceiling = baseline["smoke"], baseline["glibc_ceiling"]
+    glibc, marked, report = out.partition(REPORT_MARK + "\n")
+    if code == DOCKER_UNREACHABLE or not marked:
+        why = f"the probe could not run {capture['image']}: exit {code}: {(err or out).strip()[-200:]}"
+        return [["container-glibc", NOT_JUDGED, why], ["consumer-container", NOT_JUDGED, why]]
+    first = (glibc.splitlines() or [""])[0].split()
+    found = first[-1] if first else ""
+    rows = [["container-glibc", PASSED if found == ceiling else FAILED,
+             f"the container's glibc is {found or 'unread'}, the ceiling {ceiling}"]]
     if code != 0:
-        rows.append(["consumer-container", FAILED, f"exit {code}: {(err or out).strip()[-200:]}"])
-        return rows
+        return [*rows, ["consumer-container", FAILED, f"exit {code}: {(err or report).strip()[-200:]}"]]
     try:
-        changes = json.loads(out).get("ranked_changes") or []
+        changes = json.loads(report).get("ranked_changes") or []
     except ValueError:
-        rows.append(["consumer-container", FAILED, "the report is not JSON"])
-        return rows
+        return [*rows, ["consumer-container", FAILED, "the report is not JSON"]]
     named = [change.get("summary", "") for change in changes]
     added = [summary for summary in named if smoke["added"] in summary]
     kept = [summary for summary in named if smoke["unchanged"] in summary]
-    rows.append(["consumer-container", PASSED if len(added) == 1 and not kept and len(named) == 1 else FAILED,
-                 f"{len(named)} ranked change(s); `{smoke['added']}` named {len(added)}x, "
-                 f"`{smoke['unchanged']}` named {len(kept)}x"])
-    return rows
+    return [*rows, ["consumer-container", PASSED if len(added) == 1 and not kept and len(named) == 1 else FAILED,
+                    f"{len(named)} ranked change(s); `{smoke['added']}` named {len(added)}x, "
+                    f"`{smoke['unchanged']}` named {len(kept)}x"]]
 
 
 def _git(repository: Path, *args: str) -> subprocess.CompletedProcess:
@@ -281,9 +282,10 @@ def baseline_at(repository: Path, commit: str, package_path: str, into: Path) ->
     return baseline, tree.stdout.decode().strip()
 
 
-def judge(store: Path, steps: list[dict], package: str, entry: str, repository: Path, commit: str,
-          package_path: str, scratch: Path, runner: Runner = docker_runner) -> int:
-    """Judge the stored entry and store the verdict; 0 when it passed (and matches its record)."""
+def prepare(store: Path, steps: list[dict], package: str, entry: str, repository: Path, commit: str,
+            package_path: str, scratch: Path) -> int:
+    """In the build environment: the stored entry extracted by digest, rows A to D judged, and the work
+    directory, its tar, the probe and the prepared state written under `scratch`. raises Refused."""
     step = {row["id"]: row for row in steps}.get(f"{package}/package")
     record = artefact_store.LocalStore(store).record(step["key"]) if step else None
     if record is None:
@@ -292,7 +294,7 @@ def judge(store: Path, steps: list[dict], package: str, entry: str, repository: 
     held = {path: digest for path, _mode, digest in output["entries"]}
     if entry not in held:
         raise Refused(f"{package} holds no entry {entry}")
-    work = scratch / "consumer"
+    work = scratch / WORK
     work.mkdir(parents=True)
     executable = Path(entry).name
     try:
@@ -301,21 +303,65 @@ def judge(store: Path, steps: list[dict], package: str, entry: str, repository: 
         raise Refused(str(refused)) from refused
     (work / executable).chmod(0o755)
     baseline, tree = baseline_at(repository, commit, package_path, work)
-    rows = byte_rows((work / executable).read_bytes(), baseline["glibc_ceiling"]) + \
-        container_rows(work, executable, held[entry], baseline, runner)
+    rows = byte_rows((work / executable).read_bytes(), baseline["glibc_ceiling"])
+    (scratch / WORK_TAR).write_bytes(work_stream(work))
+    (scratch / PROBE).write_text(json.dumps({"image": baseline["container"], "argv": [
+        "sh", "-c", probe_script(executable, held[entry], baseline["smoke"])]}, sort_keys=True))
+    (scratch / PREPARED).write_text(json.dumps({"package": package, "entry": entry, "digest": held[entry],
+                                                "baseline": baseline, "tree": tree, "rows": rows}, sort_keys=True))
+    print(f"consumer_verdict: PREPARED {package} {entry} — the probe {baseline['container']} is the launcher's")
+    return 0
+
+
+def _read(path: Path, what: str) -> dict:
+    try:
+        held = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as unread:
+        raise Refused(f"{what} {path} could not be read: {unread}") from unread
+    if not isinstance(held, dict):
+        raise Refused(f"{what} {path} is not a JSON object")
+    return held
+
+
+def act_member(member: dict, environ: dict) -> tuple[dict, dict]:
+    """(the `system`, the `toolchain`) the member file names, the system `{image: <digest>}` and that
+    digest this container's MALF_SYSTEM, the toolchain a non-empty measurement. raises Refused."""
+    system, toolchain = member.get("system"), member.get("toolchain")
+    pinned = environ.get(SYSTEM_ENV, "")
+    if not PINNED_SYSTEM.match(pinned):
+        raise Refused(f"{SYSTEM_ENV} is {pinned!r}: the act did not run in the attested build environment, so it has "
+                      f"no system identity (DN-142.D30 (11) R21)")
+    if system != {"image": pinned}:
+        raise Refused(f"the member names the system {system!r}, and this container runs {{'image': {pinned!r}}}")
+    if not isinstance(toolchain, dict) or not toolchain:
+        raise Refused(f"the member names the toolchain {toolchain!r}, not a measurement of the image "
+                      f"(DN-142.D30 (10) R15)")
+    return system, toolchain
+
+
+def conclude(store: Path, scratch: Path, member: dict, environ: dict) -> int:
+    """In the build environment, after the probe: rows E and F from its capture, the verdict stored under
+    the member's system and toolchain; 0 when it passed (and matches its record). raises Refused."""
+    system, toolchain = act_member(member, environ)
+    prepared, capture = _read(scratch / PREPARED, "the prepared state"), _read(scratch / CAPTURE, "the probe's capture")
+    baseline = prepared["baseline"]
+    if capture.get("image") != baseline["container"]:
+        raise Refused(f"the probe ran {capture.get('image')!r}, and the baseline names {baseline['container']}")
+    rows = prepared["rows"] + container_rows(capture, baseline)
     rows.sort(key=lambda row: ROWS.index(row[0]))
     verdict = "pass" if all(row[1] == PASSED for row in rows) else "fail"
     definition = artefact_store.definition_member(Path(__file__).resolve().parent,
-                                                  artefact_store.parameter_document(JUDGE_ARGV, None))
+                                                  artefact_store.parameter_document(ACT_ARGV, None))
+    entry, package = prepared["entry"], prepared["package"]
     document = {
         "step": {"kind": "verdict", "id": NAME, "subject": package,
                  "predicate": {"id": "malf consumer_verdict.py", "version": definition["malf"]},
                  "params": {"glibc_ceiling": baseline["glibc_ceiling"], "entry": entry}},
         "definition": definition,
-        "judged": {entry: held[entry]},
-        "data": {"container": baseline["container"], "baseline": tree},
-        "toolchain": {},
-        "system": artefact_store.system_member(),
+        "judged": {entry: prepared["digest"]},
+        "data": {"container": baseline["container"], "baseline": prepared["tree"]},
+        "toolchain": toolchain,
+        "system": system,
         "context": {},
     }
     findings = [f"{row[0]}: {row[1]}" for row in rows if row[1] != PASSED]
@@ -379,66 +425,87 @@ def selftest() -> int:
                     "smoke": {"baseline": "base.log", "changed": "changed.log",
                               "added": "ERROR disk full node-7", "unchanged": "ERROR conn refused db-1"}}
         report = json.dumps({"ranked_changes": [{"summary": 'New error pattern: "ERROR disk full node-7"'}]})
+        glibc = "ldd (Ubuntu GLIBC 2.39-0ubuntu8.6) 2.39\n"
 
-        work = root / "work"
-        work.mkdir()
-        for name, data in (("sift", green), ("base.log", b"ERROR conn refused db-1\n"),
-                           ("changed.log", b"ERROR conn refused db-1\nERROR disk full node-7\n")):
-            (work / name).write_bytes(data)
-        (work / "sift").chmod(0o755)
-        digest = hashlib.sha256(green).hexdigest()
+        def probed(code: int = 0, out: str = report, glibc_line: str = glibc, err: str = "",
+                   marked: bool = True) -> dict:
+            """The launcher's capture of the probe: its glibc line, the mark, then the executable's report."""
+            return {"image": baseline["container"], "code": code, "stderr": err,
+                    "stdout": glibc_line + (REPORT_MARK + "\n" if marked else "") + out}
 
-        def fake(ldd: tuple[int, str] = (0, "ldd (Ubuntu GLIBC 2.39-0ubuntu8.6) 2.39\n"),
-                 smoke: tuple[int, str] = (0, report)) -> Runner:
-            """A daemon in a mount namespace of its own (the release runner's private /tmp): a bind
-            mount shows the container an empty directory, so /w holds only what the stdin stream
-            carries, and the script's digest check runs over those bytes."""
-            def run(argv: list[str], stdin: bytes) -> tuple[int, str, str]:
-                if "ldd" in argv:
-                    return ldd[0], ldd[1], ""
-                held: dict[str, bytes] = {}
-                if stdin and "-i" in argv:
-                    with tarfile.open(fileobj=io.BytesIO(stdin)) as bundle:
-                        held = {member.name: bundle.extractfile(member).read()
-                                for member in bundle.getmembers() if member.isfile() and member.mode & 0o100}
-                if "sift" not in held:
-                    return 127, "", "sh: 1: ./sift: not found"
-                want = re.search(r"echo '([0-9a-f]{64})  sift'", argv[-1])
-                if not want or hashlib.sha256(held["sift"]).hexdigest() != want.group(1):
-                    return 1, "", "sha256sum: WARNING: 1 computed checksum did NOT match"
-                return smoke[0], smoke[1], "boom" if smoke[0] else ""
-            return run
-
-        arm("the pinned container runs the two-log diff naming the added line once and the shared one never, "
-            "and its glibc is the ceiling",
-            outcomes(container_rows(work, "sift", digest, baseline, fake())),
-            {"container-glibc": PASSED, "consumer-container": PASSED})
-        arm("CONTROL: over that daemon a bind mount of the work directory finds no executable, the release "
-            "runner's red (step 0 run 38296956741: `exit 127: sh: 1: ./sift: not found`)",
-            fake()(["docker", "run", "--rm", "-v", f"{work}:{WORK_MOUNT}:ro", "-w", WORK_MOUNT,
-                    baseline["container"], "sh", "-c", f"echo '{digest}  sift' | sha256sum -c - && ./sift --help"],
-                   b"")[0], 127)
-        arm("RED: a container holding other bytes than the judged entry reds row E",
-            outcomes(container_rows(work, "sift", "0" * 64, baseline, fake()))["consumer-container"], FAILED)
+        arm("the probe's capture names the added line once and the shared one never, and its glibc is the ceiling",
+            outcomes(container_rows(probed(), baseline)), {"container-glibc": PASSED, "consumer-container": PASSED})
+        script = probe_script("sift", "a" * 64, baseline["smoke"])
+        arm("the probe's script prints the glibc line and the mark, then hashes the unpacked executable against "
+            "the judged digest before running it",
+            (script.index("ldd --version") < script.index(REPORT_MARK) < script.index("tar -x -f -")
+             < script.index(f"echo '{'a' * 64}  sift' | sha256sum -c") < script.index("./sift --help")), True)
+        arm("RED: a container holding other bytes than the judged entry reds row E (the script's digest check exits 1)",
+            outcomes(container_rows(probed(1, "", err="sha256sum: WARNING: 1 computed checksum did NOT match"),
+                                    baseline))["consumer-container"], FAILED)
         arm("RED: an executable exiting 1 in the container reds row E",
-            outcomes(container_rows(work, "sift", digest, baseline, fake(smoke=(1, ""))))["consumer-container"],
-            FAILED)
-        arm("NOT JUDGED: a docker that cannot run the image is never a pass",
-            set(outcomes(container_rows(work, "sift", digest, baseline,
-                                        fake(ldd=(DOCKER_UNREACHABLE, ""), smoke=(DOCKER_UNREACHABLE, "")))).values()),
-            {NOT_JUDGED})
+            outcomes(container_rows(probed(1, ""), baseline))["consumer-container"], FAILED)
+        arm("NOT JUDGED: a probe that could not run (docker's own exit 125) is never a pass, in either row",
+            set(outcomes(container_rows(probed(DOCKER_UNREACHABLE, "", "", "no such image", marked=False),
+                                        baseline)).values()), {NOT_JUDGED})
+        arm("NOT JUDGED: a probe whose script never reached the mark (no shell, exit 127) is never a pass",
+            set(outcomes(container_rows(probed(127, "", "", "exec: sh: not found", marked=False),
+                                        baseline)).values()), {NOT_JUDGED})
         arm("RED: a report that does not name the added line reds row E (the content, not a non-empty file)",
-            outcomes(container_rows(work, "sift", digest, baseline,
-                                    fake(smoke=(0, json.dumps({"ranked_changes": [{"summary": "x"}]})))))
+            outcomes(container_rows(probed(out=json.dumps({"ranked_changes": [{"summary": "x"}]})), baseline))
             ["consumer-container"], FAILED)
         arm("RED: a report that names the shared line as a change reds row E",
-            outcomes(container_rows(work, "sift", digest, baseline, fake(smoke=(0, json.dumps({"ranked_changes": [
-                {"summary": "ERROR disk full node-7"}, {"summary": "ERROR conn refused db-1"}]})))))
+            outcomes(container_rows(probed(out=json.dumps({"ranked_changes": [
+                {"summary": "ERROR disk full node-7"}, {"summary": "ERROR conn refused db-1"}]})), baseline))
             ["consumer-container"], FAILED)
         arm("RED: a ceiling the container's glibc is not reds the consistency row",
-            outcomes(container_rows(work, "sift", digest, {**baseline, "glibc_ceiling": "2.40"},
-                                    fake()))["container-glibc"],
-            FAILED)
+            outcomes(container_rows(probed(), {**baseline, "glibc_ceiling": "2.40"}))["container-glibc"], FAILED)
+
+        pin = "sha256:" + "9" * 64
+        measured = {"python3": {"version": "3.12.3", "executable": "1" * 64}}
+        member = {"system": {"image": pin}, "toolchain": measured}
+        act = root / "act"
+        act.mkdir()
+        (act / PREPARED).write_text(json.dumps({
+            "package": "tools", "entry": "bin/sift", "digest": "a" * 64, "baseline": baseline, "tree": "b" * 40,
+            "rows": byte_rows(green, "2.39")}))
+        (act / CAPTURE).write_text(json.dumps(probed()))
+        store = root / "store"
+        concluded = conclude(store, act, member, {SYSTEM_ENV: pin})
+        records = [json.loads(path.read_text()) for path in sorted((store / "records").glob("*.json"))]
+        arm("RED-FIRST (DN-142.D30 (11) R21): the consumer verdict's record attests {image: <pin>} and the toolchain "
+            "the seam measured in that image",
+            (concluded, [(record["inputs"]["system"], record["inputs"]["toolchain"],
+                          record["outputs"][NAME]["verdict"]) for record in records]),
+            (0, [({"image": pin}, measured, "pass")]))
+
+        def refused(call) -> str:
+            try:
+                call()
+            except Refused as refusal:
+                return str(refusal)
+            return "no refusal"
+
+        arm("RED: a conclude run outside the build environment (no MALF_SYSTEM) is refused a system member",
+            refused(lambda: act_member(member, {})).startswith("MALF_SYSTEM is '': the act did not run in the "
+                                                              "attested build environment"), True)
+        arm("RED: a member naming another image than the container's MALF_SYSTEM is refused",
+            refused(lambda: act_member(member, {SYSTEM_ENV: "sha256:" + "8" * 64})).startswith(
+                f"the member names the system {{'image': '{pin}'}}"), True)
+        arm("RED: a member carrying no measured toolchain is refused",
+            refused(lambda: act_member({**member, "toolchain": {}}, {SYSTEM_ENV: pin})).startswith(
+                "the member names the toolchain {}"), True)
+        (act / CAPTURE).write_text(json.dumps({**probed(), "image": "ubuntu:22.04@sha256:" + "4" * 64}))
+        arm("RED: a capture of another image than the baseline's is refused, nothing stored",
+            (refused(lambda: conclude(root / "other-store", act, member, {SYSTEM_ENV: pin})).startswith(
+                "the probe ran 'ubuntu:22.04@sha256:"), (root / "other-store" / "records").is_dir()), (True, False))
+        judging = [node for node in ast.parse(Path(__file__).read_text(encoding="utf-8")).body
+                   if isinstance(node, ast.FunctionDef) and node.name != "selftest"]
+        built = sorted({node.value for function in judging for node in ast.walk(function)
+                        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+                        and Path(node.value.split(" ")[0]).name == "docker"})
+        arm("RED: no `docker` argv is built here: the consumer container is the launcher's probe (DN-142.D30 (11) R21)",
+            built, [])
 
     for failure in failures:
         print(f"consumer_verdict selftest FAILED: {failure}")
@@ -450,9 +517,11 @@ def main(argv: list[str]) -> int:
     try:
         if argv == ["selftest"]:
             return selftest()
-        if len(argv) == 9 and argv[0] == "judge":
-            return judge(Path(argv[1]), json.loads(Path(argv[2]).read_text()), argv[3], argv[4], Path(argv[5]),
-                         argv[6], argv[7], Path(argv[8]))
+        if len(argv) == 9 and argv[0] == "prepare":
+            return prepare(Path(argv[1]), json.loads(Path(argv[2]).read_text()), argv[3], argv[4], Path(argv[5]),
+                           argv[6], argv[7], Path(argv[8]))
+        if len(argv) == 4 and argv[0] == "conclude":
+            return conclude(Path(argv[1]), Path(argv[2]), _read(Path(argv[3]), "the act's member"), dict(os.environ))
     except Refused as refused:
         print(f"consumer_verdict: REFUSED — {refused}", file=sys.stderr)
         return 1
