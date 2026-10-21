@@ -51,6 +51,12 @@ format is its own, so a destination slice never verifies as an owner slice, nor 
 repository that owns no row is no slice's repository: the seal never creates a store package for a
 repository that is a destination only.
 
+EVERY RECORD THE RUN LISTS HAS A SYSTEM IDENTITY (DN-142.D30 E4, (11) R22), read before any row: it carries
+the build environment's `{image: <config digest>}` that `config/build-environment.json` pins, or names the
+keyed parent record that carries it (a test verdict its `build`, an image each executable's `record`), or, an
+ingestion produced outside the writer's domain, names its seat and its dated exception. Another ID, the
+retired `host` attestation, an empty or null member, or neither is a refusal naming the step.
+
 THE PLAN is the builder's declared input: which repository publishes what, under which name.
 
     {"format": "coderoast.store.plan/3",
@@ -324,6 +330,64 @@ def hold(store: Path, digest: str, data: bytes) -> None:
 Signer = Callable[[str, bytes], bytes]
 
 
+def pinned_system() -> dict:
+    """`{image: <config digest>}` of the build environment this malf pins (`config/build-environment.json`)."""
+    try:
+        image = json.loads(artefact_store.ENVIRONMENT_PIN.read_text(encoding="utf-8")).get("image")
+    except (OSError, ValueError, AttributeError) as unread:
+        raise Refused(f"the build-environment pin {artefact_store.ENVIRONMENT_PIN} could not be read: {unread}") from unread
+    if not isinstance(image, str) or not artefact_store.CONFIG_DIGEST.match(image):
+        raise Refused(f"{artefact_store.ENVIRONMENT_PIN} names no config digest as `image`: {image!r}")
+    return {"image": image}
+
+
+def system_findings(store: Path, steps: dict[str, dict], pinned: dict) -> list[str]:
+    """THE SYSTEM READING (DN-142.D30 E4, (11) R22): every record the step-0 run lists carries `pinned`, the
+    build environment's `{image: <config digest>}`; or names the keyed parent record that carries it (a test
+    verdict its `build`, an image each executable's `record`); or, produced outside the writer's domain, names
+    its seat and its dated exception (an ingestion, DN-142.D7, DN-142.D20 (2)). Another ID, the retired `host`
+    attestation, an empty or null member and a record naming neither are each a finding, so a host-built
+    binary never shares a key with an image-built one."""
+    def held(key: object) -> dict | None:
+        path = store / "records" / f"{key}.json"
+        return json.loads(path.read_text()) if isinstance(key, str) and path.is_file() else None
+
+    findings = []
+    for step_id, step in sorted(steps.items()):
+        record = held(step.get("key"))
+        if record is None:
+            findings.append(f"{step_id}: the store holds no record {step.get('key')}")
+            continue
+        inputs = record.get("inputs") or {}
+        kind = (inputs.get("step") or {}).get("kind")
+        if "system" in inputs:
+            if inputs["system"] != pinned:
+                findings.append(f"{step_id}: its {kind} record attests the system {inputs['system']!r}, not the "
+                                f"pinned build environment {pinned!r}")
+            continue
+        if kind == artefact_store.INGEST_KIND:
+            output = (record.get("outputs") or {}).get(artefact_store.INGEST_OUTPUT) or {}
+            if not output.get("seat") or not (output.get("exception") or {}).get("since"):
+                findings.append(f"{step_id}: an ingestion carries no system member, so it must name its seat and "
+                                f"its dated exception, and it names {output.get('seat')!r} and "
+                                f"{output.get('exception')!r} (DN-142.D7)")
+            continue
+        named = ([inputs.get("build")] if kind == "test-verdict" else
+                 [row.get("record") for row in inputs.get("executables") or []] if kind == "image" else [])
+        parents = [parent for parent in named if parent]
+        if not parents:
+            findings.append(f"{step_id}: its {kind} record carries no system member and names no keyed parent "
+                            f"record carrying one")
+        for parent in parents:
+            body = held(parent)
+            system = ((body or {}).get("inputs") or {}).get("system")
+            if system != pinned:
+                findings.append(f"{step_id}: its {kind} record names the keyed parent {parent}, which "
+                                f"{'the store does not hold' if body is None else f'attests {system!r}'}, not "
+                                f"the pinned build environment {pinned!r}")
+    return findings
+
+
 def build(store: Path, record_bytes: bytes, plan: dict, sign_with: Signer | None = None
           ) -> tuple[bytes, dict[str, bytes], dict[tuple[str, str], tuple[bytes, bytes | None]]]:
     """(the whole manifest, {owner: slice}, {(owner, destination): (destination slice, its
@@ -341,6 +405,9 @@ def build(store: Path, record_bytes: bytes, plan: dict, sign_with: Signer | None
     steps = {step["id"]: step for step in record.get("steps", [])}
     if not steps:
         raise Refused("the step-0 record lists no `steps`")
+    unsystemed = system_findings(store, steps, pinned_system())
+    if unsystemed:
+        raise Refused("; ".join(unsystemed))
 
     def stored(step_id: str) -> dict:
         step = steps.get(step_id)
@@ -728,6 +795,7 @@ def _fixture(root: Path) -> tuple[Path, bytes, dict, dict[str, Path]]:
     for part in ("objects", "records"):
         (store / part).mkdir(parents=True)
     steps, transports = [], {}
+    system = pinned_system()
 
     def put(document: dict, outputs: dict) -> str:
         key = sha256_bytes(canonical(document))
@@ -748,11 +816,11 @@ def _fixture(root: Path) -> tuple[Path, bytes, dict, dict[str, Path]]:
         entries = [[path, mode, sha256_bytes(data)] for path, (mode, data) in sorted(files.items())]
         content = sha256_bytes(canonical(entries))
         build_ids = {path: sha256_bytes(data)[:40] for path, (mode, data) in files.items() if mode == "executable"}
-        key = put({"step": {"kind": "conan-create", "package": name, "executables": executables}},
+        key = put({"step": {"kind": "conan-create", "package": name, "executables": executables}, "system": system},
                   {"package": {"content": content, "entries": entries, "transport": transport,
                                "build_ids": build_ids}})
         steps.append({"id": f"{name}/package", "key": key, "verdict": None})
-        verdict = put({"step": {"kind": "test-verdict", "package": name}},
+        verdict = put({"step": {"kind": "test-verdict", "package": name}, "build": key},
                       {"verdict": {"verdict": "pass", "judged": {name: content}}})
         steps.append({"id": f"{name}/verdict", "key": verdict, "verdict": "pass"})
 
@@ -772,7 +840,7 @@ def _fixture(root: Path) -> tuple[Path, bytes, dict, dict[str, Path]]:
     steps.append({"id": "srv-image/image", "key": image, "verdict": None})
     tool_entry = sha256_bytes(b"\x7fELF tool bytes")
     consumer = put({"step": {"kind": "verdict", "id": "consumer", "subject": "priv_tools"},
-                    "judged": {"bin/tool": tool_entry}},
+                    "judged": {"bin/tool": tool_entry}, "system": system},
                    {"consumer": {"verdict": "pass", "findings": sha256_bytes(canonical([]))}})
     steps.append({"id": "priv_tools/consumer", "key": consumer, "verdict": "pass"})
 
@@ -781,10 +849,11 @@ def _fixture(root: Path) -> tuple[Path, bytes, dict, dict[str, Path]]:
         return sha256_bytes(data)
 
     tracked = put({"step": {"kind": "tracked", "repository": "priv-repo", "package": "priv_tools"},
-                   "files": [["sbom.json", "e" * 40]]},
+                   "files": [["sbom.json", "e" * 40]], "system": system},
                   {"tracked": {"objects": {"sbom.json": held(b'{"bom": 1}\n')}}})
     steps.append({"id": "priv_tools/tracked", "key": tracked, "verdict": None})
-    bench = put({"step": {"kind": "verdict", "id": "bench", "subject": "priv_tools"}, "judged": {"bin/tool": tool_entry}},
+    bench = put({"step": {"kind": "verdict", "id": "bench", "subject": "priv_tools"}, "judged": {"bin/tool": tool_entry},
+                 "system": system},
                 {"bench": {"verdict": "pass", "objects": {"bench.json": held(b'{"ns": 7}\n')}}})
     steps.append({"id": "priv_tools/bench", "key": bench, "verdict": "pass"})
     windows = held(b"MZ windows bytes")
@@ -1223,6 +1292,46 @@ def selftest() -> int:
             failures.append("a refused extraction left its bytes behind")
         arm("an entry the transport does not hold is refused",
             lambda: extract(transports["priv_tools"], "bin/absent", tool, root / "absent"), "holds 0")
+
+    with tempfile.TemporaryDirectory() as scratch:
+        root = Path(scratch)
+        pinned = pinned_system()
+        cases = (
+            ("RED-FIRST (DN-142.D30 E4): a record carrying another ID than the pin is refused, naming the step",
+             "priv_tools/consumer", lambda body: body["inputs"].update(system={"image": "sha256:" + "0" * 64}),
+             "priv_tools/consumer: its verdict record attests the system {'image': 'sha256:000"),
+            ("RED-FIRST (DN-142.D30 E4): a record attesting the retired `host` is refused",
+             "pub_lib/package", lambda body: body["inputs"].update(system={"image": "host"}),
+             "pub_lib/package: its conan-create record attests the system {'image': 'host'}"),
+            ("RED-FIRST (DN-142.D30 (11) R22): a bench verdict whose member is empty is refused",
+             "priv_tools/bench", lambda body: body["inputs"].update(system=""),
+             "priv_tools/bench: its verdict record attests the system ''"),
+            ("RED-FIRST (DN-142.D30 (11) R22): a tracked record carrying no member and naming no parent is refused",
+             "priv_tools/tracked", lambda body: body["inputs"].pop("system"),
+             "priv_tools/tracked: its tracked record carries no system member and names no keyed parent"),
+            ("RED-FIRST (DN-142.D30 (11) R22): a test verdict naming no keyed parent is refused",
+             "pub_lib/verdict", lambda body: body["inputs"].pop("build"),
+             "pub_lib/verdict: its test-verdict record carries no system member and names no keyed parent"),
+            ("RED-FIRST (DN-142.D30 (11) R22): a test verdict whose parent attests another ID is refused",
+             "pub_lib/verdict", lambda body: body["inputs"].update(build="9" * 64),
+             f"pub_lib/verdict: its test-verdict record names the keyed parent {'9' * 64}, which the store does not hold"),
+            ("RED-FIRST (DN-142.D30 (11) R22): an image naming no executable's record is refused",
+             "srv-image/image", lambda body: body["inputs"].update(executables=[]),
+             "srv-image/image: its image record carries no system member and names no keyed parent"),
+            ("RED: an ingestion naming no dated exception is refused (DN-142.D7)",
+             "priv-repo/ingest.win", lambda body: body["outputs"]["ingest"].pop("exception"),
+             "priv-repo/ingest.win: an ingestion carries no system member, so it must name its seat and its "
+             "dated exception"),
+        )
+        for number, (label, step_id, change, refusal) in enumerate(cases):
+            store, record, plan, _transports = _fixture(root / f"system-{number}")
+            rewrite(store, step_id, record, change)
+            arm(label, lambda: build(store, record, plan), refusal)
+        store, record, plan, _transports = _fixture(root / "system-green")
+        steps = {step["id"]: step for step in json.loads(record)["steps"]}
+        if system_findings(store, steps, pinned) != []:
+            failures.append(f"the green fixture's records each carry the pin, name a parent carrying it, or name "
+                            f"their seat and exception: got {system_findings(store, steps, pinned)}")
 
     for failure in failures:
         print(f"store_manifest selftest FAILED: {failure}")

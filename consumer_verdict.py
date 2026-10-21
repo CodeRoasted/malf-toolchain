@@ -93,8 +93,7 @@ DOCKER_UNREACHABLE = 125
 WORK, WORK_TAR, PROBE, PREPARED, CAPTURE = "consumer", "work.tar", "probe.json", "prepared.json", "capture.json"
 # The line the probe prints between the container's glibc reading and the executable's report.
 REPORT_MARK = "consumer-verdict: report"
-SYSTEM_ENV = "MALF_SYSTEM"
-PINNED_SYSTEM = re.compile(r"^sha256:[0-9a-f]{64}$")
+SYSTEM_ENV = artefact_store.SYSTEM_ENV
 
 
 class Refused(Exception):
@@ -324,15 +323,16 @@ def _read(path: Path, what: str) -> dict:
 
 
 def act_member(member: dict, environ: dict) -> tuple[dict, dict]:
-    """(the `system`, the `toolchain`) the member file names, the system `{image: <digest>}` and that
-    digest this container's MALF_SYSTEM, the toolchain a non-empty measurement. raises Refused."""
+    """(the `system`, the `toolchain`) the member file names: the system this container's own
+    (`artefact_store.system_member`: MALF_SYSTEM, the pinned config digest, `{image: <pin>}`), the
+    toolchain a non-empty measurement. raises Refused."""
     system, toolchain = member.get("system"), member.get("toolchain")
-    pinned = environ.get(SYSTEM_ENV, "")
-    if not PINNED_SYSTEM.match(pinned):
-        raise Refused(f"{SYSTEM_ENV} is {pinned!r}: the act did not run in the attested build environment, so it has "
-                      f"no system identity (DN-142.D30 (11) R21)")
-    if system != {"image": pinned}:
-        raise Refused(f"the member names the system {system!r}, and this container runs {{'image': {pinned!r}}}")
+    try:
+        own = artefact_store.system_member(environ)
+    except artefact_store.Refused as refused:
+        raise Refused(str(refused)) from refused
+    if system != own:
+        raise Refused(f"the member names the system {system!r}, and this container runs {own!r}")
     if not isinstance(toolchain, dict) or not toolchain:
         raise Refused(f"the member names the toolchain {toolchain!r}, not a measurement of the image "
                       f"(DN-142.D30 (10) R15)")
@@ -461,7 +461,7 @@ def selftest() -> int:
         arm("RED: a ceiling the container's glibc is not reds the consistency row",
             outcomes(container_rows(probed(), {**baseline, "glibc_ceiling": "2.40"}))["container-glibc"], FAILED)
 
-        pin = "sha256:" + "9" * 64
+        pin = json.loads(artefact_store.ENVIRONMENT_PIN.read_text(encoding="utf-8"))["image"]
         measured = {"python3": {"version": "3.12.3", "executable": "1" * 64}}
         member = {"system": {"image": pin}, "toolchain": measured}
         act = root / "act"
@@ -487,11 +487,14 @@ def selftest() -> int:
             return "no refusal"
 
         arm("RED: a conclude run outside the build environment (no MALF_SYSTEM) is refused a system member",
-            refused(lambda: act_member(member, {})).startswith("MALF_SYSTEM is '': the act did not run in the "
-                                                              "attested build environment"), True)
-        arm("RED: a member naming another image than the container's MALF_SYSTEM is refused",
-            refused(lambda: act_member(member, {SYSTEM_ENV: "sha256:" + "8" * 64})).startswith(
-                f"the member names the system {{'image': '{pin}'}}"), True)
+            refused(lambda: act_member(member, {})).startswith("no system member outside the build environment: "
+                                                              "MALF_SYSTEM is ''"), True)
+        arm("RED: a container whose MALF_SYSTEM is another image than the pin is refused",
+            "the act ran in another image" in refused(lambda: act_member(member, {SYSTEM_ENV: "sha256:" + "8" * 64})),
+            True)
+        arm("RED: a member naming another image than the container's own is refused",
+            refused(lambda: act_member({**member, "system": {"image": "host"}}, {SYSTEM_ENV: pin})).startswith(
+                "the member names the system {'image': 'host'}"), True)
         arm("RED: a member carrying no measured toolchain is refused",
             refused(lambda: act_member({**member, "toolchain": {}}, {SYSTEM_ENV: pin})).startswith(
                 "the member names the toolchain {}"), True)

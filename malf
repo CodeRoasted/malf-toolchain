@@ -5463,7 +5463,8 @@ cmd_exports_verify() {
 # malf store-verdict <predicate> <repository>... — DN-142.D7's verdict record over a local store:
 # the predicate (`format`: `malf format --check`) judges each repository's TRACKED tree in an export
 # beside an export of malf's own tracked tree, and the verdict is keyed by those trees, the
-# clang-format and python3 that ran and the host's package list. A new key is STORED; a stored key
+# clang-format and python3 that ran and the build environment's config digest (refused outside it,
+# DN-142.D30 E4). A new key is STORED; a stored key
 # is still re-judged and COMPARED (phase 1, ROADMAP N358), and a differing verdict or finding set
 # at an equal key is a defect of the gate (exit 1). A failing verdict is stored too, and exits 1.
 #

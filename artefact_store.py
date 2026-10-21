@@ -497,10 +497,30 @@ def measure_toolchain(compiler_root: Path) -> dict[str, object]:
     return tools
 
 
-def system_member() -> str:
-    """DN-142.D2's `system` member: the sorted installed package list of the host."""
-    listing = _run(["dpkg-query", "-W", "-f", "${Package}=${Version}\n"])
-    return hashlib.sha256("\n".join(sorted(listing.splitlines())).encode()).hexdigest()
+# THE `system` MEMBER IS THE BUILD ENVIRONMENT'S PINNED CONFIG DIGEST (DN-142.D30 (1), row E4): `{image: <digest>}`,
+# from two producers that must agree. MALF_SYSTEM is handed to a container by malf's launcher only after the
+# daemon reported the pinned ID and that config digest for it (build_environment.py `check`); the pin is in
+# malf's tree, which every key names whole as its `definition`. The host's package list is in no key.
+SYSTEM_ENV = "MALF_SYSTEM"
+ENVIRONMENT_PIN = Path(__file__).resolve().parent / "config" / "build-environment.json"
+CONFIG_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def system_member(environ: "dict[str, str] | None" = None, pin: Path = ENVIRONMENT_PIN) -> dict:
+    """`{image: <the pinned config digest>}`. raises Refused outside the build environment (no MALF_SYSTEM, or
+    one that is no config digest, the retired `host` attestation included) and when MALF_SYSTEM is not the pin."""
+    handed = (os.environ if environ is None else environ).get(SYSTEM_ENV, "")
+    if not CONFIG_DIGEST.match(handed):
+        raise Refused(f"no system member outside the build environment: {SYSTEM_ENV} is {handed!r}, not the config "
+                      f"digest malf's launcher hands an act it started (DN-142.D30 E4)")
+    try:
+        pinned = json.loads(pin.read_text(encoding="utf-8")).get("image")
+    except (OSError, ValueError, AttributeError) as unread:
+        raise Refused(f"the build-environment pin {pin} could not be read: {unread}") from unread
+    if handed != pinned:
+        raise Refused(f"{SYSTEM_ENV} is {handed}, and the pin {pin} names {pinned!r}: the act ran in another image "
+                      f"than the one this malf pins (DN-142.D30 E4)")
+    return {"image": handed}
 
 
 WRITER_PROFILE = Path("config") / "writer.profile"
@@ -2025,7 +2045,7 @@ def bench_record(store: Path, build_key: str, package: str, package_id: str, pro
         "judged": judged,
         "data": {},
         "toolchain": {},
-        "system": "",
+        "system": system_member(),
         "context": {"runner": bench_runner()},
     }
     return judged_verdict(store, document,
@@ -2448,8 +2468,8 @@ def tracked_step(store: Path, repository: Path, commit: str, name: str, package:
                  package_path: str, members: list[str]) -> str:
     """The `<package>/tracked` step (DN-142.D25 (1)): each member, a path under the package's path,
     read from git at `commit`, never from disk. Its key document is `{step: {kind: tracked,
-    repository, package}, files: [[<member>, <blob id>]...]}`, so a commit that leaves those blobs
-    equal is a key hit; its output `{tracked: {objects: {<member>: <sha256>}}}` judges nothing and
+    repository, package}, files: [[<member>, <blob id>]...], system}`, so a commit that leaves those
+    blobs equal is a key hit within one build environment; its output `{tracked: {objects: {<member>: <sha256>}}}` judges nothing and
     carries no verdict. post: the record's key, stored or matching; Refused on a member that is no
     blob at the commit, or on a mismatch at an equal key."""
     defects = [defect for member in members if (defect := member_defect(member))]
@@ -2470,7 +2490,8 @@ def tracked_step(store: Path, repository: Path, commit: str, name: str, package:
         files.append([member, blob])
     if absent:
         raise Refused(f"{package}: {', '.join(absent)} is no blob of {name} at {commit}")
-    document = {"step": {"kind": TRACKED_KIND, "repository": name, "package": package}, "files": files}
+    document = {"step": {"kind": TRACKED_KIND, "repository": name, "package": package}, "files": files,
+                "system": system_member()}
     local = LocalStore(store)
     objects = {member: local.put_bytes(_git_bytes(repository, ["cat-file", "blob", blob]))
                for member, blob in files}
@@ -2761,6 +2782,20 @@ def selftest() -> int:
             return
         failures.append(f"{label}: accepted {got!r}, want a refusal containing {want!r}")
 
+    # THE SYSTEM MEMBER (DN-142.D30 E4): the pinned config digest, MALF_SYSTEM checked against the pin, and
+    # nothing outside the build environment; the arms below run as an act the launcher started.
+    pinned = json.loads(ENVIRONMENT_PIN.read_text(encoding="utf-8"))["image"]
+    arm("RED-FIRST (DN-142.D30 E4): an act outside the launcher (no MALF_SYSTEM) is refused a system member",
+        lambda: system_member({}), "no system member outside the build environment: MALF_SYSTEM is ''")
+    arm("RED-FIRST (DN-142.D30 E4): the retired `host` attestation is refused, so a host-built binary never shares "
+        "a key with an image-built one", lambda: system_member({SYSTEM_ENV: "host"}), "MALF_SYSTEM is 'host'")
+    arm("RED-FIRST (DN-142.D30 E4): a MALF_SYSTEM naming another ID than the pin is refused",
+        lambda: system_member({SYSTEM_ENV: "sha256:" + "0" * 64}), "the act ran in another image")
+    expect("inside the build environment the member is {image: <the pinned config digest>}",
+           system_member({SYSTEM_ENV: pinned}), {"image": pinned})
+    outside = os.environ.get(SYSTEM_ENV)
+    os.environ[SYSTEM_ENV] = pinned
+
     # THE DEFINITION MEMBER (DN-142.D19 (1)): malf's tree and the act's parameter document, never a
     # driver's own tree; a handed document is checked against the act it keys.
     act = ["malf", "store-create"]
@@ -3003,7 +3038,7 @@ def selftest() -> int:
             record = json.loads((tstore / "records" / f"{tracked}.json").read_text())
             expect("the tracked document and its output", (record["inputs"], record["outputs"]),
                    ({"step": {"kind": "tracked", "repository": "eidos", "package": "insight_sift"},
-                     "files": [["sbom.cdx.json", blob]]},
+                     "files": [["sbom.cdx.json", blob]], "system": {"image": pinned}},
                     {"tracked": {"objects": {"sbom.cdx.json": hashlib.sha256(b'{"bom": 1}\n').hexdigest()}}}))
             expect("the STORED line names the step and its output", "STORED insight_sift/tracked tracked key" in printed, True)
             resolved, _out = arm("the tracked object resolves, its bytes the commit's and never the disk's",
@@ -3069,6 +3104,8 @@ def selftest() -> int:
                    (body["inputs"]["build"], body["inputs"]["step"]["predicate"]["id"],
                     sorted(body["inputs"]["context"]["runner"])),
                    (build_key, BENCH_PREDICATE, ["cpu", "cpus", "host"]))
+            expect("RED-FIRST (DN-142.D30 (11) R22): the bench verdict carries the image's system member, never ''",
+                   body["inputs"]["system"], {"image": pinned})
             resolved, _out = arm("the benchmark JSON resolves step -> record -> output -> member",
                                  lambda: output_object(bstore, key, BENCH_OUTPUT, "logcraft_core_bench.json"), None)
             expect("the object is the JSON the run wrote", resolved,
@@ -3278,6 +3315,10 @@ def selftest() -> int:
         expect("the ledger totals the walk's restores",
                restore_ledger(ledger).split(", ")[:2], ["1 restore(s)", "2 node(s)"])
 
+    if outside is None:
+        os.environ.pop(SYSTEM_ENV, None)
+    else:
+        os.environ[SYSTEM_ENV] = outside
     for failure in failures:
         print(f"artefact_store selftest FAILED: {failure}")
     print(f"artefact_store selftest: {armed[0]} arm(s), {len(failures)} failure(s)")

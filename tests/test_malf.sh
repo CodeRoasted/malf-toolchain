@@ -28,6 +28,10 @@ set -uo pipefail
 MALF_TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MALF_ROOT="$(cd "$MALF_TEST_DIR/.." && pwd)"
 MALF_BIN="$MALF_ROOT/malf"
+# A keyed step runs inside the build environment, whose launcher hands it MALF_SYSTEM, the pinned config digest:
+# outside it artefact_store refuses a system member (DN-142.D30 E4). The arms that run a store step on this
+# host hand the pin's digest to that step alone.
+MALF_TEST_SYSTEM="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["image"])' "$MALF_ROOT/config/build-environment.json")"
 
 # A COPY of malf runs beside every file its home sync reads (_malf_sync_conan_conf, the overlay), as the real one
 # does: a missing one is a red there, never a skip (DN-142.D29 (7)). Nothing already in <dir> is replaced,
@@ -366,8 +370,8 @@ echo
 echo "[7j] store_manifest carries its own refusal proof (selftest): a manifest admits only evaluated digests, an entry ships as its own bytes, an object only through its producing record and an image as the archive its step stored, a slice and a destination slice verify only under the writer's key and only as their own format, the seal is kept once, and DN-142.D22 (3) binds both directions"
 manifest_selftest_output="$(timeout 120 python3 "$MALF_ROOT/store_manifest.py" selftest 2>&1)"
 manifest_selftest_status=$?
-check "store_manifest selftest: 60 arms, every refusal fired, the green manifest, slices, destination slices, objects, seal, signature and extraction intact" \
-      "ok" "$([[ $manifest_selftest_status -eq 0 ]] && grep -q '^store_manifest selftest: 60 arm(s), 0 failure(s)$' <<< "$manifest_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$manifest_selftest_output")")"
+check "store_manifest selftest: 68 arms, every refusal fired, the system reading over every record kind (DN-142.D30 E4), the green manifest, slices, destination slices, objects, seal, signature and extraction intact" \
+      "ok" "$([[ $manifest_selftest_status -eq 0 ]] && grep -q '^store_manifest selftest: 68 arm(s), 0 failure(s)$' <<< "$manifest_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$manifest_selftest_output")")"
 
 echo
 
@@ -413,8 +417,8 @@ echo
 echo "[7j0] artefact_store's object producers carry their own refusal proof (selftest): the objects convention resolves step -> record -> output -> member, the tracked step is keyed on blob ids at a commit, and the ingestion write refuses a printed digest that is not the bytes, a record without its seat or dated exception, a PE carrying a symbol table or a CodeView entry, and records a divergence at an equal inputs_key, never a red (DN-142.D20 (2), DN-142.D25)"
 objects_selftest_output="$(timeout 120 python3 "$MALF_ROOT/artefact_store.py" selftest 2>&1)"
 objects_selftest_status=$?
-check "artefact_store selftest: 43 arms, every refusal fired, the ingestion record and its class, the tracked record, the divergence event, the bench verdict, the test_package member and the restore intact" \
-      "ok" "$([[ $objects_selftest_status -eq 0 ]] && grep -q '^artefact_store selftest: 43 arm(s), 0 failure(s)$' <<< "$objects_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$objects_selftest_output")")"
+check "artefact_store selftest: 46 arms, every refusal fired, the system member refused outside the build environment, the ingestion record and its class, the tracked record, the divergence event, the bench verdict, the test_package member and the restore intact" \
+      "ok" "$([[ $objects_selftest_status -eq 0 ]] && grep -q '^artefact_store selftest: 46 arm(s), 0 failure(s)$' <<< "$objects_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$objects_selftest_output")")"
 
 echo
 
@@ -429,8 +433,8 @@ echo
 echo "[7j1b] consumer_verdict carries its own refusal proof (selftest): every row reds on an executable built here or a fixture probe capture, a probe that cannot run is never a pass (N360 plan A2(d)), and its record attests the build environment's image (DN-142.D30 (11) R21)"
 consumer_selftest_output="$(timeout 120 python3 "$MALF_ROOT/consumer_verdict.py" selftest 2>&1)"
 consumer_selftest_status=$?
-check "consumer_verdict selftest: 22 arms, every row red on its fixture and green on a C executable, the record attesting {image: <pin>}, no docker argv built outside the launcher" \
-      "ok" "$([[ $consumer_selftest_status -eq 0 ]] && grep -q '^consumer_verdict selftest: 22 arm(s), 0 failure(s)$' <<< "$consumer_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$consumer_selftest_output")")"
+check "consumer_verdict selftest: 23 arms, every row red on its fixture and green on a C executable, the record attesting {image: <pin>}, no docker argv built outside the launcher" \
+      "ok" "$([[ $consumer_selftest_status -eq 0 ]] && grep -q '^consumer_verdict selftest: 23 arm(s), 0 failure(s)$' <<< "$consumer_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$consumer_selftest_output")")"
 
 echo
 
@@ -3636,7 +3640,7 @@ export MALF_STEP_EXECUTABLES="$bi_tmp/executables.json"
 bi_step() {   # <tool file> <store> [profile] -> rc=<status>; the step's output in $bi_tmp/step.log
     cp "$1" "$bi_pkg/tool"
     CONAN_HOME="$bi_home" conan create "$bi_pkg" -pr:a fixture --build="bi_tool/*" --format=json > "$bi_tmp/graph.json" 2> "$bi_tmp/create.log" || { echo "rc=create-failed"; return; }
-    CONAN_HOME="$bi_home" MALF_STEP_TEST_FOLDER=none python3 "$MALF_ROOT/artefact_store.py" conan-step "$2" "$bi_home" "$bi_tmp/graph.json" bi_tool "${3:-fixture}" "$MALF_ROOT" "$bi_tmp/toolchain.json" "bi_" > "$bi_tmp/step.log" 2>&1
+    CONAN_HOME="$bi_home" MALF_STEP_TEST_FOLDER=none MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$2" "$bi_home" "$bi_tmp/graph.json" bi_tool "${3:-fixture}" "$MALF_ROOT" "$bi_tmp/toolchain.json" "bi_" > "$bi_tmp/step.log" 2>&1
     echo "rc=$?"
 }
 check "a package whose linked ELF file carries no build-id is REFUSED by the step, naming the file, and nothing is stored" \
@@ -3728,7 +3732,7 @@ bi_junit() {   # <file> <name:outcome>... — a JUnit file of malf's helper's sh
       done; printf '</testsuite>\n'; } > "$1"
 }
 bi_verdict() {   # <results dir> -> rc=<status> and the step output's verdict lines
-    CONAN_HOME="$bi_home" MALF_STEP_TEST_FOLDER=none python3 "$MALF_ROOT/artefact_store.py" conan-step "$bi_tmp/vstore" "$bi_home" "$bi_tmp/graph.json" bi_tool fixture "$MALF_ROOT" "$bi_tmp/toolchain.json" "bi_" "$1" > "$bi_tmp/v.log" 2>&1
+    CONAN_HOME="$bi_home" MALF_STEP_TEST_FOLDER=none MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$bi_tmp/vstore" "$bi_home" "$bi_tmp/graph.json" bi_tool fixture "$MALF_ROOT" "$bi_tmp/toolchain.json" "bi_" "$1" > "$bi_tmp/v.log" 2>&1
     printf 'rc=%s %s' "$?" "$(grep -oE '(STORED|MATCH|MISMATCH|NO VERDICT) bi_tool( verdict)?' "$bi_tmp/v.log" | paste -sd,)"
 }
 bi_empty_id="da39a3ee5e6b4b0d3255bfef95601890afd80709"
@@ -3776,7 +3780,7 @@ class BiData(ConanFile):
 PYR
 check "a content recipe created in the build context alone is recorded, its node found in that context" \
       "rc=0 1" \
-      "$(CONAN_HOME="$bi_home" conan create "$bi_data" -pr:a fixture --build="bi_data/*" --format=json > "$bi_tmp/data.json" 2>/dev/null; MALF_STEP_EXECUTABLES= CONAN_HOME="$bi_home" MALF_STEP_TEST_FOLDER=none python3 "$MALF_ROOT/artefact_store.py" conan-step "$bi_tmp/dstore" "$bi_home" "$bi_tmp/data.json" bi_data fixture "$MALF_ROOT" "$bi_tmp/toolchain.json" "bi_" > "$bi_tmp/d.log" 2>&1; echo "rc=$?") $(grep -c 'STORED bi_data package' "$bi_tmp/d.log")"
+      "$(CONAN_HOME="$bi_home" conan create "$bi_data" -pr:a fixture --build="bi_data/*" --format=json > "$bi_tmp/data.json" 2>/dev/null; MALF_STEP_EXECUTABLES= CONAN_HOME="$bi_home" MALF_STEP_TEST_FOLDER=none MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$bi_tmp/dstore" "$bi_home" "$bi_tmp/data.json" bi_data fixture "$MALF_ROOT" "$bi_tmp/toolchain.json" "bi_" > "$bi_tmp/d.log" 2>&1; echo "rc=$?") $(grep -c 'STORED bi_data package' "$bi_tmp/d.log")"
 cp "$bi_home/profiles/fixture" "$bi_home/profiles/fixture-b"
 check "two records holding the same bytes under two keys both answer the build-id lookup, and an unknown id answers nothing (exit 1)" \
       "rc=0 2 rc=1" \
@@ -5066,8 +5070,8 @@ as_create() {   # <home name> — the graph of a create of ex_top in that home
 }
 as_step() {   # <home name> — the step's verdict line and exit, the key and digests elided; tpdep's own step recorded first (DN-142.D17 (4))
     local out rc
-    python3 "$MALF_ROOT/artefact_store.py" third-party-step "$as_tmp/store" "$as_tmp/$1" "$as_tmp/$1.tp.json" ex_ fixture "$MALF_ROOT" "$as_tmp/toolchain.json" > /dev/null 2>&1
-    out="$(MALF_STEP_TEST_FOLDER=none python3 "$MALF_ROOT/artefact_store.py" conan-step "$as_tmp/store" "$as_tmp/$1" "$as_tmp/$1.graph.json" ex_top fixture "$MALF_ROOT" "$as_tmp/toolchain.json" "ex_" 2>&1)"; rc=$?
+    MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" third-party-step "$as_tmp/store" "$as_tmp/$1" "$as_tmp/$1.tp.json" ex_ fixture "$MALF_ROOT" "$as_tmp/toolchain.json" > /dev/null 2>&1
+    out="$(MALF_STEP_TEST_FOLDER=none MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$as_tmp/store" "$as_tmp/$1" "$as_tmp/$1.graph.json" ex_top fixture "$MALF_ROOT" "$as_tmp/toolchain.json" "ex_" 2>&1)"; rc=$?
     printf 'rc=%s %s' "$rc" "$(grep -oE 'artefact_store: [A-Z]+ ex_top package|[0-9]+ file\(s\): .*' <<< "$out" | sed 's/artefact_store: //' | tr '\n' ' ')"
 }
 as_key() { python3 -c 'import json, sys; print(*sorted(r.rsplit("/", 1)[-1].removesuffix(".json") for r in sys.argv[1:]))' $(grep -l '"package": "ex_top"' "$as_tmp/store/records/"*.json); }
@@ -5118,7 +5122,7 @@ check "RED FIRST — the old spelling --build=missing builds a missing first-par
       "rc=0 " "$(as_act home-old ex_low --build=missing --build='ex_low/*')"
 as_fresh home-act
 CONAN_HOME="$as_tmp/home-act" conan create "$as_tmp/tpdep" -pr:a fixture --format=json > "$as_tmp/home-act.tpdep.json" 2> /dev/null
-python3 "$MALF_ROOT/artefact_store.py" third-party-step "$as_tmp/ustore" "$as_tmp/home-act" "$as_tmp/home-act.tpdep.json" ex_ fixture "$MALF_ROOT" "$as_tmp/toolchain.json" > /dev/null 2>&1
+MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" third-party-step "$as_tmp/ustore" "$as_tmp/home-act" "$as_tmp/home-act.tpdep.json" ex_ fixture "$MALF_ROOT" "$as_tmp/toolchain.json" > /dev/null 2>&1
 mapfile -t as_low_args < <(as_build_args ex_low)
 mapfile -t as_mid_args < <(as_build_args ex_mid)
 check "(a) the act's spelling FAILS the create, naming the first-party package whose binary is missing" \
@@ -5127,7 +5131,7 @@ check "(a) once ex_mid's own create made it, the consumer's create passes, its t
       "rc=0 |rc=0 " "$(as_act home-act ex_mid "${as_mid_args[@]}")|$(as_act home-act ex_low "${as_low_args[@]}")"
 as_record_step() {   # <package> — the step's verdict word and exit over the upstream store
     local out rc
-    out="$(MALF_STEP_TEST_FOLDER=none python3 "$MALF_ROOT/artefact_store.py" conan-step "$as_tmp/ustore" "$as_tmp/home-act" "$as_tmp/home-act.$1.graph.json" "$1" fixture "$MALF_ROOT" "$as_tmp/toolchain.json" "ex_" 2>&1)"; rc=$?
+    out="$(MALF_STEP_TEST_FOLDER=none MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$as_tmp/ustore" "$as_tmp/home-act" "$as_tmp/home-act.$1.graph.json" "$1" fixture "$MALF_ROOT" "$as_tmp/toolchain.json" "ex_" 2>&1)"; rc=$?
     printf 'rc=%s %s' "$rc" "$(grep -oE "(STORED|MATCH) $1 package|REFUSED $1: [0-9]+ upstream|ex_mid/host" <<< "$out" | tr '\n' ' ')"
 }
 check "(b) RED — a step linking a first-party upstream no record of that package's own step holds is REFUSED, naming it, and stores nothing" \
@@ -5276,21 +5280,6 @@ check "RED — a path into a second conan home is refused" \
 check "RED — a path into a profile's home nested under the act's home base is another home, and refused" \
       "rc=2 names 1 path(s) the first: <t>/home/clang21-asan/p/b/fmt0123456789abc/p/lib/libfmt.a" \
       "$(pv_graph "$pv_tmp/repo/dep/$pv_own/libx.a" "$pv_tmp/home/clang21-asan/p/b/fmt0123456789abc/p/lib/libfmt.a"; pv_check "$pv_system")"
-# G-ENV-3'S HOST SEAM HANDS MALF_SYSTEM=host (DN-142.D30 (10) R16): its trees are `.environment-host`, and its
-# graph is judged as an image's, so the desk's bare tree and a second home are refused on the host too.
-pv_host_tree="$pv_tmp/repo/pkg/build-clang21-asan.environment-host"
-mkdir -p "$pv_host_tree" && echo "[]" > "$pv_host_tree/compile_commands.json"
-pv_host_check() {   # <a linked archive> — under MALF_SYSTEM=host: the suffix, the check's exit and the first path it names
-    printf 'cmake_ninja_workdir = %s/\nbuild x: CXX_EXECUTABLE_LINKER__x | %s\n  LINK_LIBRARIES = %s\n' "$pv_host_tree" "$1" "$1" \
-        > "$pv_host_tree/build.ninja"
-    bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; export MALF_SYSTEM=host CONAN_HOME="$3/home"
-        _malf_build_provenance build "$2/build.ninja" "$2/compile_commands.json" 2> "$2.err"; rc=$?
-        echo "$(_malf_environment_suffix) rc=$rc $(grep -oE "the first: [^ ]+" "$2.err" | sed "s#$3#<t>#")"' \
-        _ "$MALF_BIN" "$pv_host_tree" "$pv_tmp"
-}
-check "RED — under the host seam (MALF_SYSTEM=host) a graph linking the desk's bare host tree is refused; its own .environment-host tree passes; a second conan home is refused" \
-      ".environment-host rc=2 the first: <t>/repo/dep/build-clang21-asan/libx.a|.environment-host rc=0 |.environment-host rc=2 the first: <t>/other-home/p/b/fmt0123456789abc/p/lib/libfmt.a" \
-      "$(pv_host_check "$pv_tmp/repo/dep/build-clang21-asan/libx.a")|$(pv_host_check "$pv_tmp/repo/dep/build-clang21-asan.environment-host/libx.a")|$(pv_host_check "$pv_tmp/other-home/p/b/fmt0123456789abc/p/lib/libfmt.a")"
 # A HOME NAMED BARE (a prefix map's left side) is judged as the home it is, never by its parent: an act
 # whose home is a profile's home nested under the base names its own home, and the base is not its home.
 pv_graph "$pv_tmp/repo/dep/$pv_own/libx.a" "-ffile-prefix-map=$pv_tmp/home/clang21-asan=/malf-home"
@@ -5417,7 +5406,7 @@ tq_home() {   # <home name> — a fresh conan home holding every fixture recipe 
 }
 tq_step() {   # <home name> <store name> <package> — malf's step function over the fixture home; its output in $tq_tmp/out, its exit printed
     mkdir -p "$tq_tmp/scratch-$1"; printf '{"compiler": "fixture"}' > "$tq_tmp/scratch-$1/toolchain.json"
-    bash -c 'MALF_SOURCE_ONLY=1 source "$1" > /dev/null 2>&1; set +e
+    MALF_SYSTEM="$MALF_TEST_SYSTEM" bash -c 'MALF_SOURCE_ONLY=1 source "$1" > /dev/null 2>&1; set +e
         export CONAN_HOME="$2"; MALF_PROFILE="$2/profiles/fixture"; MALF_BUILD_PROFILE="$MALF_PROFILE"
         MALF_CONFIG=Release; MALF_PROFILE_NAME=fixture; _MALF_WRITER_ARGS=(); _MALF_SHIP_LOCK=(${TQ_LOCK:+--lockfile=$TQ_LOCK})
         _MALF_DOMAIN=(--workspace "$(dirname "$2")" --store "$3" --scratch "$4" --conan-home "$2")
@@ -5475,7 +5464,7 @@ tq_home b
 CONAN_HOME="$tq_tmp/b" conan create "$tq_src/ex_v" -pr:a fixture --build=missing --format=json > "$tq_tmp/b.json" 2> /dev/null
 check "(b) RED — a first-party create that built a third-party package is REFUSED, naming it, and stores nothing" \
       "rc=1 1 0" \
-      "$(MALF_STEP_TEST_FOLDER=none python3 "$MALF_ROOT/artefact_store.py" conan-step "$tq_tmp/store-b" "$tq_tmp/b" "$tq_tmp/b.json" ex_v fixture "$MALF_ROOT" "$tq_tmp/scratch-a/toolchain.json" ex_ > "$tq_tmp/out" 2>&1; echo -n "rc=$? "; echo -n "$(tq_has 'REFUSED ex_v: its create built or downloaded 1 third-party package(s).*tpv/0.1 (host) Build') "; ls "$tq_tmp/store-b/records" 2>/dev/null | wc -l | tr -d ' ')"
+      "$(MALF_STEP_TEST_FOLDER=none MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$tq_tmp/store-b" "$tq_tmp/b" "$tq_tmp/b.json" ex_v fixture "$MALF_ROOT" "$tq_tmp/scratch-a/toolchain.json" ex_ > "$tq_tmp/out" 2>&1; echo -n "rc=$? "; echo -n "$(tq_has 'REFUSED ex_v: its create built or downloaded 1 third-party package(s).*tpv/0.1 (host) Build') "; ls "$tq_tmp/store-b/records" 2>/dev/null | wc -l | tr -d ' ')"
 
 # (c) a third-party content no record holds is refused, in the act and in the read-only replay.
 tq_home c
@@ -5483,7 +5472,7 @@ CONAN_HOME="$tq_tmp/c" conan create "$tq_src/tpr" -pr:a fixture > /dev/null 2>&1
 CONAN_HOME="$tq_tmp/c" conan create "$tq_src/ex_r" -pr:a fixture --build='ex_r/*' --no-remote --format=json > "$tq_tmp/c.json" 2> /dev/null
 check "(c) RED — a first-party step linking a third-party binary no third-party-create record holds is REFUSED, naming it, and stores nothing" \
       "rc=1 1 0" \
-      "$(MALF_STEP_EXECUTABLES= MALF_STEP_TEST_FOLDER=none python3 "$MALF_ROOT/artefact_store.py" conan-step "$tq_tmp/store-c" "$tq_tmp/c" "$tq_tmp/c.json" ex_r fixture "$MALF_ROOT" "$tq_tmp/scratch-a/toolchain.json" ex_ > "$tq_tmp/out" 2>&1; echo -n "rc=$? "; echo -n "$(tq_has 'REFUSED ex_r: 1 third-party package(s).*tpr/host tpr/0.1#[0-9a-f]*:[0-9a-f]* at content [0-9a-f]*: no third-party-create record holds it') "; ls "$tq_tmp/store-c/records" 2>/dev/null | wc -l | tr -d ' ')"
+      "$(MALF_STEP_EXECUTABLES= MALF_STEP_TEST_FOLDER=none MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$tq_tmp/store-c" "$tq_tmp/c" "$tq_tmp/c.json" ex_r fixture "$MALF_ROOT" "$tq_tmp/scratch-a/toolchain.json" ex_ > "$tq_tmp/out" 2>&1; echo -n "rc=$? "; echo -n "$(tq_has 'REFUSED ex_r: 1 third-party package(s).*tpr/host tpr/0.1#[0-9a-f]*:[0-9a-f]* at content [0-9a-f]*: no third-party-create record holds it') "; ls "$tq_tmp/store-c/records" 2>/dev/null | wc -l | tr -d ' ')"
 mkdir -p "$tq_tmp/store-replay/records"
 printf '{"key": "k", "inputs": {"step": {"kind": "conan-create", "package": "ex_r", "profile": "fixture"}, "upstream": {}, "third_party": {"tpr/host": {"ref": "tpr/0.1#r", "package_id": "p", "content": "%s"}}}, "outputs": {}}' "$(printf 'c%.0s' {1..64})" > "$tq_tmp/store-replay/records/k.json"
 check "(c) RED — the read-only replay names a stored record whose third-party content no record holds" \
@@ -5542,7 +5531,7 @@ CONAN_HOME="$tq_tmp/f" conan create "$tq_src/tpp" -pr:a fixture > /dev/null 2>&1
 CONAN_HOME="$tq_tmp/f" conan create "$tq_src/ex_p" -pr:a fixture --build='ex_p/*' --format=json > "$tq_tmp/f.json" 2> /dev/null
 check "(f) RED — the key derivation of a first-party step refuses a graph carrying a python_requires, naming it" \
       "rc=1 1" \
-      "$(MALF_STEP_EXECUTABLES= MALF_STEP_TEST_FOLDER=none python3 "$MALF_ROOT/artefact_store.py" conan-step "$tq_tmp/store-f2" "$tq_tmp/f" "$tq_tmp/f.json" ex_p fixture "$MALF_ROOT" "$tq_tmp/scratch-a/toolchain.json" ex_ > "$tq_tmp/out" 2>&1; echo -n "rc=$? "; tq_has 'tpp/0.1 carries pyreq/0.1#')"
+      "$(MALF_STEP_EXECUTABLES= MALF_STEP_TEST_FOLDER=none MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$tq_tmp/store-f2" "$tq_tmp/f" "$tq_tmp/f.json" ex_p fixture "$MALF_ROOT" "$tq_tmp/scratch-a/toolchain.json" ex_ > "$tq_tmp/out" 2>&1; echo -n "rc=$? "; tq_has 'tpp/0.1 carries pyreq/0.1#')"
 # (g) a build outside CMake writes the absolute path of what it compiles into the bytes; malf's
 # wrapper maps every folder of the home, so two homes of different path LENGTH build equal bytes.
 tq_home g; tq_home g-a-second-home-at-a-much-longer-path
@@ -5701,7 +5690,7 @@ check "RED — a test folder on disk that git tracks none of is refused, since a
 mkdir -p "$tt_tmp/bin"
 printf '#!/bin/sh\nprintf "%%s\\n" "$@" > "%s/conan.argv"\n' "$tt_tmp" > "$tt_tmp/bin/conan"; chmod +x "$tt_tmp/bin/conan"
 tt_create() {   # <test folder argument> — the create's exit and its --test-folder arguments
-    PATH="$tt_tmp/bin:$PATH" bash -c 'MALF_SOURCE_ONLY=1 source "$1" > /dev/null 2>&1; set +e
+    PATH="$tt_tmp/bin:$PATH" MALF_SYSTEM="$MALF_TEST_SYSTEM" bash -c 'MALF_SOURCE_ONLY=1 source "$1" > /dev/null 2>&1; set +e
         _MALF_WRITER_PROFILES=(); _MALF_WRITER_ARGS=(); _MALF_SHIP_LOCK=(); MALF_CONFIG=Release; rm -f "$3/conan.argv"
         _MALF_STEP_TALLY="$3/create.denials"; mkdir -p "$3/ws" "$3/store" "$3/scratch/home"
         _MALF_DOMAIN=(--workspace "$3/ws" --store "$3/store" --scratch "$3/scratch"); export CONAN_HOME="$3/scratch/home"
@@ -5731,7 +5720,7 @@ printf 'int main() { return 0; }\n' > "$sv_repo/src/main.cpp"
 git -C "$sv_repo" add -A && git -C "$sv_repo" commit -qm clean
 sv_step() {   # [env assignments...] — the verdict lines and the exit, keys and digests elided
     local out rc
-    out="$(env "$@" MALF_STORE_DIR="$sv_tmp/store" bash "$MALF_BIN" store-verdict format "$sv_repo" 2>&1)"; rc=$?
+    out="$(env "$@" MALF_SYSTEM="$MALF_TEST_SYSTEM" MALF_STORE_DIR="$sv_tmp/store" bash "$MALF_BIN" store-verdict format "$sv_repo" 2>&1)"; rc=$?
     printf 'rc=%s %s' "$rc" "$(grep -oE 'artefact_store: (STORED|MATCH|MISMATCH|FAIL|UNJUDGED) fixture-repo (verdict|format)|verdict (pass|fail) findings|first src/[a-z]+\.cpp|REFUSED — MALF_STORE_PARAMETERS' <<< "$out" | sed 's/artefact_store: //' | tr '\n' ' ')"
 }
 sv_records() { ls "$sv_tmp/store/records" 2>/dev/null | wc -l | tr -d ' '; }
@@ -6014,7 +6003,7 @@ check "the fixture: two distinct tpdep revisions, each lock naming one, and the 
 # part of what a lockfile resolves. Prints the exit status and the tpdep revision the create's graph holds.
 ls_step() {   # <malf dir> <package>
     rm -f "$ls_tmp/graph.json" "$ls_tmp/create.log"
-    CONAN_HOME="$ls_home" bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e
+    CONAN_HOME="$ls_home" MALF_SYSTEM="$MALF_TEST_SYSTEM" bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e
         MALF_DIR="$2"; MALF_PROFILE="$3"; MALF_BUILD_PROFILE="$3"; MALF_CONFIG=Release
         _MALF_WRITER_PROFILES=(--profile:host="$3" --profile:build="$3")
         _malf_writer_create_args || exit 3
