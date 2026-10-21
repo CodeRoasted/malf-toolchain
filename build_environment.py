@@ -129,6 +129,11 @@ HEX = re.compile(r"^[0-9a-f]{64}$")
 REFUSED = 2
 # The act's uid and gid inside its nested user namespace: the image's `ubuntu` (DN-142.D30 (8) R4).
 ACT_UID = 1000
+# The container's hostname, one for every act. Docker's default is the container's id, new at every run, and a
+# configure step that records it wrote other bytes at an equal key: libtool's generated script names the host it
+# was configured on, so `libtool/package` differed between two walks of one commit in one image (G-env-3, measured
+# 2026-10-21, DN-142.D30 (10) R16) and re-keyed every package built with it (cityhash, libcurl).
+ACT_HOSTNAME = "build-environment"
 # The container's own HOME: the image's, never the caller's, which is not mounted.
 CONTAINER_HOME = "/root"
 # The caller's shared-memory tmpfs, whose size the container's /dev/shm takes: Docker's default is 64 MiB,
@@ -278,7 +283,7 @@ def run_argv(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], cw
         raise Refused(f"the working directory {cwd} lies under no mount ({', '.join(map(str, resolved)) or 'none'})")
     shm = os.statvfs(SHM)
     command = [docker, "run", "--rm", "--init", "--network", network, *(["--name", name] if name else []),
-               "--workdir", str(cwd),
+               "--workdir", str(cwd), "--hostname", ACT_HOSTNAME,
                "--shm-size", str(shm.f_blocks * shm.f_frsize),
                "--security-opt", "seccomp=unconfined",
                "--env", f"HOME={home}", "--env", f"{SYSTEM_ENV}={pin.image}"]
@@ -821,10 +826,17 @@ PROBE_SOURCE = r"""
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/statvfs.h>
+#include <unistd.h>
 extern char **environ;
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "env") == 0) {
         for (char **entry = environ; *entry; ++entry) puts(*entry);
+        return 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "hostname") == 0) {
+        char name[256];
+        if (gethostname(name, sizeof name) != 0) return 1;
+        puts(name);
         return 0;
     }
     if (argc > 1 && strcmp(argv[1], "shm") == 0) {
@@ -1223,6 +1235,10 @@ def selftest() -> int:
             caller = os.statvfs(SHM)
             arm("RED: the container's /dev/shm is the caller's size, never Docker's 64 MiB default",
                 (sized.returncode, sized.stdout.strip()), (0, str(caller.f_blocks * caller.f_frsize)))
+            named = [subprocess.run(run_argv(pin, ["/probe", "hostname"], [mount], [], mount, docker=docker),
+                                    capture_output=True, text=True, check=False) for _ in range(2)]
+            arm("RED: every act container answers one hostname, never its container id (libtool records it)",
+                [(ran.returncode, ran.stdout.strip()) for ran in named], [(0, ACT_HOSTNAME)] * 2)
             arm("RED: a declared name unset in the caller is refused, never run with a default",
                 refusal(lambda: run_argv(pin, ["/probe"], [mount], ["UNSET_NAME"], mount, environ={})).startswith(
                     "the act declares UNSET_NAME, unset in its caller"), True)
