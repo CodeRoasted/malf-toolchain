@@ -398,8 +398,10 @@ gh variable set WINDOWS_RUNNER --org CodeRoasted --body hosted --visibility priv
 
 Unset reads as `hosted`. Under `self-hosted`, a leg at a release coordinate (the release, and the
 pre-tag reading of step 0's record) runs on the Windows release runner, `coderoast-release-windows`,
-and every other run (the weekly schedule, a plain dispatch) on the label `WIN_RUNS_ON` names, this
-runner (`malf-windows`); the superproject's `runner-isolation-probe.yml` reads `WIN_RUNS_ON` too.
+and every other run (the weekly schedule, a plain dispatch) on this runner, whose label `malf-windows`
+the leg's expression names; `WINDOWS_RUNNER` is the Windows legs' ONE org variable (the superproject's
+`workflow_source` refuses a runner reading a second, ROADMAP N394), and the superproject's
+`runner-isolation-probe.yml` names both labels directly.
 The legs: insight-eidos's `golden.yaml` `proof-msvc` and `sift-windows.yml` `build`. The
 superproject's `workflow_source` check module reds on a private repository's Windows leg that
 hard-codes a hosted image. canon + metalog (and sift-action) Windows legs stay on hosted runners

@@ -26,9 +26,9 @@
 # -Instance release, which calls this script with -RunnerGroup and -NoDefaultLabels and then moves
 # the service onto its virtual account; do not call it for that instance by hand.
 #
-# The org variable WIN_RUNS_ON=malf-windows names this runner, for the switched Windows legs'
-# non-release runs and for runner-isolation-probe.yml; WINDOWS_RUNNER is the switch itself:
-#     gh variable set WIN_RUNS_ON --org CodeRoasted --body malf-windows --visibility private
+# The switched Windows legs name this runner's label (malf-windows) for their non-release runs, and
+# runner-isolation-probe.yml names it too; the org variable WINDOWS_RUNNER is the switch, and the
+# Windows legs' one variable:
 #     gh variable set WINDOWS_RUNNER --org CodeRoasted --body self-hosted --visibility private
 
 param(
@@ -720,10 +720,10 @@ Write-Host ""
 if ($RunnerGroup) {
     Log "Runner group: $RunnerGroup. A job reaches this runner only by naming the label '$Labels'."
 } else {
-    Log "Route the eidos Windows probe here:"
-    Write-Host "  gh variable set WIN_RUNS_ON --org $Org --body $Labels --visibility private"
-    Log "Fall back to GitHub-hosted windows-2025:"
-    Write-Host "  gh variable delete WIN_RUNS_ON --org $Org"
-    Log "(Only the PRIVATE eidos probe reads WIN_RUNS_ON; canon/metalog stay on windows-2025.)"
+    Log "Route the private Windows legs to the self-hosted runners (they name the label 'malf-windows'; this runner carries '$Labels'):"
+    Write-Host "  gh variable set WINDOWS_RUNNER --org $Org --body self-hosted --visibility private"
+    Log "Fall back to the GitHub-hosted windows-2025-vs2026 image:"
+    Write-Host "  gh variable set WINDOWS_RUNNER --org $Org --body hosted --visibility private"
+    Log "(Public repositories never read it: their Windows legs stay on the hosted image.)"
 }
 Write-Host ""
