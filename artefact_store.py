@@ -18,7 +18,9 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
         when the key is new (exit 0), compared when it is not (exit 0 on a match, 1 on a mismatch);
         with a results directory, the step's test verdict record beside it (DN-142.D5 (3)); with
         the corpus gates parameter document naming the package, its corpus verdict too
-        (DN-142.D21 (1)), whose red is that record's verdict and never this command's exit
+        (DN-142.D21 (1)), whose red is that record's verdict and never this command's exit; and,
+        once every record of the step is stored or matching, its `step-outcome` record naming them
+        by key, the one record `serve` serves the step from
     artefact_store.py key-first <store> <conan home> <graph info.json> <package> <profile name>
                                 <malf dir> <toolchain.json> <prefixes> <document out>
                                 reference=<ref>#<rrev>|tree=<source tree id>
@@ -67,6 +69,15 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
         object is absent (a corrupt store)
     artefact_store.py restore-ledger <ledger>
         the walk's restore totals, one line: calls, nodes, transport bytes, seconds
+    artefact_store.py serve <store> <walk home> <key-first.json> <package> <profile name> <ledger>
+                            [<corpus gates>]
+        REUSE (N359, DN-142.D19; plan H13): the step whose key the key-first document gives is
+        SERVED in place of executing when its `step-outcome` record (written last by `conan-step`
+        and `build-step`, naming every record the step wrote) and each record it names are stored,
+        were produced in their domain with their denials counted at zero, and judged `pass`: its
+        package restored into the walk's home from its transport, each record printed `REUSED`.
+        MALF_STORE_REJUDGE=1 serves nothing. Exit 0 served; 3 it must execute (why printed); 1 or 2
+        from the restore
     artefact_store.py transports <store> <profile name>
         each `third-party-create` record at the profile with its transport's size in bytes, one
         `<alias> <bytes>` line, then the per-profile sum and the count of records holding none
@@ -86,7 +97,7 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
                                  <malf dir> <toolchain.json> <prefixes> <source tree id> <results dir>
         the verdict record of one `conan build` step (a `stored: false` package, DN-142.D14): keyed
         like a create's record by its inputs, the source being the package's git tree id; it stores
-        no package and judges the upstream packages the build linked
+        no package and judges the upstream packages the build linked; then its `step-outcome`
     artefact_store.py content-manifest <root>
         the content digest of a data root (DN-142.D21 (5)): SHA-256 over the canonical JSON of the
         sorted [relative path, sha256] of every regular file under it, symlinks followed; a file
@@ -1752,16 +1763,17 @@ def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile:
     package_id = binary.split(":", 1)[1].split("#", 1)[0]
     recipe = binary.split(":", 1)[0]
     declared = _helper().read_declarations(_cache_path(home, recipe, "export_source"))
+    keys = {PACKAGE_OUTPUT: key_of(document)}
     judged = max(stored, verdict_record(store, key_of(document), package, package_id, profile,
-                                        malf_dir, results, {package: content}, declared))
+                                        malf_dir, results, {package: content}, declared, keys))
     if corpus_gates is not None:
         judged = max(judged, corpus_record(store, key_of(document), package, package_id, profile,
-                                           malf_dir, results, {package: content}, corpus_gates))
+                                           malf_dir, results, {package: content}, corpus_gates, keys))
     bench = os.environ.get(BENCH_ENV)
-    if not bench:
-        return judged
-    return max(judged, bench_record(store, key_of(document), package, package_id, profile, malf_dir,
-                                    results, {package: content}, Path(bench)))
+    if bench:
+        judged = max(judged, bench_record(store, key_of(document), package, package_id, profile, malf_dir,
+                                          results, {package: content}, Path(bench), keys))
+    return judged or outcome_record(store, key_of(document), package, profile, corpus_gates, keys)
 
 
 def build_step(store: Path, home: Path, graph_json: Path, package: str, profile: str,
@@ -1791,10 +1803,12 @@ def build_step(store: Path, home: Path, graph_json: Path, package: str, profile:
     if not source:
         sys.exit(f"artefact_store: build-step {package}: {STEP_SOURCE_ENV} names no source directory, "
                  "so its declared skips cannot be read (DN-142.D23)")
-    return verdict_record(store, key_of(document), package, package_ids[0] if package_ids else "-",
-                          profile, malf_dir, results,
-                          {name.split("/")[0]: digest for name, digest in upstream.items()},
-                          _helper().read_declarations(source))
+    keys: dict = {}
+    judged = verdict_record(store, key_of(document), package, package_ids[0] if package_ids else "-",
+                            profile, malf_dir, results,
+                            {name.split("/")[0]: digest for name, digest in upstream.items()},
+                            _helper().read_declarations(source), keys)
+    return judged or outcome_record(store, key_of(document), package, profile, None, keys)
 
 
 VERDICT_POPULATIONS = (("build", "{pid}.xml"), ("test_package", "{pid}.test_package.xml"))
@@ -1848,7 +1862,7 @@ def selection_member(malf_dir: Path) -> dict[str, object]:
 
 def verdict_record(store: Path, build_key: str, package: str, package_id: str, profile: str,
                    malf_dir: Path, results: Path, judged: dict[str, str],
-                   declarations: list | None = None) -> int:
+                   declarations: list | None = None, keys: dict | None = None) -> int:
     """Store or compare one step's test verdict (DN-142.D5 (3)); a step with no result file ran no
     test and has no verdict to keep (exit 0, saying so). The step's own files are linked at
     `<results>/steps/<package>.xml` and `.test_package.xml`, where a reader of the run finds the
@@ -1881,6 +1895,8 @@ def verdict_record(store: Path, build_key: str, package: str, package_id: str, p
                 bundle.addfile(info, handle)
     output = {"verdict": verdict, "results": rows, "findings": key_of(rows), "judged": judged,
               "tests": len(rows), "excused": excused}
+    if keys is not None:
+        keys["verdict"] = key_of(document)
     return LocalStore(store).commit(document, {"verdict": output}, {"verdict": ("log", lambda: log)})
 
 
@@ -1919,7 +1935,8 @@ def corpus_rows(results: Path, package: str, package_id: str, legs: list[dict]
 
 
 def corpus_record(store: Path, build_key: str, package: str, package_id: str, profile: str,
-                  malf_dir: Path, results: Path, judged: dict[str, str], gates: Path) -> int:
+                  malf_dir: Path, results: Path, judged: dict[str, str], gates: Path,
+                  keys: dict | None = None) -> int:
     """Store or compare one step's corpus verdict (DN-142.D21 (1), (3), (5)) when the corpus gates
     parameter document names the package; exit 0 when it names none. The verdict's red is in the
     record, never in the exit: a red corpus gate is judged by step 0's corpus stage, and failing
@@ -1946,6 +1963,8 @@ def corpus_record(store: Path, build_key: str, package: str, package_id: str, pr
                 bundle.addfile(info, handle)
     output = {"verdict": verdict, "results": rows, "findings": key_of(rows), "judged": judged,
               "tests": len(rows)}
+    if keys is not None:
+        keys["corpus"] = key_of(document)
     stored = LocalStore(store).commit(document, {"corpus": output}, {"corpus": ("log", lambda: log)})
     if verdict != "pass":
         bad = [row for row in rows if row[2] != "passed"]
@@ -2012,7 +2031,8 @@ def bench_judgment(sidecar: dict, outputs: Path) -> tuple[dict[str, Path], list[
 
 
 def bench_record(store: Path, build_key: str, package: str, package_id: str, profile: str,
-                 malf_dir: Path, results: Path, judged: dict[str, str], document_path: Path) -> int:
+                 malf_dir: Path, results: Path, judged: dict[str, str], document_path: Path,
+                 keys: dict | None = None) -> int:
     """Store or compare one step's bench verdict when the bench document names the package; exit 0
     when it names none. post: exit 0 stored or matching; 1 when the run judged nothing (each cause
     printed, no record written) or differs at an equal key."""
@@ -2042,10 +2062,120 @@ def bench_record(store: Path, build_key: str, package: str, package_id: str, pro
         "system": system_member(),
         "context": {"runner": bench_runner()},
     }
+    if keys is not None:
+        keys[BENCH_OUTPUT] = key_of(document)
     return judged_verdict(store, document,
                           {"verdict": "pass", "findings": [],
                            "entries": [[member] for member in sorted(objects)], "record": {}},
                           objects, name=BENCH_OUTPUT)
+
+
+# THE STEP'S OUTCOME (N359, DN-142.D19 (3), (8); plan H13): written LAST, once every record a step of
+# the walk writes (its package, its test verdict, its corpus and bench verdicts) was stored or matched,
+# so its existence says the step COMPLETED and its `records` name each of them by key. Its key is what
+# those records' keys add to the build key that the walk can know BEFORE the step runs: the corpus
+# legs and data the corpus gates document hands this package, and, for a package the bench document
+# names, the runner and the image its benchmarks would measure on. A step that failed, was refused,
+# crashed, timed out or judged nothing writes none (R6), so nothing of it can ever be served.
+OUTCOME_KIND = "step-outcome"
+OUTCOME_OUTPUT = "outcome"
+SERVE_MISS = 3
+
+
+def outcome_document(build_key: str, package: str, profile: str, corpus_gates: Path | None) -> dict:
+    """The input document of `package`'s outcome at `build_key`, from what the walk hands the step."""
+    corpus = None
+    if corpus_gates is not None:
+        gates = json.loads(corpus_gates.read_text())
+        legs = gates.get("packages", {}).get(package)
+        corpus = {"legs": legs, "data": gates["data"]} if legs else None
+    bench_path = os.environ.get(BENCH_ENV)
+    benched = bool(bench_path) and package in json.loads(Path(bench_path).read_text()).get("packages", [])
+    return {"step": {"kind": OUTCOME_KIND, "package": package, "profile": profile}, "build": build_key,
+            "corpus": corpus,
+            "bench": {"runner": bench_runner(), "system": system_member()} if benched else None}
+
+
+def _record_verdict(record: dict) -> str:
+    """A record's verdict: a package's is `pass` (it exists only once judged), a verdict output's its own."""
+    outputs = record["outputs"]
+    if PACKAGE_OUTPUT in outputs:
+        return "pass"
+    return next(iter(outputs.values())).get("verdict", "unjudged")
+
+
+def outcome_record(store: Path, build_key: str, package: str, profile: str, corpus_gates: Path | None,
+                   keys: dict) -> int:
+    """Store or compare `package`'s outcome over the records `keys` names (every one already committed).
+    post: as LocalStore.commit."""
+    local = LocalStore(store)
+    verdicts = {name: _record_verdict(local.record(key)) for name, key in sorted(keys.items())}
+    verdict = "pass" if all(value == "pass" for value in verdicts.values()) else "fail"
+    return local.commit(outcome_document(build_key, package, profile, corpus_gates),
+                        {OUTCOME_OUTPUT: {"verdict": verdict, "records": dict(sorted(keys.items())),
+                                          "findings": key_of(verdicts)}}, {})
+
+
+def unservable(store: Path, document: dict, rejudge: bool) -> tuple[dict | None, str | None]:
+    """(the outcome record a step may be SERVED from instead of executing, None) or (None, why it runs).
+    It is served only when its outcome and every record the outcome names are stored, were each produced
+    by an act that ran in its domain with its denials counted at zero (`servable`), and judged `pass`;
+    `rejudge` (the walk's explicit flag, never a retry) runs every step and compares it."""
+    if rejudge:
+        return None, "a re-judge was asked for (MALF_STORE_REJUDGE), so every step executes and is compared"
+    local = LocalStore(store)
+    outcome = local.record(key_of(document))
+    if outcome is None:
+        return None, "no completed step at this key"
+    named = {OUTCOME_OUTPUT: outcome} | {name: local.record(key)
+                                         for name, key in outcome["outputs"][OUTCOME_OUTPUT]["records"].items()}
+    for name, record in named.items():
+        if record is None:
+            return None, f"its {name} record is absent from the store"
+        why = servable(record)
+        if why is not None:
+            return None, f"its {name} record: {why}"
+        verdict = record["outputs"][OUTCOME_OUTPUT]["verdict"] if name == OUTCOME_OUTPUT else _record_verdict(record)
+        if verdict != "pass":
+            return None, f"its {name} record judged {verdict}, and only a pass is served"
+    return outcome, None
+
+
+def serve(store: Path, home: Path, key_first: Path, package: str, profile: str, ledger: Path,
+          corpus_gates: Path | None) -> int:
+    """`serve`: the step `key_first` names served from the store in place of executing it, when
+    `unservable` finds nothing against it: its stored package restored into the walk's `home` (where the
+    steps after it resolve, exactly as an executed step's recorded package is), and each of its records
+    printed REUSED, the line a reading takes as an executed step's STORED or MATCH.
+    post: 0 served; SERVE_MISS it must execute, why printed; RESTORE_REFUSED or RESTORE_STOPPED from
+          the restore."""
+    document = json.loads(key_first.read_text())
+    build_key = key_of(document)
+    outcome, why = unservable(store, outcome_document(build_key, package, profile, corpus_gates),
+                              os.environ.get(REJUDGE_ENV) == "1")
+    if outcome is None:
+        print(f"artefact_store: EXECUTES {package} key {build_key}: {why}")
+        return SERVE_MISS
+    local = LocalStore(store)
+    records = outcome["outputs"][OUTCOME_OUTPUT]["records"]
+    if PACKAGE_OUTPUT in records:
+        output = local.record(records[PACKAGE_OUTPUT])["outputs"][PACKAGE_OUTPUT]
+        label = next(label for label in document["sources"] if label.split("/", 1)[0] == package)
+        restored = restore(store, home, {"step": {"profile": profile},
+                                         "upstream": {label: output["content"]}, "third_party": {},
+                                         CONFIGURATIONS_FIELD: {label: output["alias"].rsplit("#", 1)[0]}},
+                           ledger, f"{package}:served")
+        if restored != 0:
+            return restored
+    for name, key in sorted(records.items()):
+        print(f"artefact_store: REUSED {package} {name} key {key} {_described(local.record(key)['outputs'][name])}")
+    print(f"artefact_store: REUSED {package} {OUTCOME_OUTPUT} key {outcome['key']} "
+          f"{_described(outcome['outputs'][OUTCOME_OUTPUT])}")
+    print(f"artefact_store: SERVED {package} at key {build_key}, nothing executed (N359, DN-142.D19)")
+    return 0
+
+
+REJUDGE_ENV = "MALF_STORE_REJUDGE"
 
 
 def _transport_build_ids(transport: Path) -> dict[str, dict]:
@@ -3214,6 +3344,112 @@ def selftest() -> int:
         expect("the ledger totals the walk's restores",
                restore_ledger(ledger).split(", ")[:2], ["1 restore(s)", "2 node(s)"])
 
+        # REUSE (N359, DN-142.D19; plan H13): a completed step, every record of it a counted pass, is SERVED:
+        # its package restored into the walk's home exactly as a cold walk's recorded package is, so the
+        # steps after it key against the same bytes; anything else executes.
+        sstore = root / "serve-store"
+        slocal = LocalStore(sstore)
+        mid_folder, mid = package_tree("ex_low", "the served upstream's bytes")
+        build_key, verdict_key = "1" * 64, "2" * 64
+
+        def put_counted(key: str, outputs: dict, counted: bool = True, kind: str = "conan-create") -> None:
+            body = {"key": key, "inputs": {"step": {"kind": kind, "package": "ex_low", "profile": profile}},
+                    "outputs": outputs, "produced_by": {DENIALS_FIELD: counted}}
+            (sstore / "records" / f"{key}.json").write_text(json.dumps(body))
+
+        transport = slocal.put_bytes(b"archive of ex_low/1#r:q#w")
+        archives[transport] = ("ex_low/1#r:q#w", mid_folder)
+        put_counted(build_key, {PACKAGE_OUTPUT: {"alias": "ex_low/1#r:q#w", "content": mid, "entries": [],
+                                                 TRANSPORT_FIELD: transport}})
+        put_counted(verdict_key, {"verdict": {"verdict": "pass", "tests": 3, "findings": "f" * 64}},
+                    kind="test-verdict")
+        key_first = root / "ex_low.key-first.json"
+        key_first.write_text(json.dumps({"sources": {"ex_low/host": "s" * 64}, "step": {"package": "ex_low"}}))
+        os.environ.pop(REJUDGE_ENV, None)
+
+        def outcome_with(keys: dict, tally: str) -> tuple[int, str]:
+            (root / "tally").write_text(tally)
+            saved = os.environ.get(TALLY_ENV)
+            os.environ[TALLY_ENV] = str(root / "tally")
+            try:
+                with contextlib.redirect_stdout(io.StringIO()) as out, \
+                        contextlib.redirect_stderr(io.StringIO()) as err:
+                    code = outcome_record(sstore, key_of(json.loads(key_first.read_text())), "ex_low", profile,
+                                          None, keys)
+            finally:
+                os.environ.pop(TALLY_ENV, None)
+                if saved is not None:
+                    os.environ[TALLY_ENV] = saved
+            return code, out.getvalue() + err.getvalue()
+
+        def served(into: Path) -> tuple[int, str]:
+            saved = globals()["_conan_restore"]
+            globals()["_conan_restore"] = fixture_restore
+            try:
+                with contextlib.redirect_stdout(io.StringIO()) as out, \
+                        contextlib.redirect_stderr(io.StringIO()) as err:
+                    code = serve(sstore, into, key_first, "ex_low", profile, root / "serve.jsonl", None)
+            finally:
+                globals()["_conan_restore"] = saved
+            return code, out.getvalue() + err.getvalue()
+
+        code, printed = served(root / "walk-miss")
+        expect("RED: a key the store never completed EXECUTES, naming why, and nothing is restored",
+               (code, "EXECUTES ex_low key" in printed and "no completed step at this key" in printed,
+                (root / "walk-miss").exists()), (SERVE_MISS, True, False))
+        code, printed = outcome_with({PACKAGE_OUTPUT: build_key, "verdict": verdict_key}, "counted 0\n")
+        expect("a completed step's outcome is stored LAST, naming each record by key, its verdict the records'",
+               (code, LocalStore(sstore).record(key_of(outcome_document(
+                   key_of(json.loads(key_first.read_text())), "ex_low", profile, None)))["outputs"][OUTCOME_OUTPUT]
+                ["records"]), (0, {PACKAGE_OUTPUT: build_key, "verdict": verdict_key}))
+        code, printed = served(root / "walk-served")
+        cold = root / "walk-cold"
+        saved = globals()["_conan_restore"]
+        globals()["_conan_restore"] = fixture_restore
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                restore(sstore, cold, {"step": {"profile": profile}, "upstream": {"ex_low/host": mid},
+                                       "third_party": {}, CONFIGURATIONS_FIELD: {"ex_low/host": "ex_low/1#r:q"}},
+                        root / "cold.jsonl", "ex_low:recorded")
+        finally:
+            globals()["_conan_restore"] = saved
+        expect("RED: a completed counted pass is SERVED: its package lands in the walk's home byte for byte as a "
+               "cold walk's recorded restore lands it, so its dependent keys against the same upstream, and "
+               "every record prints REUSED",
+               (code, (root / "walk-served").is_dir() and tree_digest(root / "walk-served")[0] == tree_digest(cold)[0],
+                sum(line.startswith("artefact_store: REUSED ex_low ") for line in printed.splitlines()),
+                f"REUSED ex_low {PACKAGE_OUTPUT} key {build_key} content {mid}" in printed),
+               (0, True, 3, True))
+        code, printed = outcome_with({PACKAGE_OUTPUT: build_key, "verdict": verdict_key}, "counted 0\n")
+        expect("an outcome rebuilt at an equal key over the same records MATCHES",
+               (code, "MATCH ex_low outcome key" in printed), (0, True))
+        put_counted("3" * 64, {"verdict": {"verdict": "pass", "tests": 4, "findings": "e" * 64}},
+                    kind="test-verdict")
+        code, printed = outcome_with({PACKAGE_OUTPUT: build_key, "verdict": "3" * 64}, "counted 0\n")
+        expect("RED: an outcome naming another record at an equal key is a MISMATCH",
+               (code, "MISMATCH ex_low outcome at an equal key" in printed), (1, True))
+        for name in os.listdir(sstore / "mismatches"):
+            (sstore / "mismatches" / name).unlink()
+        os.environ[REJUDGE_ENV] = "1"
+        code, printed = served(root / "walk-rejudge")
+        os.environ.pop(REJUDGE_ENV)
+        expect("RED: MALF_STORE_REJUDGE=1, the explicit re-judge, serves nothing",
+               (code, "a re-judge was asked for" in printed), (SERVE_MISS, True))
+        put_counted(verdict_key, {"verdict": {"verdict": "fail", "tests": 3, "findings": "f" * 64}},
+                    kind="test-verdict")
+        code, printed = served(root / "walk-fail")
+        expect("RED: a step whose test verdict judged fail is never served",
+               (code, "its verdict record judged fail, and only a pass is served" in printed), (SERVE_MISS, True))
+        put_counted(verdict_key, {"verdict": {"verdict": "pass", "tests": 3, "findings": "f" * 64}},
+                    counted=False, kind="test-verdict")
+        code, printed = served(root / "walk-uncounted")
+        expect("RED: a record whose act's denials were not counted in its domain is never served",
+               (code, "its verdict record: the record" in printed and "re-executes" in printed), (SERVE_MISS, True))
+        (sstore / "records" / f"{verdict_key}.json").unlink()
+        code, printed = served(root / "walk-absent")
+        expect("RED: an outcome naming a record the store no longer holds is never served",
+               (code, "its verdict record is absent from the store" in printed), (SERVE_MISS, True))
+
     if outside is None:
         os.environ.pop(SYSTEM_ENV, None)
     else:
@@ -3329,6 +3565,9 @@ def main(argv: list[str]) -> int:
     if len(argv) in (6, 8) and argv[0] == "restore":
         return restore(Path(argv[1]), Path(argv[2]), json.loads(Path(argv[3]).read_text()), Path(argv[4]),
                        argv[5], (Path(argv[6]), Path(argv[7])) if len(argv) == 8 else None)
+    if len(argv) in (7, 8) and argv[0] == "serve":
+        return serve(Path(argv[1]), Path(argv[2]), Path(argv[3]), argv[4], argv[5], Path(argv[6]),
+                     Path(argv[7]) if len(argv) == 8 else None)
     if len(argv) == 2 and argv[0] == "restore-ledger":
         print(restore_ledger(Path(argv[1])))
         return 0

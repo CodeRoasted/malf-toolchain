@@ -20,6 +20,12 @@ ONE home share every path but the per-create folder hash, so they prove less.
         manifest, or whose manifest is not its revision, is refused naming it (exit 1); a revision no
         source holds is named and left to the graph that needs it, which fails naming it, since the act
         has no network
+    package_twin.py provision <lockfile> <owned prefixes> <home> <source download cache>
+        ON THE HOST, before a walk whose container has no network: every third-party recipe revision
+        <lockfile> names that <home> lacks downloaded from <home>'s remotes and checked against its
+        revision, and every source file a held lock recipe declares (its conandata `sources` entry, a url
+        and a sha256) that <source download cache> lacks downloaded and checked against its sha256. Exit 0
+        everything held; 1 a revision or a source no remote serves, named; a fresh <home> is left alone
     package_twin.py missing <home> <released tsv> <owned prefixes> <host profile> <build profile> <lockfile>
         every released recipe exported into <home> (a seeded home, before any create), then its graph resolved
         there strictly against <lockfile>, as the creates resolve it: exit 0 when the home holds every third-party binary the graphs need, 3 naming each
@@ -51,7 +57,10 @@ import os
 import subprocess
 import sys
 import tempfile
+import urllib.request
 from pathlib import Path
+
+import yaml
 
 import artefact_store
 
@@ -179,6 +188,120 @@ def seed_recipes(lockfile: Path, prefixes: tuple[str, ...], target: Path, source
     return 0
 
 
+SOURCE_TIMEOUT_S = 120
+SOURCE_CHUNK_BYTES = 1 << 20
+
+
+def enabled_remotes(home: Path) -> list[str]:
+    """The names of `home`'s enabled remotes, in its resolution order."""
+    return [remote["name"] for remote in json.loads(conan(home, "remote", "list", "--format=json"))
+            if remote.get("enabled", True)]
+
+
+def fetch_recipe(home: Path, reference: str, remotes: list[str]) -> str | None:
+    """Download the recipe `reference` (`name/version#revision`) into `home` from the first of `remotes`
+    holding it, recipe alone. post: the remote it came from, or None when none holds it."""
+    env = {**os.environ, "CONAN_HOME": str(home)}
+    for remote in remotes:
+        done = subprocess.run(["conan", "download", reference, "--only-recipe", "-r", remote],
+                              capture_output=True, text=True, env=env)
+        if done.returncode == 0:
+            return remote
+    return None
+
+
+def source_entries(conandata: dict, version: str) -> list[tuple[list[str], str]] | None:
+    """The `(urls, sha256)` downloads `conandata` declares for `version`: [] when it declares none, None when
+    its entry is keyed by platform, a shape this provisioning does not choose a member of."""
+    entry = (conandata.get("sources") or {}).get(version)
+    if entry is None:
+        return []
+    listed = entry if isinstance(entry, list) else [entry]
+    if not all(isinstance(item, dict) and "url" in item and "sha256" in item for item in listed):
+        return None
+    return [([item["url"]] if isinstance(item["url"], str) else list(item["url"]), item["sha256"])
+            for item in listed]
+
+
+def fetch_source(cache: Path, urls: list[str], sha256: str) -> str | None:
+    """Download the file `sha256` names into conan's source download cache `cache` (`core.sources:
+    download_cache`, read by conan at `<cache>/s/<sha256>`) from the first of `urls` whose bytes digest to
+    it, written beside and renamed in, so a reader never sees a partial file. post: None when stored, else
+    every url's failure."""
+    target = cache / "s" / sha256
+    target.parent.mkdir(parents=True, exist_ok=True)
+    failures = []
+    for url in urls:
+        staged = target.parent / f"{sha256}.provisioning-{os.getpid()}"
+        digest = hashlib.sha256()
+        try:
+            with urllib.request.urlopen(url, timeout=SOURCE_TIMEOUT_S) as answer, staged.open("wb") as out:
+                while chunk := answer.read(SOURCE_CHUNK_BYTES):
+                    digest.update(chunk)
+                    out.write(chunk)
+        except (OSError, ValueError) as error:
+            staged.unlink(missing_ok=True)
+            failures.append(f"{url}: {error}")
+            continue
+        if digest.hexdigest() != sha256:
+            staged.unlink(missing_ok=True)
+            failures.append(f"{url}: its bytes digest to {digest.hexdigest()}")
+            continue
+        os.replace(staged, target)
+        return None
+    return "; ".join(failures)
+
+
+def provision(lockfile: Path, prefixes: tuple[str, ...], home: Path, cache: Path) -> int:
+    """Make `home` hold every third-party recipe revision `lockfile` names and `cache` every source file those
+    recipes declare, ON THE HOST, before the walk's container starts: the walk and every act after it have
+    no network (DN-142.D30), so a revision or a source absent here fails a third-party step, naming a remote
+    it cannot reach (measured 2026-10-22, step 0 run 39774938501: boost/1.83.0, drogon's requirement, held
+    by no home, red B2 and B4). A recipe comes from the home's own remotes in order and is checked against
+    its revision; a source is checked against the sha256 its recipe declares, the identity conan reads it
+    by. Nothing is fetched when everything is held, so a provisioned seat needs no network at all."""
+    if not (home / "settings.yml").is_file():
+        print(f"package_twin: nothing provisioned — {home} is not a conan home yet, and the walk that "
+              f"creates it seeds it")
+        return 0
+    wanted = lock_recipes(lockfile, prefixes)
+    absent = [reference for reference in wanted if reference not in held_revisions(home)]
+    remotes = enabled_remotes(home) if absent else []
+    fetched, unfetched = [], []
+    for reference in absent:
+        remote = fetch_recipe(home, reference, remotes)
+        (fetched if remote else unfetched).append(f"{reference} ({remote})" if remote else reference)
+    forged = forged_revisions(home, [entry.split(" ", 1)[0] for entry in fetched])
+    sources, unsourced, by_platform = [], [], []
+    for reference in sorted(set(wanted) & held_revisions(home)):
+        folder = Path(conan(home, "cache", "path", reference).strip())
+        conandata = folder / "conandata.yml"
+        declared = source_entries(yaml.safe_load(conandata.read_text()) or {},
+                                  reference.split("/", 1)[1].split("#", 1)[0]) if conandata.is_file() else []
+        if declared is None:
+            by_platform.append(reference)
+            continue
+        for urls, sha256 in declared:
+            if (cache / "s" / sha256).is_file():
+                continue
+            failure = fetch_source(cache, urls, sha256)
+            (unsourced if failure else sources).append(f"{reference} {sha256}" + (f" ({failure})" if failure else ""))
+    print(f"package_twin: provisioned {home} from {lockfile.name}: {len(fetched)} recipe revision(s) fetched"
+          f"{': ' + ', '.join(fetched) if fetched else ''}; {len(sources)} source file(s) fetched into {cache}"
+          f"{': ' + ', '.join(sources) if sources else ''}")
+    if by_platform:
+        print(f"package_twin: not provisioned, their sources keyed by platform: {', '.join(by_platform)}")
+    refusals = ([f"{len(unfetched)} recipe revision(s) held by none of the remotes {', '.join(remotes)}: "
+                 f"{', '.join(unfetched)}"] if unfetched else []) \
+        + ([f"a fetched recipe whose conanmanifest.txt is not its revision: {', '.join(forged)}"] if forged else []) \
+        + ([f"{len(unsourced)} source file(s) not fetched: {', '.join(unsourced)}"] if unsourced else [])
+    if refusals:
+        print(f"package_twin: REFUSED — {home} cannot hold what the lock pins, and the walk has no network to "
+              f"fetch it: {'; '.join(refusals)}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def missing(home: Path, released: Path, prefixes: tuple[str, ...], host: str, build: str,
             lockfile: Path) -> int:
     """Name every third-party binary the released graphs need that `home` does not hold."""
@@ -256,6 +379,8 @@ def main(argv: list[str]) -> int:
         return 0
     if len(argv) >= 5 and argv[0] == "seed-recipes":
         return seed_recipes(Path(argv[1]), tuple(argv[2].split()), Path(argv[3]), [Path(home) for home in argv[4:]])
+    if len(argv) == 5 and argv[0] == "provision":
+        return provision(Path(argv[1]), tuple(argv[2].split()), Path(argv[3]), Path(argv[4]))
     if len(argv) == 7 and argv[0] == "missing":
         return missing(Path(argv[1]), Path(argv[2]), tuple(argv[3].split()), argv[4], argv[5],
                        Path(argv[6]))

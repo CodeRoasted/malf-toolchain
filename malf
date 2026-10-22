@@ -5579,7 +5579,16 @@ _malf_store_create_in_environment() {   # <package>...
     # HOME, and each act inside gets its own (DN-142.D30 (9) R8).
     mkdir -p "$MALF_CONAN_SOURCES_CACHE"
     local -a args=(--mount "$MALF_WORKSPACE_ROOT" --mount "$store" --mount /tmp --mount "$MALF_CONAN_SOURCES_CACHE")
-    local cut_home="${MALF_CUT_VERIFY_CONAN_HOME:-$MALF_CONAN_HOME_BASE/cut-verify}" home
+    local cut_home="${MALF_CUT_VERIFY_CONAN_HOME:-$MALF_CONAN_HOME_BASE/cut-verify}" home recipes prefixes
+    # THE CONTAINER HAS NO NETWORK, SO THE HOST PROVISIONS FIRST (package_twin.py provision): the home the
+    # walk reads its recipes from (its own, or the seed a fresh one is seeded from) holds every lock
+    # revision, and the download cache every source those recipes declare, each checked by its digest.
+    recipes="${MALF_STORE_CONAN_HOME:-$cut_home}"
+    _malf_conan_home_fresh "$recipes" && recipes="${MALF_TWIN_SEED_HOME:-$cut_home}"
+    prefixes="$(_malf_owned_prefixes)" \
+        || { echo "malf store-create: the owned package namespaces of $MALF_WORKSPACE_ROOT could not be derived" >&2; return 2; }
+    python3 "$MALF_DIR/package_twin.py" provision "$MALF_DIR/conan.lock" "$prefixes" "$recipes" "$MALF_CONAN_SOURCES_CACHE" \
+        || { echo "malf store-create: REFUSED before the walk — $recipes or $MALF_CONAN_SOURCES_CACHE lacks what malf/conan.lock pins (above)" >&2; return 2; }
     for home in "$MALF_CONAN_HOME_BASE" "$cut_home" "${MALF_STORE_CONAN_HOME:-}" "${MALF_TWIN_SEED_HOME:-}"; do
         [[ -n "$home" ]] || continue
         mkdir -p "$home" && args+=(--mount "$home")
@@ -5595,7 +5604,7 @@ _malf_store_create_in_environment() {   # <package>...
     fi
     for name in MALF_STORE_PARAMETERS MALF_STORE_LOG_ARCHIVE MALF_CORPUS_GATES MALF_BENCH MALF_BENCH_SLOT_TOKEN \
                 MALF_CUT_VERIFY_CONAN_HOME MALF_CUT_VERIFY_PROFILE MALF_STORE_CONAN_HOME MALF_TWIN_SEED_HOME \
-                MALF_STORE_BUILD_REV; do
+                MALF_STORE_BUILD_REV MALF_STORE_REJUDGE; do
         [[ -z "${!name:-}" ]] || args+=(--env "$name")
     done
     export MALF_STORE_DIR="$store" MALF_WORKSPACE_ROOT CONAN_HOME="$MALF_CONAN_HOME_BASE" MALF_BUILD_SLOT_DIR
@@ -5644,8 +5653,10 @@ _malf_store_walk_backends() {   # <out> [<package>...]
 # and identified by its bytes (DN-142.D3); each step that ran tests leaves a TEST VERDICT record
 # beside it (DN-142.D5 (3)): artefact_store.py owns all three and the store. Every key's `definition`
 # is malf's tree plus the act's PARAMETER DOCUMENT (_malf_store_parameters), never a driver's tree.
-# A new key is STORED; a stored key is REBUILT and COMPARED, and a differing output at an equal key
-# fails, naming both digests and the differing files or tests.
+# A new key is STORED. A key the store COMPLETED, every record of it a judged pass from a counted
+# domain, is SERVED (_malf_store_serve): its package restored, nothing executed. Any other stored key,
+# and every key under MALF_STORE_REJUDGE=1, is REBUILT and COMPARED, and a differing output at an equal
+# key fails, naming both digests and the differing files or tests.
 #
 # THE EXECUTABLES (DN-142.D22): each step's `executables:` map is read from its repository's
 # packages.yml at HEAD (the recorded commit, never the disk) and handed to the record through
@@ -5764,6 +5775,7 @@ cmd_store_create() {
     [[ -z "${MALF_STORE_LOG_ARCHIVE:-}" ]] || rm -f "$MALF_STORE_LOG_ARCHIVE"
     local -a failed=() skipped=()
     local -A broke=()
+    _MALF_WALK_SERVED=0
     _malf_store_clock "$scratch/times"; run_at="$_MALF_CLOCK_AT"
     while IFS=$'\t' read -r name path deps kind; do
         total=$((total+1))
@@ -5788,6 +5800,7 @@ cmd_store_create() {
         esac
     done <<< "$wanted"
     echo "=== malf store-create: restored $(python3 "$MALF_DIR/artefact_store.py" restore-ledger "$scratch/restore.jsonl") ==="
+    echo "=== malf store-create: $_MALF_WALK_SERVED of $total step(s) served from the store, $((total - _MALF_WALK_SERVED)) executed or not reached ==="
     if [[ -n "$stopped" ]]; then
         _malf_store_keep_logs "$scratch"
         echo "malf store-create: STOPPED at $name — a kept record's transport is absent, so the store is corrupt and nothing after it ran (DN-142.D17 (2)) — logs in $scratch" >&2
@@ -6006,9 +6019,11 @@ _malf_store_run_step() {   # <n> <name> <path> <create|build> <store> <scratch> 
     fi
     if [[ "$kind" == "build" ]]; then
         rc=0
+        _MALF_STEP_SERVED=""
         _malf_store_build_one "$name" "$path" "${MALF_STORE_BUILD_REV:-HEAD}" "$store" "$scratch" "$prefixes" || rc=$?
         case $rc in
-            0) _malf_store_closed "$total" "$name" PASS "$run_at" "$step_at" "$step_cpu" "$scratch/times"; return 0 ;;
+            0) [[ -z "$_MALF_STEP_SERVED" ]] || _MALF_WALK_SERVED=$((_MALF_WALK_SERVED + 1))
+               _malf_store_closed "$total" "$name" "${_MALF_STEP_SERVED:-PASS}" "$run_at" "$step_at" "$step_cpu" "$scratch/times"; return 0 ;;
             2) _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
                return "$_MALF_STEP_STOPPED" ;;
         esac
@@ -6027,6 +6042,17 @@ _malf_store_run_step() {   # <n> <name> <path> <create|build> <store> <scratch> 
         _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
         return "$_MALF_STEP_UNRECORDED"
     fi
+    rc=0
+    _malf_store_serve "$name" "$store" "$scratch" "$CONAN_HOME" "${corpus_args[@]}" || rc=$?
+    case $rc in
+        0) _MALF_WALK_SERVED=$((_MALF_WALK_SERVED + 1))
+           _malf_store_closed "$total" "$name" REUSED "$run_at" "$step_at" "$step_cpu" "$scratch/times"; return 0 ;;
+        "$_MALF_SERVE_MISS") ;;
+        2) _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+           return "$_MALF_STEP_STOPPED" ;;
+        *) _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+           return "$_MALF_STEP_UNRECORDED" ;;
+    esac
     if ! step_home="$(_malf_step_home "$scratch" "$name")"; then
         _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
         return "$_MALF_STEP_UNRECORDED"
@@ -6042,6 +6068,22 @@ _malf_store_run_step() {   # <n> <name> <path> <create|build> <store> <scratch> 
     esac
     _malf_store_closed "$total" "$name" "$verdict" "$run_at" "$step_at" "$step_cpu" "$scratch/times"
     return "$rc"
+}
+
+# REUSE (N359, DN-142.D19; plan H13): a step whose key before it runs is a key the store COMPLETED, with
+# every record of it judged `pass` by an act that ran in its domain with its denials counted at zero, is
+# SERVED instead of executed (artefact_store.py `serve`): its stored package is restored into the walk's
+# home, as an executed step's recorded package is, so every step after it resolves and keys against the
+# same bytes a cold walk gives it, and each of its records is printed REUSED. Anything else executes
+# as before: a key miss, a record absent, unconfined, uncounted or judged other than `pass`, and every
+# step of a walk run with MALF_STORE_REJUDGE=1, the explicit re-judge, never a retry.
+# pre: the key-first document of <name> is in <scratch> (_malf_store_key_first).
+# post: exit 0 served; _MALF_SERVE_MISS it executes; 1 a refused restore; 2 a corrupt store.
+_MALF_SERVE_MISS=3
+_MALF_WALK_SERVED=0
+_malf_store_serve() {   # <name> <store> <scratch> <walk home> [<corpus gates>]
+    python3 "$MALF_DIR/artefact_store.py" serve "$2" "$4" "$3/$1.key-first.json" "$1" "$MALF_PROFILE_NAME" \
+        "$3/restore.jsonl" "${@:5}"
 }
 
 # A CREATE STEP IN ITS OWN HOME (DN-142.D25 (5) call F): the home restored from the key-first document
@@ -6414,6 +6456,14 @@ _malf_store_build_one() {   # <name> <path> <rev> <store> <scratch> <prefixes>
         echo "malf store-create: the key of $name could not be computed before its build (above, or $scratch/$name.log)" >&2
         _malf_quote_log "$scratch/$name.log" "$name (its key before the build)"; return 1
     fi
+    rc=0
+    _malf_store_serve "$name" "$store" "$scratch" "$CONAN_HOME" || rc=$?
+    case $rc in
+        0) _MALF_STEP_SERVED=REUSED; return 0 ;;
+        "$_MALF_SERVE_MISS") ;;
+        2) return 2 ;;
+        *) return 1 ;;
+    esac
     step_home="$(_malf_step_home "$scratch" "$name")" || return 1
     local walk_home="$CONAN_HOME"
     rc=0

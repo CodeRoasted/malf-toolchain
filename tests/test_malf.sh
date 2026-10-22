@@ -417,7 +417,7 @@ echo
 echo "[7j0] artefact_store's object producers carry their own refusal proof (selftest): the objects convention resolves step -> record -> output -> member, the tracked step is keyed on blob ids at a commit, and the ingestion write refuses a printed digest that is not the bytes, a record without its seat or dated exception, a PE carrying a symbol table or a CodeView entry, and records a divergence at an equal inputs_key, never a red (DN-142.D20 (2), DN-142.D25)"
 objects_selftest_output="$(timeout 120 python3 "$MALF_ROOT/artefact_store.py" selftest 2>&1)"
 objects_selftest_status=$?
-check "artefact_store selftest: 46 arms, every refusal fired, the system member refused outside the build environment, the ingestion record and its class, the tracked record, the divergence event, the bench verdict, the test_package member and the restore intact" \
+check "artefact_store selftest: 46 arms, every refusal fired, the system member refused outside the build environment, the ingestion record and its class, the tracked record, the divergence event, the bench verdict, the test_package member, the restore and the reuse decision intact" \
       "ok" "$([[ $objects_selftest_status -eq 0 ]] && grep -q '^artefact_store selftest: 46 arm(s), 0 failure(s)$' <<< "$objects_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$objects_selftest_output")")"
 
 echo
@@ -3750,15 +3750,15 @@ bi_junit() {   # <file> <name:outcome>... — a JUnit file of malf's helper's sh
 }
 bi_verdict() {   # <results dir> -> rc=<status> and the step output's verdict lines
     CONAN_HOME="$bi_home" MALF_STEP_TEST_FOLDER=none MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$bi_tmp/vstore" "$bi_home" "$bi_tmp/graph.json" bi_tool fixture "$MALF_ROOT" "$bi_tmp/toolchain.json" "bi_" "$1" > "$bi_tmp/v.log" 2>&1
-    printf 'rc=%s %s' "$?" "$(grep -oE '(STORED|MATCH|MISMATCH|NO VERDICT) bi_tool( verdict)?' "$bi_tmp/v.log" | paste -sd,)"
+    printf 'rc=%s %s' "$?" "$(grep -oE '(STORED|MATCH|MISMATCH|NO VERDICT) bi_tool( verdict| outcome)?' "$bi_tmp/v.log" | paste -sd,)"
 }
 bi_empty_id="da39a3ee5e6b4b0d3255bfef95601890afd80709"
 mkdir -p "$bi_tmp/res/bi_tool" "$bi_tmp/res/bi_tool.other"
 bi_junit "$bi_tmp/res/bi_tool/$bi_empty_id.xml" BiTool.One:passed BiTool.Two:passed
 bi_junit "$bi_tmp/res/bi_tool/$bi_empty_id.test_package.xml" BiToolTp.Links:passed
 bi_junit "$bi_tmp/res/bi_tool/$(printf 'f%.0s' {1..40}).xml" BiTool.Variant:passed
-check "a create's step with result files stores its package record AND a verdict record of both populations, judging the package's content digest" \
-      "rc=0 STORED bi_tool,STORED bi_tool verdict [[\"build\", \"BiTool.One\", \"passed\"], [\"build\", \"BiTool.Two\", \"passed\"], [\"test_package\", \"BiToolTp.Links\", \"passed\"]] same" \
+check "a create's step with result files stores its package record AND a verdict record of both populations, judging the package's content digest, then its outcome naming both" \
+      "rc=0 STORED bi_tool,STORED bi_tool verdict,STORED bi_tool outcome [[\"build\", \"BiTool.One\", \"passed\"], [\"build\", \"BiTool.Two\", \"passed\"], [\"test_package\", \"BiToolTp.Links\", \"passed\"]] same" \
       "$(bi_verdict "$bi_tmp/res") $(python3 -c "
 import json, glob
 recs = [json.load(open(r)) for r in glob.glob('$bi_tmp/vstore/records/*.json')]
@@ -3768,14 +3768,14 @@ print(json.dumps(verdict['outputs']['verdict']['results']), 'same' if verdict['o
 check "the verdict reads the step's own binary's results, never a variant's under another package id, and links them under steps/" \
       "0 2 1" \
       "$(grep -c 'BiTool.Variant' "$bi_tmp/res/steps/bi_tool.xml") $(grep -c 'BiTool\.\(One\|Two\)' "$bi_tmp/res/steps/bi_tool.xml") $(grep -c 'BiToolTp.Links' "$bi_tmp/res/steps/bi_tool.test_package.xml")"
-check "the same step again matches both records" "rc=0 MATCH bi_tool,MATCH bi_tool verdict" "$(bi_verdict "$bi_tmp/res")"
+check "the same step again matches its records and its outcome" "rc=0 MATCH bi_tool,MATCH bi_tool verdict,MATCH bi_tool outcome" "$(bi_verdict "$bi_tmp/res")"
 bi_junit "$bi_tmp/res/bi_tool/$bi_empty_id.xml" BiTool.One:passed BiTool.Renamed:passed
 check "a rebuilt step at an equal key whose result set differs is a verdict MISMATCH (exit 1) naming the tests" \
       "rc=1 MATCH bi_tool,MISMATCH bi_tool verdict 1" \
       "$(bi_verdict "$bi_tmp/res") $(grep -c 'MISMATCH bi_tool verdict at an equal key .* 2 test(s): build:BiTool.Renamed, build:BiTool.Two' "$bi_tmp/v.log")"
 mkdir -p "$bi_tmp/none"
-check "a step that wrote no result file stores no verdict, saying so" \
-      "rc=0 MATCH bi_tool,NO VERDICT bi_tool" "$(bi_verdict "$bi_tmp/none")"
+check "a step that wrote no result file stores no verdict, saying so; at the key whose step once ran tests, its outcome naming no verdict is a MISMATCH, never a silent loss of the tests" \
+      "rc=1 MATCH bi_tool,NO VERDICT bi_tool,MISMATCH bi_tool outcome" "$(bi_verdict "$bi_tmp/none")"
 # A content recipe (`package_type = "build-scripts"`) is created in the BUILD context alone; its
 # step is recorded all the same (measured on insight_scenarios: the graph holds no host node).
 bi_data="$bi_tmp/bi_data"; mkdir -p "$bi_data"; printf 'scenario\n' > "$bi_data/notes.txt"
@@ -5016,6 +5016,87 @@ check "no line of malf still claims a missing third-party binary is built in eac
       "0" "$(grep -c 'built in each home alike' "$MALF_BIN")"
 echo
 
+echo "[7q7f2] the walk's home is PROVISIONED on the host before its networkless container: every lock recipe revision and every source file it declares (DN-142.D30; step 0 run 39774938501's B2 and B4)"
+# Measured 2026-10-22: boost/1.83.0, drogon's requirement, was held by no home of the release seat, and the
+# walk's container has no network, so coderoast_server's third-party resolve failed naming center2.conan.io
+# (B2) and the server's lint database failed naming no remote (B4). The fixture: a recipe index standing in
+# for the home's remote, one recipe declaring one source file by a file:// url and its sha256, a lock
+# pinning the recipe's revision, a home holding nothing.
+pv_tmp="$(realpath "$(mktemp -d)")"
+mkdir -p "$pv_tmp/index/recipes/tpdep/all" "$pv_tmp/cache"
+printf 'versions:\n  "0.1":\n    folder: all\n' > "$pv_tmp/index/recipes/tpdep/config.yml"
+printf 'from conan import ConanFile\n\n\nclass TpDep(ConanFile):\n    name = "tpdep"\n    package_type = "header-library"\n' > "$pv_tmp/index/recipes/tpdep/all/conanfile.py"
+printf 'the source bytes\n' > "$pv_tmp/source.txt"
+pv_sha="$(sha256sum "$pv_tmp/source.txt" | cut -d' ' -f1)"
+printf 'sources:\n  "0.1":\n    url: "file://%s"\n    sha256: "%s"\n' "$pv_tmp/source.txt" "$pv_sha" > "$pv_tmp/index/recipes/tpdep/all/conandata.yml"
+pv_home() {   # <home> — a conan home whose one remote is the fixture's index
+    CONAN_HOME="$1" conan profile detect > /dev/null 2>&1
+    CONAN_HOME="$1" conan remote remove conancenter > /dev/null 2>&1
+    CONAN_HOME="$1" conan remote add index "$pv_tmp/index" --type=local-recipes-index > /dev/null 2>&1
+}
+pv_home "$pv_tmp/probe"
+CONAN_HOME="$pv_tmp/probe" conan download "tpdep/0.1" --only-recipe -r index > /dev/null 2>&1
+pv_rev="$(CONAN_HOME="$pv_tmp/probe" conan list 'tpdep/0.1#*' --format=json 2>/dev/null | python3 -c 'import json, sys; print(next(iter(json.load(sys.stdin)["Local Cache"]["tpdep/0.1"]["revisions"])))')"
+pv_lock() {   # <file> <revision>
+    printf '{"version": "0.5", "requires": ["tpdep/0.1#%s%%0"], "build_requires": [], "python_requires": [], "config_requires": []}\n' "$2" > "$1"
+}
+pv_lock "$pv_tmp/conan.lock" "$pv_rev"
+pv_home "$pv_tmp/home"
+pv_run() {   # <lock> <home> — the exit, then the verdict lines with the fixture's paths dropped
+    local out rc
+    out="$(python3 "$MALF_ROOT/package_twin.py" provision "$1" "ex_" "$2" "$pv_tmp/cache" 2>&1)"; rc=$?
+    printf 'rc=%s|%s' "$rc" "$(grep '^package_twin:' <<< "$out" | sed -E "s|$pv_tmp/||g; s/$pv_rev/REV/g; s/$pv_sha/SHA/g" | tr '\n' '|')"
+}
+check "RED: a home lacking a lock revision is provisioned from its remote, and the source its recipe declares lands in the download cache at its sha256, exit 0" \
+      "rc=0|package_twin: provisioned home from conan.lock: 1 recipe revision(s) fetched: tpdep/0.1#REV (index); 1 source file(s) fetched into cache: tpdep/0.1#REV SHA|" \
+      "$(pv_run "$pv_tmp/conan.lock" "$pv_tmp/home")"
+check "the fetched source is the declared bytes, read by conan at <cache>/s/<sha256>" \
+      "the source bytes" "$(cat "$pv_tmp/cache/s/$pv_sha" 2>&1)"
+check "a provisioned home fetches nothing the second time: a seat holding the lock needs no network" \
+      "rc=0|package_twin: provisioned home from conan.lock: 0 recipe revision(s) fetched; 0 source file(s) fetched into cache|" \
+      "$(rm -rf "$pv_tmp/index"; pv_run "$pv_tmp/conan.lock" "$pv_tmp/home")"
+check "RED: a lock revision no remote serves is refused, exit 1, naming it (the walk would fail later, naming a remote it cannot reach)" \
+      "rc=1|package_twin: REFUSED — home cannot hold what the lock pins, and the walk has no network to fetch it: 1 recipe revision(s) held by none of the remotes index: tpdep/0.1#0123456789abcdef0123456789abcdef|" \
+      "$(pv_lock "$pv_tmp/bogus.lock" 0123456789abcdef0123456789abcdef; pv_run "$pv_tmp/bogus.lock" "$pv_tmp/home" | sed -E 's/package_twin: provisioned [^|]*[|]//')"
+rm -f "$pv_tmp/cache/s/$pv_sha"
+printf 'other bytes\n' > "$pv_tmp/source.txt"
+check "RED: a source whose bytes are not the declared sha256 is refused, exit 1, naming the digest it has, and nothing is written at its sha256" \
+      "rc=1 1 absent" \
+      "$(out="$(python3 "$MALF_ROOT/package_twin.py" provision "$pv_tmp/conan.lock" "ex_" "$pv_tmp/home" "$pv_tmp/cache" 2>&1)"; rc=$?
+         printf 'rc=%s %s %s' "$rc" "$(grep -c "1 source file(s) not fetched: tpdep/0.1#$pv_rev $pv_sha (file://$pv_tmp/source.txt: its bytes digest to $(sha256sum "$pv_tmp/source.txt" | cut -d' ' -f1))" <<< "$out")" "$([[ -e "$pv_tmp/cache/s/$pv_sha" ]] && echo present || echo absent)")"
+check "a fresh home is left alone, for the walk that creates it to seed, exit 0" \
+      "rc=0|package_twin: nothing provisioned — fresh is not a conan home yet, and the walk that creates it seeds it|" \
+      "$(pv_run "$pv_tmp/conan.lock" "$pv_tmp/fresh")"
+# The driver: the host half of store-create provisions the home the walk reads its recipes from (the walk's
+# own, or the seed of a fresh one) BEFORE its container starts, and a refusal stops it at exit 2.
+pv_body="$(sed -n '/^_malf_store_create_in_environment()/,/^}/p' "$MALF_BIN")"
+check "store-create's host half provisions before the build environment runs, and refuses at exit 2" \
+      "provision-first refuse-2" \
+      "$( (( $(grep -n 'package_twin.py" provision' <<< "$pv_body" | cut -d: -f1 | head -1) < $(grep -n 'build_environment.py" run' <<< "$pv_body" | cut -d: -f1 | head -1) )) && printf provision-first) $(grep -A2 'package_twin.py" provision' <<< "$pv_body" | grep -q 'return 2' && printf refuse-2)"
+rm -rf "$pv_tmp"
+echo
+
+echo "[7q7f3] a step whose key the store completed is SERVED, never executed, unless the walk asks for a re-judge (N359, DN-142.D19; plan H13)"
+# The decision is artefact_store.py's `serve` (its selftest's REUSE arms); these pin where the walk asks it:
+# after the key before the step and before any step home or create, in a create step and in a stored: false
+# build alike, and that the explicit re-judge reaches the walk's container.
+sv_step="$(sed -n '/^_malf_store_run_step()/,/^}/p' "$MALF_BIN")"
+sv_build="$(sed -n '/^_malf_store_build_one()/,/^}/p' "$MALF_BIN")"
+sv_line() {   # <body> <pattern> — the first line number of <pattern> in <body>, 0 when absent
+    grep -n -- "$2" <<< "$1" | head -1 | cut -d: -f1 | grep . || echo 0
+}
+check "RED: a create step asks serve after its key before the step and before its step home, and closes REUSED on a serve" \
+      "ordered 1" \
+      "$( (( $(sv_line "$sv_step" '_malf_store_key_first "$name"') > 0 && $(sv_line "$sv_step" '_malf_store_key_first "$name"') < $(sv_line "$sv_step" '_malf_store_serve "$name"') && $(sv_line "$sv_step" '_malf_store_serve "$name"') < $(sv_line "$sv_step" 'step_home="$(_malf_step_home') )) && printf ordered) $(grep -c '"$name" REUSED' <<< "$sv_step")"
+check "RED: a stored: false build asks serve after its key before the build and before its step home" \
+      "ordered" \
+      "$( (( $(sv_line "$sv_build" '_malf_store_key_first "$name"') > 0 && $(sv_line "$sv_build" '_malf_store_key_first "$name"') < $(sv_line "$sv_build" '_malf_store_serve "$name"') && $(sv_line "$sv_build" '_malf_store_serve "$name"') < $(sv_line "$sv_build" 'step_home="$(_malf_step_home') )) && printf ordered)"
+check "RED: the walk's container is handed MALF_STORE_REJUDGE, the explicit re-judge" \
+      "1" "$(sed -n '/^_malf_store_create_in_environment()/,/^}/p' "$MALF_BIN" | grep -c 'MALF_STORE_BUILD_REV MALF_STORE_REJUDGE')"
+check "RED: conan-step and build-step write the step's outcome LAST, and only when every record before it stored or matched" \
+      "2" "$(grep -c 'return judged or outcome_record(store, key_of(document), package, profile' "$MALF_ROOT/artefact_store.py")"
+echo
+
 echo "[7q7g] a step's key is its inputs' canonical bytes, an output's identity its decoded tree, and an equal key with differing bytes fails (DN-142.D2, DN-142.D3; ROADMAP N358)"
 # The key: two spellings of one document give one key, and a value that is not an input (a float,
 # an absolute path) is refused rather than keyed. The identity: the same tree at two absolute paths
@@ -5404,6 +5485,8 @@ tq_first ex_z 'requires = "tpz/0.1"'
 tq_first ex_u 'requires = "tpu/0.1"'
 tq_first ex_n 'tool_requires = "tpn/0.1"'
 tq_first ex_t 'requires = "tpt/0.1"'
+# ex_m consumes a FIRST-PARTY upstream, ex_r: the step a reuse can serve and its dependent's key reads.
+tq_first ex_m 'requires = "ex_r/0.1"'
 # ex_k's export reads the clock: an input `conan graph info` cannot see, which the create's own export
 # then holds at another value (DN-142.D19 (4), gate G2).
 tq_first ex_k 'requires = "tpr/0.1"'
@@ -5421,9 +5504,9 @@ tq_home() {   # <home name> — a fresh conan home holding every fixture recipe 
     printf '[settings]\nos=Linux\narch=x86_64\nbuild_type=Release\n[buildenv]\nCC=gcc\nCXX=g++\n' > "$home/profiles/fixture"
     for recipe in pyreq tpv tpr tpd tpw tpp tpf tpy tpz tpu tpn tpt; do CONAN_HOME="$home" conan export "$tq_src/$recipe" > /dev/null 2>&1; done
 }
-tq_step() {   # <home name> <store name> <package> — malf's step function over the fixture home; its output in $tq_tmp/out, its exit printed
+tq_step() {   # <home name> <store name> <package> — malf's step function over the fixture home; its output in $tq_tmp/out, its exit printed; TQ_REJUDGE=1 asks the walk's re-judge
     mkdir -p "$tq_tmp/scratch-$1"; printf '{"compiler": "fixture"}' > "$tq_tmp/scratch-$1/toolchain.json"
-    MALF_SYSTEM="$MALF_TEST_SYSTEM" bash -c 'MALF_SOURCE_ONLY=1 source "$1" > /dev/null 2>&1; set +e
+    MALF_STORE_REJUDGE="${TQ_REJUDGE:-}" MALF_SYSTEM="$MALF_TEST_SYSTEM" bash -c 'MALF_SOURCE_ONLY=1 source "$1" > /dev/null 2>&1; set +e
         export CONAN_HOME="$2"; MALF_PROFILE="$2/profiles/fixture"; MALF_BUILD_PROFILE="$MALF_PROFILE"
         MALF_CONFIG=Release; MALF_PROFILE_NAME=fixture; _MALF_WRITER_ARGS=(); _MALF_SHIP_LOCK=(${TQ_LOCK:+--lockfile=$TQ_LOCK})
         _MALF_DOMAIN=(--workspace "$(dirname "$2")" --store "$3" --scratch "$4" --conan-home "$2")
@@ -5453,10 +5536,24 @@ check "(a) RED — act 2: tpv rebuilt at an EQUAL key differs, a MISMATCH naming
 cache = json.load(sys.stdin).get("Local Cache", {})
 print(sum(len(recipe.get("packages", {})) for body in cache.values() if isinstance(body, dict)
           for recipe in body.get("revisions", {}).values()))')"
-# (a′) the reproducible control: the same two acts over tpr.
-check "(a′) the reproducible control: act 2 MATCHES tpr's third-party-create and the consumer's create at equal keys" \
-      "rc=0 rc=0 1 1 2" \
-      "$(tq_step a store-r ex_r) $(tq_step a-second-home-at-a-longer-path store-r ex_r) $(tq_has 'artefact_store: MATCH tpr package') $(tq_has 'artefact_store: MATCH ex_r package') $(ls "$tq_tmp/store-r/records" | wc -l | tr -d ' ')"
+# (a′) the reproducible control: the same two acts over tpr, the second asking the walk's re-judge.
+check "(a′) the reproducible control: act 2, re-judged, MATCHES tpr's third-party-create and the consumer's create and outcome at equal keys" \
+      "rc=0 rc=0 1 1 1 3" \
+      "$(tq_step a store-r ex_r) $(TQ_REJUDGE=1 tq_step a-second-home-at-a-longer-path store-r ex_r) $(tq_has 'artefact_store: MATCH tpr package') $(tq_has 'artefact_store: MATCH ex_r package') $(tq_has 'artefact_store: MATCH ex_r outcome') $(ls "$tq_tmp/store-r/records" | wc -l | tr -d ' ')"
+# (a⁗) REUSE (N359, DN-142.D19; plan H13): the same step at the same key, NOT re-judged, is SERVED in a
+# fresh home: nothing is created, its package lands in the walk's home from the store, and its
+# dependent ex_m, created against that restored upstream and re-judged, MATCHES the record a cold walk
+# (act 1, home a, every step executed) wrote at the same key.
+tq_home a-reused
+check "(a⁗) RED — a step whose key the store completed is SERVED in a fresh home: REUSED, its line closes REUSED, no create runs, and its package is in the walk's home at the recorded content" \
+      "rc=0 1 1 0 1 3" \
+      "$(tq_step a-reused store-r ex_r) $(tq_has 'artefact_store: REUSED ex_r package key') $(tq_has '\[1\] ex_r REUSED') $(tq_has 'KEY-FIRST ex_r') $(CONAN_HOME="$tq_tmp/a-reused" conan list 'ex_r/0.1:*' --format=json 2>/dev/null | python3 -c 'import json, sys
+cache = json.load(sys.stdin).get("Local Cache", {})
+print(sum(len(recipe.get("packages", {})) for body in cache.values() if isinstance(body, dict)
+          for recipe in body.get("revisions", {}).values()))') $(ls "$tq_tmp/store-r/records" | wc -l | tr -d ' ')"
+check "(a⁗) RED — the dependent of a served upstream, created against it, MATCHES the cold walk's record at an equal key" \
+      "rc=0 rc=0 1 1" \
+      "$(tq_step a store-r ex_m) $(TQ_REJUDGE=1 tq_step a-reused store-r ex_m) $(tq_has 'artefact_store: MATCH ex_m package') $(tq_has 'KEY-FIRST ex_m equal')"
 
 # (a‴) every act runs with a TMPDIR and a HOME of its own under its walk's scratch, and they are
 # LOCATIONS: two walks whose scratch directories differ give the act two of each and one key.
@@ -5465,7 +5562,7 @@ tq_locations() {   # <home name> — the HOME and TMPDIR ex_h's create printed i
 }
 check "(a‴) RED — an act's HOME and TMPDIR are its own, under its walk's scratch, distinct across two walks, and the act's key is equal: act 2 MATCHES (DN-142.D30 (9) R8)" \
       "rc=0 rc=0 1 under-a under-second" \
-      "$(tq_step a store-h ex_h) $(tq_step a-second-home-at-a-longer-path store-h ex_h) $(tq_has 'artefact_store: MATCH ex_h package') $(read -r h t <<< "$(tq_locations a)"; [[ "$h" == "$tq_tmp/scratch-a/act."*/home && "$t" == "${h%/home}/tmp" ]] && echo under-a || echo "GOT[$h $t]") $(read -r h t <<< "$(tq_locations a-second-home-at-a-longer-path)"; [[ "$h" == "$tq_tmp/scratch-a-second-home-at-a-longer-path/act."*/home && "$t" == "${h%/home}/tmp" ]] && echo under-second || echo "GOT[$h $t]")"
+      "$(tq_step a store-h ex_h) $(TQ_REJUDGE=1 tq_step a-second-home-at-a-longer-path store-h ex_h) $(tq_has 'artefact_store: MATCH ex_h package') $(read -r h t <<< "$(tq_locations a)"; [[ "$h" == "$tq_tmp/scratch-a/act."*/home && "$t" == "${h%/home}/tmp" ]] && echo under-a || echo "GOT[$h $t]") $(read -r h t <<< "$(tq_locations a-second-home-at-a-longer-path)"; [[ "$h" == "$tq_tmp/scratch-a-second-home-at-a-longer-path/act."*/home && "$t" == "${h%/home}/tmp" ]] && echo under-second || echo "GOT[$h $t]")"
 
 # (a″) a recipe a remote served carries no export_sources folder (conan 2.28.1 creates one only for
 # a recipe exported from a local path): its step is keyed by its export alone.
@@ -5554,7 +5651,7 @@ check "(f) RED — the key derivation of a first-party step refuses a graph carr
 tq_home g; tq_home g-a-second-home-at-a-much-longer-path
 check "(g) RED — a non-CMake third-party build carrying __FILE__ MATCHES across two homes of different path length" \
       "rc=0 rc=0 1 1" \
-      "$(tq_step g store-g ex_f) $(tq_step g-a-second-home-at-a-much-longer-path store-g ex_f) $(tq_has 'artefact_store: MATCH tpf package') $(tq_has 'artefact_store: MATCH ex_f package')"
+      "$(tq_step g store-g ex_f) $(TQ_REJUDGE=1 tq_step g-a-second-home-at-a-much-longer-path store-g ex_f) $(tq_has 'artefact_store: MATCH tpf package') $(tq_has 'artefact_store: MATCH ex_f package')"
 # (g′) and the wrapper leaks nothing: the package id is the same (the MATCH is at an equal key), no
 # file of the package names the home or the wrapper's own path, and the recorded compiler is its name.
 tq_folder="$(CONAN_HOME="$tq_tmp/g-a-second-home-at-a-much-longer-path" conan cache path "$(CONAN_HOME="$tq_tmp/g-a-second-home-at-a-much-longer-path" conan list 'tpf/0.1#*:*#*' --format=json 2>/dev/null | python3 -c 'import json, sys
@@ -5585,7 +5682,7 @@ check "(h″) RED — a finalized package is judged by the folder it packaged an
 tq_home t
 check "(s) RED — a third-party build that stamps its build time MATCHES when its step rebuilds it in the same home" \
       "rc=0 rc=0 1" \
-      "$(tq_step t store-t ex_t) $(CONAN_HOME="$tq_tmp/t" conan remove 'tpt/0.1:*' -c > /dev/null 2>&1; tq_step t store-t ex_t) $(tq_has 'artefact_store: MATCH tpt package')"
+      "$(tq_step t store-t ex_t) $(CONAN_HOME="$tq_tmp/t" conan remove 'tpt/0.1:*' -c > /dev/null 2>&1; TQ_REJUDGE=1 tq_step t store-t ex_t) $(tq_has 'artefact_store: MATCH tpt package')"
 # (k) THE KEY BEFORE THE STEP (DN-142.D19 (4), gate G2): every step computes its key from `conan graph
 # info` and its upstreams' records before it runs, and its record must equal it after. A step whose
 # export reads the clock moves its own sources between the two: refused, naming the member.
@@ -6498,8 +6595,8 @@ ok = found and found.group(1, 2, 3) == ("3", "st_pkg", "PASS") and float(found.g
 print("ok" if ok else repr(line))' "$st_out")"
 st_body="$(sed -n '/^cmd_store_create()/,/^}/p' "$MALF_BIN")"
 st_step="$(sed -n '/^_malf_store_run_step()/,/^}/p' "$MALF_BIN")"
-check "the walk opens every step it runs and closes it on each of its twelve exits: its third-party step failed or found the store corrupt, its unconfined declaration unread, its backends declaration unread or its parameter document refused, a build passed, failed or found the store corrupt, a declaration unread, its key before the step refused, its step home unwritten, its create and records in that home" \
-      "1 1 12 1" "$(grep -c '_malf_store_clock "$scratch/times"; run_at=' <<< "$st_body") $(grep -c '_malf_store_opened "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total" "$name" SKIPPED' <<< "$st_step")"
+check "the walk opens every step it runs and closes it on each of its fifteen exits: its third-party step failed or found the store corrupt, its unconfined declaration unread, its backends declaration unread or its parameter document refused, a build passed, failed or found the store corrupt, a declaration unread, its key before the step refused, its serve served it, found the store corrupt or refused its restore, its step home unwritten, its create and records in that home" \
+      "1 1 15 1" "$(grep -c '_malf_store_clock "$scratch/times"; run_at=' <<< "$st_body") $(grep -c '_malf_store_opened "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total" "$name" SKIPPED' <<< "$st_step")"
 st_build="$(sed -n '/^_malf_store_build_in()/,/^}/p' "$MALF_BIN")"
 check "a stored: false step's conan build runs with --no-remote, as its key before the step resolved it: inside the build environment there is no network, and on the host a remote would be consulted silently (W559 G-env-1, insight_twin)" \
       "1" "$(grep -c -- '--build=never --no-remote' <<< "$st_build")"
