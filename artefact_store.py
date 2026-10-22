@@ -2088,7 +2088,8 @@ def outcome_document(build_key: str, package: str, profile: str, corpus_gates: P
     if corpus_gates is not None:
         gates = json.loads(corpus_gates.read_text())
         legs = gates.get("packages", {}).get(package)
-        corpus = {"legs": legs, "data": gates["data"]} if legs else None
+        corpus = {"legs": [{"leg": leg["leg"], "suites": sorted(leg["suites"])} for leg in legs],
+                  "data": gates["data"]} if legs else None
     bench_path = os.environ.get(BENCH_ENV)
     benched = bool(bench_path) and package in json.loads(Path(bench_path).read_text()).get("packages", [])
     return {"step": {"kind": OUTCOME_KIND, "package": package, "profile": profile}, "build": build_key,
@@ -3393,6 +3394,15 @@ def selftest() -> int:
                 globals()["_conan_restore"] = saved
             return code, out.getvalue() + err.getvalue()
 
+        gates = root / "corpus_gates.json"
+        gates.write_text(json.dumps({"packages": {"ex_low": [{"leg": "sample", "suites": ["S", "R"],
+                                                              "environment": {"MOUNT": str(root / "mount")}}]},
+                                     "data": {"MOUNT": "d" * 64}}))
+        keyed = outcome_document(build_key, "ex_low", profile, gates)
+        expect("RED: a corpus leg's outcome member is its legs and suites and its data's digests, never the mount's "
+               "path, which no key may hold (step 0 run 39851092354: insight_canon refused)",
+               (keyed["corpus"], len(key_of(keyed))),
+               ({"legs": [{"leg": "sample", "suites": ["R", "S"]}], "data": {"MOUNT": "d" * 64}}, 64))
         code, printed = served(root / "walk-miss")
         expect("RED: a key the store never completed EXECUTES, naming why, and nothing is restored",
                (code, "EXECUTES ex_low key" in printed and "no completed step at this key" in printed,
