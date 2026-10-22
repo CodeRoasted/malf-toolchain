@@ -241,7 +241,13 @@ if [ "$TEST" = "true" ]; then
     # tests/declared_skips.json at this profile, the whole default selection, stale rows included.
     junit="$PWD/build/$MODULE/conan-module.junit.xml"
     rm -f "$junit"
-    ctest "${ctest_args[@]}" --output-junit "$junit" < /dev/null
+    # THE MODULE'S DECLARED BACKENDS (DN-142.D30 (5) E2b) come up for the run through the verb `malf
+    # test` uses on the desk: each `backends:` entry of the module's packages.yml started beside the
+    # run, published on 127.0.0.1, its address in CODEROAST_BACKEND_<NAME>, removed after; a module
+    # declaring none runs bare. Without it this ctest ran with no backend and an infra suite failed
+    # on the unset variable (coderoast-server CI run 39697469236: 16 of 30 infra/clickhouse tests).
+    python3 "$TOOLCHAIN_ROOT/build_environment.py" with-backends "$MODULE" -- \
+      ctest "${ctest_args[@]}" --output-junit "$junit" < /dev/null
     python3 "$TOOLCHAIN_ROOT/malf_recipe_tests.py" judge-skips "$junit" "$PWD/$MODULE" "$PROFILE_NAME" false
   ) 2>&1 | tee -a "$LOG"
   build_status=${PIPESTATUS[0]}
@@ -253,8 +259,11 @@ if [ "$TEST" = "true" ]; then
 fi
 
 if [ "$CREATE" = "true" ]; then
+  # The create's build() runs the same test selection (malf_recipe_tests.run_tests), so it runs
+  # beside the same declared backends, through the same verb, as the test phase above.
   {
-    conan create "$MODULE" \
+    python3 "$TOOLCHAIN_ROOT/build_environment.py" with-backends "$MODULE" -- \
+      conan create "$MODULE" \
       --build=missing \
       --build-test=missing \
       --profile:host="$PROFILE" \

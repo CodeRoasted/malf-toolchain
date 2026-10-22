@@ -67,11 +67,11 @@ every privileged syscall by the kernel.
         CODEROAST_BACKEND_<NAME>=<name>:<port> an act beside the walk's network reaches it by
         --parameters <document> prints instead the walk's parameter document with each such variable added
         to its `env`, the document a declaring step's act is keyed under
-    build_environment.py backends-at <package dir>
-        the backends the package at that directory declares in its working-tree packages.yml, as JSON
-    build_environment.py with-backends --backends <file> -- <argv>...
-        <argv> on the host beside those backends published on 127.0.0.1 at ports the daemon allocates, each
-        address in its CODEROAST_BACKEND_<NAME> (the desk's `malf test`); exit the command's, 2 refused
+    build_environment.py with-backends <package dir> -- <argv>...
+        <argv> on the host beside the backends the package at that directory declares in its working-tree
+        packages.yml, published on 127.0.0.1 at ports the daemon allocates, each address in its
+        CODEROAST_BACKEND_<NAME>; bare when it declares none (the desk's `malf test` and CI's
+        conan_module.sh, test phase and create alike); exit the command's, 2 refused
     build_environment.py selftest
         every refusal and the container's isolation, over a throwaway image built here (FROM scratch, no
         network), never the real archive; the definition check's refusals over recipes written here
@@ -84,7 +84,8 @@ removes the backends and the network on every exit path (a dead launcher's lefto
 pid, are reaped by the next); a walk with no declaring step keeps `--network none`. A declaring step's act
 reaches each backend as CODEROAST_BACKEND_<NAME>=<name>:<port>, keyed in its parameter document, the
 declaration itself in its key's `step` member. No container the launcher starts holds a Docker socket.
-The desk's `malf test` starts the same backends through the same code, published on 127.0.0.1.
+The desk's `malf test` and CI's conan_module.sh start the same backends through the same code, published
+on 127.0.0.1.
 
 GIT MIRRORS. The walk has no network, and conan's source download cache serves only a downloaded file, so a
 recipe whose source() fetches with git (ConanCenter's gnu-config) is served from a bare mirror built into the
@@ -467,8 +468,8 @@ def declared_backends(package_dir: Path, package: str, at_head: bool = True) -> 
 
 def backends_at(directory: Path) -> list[Backend]:
     """The backends the package at `directory` declares in its repository's working-tree packages.yml
-    (the desk's `malf test`): the package whose `path:` is `directory` relative to the repository; [] for a
-    directory no package names."""
+    (`with-backends`, the desk's `malf test` and CI's conan_module.sh): the package whose `path:` is `directory`
+    relative to the repository; [] for a directory no package names."""
     import yaml
 
     top = subprocess.run(["git", "-C", str(directory), "rev-parse", "--show-toplevel"], capture_output=True,
@@ -646,7 +647,9 @@ class BackendWalk:
 
 def with_backends(docker: str, backends: list[Backend], argv: list[str]) -> int:
     """`argv` run on the host beside the backends published on 127.0.0.1, each address in its
-    CODEROAST_BACKEND_<NAME> (the desk's `malf test`, the same start, barrier and teardown as a walk's)."""
+    CODEROAST_BACKEND_<NAME> (the same start, barrier and teardown as a walk's); bare when there are none."""
+    if not backends:
+        return subprocess.run(argv, check=False).returncode
     with BackendWalk(docker, backends, publish=True) as walk:
         return subprocess.run(argv, env={**os.environ, **walk.addresses}, check=False).returncode
 
@@ -1089,8 +1092,16 @@ def _backend_arms(arm, refusal, base: Path, docker: str) -> None:
         script = base / "desk.sh"
         script.write_text(f'#!/bin/sh\nexec {host_probe} connect "${{CODEROAST_BACKEND_PROBE%:*}}" "${{CODEROAST_BACKEND_PROBE#*:}}"\n')
         script.chmod(0o755)
-        arm("the desk's with-backends hands the command each backend published on 127.0.0.1, by its variable",
-            with_backends(docker, [probe], [str(script)]), 0)
+        declaring = base / "declaring"
+        (declaring / "pkg").mkdir(parents=True)
+        subprocess.run(["git", "init", "--quiet", str(declaring)], check=True)
+        (declaring / "packages.yml").write_text(json.dumps({"packages": {"probe_pkg": {
+            "path": "pkg", "backends": [{"name": "probe", "image": reference, "port": 7000,
+                                         "health": "/probe connect 127.0.0.1 7000",
+                                         "command": ["/probe", "serve", "7000"]}]}}}))
+        arm("with-backends over a declaring package hands the command each backend published on 127.0.0.1, by "
+            "its variable (the desk's malf test and CI's conan_module.sh)",
+            main(["with-backends", str(declaring / "pkg"), "--", str(script)]), 0)
         streamed, captured = base / "probe.tar", base / "probe.json"
         with tarfile.open(streamed, "w") as bundle:
             member = tarfile.TarInfo("hello")
@@ -1448,11 +1459,11 @@ def main(argv: list[str]) -> int:
             return REFUSED
         return run_probe(docker, given.image, argv[split + 1:], Path(given.stdin), Path(given.capture))
     if argv[:1] == ["with-backends"]:
-        if "--" not in argv or argv[1:2] != ["--backends"] or argv.index("--") != 3 or not argv[4:]:
-            print("build_environment.py with-backends: --backends <file> -- <argv>...", file=sys.stderr)
+        if "--" not in argv or argv.index("--") != 2 or not argv[3:]:
+            print("build_environment.py with-backends: <package dir> -- <argv>...", file=sys.stderr)
             return REFUSED
         try:
-            return with_backends(docker, read_backends(Path(argv[2])), argv[4:])
+            return with_backends(docker, backends_at(Path(argv[1])), argv[3:])
         except Refused as refused:
             print(f"build_environment: REFUSED — {refused}; the command did not run (DN-142.D30 (5) E2b)", file=sys.stderr)
             return REFUSED
@@ -1469,7 +1480,6 @@ def main(argv: list[str]) -> int:
     declared.add_argument("--variables", action="store_true")
     declared.add_argument("--parameters")
     declared.add_argument("steps", nargs="+")
-    verbs.add_parser("backends-at").add_argument("directory", type=Path)
     args = parser.parse_args(argv)
     if args.verb == "selftest":
         return selftest()
@@ -1491,9 +1501,6 @@ def main(argv: list[str]) -> int:
                 print(json.dumps(document, sort_keys=True, separators=(",", ":")))
             else:
                 print(json.dumps([backend.document() for backend in union], sort_keys=True))
-            return 0
-        if args.verb == "backends-at":
-            print(json.dumps([backend.document() for backend in backends_at(args.directory)], sort_keys=True))
             return 0
         if args.verb in ("definition-check", "mirror-check"):
             findings = (definition_check(conan_homes(args.conan_home)) if args.verb == "definition-check"

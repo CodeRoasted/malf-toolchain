@@ -1958,18 +1958,10 @@ _malf_test_run() {                  # <build_dir> <verbose> <regex> <corpus_only
     # THE PACKAGE'S DECLARED BACKENDS (DN-142.D30 (5) E2b) come up for the run through the same launcher code
     # a walk uses, published on the host's 127.0.0.1, each address in its CODEROAST_BACKEND_<NAME>: the test
     # fixture has ONE path, the variable, on the desk and in the image.
-    local declared="[]" beside_file=""
+    # note: CI's conan_module.sh runs its ctest and its create through the same verb, so the two seats start one set.
     local -a beside=()
-    if [[ -n "$source" ]]; then
-        declared="$(python3 "$MALF_DIR/build_environment.py" backends-at "$source")" \
-            || { echo "malf test: the \`backends:\` declaration of $source could not be read (above)" >&2; exit 1; }
-    fi
-    if [[ "$declared" != "[]" ]]; then
-        beside_file="$(mktemp)" && printf '%s\n' "$declared" > "$beside_file"
-        beside=(python3 "$MALF_DIR/build_environment.py" with-backends --backends "$beside_file" --)
-    fi
+    [[ -z "$source" ]] || beside=(python3 "$MALF_DIR/build_environment.py" with-backends "$source" --)
     "${beside[@]}" ctest "${ctest_args[@]}" --output-junit "$junit" < /dev/null || status=$?
-    [[ -z "$beside_file" ]] || rm -f "$beside_file"
     [[ $status -eq 0 ]] || return "$status"
     python3 "$MALF_DIR/malf_recipe_tests.py" judge-skips "$junit" "$source" "$MALF_PROFILE_NAME" "$filtered"
 }

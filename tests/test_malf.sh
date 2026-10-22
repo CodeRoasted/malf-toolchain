@@ -3441,6 +3441,40 @@ check "conan_module.sh reads its ctest selection from the helper and spells no c
       "1 0" "$(grep -c 'malf_recipe_tests.py" desk-args' "$cm_script") $(grep -vE '^\s*#' "$cm_script" | grep -cE '(-L|-LE) corpus')"
 check "conan_module.sh's ctest writes its JUnit and judges its skips at the step's own profile, against the module's declarations (DN-142.D23)" \
       "1 1" "$(grep -cE '^\s*ctest "\$\{ctest_args\[@\]\}" --output-junit "\$junit" < /dev/null$' "$cm_script") $(grep -cE '^\s*python3 "\$TOOLCHAIN_ROOT/malf_recipe_tests.py" judge-skips "\$junit" "\$PWD/\$MODULE" "\$PROFILE_NAME" false$' "$cm_script")"
+# THE CI PATH STARTS A MODULE'S DECLARED BACKENDS AS THE DESK DOES (DN-142.D30 (5) E2b): both the test
+# phase's ctest and the create (whose build() runs the same selection) run through the launcher's one
+# verb, which reads the module's `backends:` and runs its command bare when there is none. Before it,
+# CI ran ctest bare and coderoast-server's infra suites failed on an unset CODEROAST_BACKEND_<NAME>
+# (server CI run 39697469236: 16 of 30 infra/clickhouse tests).
+check "conan_module.sh runs its ctest and its conan create through the launcher's with-backends over the module, and malf test its ctest over the tree's source" \
+      "ctest:1 create:1 desk:1" "$(python3 - "$cm_script" "$MALF_BIN" <<'PYC'
+import re, sys
+from pathlib import Path
+lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+wrapper = re.compile(r'^\s*python3 "\$TOOLCHAIN_ROOT/build_environment\.py" with-backends "\$MODULE" -- \\$')
+def wrapped(body):
+    return sum(1 for index, line in enumerate(lines)
+               if index and re.match(body, line) and wrapper.match(lines[index - 1]))
+desk = sum(1 for line in Path(sys.argv[2]).read_text(encoding="utf-8").splitlines()
+           if re.match(r'^\s*"\$\{beside\[@\]\}" ctest "\$\{ctest_args\[@\]\}" --output-junit "\$junit" < /dev/null', line))
+desk_verb = Path(sys.argv[2]).read_text(encoding="utf-8").count(
+    'beside=(python3 "$MALF_DIR/build_environment.py" with-backends "$source" --)')
+print(f"ctest:{wrapped(r'^\s*ctest ')} create:{wrapped(r'^\s*conan create ')} desk:{min(desk, desk_verb)}")
+PYC
+)"
+wb_tmp="$(mktemp -d)"
+git -C "$wb_tmp" init --quiet
+mkdir -p "$wb_tmp/plain" "$wb_tmp/broken"
+printf 'packages:\n  plain_pkg:\n    path: plain\n  broken_pkg:\n    path: broken\n    backends: [{name: redis, image: "redis:7", port: 6379, health: "true"}]\n' \
+    > "$wb_tmp/packages.yml"
+wb_plain="$(python3 "$MALF_ROOT/build_environment.py" with-backends "$wb_tmp/plain" -- \
+    sh -c 'echo "${CODEROAST_BACKEND_REDIS-unset}"; exit 7' 2>&1; echo "rc=$?")"
+wb_broken="$(python3 "$MALF_ROOT/build_environment.py" with-backends "$wb_tmp/broken" -- sh -c 'echo ran' 2>&1; echo "rc=$?")"
+check "with-backends over a package declaring no backend runs its command bare and exits the command's code" \
+      "unset rc=7" "$(tr '\n' ' ' <<< "$wb_plain" | sed 's/ $//')"
+check "RED: with-backends over a malformed declaration refuses before the command runs, naming the image" \
+      "0 1 rc=2" "$(grep -c '^ran$' <<< "$wb_broken") $(grep -c "image 'redis:7' is not pinned by digest" <<< "$wb_broken") $(tail -1 <<< "$wb_broken")"
+rm -rf "$wb_tmp"
 check "every conan create or install under malf's .github that can run tests names user.malf:profile, or carries the consumer set that runs none (DN-142.D23)" \
       "none" "$(python3 - "$MALF_ROOT/.github" <<'PYC'
 import re, sys
