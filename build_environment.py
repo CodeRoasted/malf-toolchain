@@ -276,17 +276,21 @@ def run_argv(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], cw
     path; `host_pids` shares the host's process ids (a bench walk judging the build slot's holder);
     `network` is `none` unless the act runs beside the walk's backends, on their internal network, and
     `name` names the container so a teardown can remove it whatever happened to its client.
-    raises Refused on an unset declared name, a mount that is not an existing absolute directory, or a
-    working directory under no writable mount. `home` is the container's HOME: the image's own, or a
+    raises Refused on an unset declared name, a writable mount that is not an existing absolute directory,
+    a read-only mount that is neither an existing absolute directory nor an existing absolute file (a
+    corpus leg may name a manifest FILE, bound alone), or a working directory under no writable mount. `home` is the container's HOME: the image's own, or a
     location of the act's own under a mount (DN-142.D30 (9) R8), never the caller's."""
     environ = os.environ if environ is None else environ
     unset = sorted(name for name in names if name not in environ)
     if unset:
         raise Refused(f"the act declares {', '.join(unset)}, unset in its caller: an undeclared default would run")
     resolved = []
-    for mount in [*mounts, *read_only]:
+    for mount in mounts:
         if not mount.is_absolute() or not mount.is_dir():
             raise Refused(f"the mount {mount} is not an existing absolute directory")
+    for mount in read_only:
+        if not mount.is_absolute() or not (mount.is_dir() or mount.is_file()):
+            raise Refused(f"the read-only mount {mount} is not an existing absolute directory or file")
     resolved = list(mounts)
     if not any(cwd == mount or mount in cwd.parents for mount in resolved):
         raise Refused(f"the working directory {cwd} lies under no mount ({', '.join(map(str, resolved)) or 'none'})")
@@ -912,6 +916,12 @@ int main(int argc, char **argv) {
         printf("%llu\n", (unsigned long long)fs.f_blocks * fs.f_frsize);
         return 0;
     }
+    if (argc > 2 && strcmp(argv[1], "cat") == 0) {
+        FILE *file = fopen(argv[2], "r");
+        if (!file) { perror(argv[2]); return 1; }
+        for (int byte; (byte = fgetc(file)) != EOF;) putchar(byte);
+        return fclose(file) == 0 ? 0 : 1;
+    }
     if (argc > 1 && strcmp(argv[1], "net") == 0) {
         int sock = socket(AF_INET, SOCK_DGRAM, 0);
         struct sockaddr_in to;
@@ -1394,6 +1404,19 @@ def selftest() -> int:
             arm("RED: a working directory under no mount is refused",
                 refusal(lambda: run_argv(pin, ["/probe"], [mount], [], base, environ={})).startswith(
                     f"the working directory {base} lies under no mount"), True)
+            (base / "manifest.tsv").write_text("one row\n")
+            filed = subprocess.run(run_argv(pin, ["/probe", "cat", str(base / "manifest.tsv")], [mount], [], mount,
+                                            docker=docker, read_only=[base / "manifest.tsv"]),
+                                   capture_output=True, text=True, check=False)
+            arm("RED: an existing absolute FILE is a read-only mount, bound alone and read inside (a corpus leg's "
+                "manifest, step 0 run 39825315098's B2)", (filed.returncode, filed.stdout), (0, "one row\n"))
+            arm("RED: a read-only mount that does not exist is refused, never bound",
+                refusal(lambda: run_argv(pin, ["/probe"], [mount], [], mount, environ={},
+                                         read_only=[base / "absent.tsv"])).startswith(
+                    f"the read-only mount {base / 'absent.tsv'} is not an existing absolute directory or file"), True)
+            arm("RED: a WRITABLE mount is a directory, never a file",
+                refusal(lambda: run_argv(pin, ["/probe"], [base / "manifest.tsv"], [], mount, environ={})).startswith(
+                    f"the mount {base / 'manifest.tsv'} is not an existing absolute directory"), True)
             _act_user_arms(arm, pin, mount, docker)
             started = run_argv(pin, ["/probe"], [mount], [], mount, environ={})
             arm("every act container lifts the default seccomp profile and starts its argv as uid 1000 in a nested "
