@@ -5878,6 +5878,39 @@ check "the width the create was handed is bounded by the affinity: at most 2 on 
 rm -rf "$tt_tmp"
 echo
 
+echo "[7q7w] the CI composites' conan acts take the build's width too: conan_module.sh's install, build and create, and the vendor row's create, each handed what malf derives on the seat, never conan's os.cpu_count()"
+cw_tmp="$(realpath "$(mktemp -d)")"
+mkdir -p "$cw_tmp/bin" "$cw_tmp/ws/cw_mod" "$cw_tmp/home/profiles" "$cw_tmp/src/Owner/cw_repo/pkg"
+printf '[settings]\nos=Linux\n' > "$cw_tmp/home/profiles/cw_profile"
+for tool in conan cmake ctest; do
+    printf '#!/usr/bin/env bash\n{ printf "%s"; printf " %%s" "$@"; echo; } >> "%s/acts"\n' "$tool" "$cw_tmp" > "$cw_tmp/bin/$tool"
+done
+printf '#!/usr/bin/env bash\nexit 0\n' > "$cw_tmp/bin/gdb"
+chmod +x "$cw_tmp/bin/"*
+ln -s "$(command -v python3)" "$cw_tmp/bin/python"
+(cd "$cw_tmp/src/Owner/cw_repo" && git init -q && printf 'packages:\n  cw_pkg:\n    path: pkg\n    version: 1.2.3\n' > packages.yml \
+    && git add packages.yml && git -c user.email=t@t -c user.name=t commit -qm one)
+cw_width="$(taskset -c 0-1 bash -c 'MALF_SOURCE_ONLY=1 source "$1" > /dev/null 2>&1; set +e; _malf_build_width; echo "$_MALF_BUILD_JOBS"' _ "$MALF_BIN")"
+(cd "$cw_tmp/ws" && PATH="$cw_tmp/bin:$PATH" CONAN_HOME="$cw_tmp/home" GITHUB_WORKSPACE="$cw_tmp/ws" \
+    taskset -c 0-1 bash "$MALF_ROOT/.github/actions/conan-module/conan_module.sh" cw_mod true true cw_profile > "$cw_tmp/module.out" 2>&1)
+(PATH="$cw_tmp/bin:$PATH" CONAN_HOME="$cw_tmp/home" GH_TOKEN=unused PROFILE_NAME=cw_profile MALF_TOOLCHAIN_DIR="$MALF_ROOT" \
+    DEPS_SRC_ROOT="$cw_tmp/src" taskset -c 0-1 bash "$MALF_ROOT/.github/actions/coderoast-vendor/ci_build_conan_package.sh" \
+    cw_pkg 1.2.3 Owner/cw_repo > "$cw_tmp/vendor.out" 2>&1)
+cw_act() {   # <act prefix> — the act's width flag as the stub recorded it, or "none"
+    local line
+    line="$(grep -m1 "^$1" "$cw_tmp/acts")" || { echo "never ran"; return; }
+    grep -oE '(tools\.build:jobs=|--parallel )[0-9]+' <<< "$line" | paste -sd' ' | grep . || echo none
+}
+check "RED — conan_module.sh's conan install, cmake --build and conan create, and the vendor row's conan create, are each handed the seat's width ($cw_width on 2 CPUs)" \
+      "tools.build:jobs=$cw_width|--parallel $cw_width|tools.build:jobs=$cw_width|tools.build:jobs=$cw_width" \
+      "$(cw_act "conan install")|$(cw_act "cmake --build")|$(cw_act "conan create cw_mod")|$(cw_act "conan create $cw_tmp/src")"
+check "each script prints the width's derivation under its act's name, from malf's one derivation" \
+      "2 1" "$(grep -cE '^conan_module: (conan install|conan create) cw_mod: -j[0-9]+ = ' "$cw_tmp/module.out") $(grep -cE '^ci_build_conan_package: conan create cw_pkg/1.2.3: -j[0-9]+ = ' "$cw_tmp/vendor.out")"
+check "neither script derives a width of its own: no nproc, no MemAvailable, no cpu_count" \
+      "0" "$(grep -vE '^\s*#' "$MALF_ROOT/.github/actions/conan-module/conan_module.sh" "$MALF_ROOT/.github/actions/coderoast-vendor/ci_build_conan_package.sh" | grep -cE 'nproc|MemAvailable|cpu_count')"
+rm -rf "$cw_tmp"
+echo
+
 echo "[7q7s] gate G4's harness: a command under \`malf sandbox\` reads only beneath its declared roots, and a create whose build() opens an undeclared file reds with EACCES naming it (DN-142.D19 (5))"
 lb_out="$(timeout 120 python3 "$MALF_ROOT/landlock_sandbox.py" selftest 2>&1)"
 check "landlock_sandbox selftest: 12 arms, every denial fired" \

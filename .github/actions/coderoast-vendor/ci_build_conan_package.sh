@@ -78,10 +78,15 @@ mapfile -t consumer_args < <(python3 "$MALF_TOOLCHAIN_DIR/malf_recipe_tests.py" 
 [[ ${#consumer_args[@]} -gt 0 ]] \
     || { echo "::error::ci_build_conan_package: malf's consumer conf set came back empty"; exit 1; }
 
+# The compile width is malf's one derivation for this seat (`malf conan-jobs`), never conan's
+# os.cpu_count(); it is in no package id.
+jobs="$(bash "$MALF_TOOLCHAIN_DIR/malf" conan-jobs "ci_build_conan_package: conan create $PKG_REF")"
+
 echo "ci_build_conan_package: creating $PKG_REF from $SOURCE_REPO/$PKG_PATH (${consumer_args[*]})"
 conan create "$CLONE/$PKG_PATH" \
     --build=missing \
     "${consumer_args[@]}" \
+    -c "tools.build:jobs=$jobs" \
     --profile:host="$PROFILE" \
     --profile:build="$PROFILE" \
     --lockfile="$LOCKFILE"

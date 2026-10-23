@@ -84,6 +84,16 @@ else
   echo "conan_module: MALF_LOCKFILE set EMPTY by the caller — resolving live, unlocked"
 fi
 
+# THE COMPILE WIDTH IS malf's, READ FROM ITS ONE DERIVATION (`malf conan-jobs`): the seat's cores and
+# memory, the width every conan act malf runs itself is handed. Unset, conan's `tools.build:jobs` is
+# Python's os.cpu_count(), the host's 16 on a 2-CPU, 5 GiB ci seat. Each phase reads it when it starts,
+# and the derivation is printed under the act's name on the console, never into build.log, whose MiB
+# figures would move between two runs the Sift dogfood diffs. It is in no package id
+# (`tools.info.package_id:confs` names only the compile flags).
+width() {   # <what>
+  bash "$TOOLCHAIN_ROOT/malf" conan-jobs "conan_module: $1"
+}
+
 # On a failed test phase, capture a backtrace for whatever crashed — at ANY phase: startup (e.g.
 # SIGILL from a library auto-dispatching CPU features beyond the -march baseline), the test body, or
 # *teardown* (a static-destruction / shutdown race that traps after the test already reported PASSED).
@@ -199,6 +209,7 @@ if [ "$TEST" = "true" ]; then
   # crashing test drop a core for diagnose_crash — the only reliable capture for a *flaky* crash
   # (attaching gdb serialises signals and routinely masks the race; a natural-run core does not).
   # core_pattern is runner-owned (no passwordless sudo); the diagnostic handles cwd + systemd cores.
+  jobs="$(width "conan install $MODULE")"
   set +e
   (
     set -e
@@ -209,11 +220,12 @@ if [ "$TEST" = "true" ]; then
       --profile:host="$PROFILE" \
       --profile:build="$PROFILE" \
       -c "user.malf:profile=$PROFILE_NAME" \
+      -c "tools.build:jobs=$jobs" \
       "${LOCKFILE_ARGS[@]}" \
       -s build_type=Release
     # shellcheck disable=SC2086  # CMAKE_ARGS is intentionally word-split into separate -D flags
     cmake --preset conan-release -S "$MODULE" -B "build/$MODULE" $CMAKE_ARGS
-    cmake --build "build/$MODULE"
+    cmake --build "build/$MODULE" --parallel "$jobs"
     # THE SELECTION IS malf's, READ FROM ITS ONE DEFINITION (DN-142.D5 (5), DN-142.D13): the
     # helper every create runs inside build() and `malf test` reads its ctest arguments from,
     # `malf_recipe_tests.py desk-args` — the corpus exclusion (`-LE corpus`: a corpus gate needs a
@@ -261,6 +273,7 @@ fi
 if [ "$CREATE" = "true" ]; then
   # The create's build() runs the same test selection (malf_recipe_tests.run_tests), so it runs
   # beside the same declared backends, through the same verb, as the test phase above.
+  jobs="$(width "conan create $MODULE")"
   {
     python3 "$TOOLCHAIN_ROOT/build_environment.py" with-backends "$MODULE" -- \
       conan create "$MODULE" \
@@ -269,6 +282,7 @@ if [ "$CREATE" = "true" ]; then
       --profile:host="$PROFILE" \
       --profile:build="$PROFILE" \
       -c "user.malf:profile=$PROFILE_NAME" \
+      -c "tools.build:jobs=$jobs" \
       "${LOCKFILE_ARGS[@]}"
   } 2>&1 | tee -a "$LOG"
 fi
