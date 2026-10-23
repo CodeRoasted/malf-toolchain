@@ -3250,6 +3250,17 @@ check "a same-size rewrite that preserves the mtime MOVES the digest" \
 cm_rows="$(python3 "$MALF_ROOT/artefact_store.py" content-manifest-rows "$tp_tmp/data.sha256" v1/)"
 check "a committed sha256sum manifest's rows give the digest of the root it verifies, reading nothing under it" \
       "equal 64" "$([[ "$(python3 "$MALF_ROOT/artefact_store.py" content-manifest "$tp_tmp/data")" == "$cm_rows" ]] && echo equal || echo differs) $(grep -cE '^[0-9a-f]{64}$' <<< "$cm_rows" | sed 's/^1$/64/')"
+# A NAMED ROOT IS SYMLINK-CLOSED (DN-142.D21 (2)): a link under the root resolving outside it is a read
+# no role names, so the digest refuses it, naming the link and its target; a link staying inside is kept.
+mkdir -p "$tp_tmp/outside"; printf 'gamma\n' > "$tp_tmp/outside/c.log"
+ln -s ../outside "$tp_tmp/data/escape"
+cm_escape="$(python3 "$MALF_ROOT/artefact_store.py" content-manifest "$tp_tmp/data" 2>&1)"; cm_escape_rc=$?
+check "a symlink under the root resolving OUTSIDE it is refused, exit 2, naming the link and its target" \
+      "rc=2 named" "rc=$cm_escape_rc $(grep -F "$tp_tmp/data/escape" <<< "$cm_escape" | grep -qF "$tp_tmp/outside" && echo named || echo unnamed)"
+rm "$tp_tmp/data/escape"; ln -s sub "$tp_tmp/data/inside"
+check "a symlink under the root resolving INSIDE it is digested like any path" \
+      "rc=0" "rc=$(python3 "$MALF_ROOT/artefact_store.py" content-manifest "$tp_tmp/data" > /dev/null 2>&1; echo $?)"
+rm "$tp_tmp/data/inside"
 check "the toolchain member measures patchelf on Linux, where package() runs it, and nowhere else" \
       "patchelf|none" "$(python3 -c 'import sys
 from pathlib import Path

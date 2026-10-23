@@ -334,17 +334,28 @@ def tree_entries(folder: Path, exclude_root_manifest: bool = True) -> list[list[
     return sorted(entries)
 
 
+class EscapingSymlink(ValueError):
+    """A symlink under a named root whose resolved target lies outside that root (DN-142.D21 (2))."""
+
+
 def content_manifest(root: Path) -> str:
     """DN-142.D21 (5)'s content digest of a data root: SHA-256 over the canonical JSON of the sorted
     `[relative path, sha256]` of every regular file under it, symlinks followed; a file root is the
-    one row `[".", sha256]`. No mtime, size or inode enters it, so a same-size rewrite moves it."""
+    one row `[".", sha256]`. No mtime, size or inode enters it, so a same-size rewrite moves it.
+    A named root is symlink-closed (DN-142.D21 (2)): a link under it resolving outside it raises
+    EscapingSymlink, naming the link and its target, since that read is one no role names."""
     if root.is_file():
         return key_of([[".", file_sha256(root)]])
     if not root.is_dir():
         raise FileNotFoundError(f"{root} is neither a file nor a directory")
+    closure = root.resolve()
     rows = []
     for directory, subdirectories, names in os.walk(root, followlinks=True):
         subdirectories.sort()
+        for name in [*subdirectories, *names]:
+            path = Path(directory) / name
+            if path.is_symlink() and not path.resolve().is_relative_to(closure):
+                raise EscapingSymlink(f"{path} -> {path.resolve()} resolves outside the named root {closure}")
         for name in names:
             path = Path(directory) / name
             if path.is_file():
@@ -3544,7 +3555,11 @@ def main(argv: list[str]) -> int:
             print(line)
         return 1 if found else 0
     if len(argv) == 2 and argv[0] == "content-manifest":
-        print(content_manifest(Path(argv[1])))
+        try:
+            print(content_manifest(Path(argv[1])))
+        except EscapingSymlink as escaping:
+            print(f"artefact_store: REFUSED {escaping}", file=sys.stderr)
+            return 2
         return 0
     if len(argv) == 3 and argv[0] == "content-manifest-rows":
         print(manifest_rows_digest(Path(argv[1]), argv[2]))
