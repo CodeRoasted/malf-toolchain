@@ -6278,7 +6278,8 @@ _malf_store_build_args() {
 
 # THE THIRD-PARTY STEPS OF A FIRST-PARTY STEP (DN-142.D17 (2), (4), (10)), run before its create or
 # its build: the step's recipe resolved at the act's profile under the strict lock (`conan graph
-# info`, no binary built), artefact_store.py's `third-party-plan` naming each third-party reference
+# info --no-remote`, no binary built: the walk has no network, so a binary the home lacks reads Missing
+# and is planned, never a remote lookup), artefact_store.py's `third-party-plan` naming each third-party reference
 # whose binary is missing, would be built or downloaded, or is present at a content no record holds;
 # re-resolved with those references to be built until the plan adds nothing (a reference built
 # from source needs its build-context tools, which a resolve that reuses its binary skips). Then
@@ -6308,7 +6309,7 @@ _malf_store_third_party() {   # <n> <name> <path> <prefixes> <store> <scratch> <
     _malf_store_clock "$scratch/times"; step_at="$_MALF_CLOCK_AT"; step_cpu="$_MALF_CLOCK_CPU"
     _malf_store_opened "$index" install "$name:third-party" "$path" "$run_at" "$step_at"
     for round in 1 2 3 4 5 6 7 8 9; do
-        if ! conan graph info "$path" "${common[@]}" "${builds[@]}" --format=json > "$graph" 2>> "$log"; then
+        if ! conan graph info "$path" "${common[@]}" "${builds[@]}" --no-remote --format=json > "$graph" 2>> "$log"; then
             _MALF_THIRD_PARTY_CAUSE="resolving its graph failed ($log)"; rc=1
             _malf_quote_log "$log" "$name:third-party (its resolve)"; break
         fi

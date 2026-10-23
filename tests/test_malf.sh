@@ -5091,6 +5091,8 @@ check "RED: a create step asks serve after its key before the step and before it
 check "RED: a stored: false build asks serve after its key before the build and before its step home" \
       "ordered" \
       "$( (( $(sv_line "$sv_build" '_malf_store_key_first "$name"') > 0 && $(sv_line "$sv_build" '_malf_store_key_first "$name"') < $(sv_line "$sv_build" '_malf_store_serve "$name"') && $(sv_line "$sv_build" '_malf_store_serve "$name"') < $(sv_line "$sv_build" 'step_home="$(_malf_step_home') )) && printf ordered)"
+check "RED: a step's third-party resolve runs with --no-remote, as its install and the key before the step do: the walk has no network, so a binary the home lacks reads Missing and is planned, never a remote lookup that fails (step 0 run 39873526990, boost/1.83.0)" \
+      "1" "$(sed -n '/^_malf_store_third_party()/,/^}/p' "$MALF_BIN" | grep -c 'conan graph info "$path" "${common\[@\]}" "${builds\[@\]}" --no-remote --format=json')"
 check "RED: the walk's container is handed MALF_STORE_REJUDGE, the explicit re-judge" \
       "1" "$(sed -n '/^_malf_store_create_in_environment()/,/^}/p' "$MALF_BIN" | grep -c 'MALF_STORE_BUILD_REV MALF_STORE_REJUDGE')"
 check "RED: conan-step and build-step write the step's outcome LAST, and only when every record before it stored or matched" \
