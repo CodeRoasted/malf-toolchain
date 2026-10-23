@@ -1239,7 +1239,7 @@ write_probe_repo "$ws/repoA"
 check "A: arrangement applied — the sibling is genuinely absent (single-repo)" \
       "absent" "$([[ ! -e "$solo/insight-sib" ]] && echo absent || echo PRESENT)"
 solo_out="$(python3 -B "$BI" build --workspace "$solo" --repo "$solo" \
-            --build-key probe --profile probe --build-type Release 2>&1)"; solo_rc=$?
+            --build-key probe --profile probe --build-type Release --jobs 1 2>&1)"; solo_rc=$?
 check "A: single-repo + absent sibling exits 0" "0" "$solo_rc"
 check "A: the skip line is PRESENT, matched via the imported needle" \
       "present" "$(grep -qF "$skip_needle" <<< "$solo_out" && echo present || echo "ABSENT: $solo_out")"
@@ -1277,7 +1277,7 @@ check "B': lint DISCOVERS the child repo and counts its cell in the workspace sh
 check "C: arrangement applied — the sibling is genuinely absent (workspace)" \
       "absent" "$([[ ! -e "$ws/insight-sib" ]] && echo absent || echo PRESENT)"
 ws_out="$(python3 -B "$BI" build --workspace "$ws" --repo "$ws/repoA" \
-          --build-key probe --profile probe --build-type Release 2>&1)"; ws_rc=$?
+          --build-key probe --profile probe --build-type Release --jobs 1 2>&1)"; ws_rc=$?
 check "C: workspace + absent sibling FAILS (exit 1)" "1" "$ws_rc"
 check "C: the FAIL names the cell" \
       "named" "$(grep -qF "cell probe_cell" <<< "$ws_out" && echo named || echo "unnamed: $ws_out")"
@@ -1324,7 +1324,7 @@ check "D: stub toolchain applied (conan resolves to the stub, not the real one)"
 mkdir -p "$ws/insight-sib" "$solo/insight-sib"
 ws_sat_out="$(PATH="$stub_bin:$PATH" MALF_STUB_CMAKE_LOG="$inv_tmp/cmake_argv.log" \
               python3 -B "$BI" build --workspace "$ws" \
-              --repo "$ws/repoA" --build-key probe --profile probe --build-type Debug 2>&1)"; ws_sat_rc=$?
+              --repo "$ws/repoA" --build-key probe --profile probe --build-type Debug --jobs 3 2>&1)"; ws_sat_rc=$?
 check "D: workspace shape + sibling present -> the cell configures and links (exit 0)" \
       "rc=0 linked" \
       "rc=$ws_sat_rc $(grep -qF "linked:" <<< "$ws_sat_out" && echo linked || echo "GOT: $ws_sat_out")"
@@ -1342,9 +1342,14 @@ check "D: the cell is CONFIGURED at the build type it was handed, not at a liter
 $(grep -qF -- "-DCMAKE_BUILD_TYPE=Release" <<< "$inv_cmake_argv" && echo "RELEASE-LEAKED: $inv_cmake_argv" || echo Release-absent)"
 check "D: build mode REFUSES with no --build-type (no default — a default is a second declaration)" \
       "2" "$(PATH="$stub_bin:$PATH" python3 -B "$BI" build --workspace "$ws" --repo "$ws/repoA" \
-             --build-key probe --profile probe >/dev/null 2>&1; echo $?)"
+             --build-key probe --profile probe --jobs 1 >/dev/null 2>&1; echo $?)"
+check "RED — build mode REFUSES with no --jobs: a cell compiles at the width malf derives from the seat, never conan's os.cpu_count()" \
+      "2" "$(PATH="$stub_bin:$PATH" python3 -B "$BI" build --workspace "$ws" --repo "$ws/repoA" \
+             --build-key probe --profile probe --build-type Release >/dev/null 2>&1; echo $?)"
+check "RED — the cell's cmake build runs at the width it was handed (-j 3)" \
+      "1" "$(grep -cE -- '^--build .* -j 3 --target ' "$inv_tmp/cmake_argv.log" 2>/dev/null || echo "NO LOG")"
 solo_sat_out="$(PATH="$stub_bin:$PATH" python3 -B "$BI" build --workspace "$solo" \
-              --repo "$solo" --build-key probe --profile probe --build-type Release 2>&1)"; solo_sat_rc=$?
+              --repo "$solo" --build-key probe --profile probe --build-type Release --jobs 1 2>&1)"; solo_sat_rc=$?
 check "D: single-repo shape + sibling STAGED -> the cell builds, no skip (the D6 staging clause)" \
       "rc=0 linked no-skip" \
       "rc=$solo_sat_rc $(grep -qF "linked:" <<< "$solo_sat_out" && echo linked || echo "GOT: $solo_sat_out") $(grep -qF "$skip_needle" <<< "$solo_sat_out" && echo "LEAKED" || echo no-skip)"
@@ -2904,6 +2909,31 @@ check "no MemAvailable but a capped seat: the cap alone is the operand" \
       "$(( 8 * wd_gib ))" \
       "$(mb_set /seat_release.slice/malf-release.service memory.max max; mb_run "$mb_tmp/meminfo_none" '0::/seat_release.slice/malf-release.service' | cut -d'|' -f1)"
 rm -rf "$mb_tmp"
+
+echo "[7s3] inside the build environment the width still reads the SEAT, and every conan act that may compile is handed it"
+
+# Step 0 run 39903608377: the release seat (memory.max 10 GiB, no swap) was OOM-killed with 16 cc1plus
+# holding 8.7 GB. Two readings lied. An act container in a private cgroup namespace reads `0::/` and
+# sees the docker unit's cgroup (memory.max `max`) as its root, the seat above it invisible, so every
+# in-image width line carried MemAvailable alone (about 20 100 MiB, -j6). And conan's own compile
+# fan-out, `tools.build:jobs`, defaults to os.cpu_count(): 16 inside 6 CPUs.
+ce_argv="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import build_environment as b
+from pathlib import Path
+pin = b.Pin("sha256:" + "0" * 64, "sha256:" + "1" * 64, "a.tar", 1, "0" * 64)
+argv = b.run_argv(pin, ["true"], [Path(sys.argv[2])], [], Path(sys.argv[2]), environ={})
+print(sum(1 for at in range(len(argv) - 1) if argv[at:at + 2] == ["--cgroupns", "host"]), argv.index("--cgroupns") < argv.index(pin.id))' "$MALF_ROOT" "$(mktemp -d)" 2>&1)"
+check "RED — every act container shares the host's cgroup namespace, so /proc/self/cgroup names its seat and the seat's memory.max is readable" \
+      "1 True" "$ce_argv"
+ce_install="$(taskset -c 0-1 bash -c 'MALF_SOURCE_ONLY=1 source "$1" > /dev/null 2>&1; set +e
+    MALF_PROFILE=/p MALF_BUILD_PROFILE=/p MALF_PROFILE_NAME=p MALF_EDITABLE_BUILD_DIR=b; _malf_lockfile_args() { :; }
+    _malf_conan_install_args 2> /dev/null | tr " " "\n" | grep -c "^tools.build:jobs=[12]$"' _ "$MALF_BIN")"
+check "RED — a malf conan install (--build=missing compiles a missing third-party package) is handed the build's width" \
+      "1" "$ce_install"
+# The two other store acts that compile, the third-party install and a stored: false step's conan build,
+# and `malf commands`' test_package install, name the width in the argv they run.
+check "RED — the store's third-party install, its conan build and malf commands' test_package install each pass the width" \
+      "1 1 1" \
+      "$(for ce_fn in _malf_store_third_party_in _malf_store_build_in _malf_configure_test_package; do sed -n "/^$ce_fn()/,/^}/p" "$MALF_BIN" | grep -c '"tools.build:jobs=$_MALF_CONAN_JOBS"'; done | paste -sd' ')"
 # THE CORES ARE THE AFFINITY, which a seat's cpuset partition narrows; os.cpu_count() reads the
 # machine and says 16 inside a 6-CPU seat. A bench verdict's runner context records the count it
 # measured on, so it reads the affinity too. Guarded against vacuity: on a one-CPU machine both
@@ -5830,6 +5860,21 @@ check "a recipe with no test folder creates with no --test-folder at all, never 
       "rc=0 0" "$(tt_create none)"
 check "RED — an empty or relative test folder argument is refused before conan runs" \
       "rc=1 |rc=1 " "$(tt_create '')|$(tt_create relative/test_package)"
+# A CONAN ACT'S OWN COMPILE FAN-OUT TAKES THE BUILD'S WIDTH (step 0 run 39903608377). Unset,
+# `tools.build:jobs` is Python's os.cpu_count(), the machine's 16 inside the release seat's 6 CPUs,
+# and 16 cc1plus held 8.7 GB of its 10 GiB when the kernel killed the walk. On 2 CPUs of affinity the
+# create is handed the width `_malf_build_width` derives there, and its derivation names the create.
+tt_width="$(taskset -c 0-1 bash -c 'MALF_SOURCE_ONLY=1 source "$1" > /dev/null 2>&1; set +e; _malf_build_width; echo "$_MALF_BUILD_JOBS"' _ "$MALF_BIN")"
+tt_jobs="$(PATH="$tt_tmp/bin:$PATH" MALF_SYSTEM="$MALF_TEST_SYSTEM" taskset -c 0-1 bash -c 'MALF_SOURCE_ONLY=1 source "$1" > /dev/null 2>&1; set +e
+        _MALF_WRITER_PROFILES=(); _MALF_WRITER_ARGS=(); _MALF_SHIP_LOCK=(); MALF_CONFIG=Release; rm -f "$2/conan.argv"
+        _MALF_STEP_TALLY="$2/create.denials"; mkdir -p "$2/ws" "$2/store" "$2/scratch/home"
+        _MALF_DOMAIN=(--workspace "$2/ws" --store "$2/store" --scratch "$2/scratch"); export CONAN_HOME="$2/scratch/home"
+        _malf_store_create_step tt_w "$2/repo/with" tt_ "$2/graph.json" "$2/create.log" none 2> "$2/width.err"
+        echo "rc=$? $(grep -c "^tools.build:jobs=" "$2/conan.argv") $(grep -B1 "^tools.build:jobs=" "$2/conan.argv" | paste -sd" ") $(grep -c "^malf store-create: conan create tt_w: -j[0-9]* = max(1, min(2 cores, " "$2/width.err")"' _ "$MALF_BIN" "$tt_tmp")"
+check "RED — a store create is handed the build's width as tools.build:jobs ($tt_width on 2 CPUs), never conan's os.cpu_count(), and prints its derivation" \
+      "rc=0 1 -c tools.build:jobs=$tt_width 1" "$tt_jobs"
+check "the width the create was handed is bounded by the affinity: at most 2 on 2 CPUs" \
+      "bounded" "$( (( tt_width >= 1 && tt_width <= 2 )) && echo bounded || echo "GOT: $tt_width")"
 rm -rf "$tt_tmp"
 echo
 

@@ -21,6 +21,16 @@ each mount at its own absolute path; the environment it receives is exactly the 
 read from this process and refused when unset) plus MALF_SYSTEM, the pinned config digest, and nothing
 is inherited; its working directory is the caller's, which must lie under a mount.
 
+THE ACT SEES ITS SEAT (DN-119.D9 (1)): every act container shares the host's cgroup namespace
+(`--cgroupns host`), its /sys/fs/cgroup read-only. A fan-out's width is planned on the least
+`memory.max` over the act's cgroup and its ancestors, and a seat's cap sits on its slice, above the
+docker unit's cgroup the act runs in. In a private namespace /proc/self/cgroup reads `0::/` and the
+cgroup root shown is the docker unit's, `memory.max` `max`: step 0 run 39903608377 planned -j6 on the
+VM's 20 GiB inside the release seat's 10 GiB and was OOM-killed. Rootless dockerd on the cgroupfs driver
+creates no cgroup of a container's own, so `--memory` cannot cap it either: the seat is the one cap,
+read where the kernel keeps it. The act reads a property of the machine it schedules on, never one a
+result depends on.
+
 THE ACT'S USER (DN-142.D30 (8) R4). Every container starts its argv under `unshare --user
 --map-user=1000 --map-group=1000 --`: the act is uid 1000 (the image's `ubuntu`) with no capability, in a
 nested user namespace where uid 1000 is the container's root, which rootless Docker maps to the account
@@ -275,7 +285,8 @@ def run_argv(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], cw
     """The `docker run` command of one act: `mounts` writable and `read_only` read-only, each at its own
     path; `host_pids` shares the host's process ids (a bench walk judging the build slot's holder);
     `network` is `none` unless the act runs beside the walk's backends, on their internal network, and
-    `name` names the container so a teardown can remove it whatever happened to its client.
+    `name` names the container so a teardown can remove it whatever happened to its client. Every act
+    shares the host's cgroup namespace, so its width reads its seat (module docstring, THE ACT SEES ITS SEAT).
     raises Refused on an unset declared name, a writable mount that is not an existing absolute directory,
     a read-only mount that is neither an existing absolute directory nor an existing absolute file (a
     corpus leg may name a manifest FILE, bound alone), or a working directory under no writable mount. `home` is the container's HOME: the image's own, or a
@@ -296,7 +307,7 @@ def run_argv(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], cw
         raise Refused(f"the working directory {cwd} lies under no mount ({', '.join(map(str, resolved)) or 'none'})")
     shm = os.statvfs(SHM)
     command = [docker, "run", "--rm", "--init", "--network", network, *(["--name", name] if name else []),
-               "--workdir", str(cwd), "--hostname", ACT_HOSTNAME,
+               "--workdir", str(cwd), "--hostname", ACT_HOSTNAME, "--cgroupns", "host",
                "--shm-size", str(shm.f_blocks * shm.f_frsize),
                "--security-opt", "seccomp=unconfined",
                "--env", f"HOME={home}", "--env", f"{SYSTEM_ENV}={pin.image}"]
@@ -1398,6 +1409,16 @@ def selftest() -> int:
                                     capture_output=True, text=True, check=False) for _ in range(2)]
             arm("RED: every act container answers one hostname, never its container id (libtool records it)",
                 [(ran.returncode, ran.stdout.strip()) for ran in named], [(0, ACT_HOSTNAME)] * 2)
+            seated = subprocess.run(run_argv(pin, ["sh", "-c", 'own="$(sed -n "s/^0:://p" /proc/self/cgroup)"; '
+                                                   'echo "$own"; cat "/sys/fs/cgroup$own/memory.current" > /dev/null '
+                                                   '&& echo readable'], [mount], [], mount, docker=docker),
+                                    capture_output=True, text=True, check=False)
+            own, _newline, readable = seated.stdout.strip().partition("\n")
+            top = own.strip("/").split("/", 1)[0]
+            arm("RED: an act reads its cgroup by the host's path, under a top-level cgroup the host holds, and reads "
+                "that cgroup's memory files, so a width inside the image sees the seat's memory.max (step 0 run "
+                "39903608377)", (seated.returncode, bool(top) and (Path("/sys/fs/cgroup") / top).is_dir(), readable),
+                (0, True, "readable"))
             arm("RED: a declared name unset in the caller is refused, never run with a default",
                 refusal(lambda: run_argv(pin, ["/probe"], [mount], ["UNSET_NAME"], mount, environ={})).startswith(
                     "the act declares UNSET_NAME, unset in its caller"), True)

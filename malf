@@ -1026,10 +1026,11 @@ _malf_run_repo_inventory() {       # <build|test> <repo>
         mapfile -t entries < <(_malf_graph_rows)
         _malf_register_dep_entries "${entries[@]}"
     done <<< "$toolchains"
+    _malf_conan_jobs "malf inventory"
     python3 "$MALF_DIR/build_inventory.py" build \
         --workspace "$MALF_WORKSPACE_ROOT" --repo "$repo" \
         --build-key "$(_malf_build_key)" --profile "$MALF_PROFILE_NAME" \
-        --build-type "$MALF_CONFIG" "${tests[@]}" || return 1
+        --build-type "$MALF_CONFIG" --jobs "$_MALF_CONAN_JOBS" "${tests[@]}" || return 1
 
     # FOLD THE INVENTORY CELLS' DATABASES INTO THE REPO ROOT, exactly as a package build folds its
     # own. An inventory cell configures into `<dir>/build-inventory-$(_malf_build_key)/` and emits a
@@ -1147,9 +1148,12 @@ _malf_ship_lock_args() {
 # sanitizer replay's parse_fuzzer linked an Oct 12 host libinsight_sift.a (RankedChange 448 bytes) with
 # a 472-byte RankedChange destructor, and ASan reported a stack-buffer-overflow in emit_level.
 # MALF_EDITABLE_BUILD_DIR is malf's own tree name, so the two cannot disagree.
+# `--build=missing` compiles a binary the home lacks, so the install is handed the build's width
+# (`_malf_conan_jobs`), its derivation on stderr.
 _malf_conan_install_args() {
     local build_type="${MALF_CONFIG:-Release}" remote=""
     [[ -z "${MALF_ENVIRONMENT_RECIPES:-}" ]] || remote="--no-remote"
+    _malf_conan_jobs "malf conan install"
     # shellcheck disable=SC2046
     echo "--build=missing" \
          "--profile:host=$MALF_PROFILE" \
@@ -1157,6 +1161,7 @@ _malf_conan_install_args() {
          "-s" "build_type=$build_type" \
          "-c" "user.malf:profile=$MALF_PROFILE_NAME" \
          "-c" "user.malf:editable_build_dir=$MALF_EDITABLE_BUILD_DIR" \
+         "-c" "tools.build:jobs=$_MALF_CONAN_JOBS" \
          $(_malf_lockfile_args) $remote
 }
 
@@ -1532,6 +1537,11 @@ _malf_seat_line() {   # [cgroup fs root] [proc cgroup file]
 #
 # WHERE NEITHER TERM IS REPORTED (no MemAvailable line and no finite memory.max), the width is the
 # cores alone and the printed derivation says the memory operand was not applied.
+#
+# INSIDE THE BUILD ENVIRONMENT both terms read the host's tree: every act container shares the host's
+# cgroup namespace (build_environment.py, THE ACT SEES ITS SEAT), so /proc/self/cgroup names the seat
+# and the other seats' slices are there to read. In a private namespace it read `0::/` and the walk
+# found no cap: step 0 run 39903608377 planned -j6 on 20 GiB inside the 10 GiB release seat.
 
 # MemAvailable in KiB from a meminfo file (default /proc/meminfo); non-zero and silent when the
 # file does not carry the line.
@@ -1640,6 +1650,19 @@ _malf_build_width() {   # [meminfo file] [cgroup fs root] [proc cgroup file]
     _malf_fanout_width "malf build" "$_MALF_BUILD_CAP_KB" "$@"
     _MALF_BUILD_JOBS="$_MALF_WIDTH_JOBS"
     _MALF_BUILD_WIDTH_LINE="$_MALF_WIDTH_LINE"
+}
+
+# A CONAN ACT'S OWN COMPILE FAN-OUT TAKES THE BUILD'S WIDTH. A recipe compiles through conan's build
+# helpers, whose job count is `tools.build:jobs`, and unset that is Python's os.cpu_count(): the
+# machine's, never the affinity and never the memory — 16 inside the release seat's 6 CPUs, where 16
+# cc1plus held 8.7 GB of its 10 GiB when step 0 run 39903608377 was OOM-killed. So every conan call of
+# malf that may compile is handed the width `_malf_build_width` derives when that call starts, and its
+# derivation is printed on stderr under <what>. The width is in no key (DN-142.D3).
+# post: _MALF_CONAN_JOBS holds the width; its derivation line is on stderr
+_malf_conan_jobs() {   # <what>
+    _malf_build_width
+    _MALF_CONAN_JOBS="$_MALF_BUILD_JOBS"
+    echo "$1: ${_MALF_BUILD_WIDTH_LINE#malf build: }" >&2
 }
 
 # Run a command and record, in <peak file>, the largest max RSS (KiB) any process of its tree
@@ -3648,6 +3671,7 @@ for r in re.findall(r\"(?:test_)?requires\\s*\\(\\s*['\\\"]([^'\\\"]+)['\\\"]\\s
     print(r)
 " 2>/dev/null || true)
     echo "malf commands: installing test_package deps ($main_ref) in $(basename "$subdir")"
+    _malf_conan_jobs "malf commands: test_package install"
     conan install \
         "${tp_req_args[@]}" \
         -g CMakeToolchain -g CMakeDeps \
@@ -3656,6 +3680,7 @@ for r in re.findall(r\"(?:test_)?requires\\s*\\(\\s*['\\\"]([^'\\\"]+)['\\\"]\\s
         --profile:build="$MALF_PROFILE" \
         --build=missing \
         -c "user.malf:profile=$MALF_PROFILE_NAME" \
+        -c "tools.build:jobs=$_MALF_CONAN_JOBS" \
         -c "tools.cmake.cmaketoolchain:generator=Ninja" \
         -s "build_type=$MALF_CONFIG" \
         2>&1 | grep -vE "^$|^======|^Requirements|^Packages|^Build" || true
@@ -6236,9 +6261,10 @@ _malf_store_create_step() {   # <name> <path> <prefixes> <graph> <log> <test fol
     esac
     mapfile -t build_args < <(_malf_store_build_args "$1")
     _malf_home_profiles "$CONAN_HOME"
+    _malf_conan_jobs "malf store-create: conan create $1"
     _malf_confined "${_MALF_STEP_TALLY:-}" "$1" "$2" conan create "$2" "${_MALF_HOME_PROFILES[@]}" \
         -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${build_args[@]}" "${_MALF_SHIP_LOCK[@]}" \
-        "${test_args[@]}" --no-remote --format=json > "$4" 2> "$5"
+        -c "tools.build:jobs=$_MALF_CONAN_JOBS" "${test_args[@]}" --no-remote --format=json > "$4" 2> "$5"
 }
 
 # A CREATE'S TEST FOLDER IS READ FROM A COPY OF ITS TRACKED FILES (DN-142.D26 (1)): the files git
@@ -6361,8 +6387,9 @@ _malf_store_third_party_in() {   # <name> <path> <prefixes> <store> <scratch> <g
         2) _MALF_THIRD_PARTY_CAUSE="the store is corrupt (STOPPED above)"; return 2 ;;
         *) _MALF_THIRD_PARTY_CAUSE="restoring its phase home was refused (above)"; return 1 ;;
     esac
+    _malf_conan_jobs "malf store-create: conan install $name:third-party"
     if ! CONAN_HOME="$phase_home" _malf_confined "$scratch/$name.third-party.denials" "$name" "$path" conan install "$path" "${common[@]}" "${builds[@]}" \
-            --no-remote --output-folder="$scratch/$name.third-party" \
+            -c "tools.build:jobs=$_MALF_CONAN_JOBS" --no-remote --output-folder="$scratch/$name.third-party" \
             --format=json > "$scratch/$name.third-party.install.json" 2>> "$log"; then
         _MALF_THIRD_PARTY_CAUSE="building ${builds[*]#--build=} failed ($log)"
         _malf_quote_log "$log" "$name:third-party (its install)"; return 1
@@ -6482,8 +6509,9 @@ _malf_store_build_in() {   # <name> <prefix> <tree> <store> <scratch> <prefixes>
         "$scratch/restore.jsonl" "$name" "$walk_home" "$scratch/$name.key-first.graph.json" || rc=$?
     [[ $rc -eq 0 ]] || { [[ $rc -eq 2 ]] && return 2; return 1; }
     _malf_home_profiles "$CONAN_HOME"
+    _malf_conan_jobs "malf store-create: conan build $name"
     if ! _malf_confined "$scratch/$name.denials" "$name" "$scratch/$name/$prefix" conan build "$scratch/$name/$prefix" "${_MALF_HOME_PROFILES[@]}" \
-            -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${_MALF_SHIP_LOCK[@]}" --build=never --no-remote \
+            -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${_MALF_SHIP_LOCK[@]}" -c "tools.build:jobs=$_MALF_CONAN_JOBS" --build=never --no-remote \
             --format=json > "$scratch/$name.graph.json" 2> "$scratch/$name.log"; then
         echo "malf store-create: conan build $name failed — $scratch/$name.log" >&2
         _malf_quote_log "$scratch/$name.log" "$name (its build)"; return 1

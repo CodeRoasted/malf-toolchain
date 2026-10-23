@@ -107,7 +107,12 @@ onto CPUs 10–15 and unpinned desk loops sampled on them 6 873 times.
 The release cap holds only once `malf` derives its build width from the seat, not from the
 VM-wide `MemAvailable` (`DN-119.D9` (1), build row R5): until then a release build plans for about
 21 GiB inside a 10 GiB seat with no swap and is OOM-killed. Apply the release seat after R5 reaches
-the malf pin step 0 runs.
+the malf pin step 0 runs. Two further conditions hold it, both measured on step 0 run 39903608377,
+OOM-killed with 16 `cc1plus` in the seat: an act in the build environment reads the seat only because
+its container shares the host's cgroup namespace (`build_environment.py`, THE ACT SEES ITS SEAT; this
+seat's rootless dockerd gives a container no cgroup of its own, so the docker unit's cgroup, `memory.max`
+`max`, is all a private namespace shows), and every conan act malf runs is handed the width
+(`tools.build:jobs`), which unset is conan's `os.cpu_count()`, 16 on this VM whatever the seat.
 
 ## The desk's Docker: rootless, and the desk account outside the `docker` group
 

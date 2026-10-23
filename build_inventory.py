@@ -373,7 +373,7 @@ ENVIRONMENT_RECIPES_ENV = "MALF_ENVIRONMENT_RECIPES"
 
 
 def run_build(workspace: Path, repo_root: Path, build_key: str, profile: str,
-              build_type: str, run_tests: bool) -> int:
+              build_type: str, run_tests: bool, jobs: int) -> int:
     inventory = load_inventory(repo_root)
     if not inventory:
         return 0
@@ -417,7 +417,7 @@ def run_build(workspace: Path, repo_root: Path, build_key: str, profile: str,
         install = subprocess.run(
             ["conan", "install", str(toolchain_pkg),
              f"--profile:host={profile}", f"--profile:build={profile}",
-             "--build=missing", "-of", str(conan_out), *remote],
+             "--build=missing", "-c", f"tools.build:jobs={jobs}", "-of", str(conan_out), *remote],
             capture_output=True, text=True)
         if install.returncode != 0:
             print(f"malf inventory: conan install FAILED for {name}", file=sys.stderr)
@@ -454,7 +454,7 @@ def run_build(workspace: Path, repo_root: Path, build_key: str, profile: str,
                                                    str(Path(__file__).with_name(
                                                        "ninja_deps_guard.py")),
                                                    str(build_dir)]),
-                           ("build", ["cmake", "--build", str(build_dir),
+                           ("build", ["cmake", "--build", str(build_dir), "-j", str(jobs),
                                       "--target", entry["target"]])):
             script = " ".join(shlex.quote(part) for part in cmd)
             if buildenv.exists():
@@ -522,6 +522,11 @@ def main() -> int:
     # compile-and-link.
     parser.add_argument("--run-tests", action="store_true",
                         help="build mode: also run the tests each project registers (malf test)")
+    # NO DEFAULT, required in `build` mode: the width malf derives from the seat (`_malf_conan_jobs`).
+    # Unset, conan compiles a missing binary at os.cpu_count() and ninja at the affinity, neither
+    # bounded by memory (step 0 run 39903608377, a seat OOM-killed under conan's 16 jobs).
+    parser.add_argument("--jobs", type=int,
+                        help="build mode: the width of the cell's compiles, conan's and cmake's (malf passes it)")
     args = parser.parse_args()
     workspace = Path(args.workspace)
     # A bad path is a MISTAKE and must say so, not raise. A traceback here reads as "the tool is
@@ -539,8 +544,10 @@ def main() -> int:
         return run_toolchains(Path(args.repo).resolve())
     if not args.build_type:
         parser.error("build mode needs --build-type (the active profile's declared build_type)")
+    if args.jobs is None or args.jobs < 1:
+        parser.error("build mode needs --jobs, a width of at least 1 (malf derives it from the seat)")
     return run_build(workspace, Path(args.repo).resolve(), args.build_key, args.profile,
-                     args.build_type, args.run_tests)
+                     args.build_type, args.run_tests, args.jobs)
 
 
 if __name__ == "__main__":
