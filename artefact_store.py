@@ -819,10 +819,10 @@ def executable_classes(declared: dict) -> dict[str, str]:
 def declared_executables(package_dir: Path, package: str) -> dict:
     """The `executables:` map `package` declares in the `packages.yml` of the repository holding
     `package_dir`, read from its RECORDED commit's blob (HEAD), never the disk; `{}` when it declares
-    none — and when the file names no entry for it at all, as for coderoast-ipc's umbrella recipe
-    `coderoast_ipc`, a step of malf's walk that packages.yml does not list. That is safe by the
-    store's own rule: an executable the package holds is then unclassified, and refused. A row is
-    a bare class or the site form (DN-142.D24 (2)), returned whole.
+    none — and when the file names no entry for it at all, a step of malf's walk that packages.yml
+    does not list (an umbrella recipe's shape). That is safe by the store's own rule: an
+    executable the package holds is then unclassified, and refused. A row is a bare class or the
+    site form (DN-142.D24 (2)), returned whole.
     Raises ValueError on a row that is neither."""
     import yaml
 

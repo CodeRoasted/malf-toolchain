@@ -3003,7 +3003,7 @@ done
 # ever started, so it presented as a slow build.
 #
 # THE FIXTURE ABOVE ALREADY REPRODUCED IT AND WAS NEVER RUN AGAINST. `repo` carries a recipe AND
-# holds `leaf_a`/`leaf_b`, which is the precise shape (`insight-eidos`, `coderoast-ipc`). So the
+# holds `leaf_a`/`leaf_b`, which is the precise shape (`insight-eidos`). So the
 # arm costs one invocation, not a new fixture.
 #
 # WHAT IS ASSERTED IS THE ENUMERATION COUNT, not the build outcome. The header line is printed once
@@ -3772,7 +3772,7 @@ check "the create's key holds the CLASS only: a site-form row is keyed as publis
       "$(bi_sited sift-linux-x64)|$(bi_sited sift-linux-x64-renamed)|$(grep -l '"kind": "conan-create"' "$bi_tmp/sstore/records/"*.json | wc -l | tr -d ' ')|$(python3 -c "import json, glob; print([json.dumps(b['inputs']['step']['executables']) for b in (json.load(open(f)) for f in glob.glob('$bi_tmp/sstore/records/*.json')) if b['inputs']['step']['kind'] == 'conan-create'][0])")"
 check "a conan-step handed a row in neither form REFUSES it, nothing stored" \
       "rc=1 0 1" "$(bi_declared "$bi_tmp/pub-clean" '{"bin/tool": {"publshed": {}}}') $(grep -c 'REFUSED bi_tool: 1 declared executable(s) neither classed nor in the site form' "$bi_tmp/step.log")"
-check "a step packages.yml does not list (an umbrella recipe, coderoast_ipc's shape) reads as no declaration, {}, never an error that stops its record" \
+check "a step packages.yml does not list (an umbrella recipe's shape) reads as no declaration, {}, never an error that stops its record" \
       "rc=0 {}" "$(out="$(python3 "$MALF_ROOT/artefact_store.py" executables "$bi_tmp/decl/pkg" bi_umbrella 2>&1)"; echo "rc=$? $out")"
 check "an umbrella step that holds an executable is still REFUSED as unclassified: no declaration classifies nothing" \
       "rc=1 0 1" "$(bi_declared "$bi_tmp/pub-clean" "$(python3 "$MALF_ROOT/artefact_store.py" executables "$bi_tmp/decl/pkg" bi_umbrella)") $(grep -c 'bin/tool: unclassified' "$bi_tmp/step.log")"

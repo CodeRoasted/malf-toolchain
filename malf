@@ -754,8 +754,8 @@ _malf_resolve_target() {
 #
 # UNTIL 2026-09-04 AN EXPLICIT ARG NAMING A PACKAGE DIR MEANT "THAT PACKAGE ONLY",
 # and that is the bug this replaced. It made the two spellings of one intent
-# disagree wherever a repo has a root recipe AND sub-recipes — `insight-eidos`
-# (5 recipes) and `coderoast-ipc` (4). `malf build insight-eidos` built ONE
+# disagree wherever a repo had a root recipe AND sub-recipes — `insight-eidos`
+# (5 recipes) and, then, `coderoast-ipc` (4). `malf build insight-eidos` built ONE
 # package; `cd insight-eidos && malf build` built five. The comment here used to
 # claim the two "behave identically", which was true for every OTHER repo and
 # false for exactly those two.
@@ -806,12 +806,12 @@ _malf_resolve_target_or_sweep() {
         echo "── malf $verb [$i/${#members[@]}] $label ──"
         # MALF_ONLY=1 IS LOAD-BEARING AND ITS ABSENCE DOES NOT FAIL, IT RUNS AWAY. A member may BE
         # the root — that is the whole shape this sweep exists for, a repo carrying a root recipe
-        # plus sub-recipes (`insight-eidos`, `coderoast-ipc`) — and without it the child re-enters
+        # plus sub-recipes (`insight-eidos`) — and without it the child re-enters
         # this same resolver, re-derives this same member list, and sweeps again. Measured
         # 2026-09-04: `malf build insight-eidos` reached 717 nested processes with ZERO compilers
         # running. The root need not be FIRST in dependency order for this — only present:
-        # `insight-eidos` puts it at member 2 of 5 (behind `insight_llm`) and `coderoast-ipc` at
-        # member 1 of 4, so the second runs away before compiling anything at all. It presents as a
+        # `insight-eidos` puts it at member 2 of 5 (behind `insight_llm`) and `coderoast-ipc` (then
+        # carrying a root recipe) at member 1 of 4, so the second runs away before compiling anything at all. It presents as a
         # SLOW BUILD, which is the worst possible face: nothing errors, nothing is logged, the
         # machine looks busy, and the one visible symptom — no compiler in `ps` — is the symptom
         # nobody checks while a build is "still going".

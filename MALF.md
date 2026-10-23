@@ -53,7 +53,7 @@ fail in the release pipeline (the 1.7.2 drift-at-tag class).
 
 > **Until 2026-09-04 an explicit arg naming a package dir meant "that package
 > only", and it was a defect.** It made the two spellings of one intent disagree
-> in exactly the two repos that have a root recipe *and* sub-recipes —
+> in exactly the two repos that then had a root recipe *and* sub-recipes —
 > `insight-eidos` (5) and `coderoast-ipc` (4): `malf build insight-eidos` built
 > ONE package while `cd insight-eidos && malf build` built five. **It failed
 > silently** — the short build exits 0, so the operator reads a green over a
