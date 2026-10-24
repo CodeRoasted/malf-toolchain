@@ -47,7 +47,7 @@ jobs:
       packages: write   # the image's own package; the store package is read with the same token, which no store package grants more
     steps:
       - name: Stage malf-toolchain at this workflow's revision (the tools and the writer's public key)
-        uses: CodeRoasted/malf-toolchain/.github/actions/stage-malf@a359690a46ab9e12d85769aea6a47f3f58f29e42
+        uses: CodeRoasted/malf-toolchain/.github/actions/stage-malf@f8b476c6cf1efe2c14672c04a1bf5a7a3f615f32
         with:
           path: .malf
 
