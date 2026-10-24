@@ -63,7 +63,7 @@ jobs:
       packages: read    # this repository's own store package, the only one it is granted
     steps:
       - name: Stage malf-toolchain at this workflow's revision (the tools and the writer's public key)
-        uses: CodeRoasted/malf-toolchain/.github/actions/stage-malf@c0b8349a604ca34221245feab810c5f31e556b62
+        uses: CodeRoasted/malf-toolchain/.github/actions/stage-malf@0dc6af2690b6a890be0eceeec19ac68ead0b1ac7
         with:
           path: .malf
 
