@@ -207,8 +207,10 @@ MALF_SOURCE_EXCLUDE_DIRS="${MALF_SOURCE_EXCLUDE_DIRS:-build build-* .conan2 .cac
 # real collector tooling and stays fully in scope; only the evidence shelf leaves
 # it. So what is excluded is the DIRECTORY NAME `sift_assessment` — glob-matched
 # at any depth by `_malf_prune_args`, one directory in the workspace today — and
-# never the repo. A future C++ collector under `<platform>_corpora/…/scripts/` is
-# formatted like any other source.
+# never the repo. A future C++ collector under `<platform>_corpora/…/scripts/`
+# stays inside this surface, and is formatted like any other source once the
+# repository is armed: today no gate reaches `coderoast-corpora` (no `lint.yml`),
+# and `OPS-8.S13` brings it to zero the day one does, not before.
 #
 # LINT NEEDS NO COUNTERPART, and that is a fact about the mechanism rather than a
 # second policy: `lint --all-files` filters its walk against the compile database,
