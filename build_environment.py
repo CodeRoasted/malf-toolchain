@@ -459,8 +459,10 @@ def parse_backends(declared: object, where: str) -> list[Backend]:
 
 def declared_backends(package_dir: Path, package: str, at_head: bool = True) -> list[Backend]:
     """The backends `package` declares in the packages.yml of the repository holding `package_dir`, read
-    from HEAD (a walk's recorded commit) or from the working tree (the desk's `malf test`); [] for none."""
-    import yaml
+    from HEAD (a walk's recorded commit) or from the working tree (the desk's `malf test`); [] for an
+    entry declaring none. A step that file does not list is Refused naming it (RUL-200, through
+    `artefact_store.listed_entry`), never read as declaring no backend."""
+    import artefact_store
 
     top = subprocess.run(["git", "-C", str(package_dir), "rev-parse", "--show-toplevel"], capture_output=True,
                          text=True, check=False)
@@ -475,7 +477,11 @@ def declared_backends(package_dir: Path, package: str, at_head: bool = True) -> 
         text = shown.stdout
     else:
         text = (root / "packages.yml").read_text()
-    entry = ((yaml.safe_load(text) or {}).get("packages") or {}).get(package) or {}
+    try:
+        entry = artefact_store.listed_entry(text, package, root / "packages.yml",
+                                            "at HEAD" if at_head else "in its working tree")
+    except ValueError as unlisted:
+        raise Refused(str(unlisted)) from None
     if "backends" not in entry:
         return []
     return parse_backends(entry["backends"], f"{root / 'packages.yml'} ({package})")

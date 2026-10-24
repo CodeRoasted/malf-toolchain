@@ -47,6 +47,9 @@ refuses the act: nothing of it is stored, and the refusal names each path.
         refused before it ran (a domain in which /tmp, that TMPDIR or that HOME is an ancestor of a
         denied root or lies in the denied ground among them). --unconfined runs it with no domain, in
         its own locations all the same, its tally `unconfined` (a package declaring itself unconfined)
+    malf_closure.py count-denials <job> <verdict>
+        the denial counter over its stdin, the tracer's output piped into it by `confine` (the trace never
+        lands on disk): <job> holds the domain and its argv, <verdict> receives the count and the paths
     malf_closure.py selftest
         every arm over a fixture malf tree and a fixture workspace
 """
@@ -61,10 +64,12 @@ import json
 import os
 import posixpath
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -303,6 +308,8 @@ SYSTEM_TMP = Path("/tmp")
 TRACED_CALL = re.compile(r"^\d+ +\w+\((?P<args>.*)\) += -1 EACCES")
 TRACED_FD = re.compile(r"^(?:-?\d+|AT_FDCWD)<(?P<base>[^>]*)>")
 TRACED_STRING = re.compile(r'"((?:[^"\\]|\\.)*)"')
+# The verb the tracer's output command runs: the counter over the piped trace (`count_piped`).
+COUNT_VERB = "count-denials"
 # The errno every TRACED_CALL names: a line without it holds no denial, and is skipped unparsed.
 DENIAL_MARK = "EACCES"
 
@@ -410,14 +417,16 @@ def _read_roots(argv: list[str]) -> tuple[Path, ...]:
 @dataclass(frozen=True)
 class Denials:
     """What the counter found in one trace: how many reads the domain refused, and each refused path once, in
-    the order first refused, split by whether its real location lies in the domain's denied ground."""
+    the order first refused, split by whether its real location lies in the domain's denied ground; and how
+    many lines of trace it read, the population its verdict is over."""
 
     count: int
     ground: tuple[str, ...]
     beside: tuple[str, ...]
+    lines: int
 
 
-def counted_denials(trace: Path, domain: Domain, argv: list[str]) -> Denials:
+def counted_denials(trace: Iterable[str], domain: Domain, argv: list[str]) -> Denials:
     """Each path the traced act was denied (EACCES) whose real location the domain that ran (`argv`, the
     `domain_argv` it was built from) grants no read of, as the tracer printed it, with whether that location
     lies in the domain's denied ground. A domain built from a listing grants each entry beside a denied root's
@@ -426,32 +435,48 @@ def counted_denials(trace: Path, domain: Domain, argv: list[str]) -> Denials:
     the denied ground: each is counted, never only the denied ground itself. An EACCES at a location the domain
     grants is the file's own permission, never counted.
     A build's trace grows with its translation units times its include directories, to gigabytes, so it is
-    READ AS A STREAM, a record judged only when its line names EACCES at all; the read roots are an index, each
-    denial looking up its own ancestors, never a scan of every root; and a path refused again is counted, not
-    held again. Memory is bounded by the distinct refused paths, never by the trace."""
+    READ AS A STREAM — `trace` is the tracer's lines as they arrive, through a pipe (`_confined`), never a
+    file — a record judged only when its line names EACCES at all; the read roots are an index, each denial
+    looking up its own ancestors, never a scan of every root; and a path refused again is counted, not held
+    again. Memory is bounded by the distinct refused paths, never by the trace."""
     readable = frozenset(_read_roots(argv))
-    count = 0
+    count = read = 0
     ground: dict[str, None] = {}
     beside: dict[str, None] = {}
-    with trace.open(errors="replace") as lines:
-        for line in lines:
-            if DENIAL_MARK not in line:
+    for line in trace:
+        read += 1
+        if DENIAL_MARK not in line:
+            continue
+        for record in line.splitlines():
+            match = TRACED_CALL.match(record)
+            if not match:
                 continue
-            for record in line.splitlines():
-                match = TRACED_CALL.match(record)
-                if not match:
-                    continue
-                strings = TRACED_STRING.findall(match["args"])
-                if not strings:
-                    continue
-                base = TRACED_FD.match(match["args"])
-                path = os.path.normpath(strings[0] if strings[0].startswith("/") or not base
-                                        else os.path.join(base["base"], strings[0]))
-                real = Path(os.path.realpath(path))
-                if readable.isdisjoint((real, *real.parents)):
-                    count += 1
-                    (ground if domain.withholds(real) else beside).setdefault(path, None)
-    return Denials(count, tuple(ground), tuple(beside))
+            strings = TRACED_STRING.findall(match["args"])
+            if not strings:
+                continue
+            base = TRACED_FD.match(match["args"])
+            path = os.path.normpath(strings[0] if strings[0].startswith("/") or not base
+                                    else os.path.join(base["base"], strings[0]))
+            real = Path(os.path.realpath(path))
+            if readable.isdisjoint((real, *real.parents)):
+                count += 1
+                (ground if domain.withholds(real) else beside).setdefault(path, None)
+    return Denials(count, tuple(ground), tuple(beside), read)
+
+
+def count_piped(job: Path, verdict: Path) -> int:
+    """The `count-denials` verb, the tracer's output command (`_confined`): `counted_denials` over this process's
+    stdin, the domain and its argv read from `job`, the verdict written to `verdict` only once the stream ended,
+    renamed into place whole, so a reader that died wrote none."""
+    held = json.loads(job.read_text())
+    domain = Domain(tuple(Path(path) for path in held["denied"]), tuple(Path(path) for path in held["granted"]))
+    with io.TextIOWrapper(sys.stdin.buffer, errors="replace") as lines:
+        found = counted_denials(lines, domain, held["argv"])
+    partial = verdict.with_name(verdict.name + ".partial")
+    partial.write_text(json.dumps({"count": found.count, "ground": found.ground, "beside": found.beside,
+                                   "lines": found.lines}))
+    partial.rename(verdict)
+    return 0
 
 
 @contextlib.contextmanager
@@ -518,12 +543,28 @@ def _confined(domain: Domain, tally: Path, command: list[str], tracer: str | Non
     if tracer is None:
         tally.write_text(f"{UNCOUNTED}\n")
         return subprocess.run(sandbox, env=environment, check=False).returncode
-    with tempfile.TemporaryDirectory(prefix="malf_closure.trace.") as trace_dir:
-        trace = Path(trace_dir) / "trace"
+    # THE TRACE NEVER LANDS ON DISK: the tracer writes it into a pipe to the counter (`-o |<command>`), a child
+    # of the tracer forked before the act starts, its write end close-on-exec, so the act holds neither end.
+    # A gcc create's trace was a file in this process's temporary directory, ~4 GiB for coderoast_server
+    # (inferred from the 9.1 GB OOM of step 0 run 40003748415), and it filled the release runner's disk.
+    # Only the job (the domain and its argv) and the verdict touch the disk, each a few hundred bytes.
+    with tempfile.TemporaryDirectory(prefix="malf_closure.count.") as count_dir:
+        job, verdict = Path(count_dir) / "job.json", Path(count_dir) / "verdict.json"
+        job.write_text(json.dumps({"denied": [str(path) for path in domain.denied],
+                                   "granted": [str(path) for path in domain.granted], "argv": argv}))
+        counter = shlex.join([sys.executable, "-I", str(Path(__file__).resolve()), COUNT_VERB, str(job),
+                              str(verdict)])
         ran = subprocess.run([tracer, "-f", "-qq", "--seccomp-bpf", "-y", "-e", "trace=%file,execve",
-                              "-e", "status=failed", "-s", "4096", "-o", str(trace), *sandbox],
+                              "-e", "status=failed", "-s", "4096", "-o", f"|{counter}", *sandbox],
                              env=environment, check=False)
-        denied = counted_denials(trace, domain, argv)
+        try:
+            held = json.loads(verdict.read_text())
+            denied = Denials(held["count"], tuple(held["ground"]), tuple(held["beside"]), held["lines"])
+        except (OSError, ValueError, KeyError, TypeError) as unread:
+            tally.write_text(f"{UNCOUNTED}\n")
+            print(f"malf_closure: REFUSED — the denial counter returned no verdict ({unread!r}), so the act's "
+                  f"denials are unjudged and nothing of it is stored (DN-142.D29 (8))", file=sys.stderr)
+            return DENIED
     tally.write_text(f"{COUNTED} {denied.count}\n")
     if denied.count:
         print(f"malf_closure: REFUSED — the step's domain refused {denied.count} read(s), and an act a domain refused "
@@ -812,14 +853,68 @@ def selftest() -> int:
             f'7 newfstatat(AT_FDCWD</>, "{fresh}", 0x7ffc, 0) = -1 EACCES (Permission denied)\n'
             f'7 +++ a record\r8 openat(AT_FDCWD</>, "{store / "records" / "k.json"}", O_RDONLY) = -1 EACCES (Permission denied)\n'
             f'7 chdir() = -1 EACCES (Permission denied)\n')
-        found = counted_denials(traced, domain, argv)
+        with traced.open(errors="replace") as lines:
+            found = counted_denials(lines, domain, argv)
+        golden = (5, (str(sibling / "secret.txt"), str(sibling / "relative.txt"), str(store / "records" / "k.json")),
+                  (str(fresh),))
         arm("the counter's verdict over a trace of every record shape: a repeated denial counts twice and is named "
             "once, a relative path joins its descriptor's directory, an EACCES at a granted location (the file's own "
             "permission), an ENOENT and a call naming no path count nothing, an entry created after the listing is "
             "denied beside the ground (counted, named apart), and a carriage return splits two records",
-            (found.count, found.ground, found.beside),
-            (5, (str(sibling / "secret.txt"), str(sibling / "relative.txt"), str(store / "records" / "k.json")),
-             (str(fresh),)))
+            (found.count, found.ground, found.beside), golden)
+        # THE SAME BYTES THROUGH THE PIPE the tracer writes into (`count-denials` reading its stdin, the verdict
+        # file it renames into place): the framing a pipe delivers is the file's, so the verdict is identical.
+        job, verdict = base / "golden.job.json", base / "golden.verdict.json"
+        job.write_text(json.dumps({"denied": [str(path) for path in domain.denied],
+                                   "granted": [str(path) for path in domain.granted], "argv": argv}))
+        piped = subprocess.run([sys.executable, "-I", str(Path(__file__).resolve()), COUNT_VERB, str(job),
+                                str(verdict)], input=traced.read_bytes(), capture_output=True, check=False)
+        held = json.loads(verdict.read_text()) if verdict.is_file() else {}
+        arm(f"the golden trace piped into `count-denials` gives the same verdict as read from its file, over the same "
+            f"{found.lines} lines",
+            (piped.returncode, held.get("count"), tuple(held.get("ground", ())), tuple(held.get("beside", ())),
+             held.get("lines")), (0, *golden, found.lines))
+        # THE TRACE NEVER LANDS ON DISK. An act emitting a large trace (failed stats, each a traced record) measures,
+        # while it still runs, every byte under the confining process's temporary directory: the trace went to a
+        # file there before (the release runner's disk filled twice), and now only the job and the verdict do.
+        confiner_tmp = base / "confiner-tmp"
+        confiner_tmp.mkdir()
+        measured_at = scratch / "measured-bytes"
+        records = 40000
+        emitter = ("import os, sys\n"
+                   f"for index in range({records}):\n"
+                   "    try:\n"
+                   f"        os.stat('/malf-closure-absent/{'x' * 160}/' + str(index))\n"
+                   "    except OSError:\n"
+                   "        pass\n"
+                   "total = sum(os.path.getsize(os.path.join(where, name)) for where, _dirs, names in os.walk(sys.argv[1])"
+                   " for name in names)\n"
+                   "open(sys.argv[2], 'w').write(str(total))\n")
+        saved_tmp, tempfile.tempdir = tempfile.tempdir, str(confiner_tmp)
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                code = confine(domain, scratch, tally, [sys.executable, "-I", "-c", emitter, str(confiner_tmp),
+                                                        str(measured_at)], tracer=tracer)
+        finally:
+            tempfile.tempdir = saved_tmp
+        on_disk = int(measured_at.read_text()) if measured_at.is_file() else -1
+        arm(f"RED: an act tracing {records} failed calls (about 12 MiB of trace) finds under 64 KiB "
+            f"under the confining process's temporary directory while it runs, and is counted at zero (got {on_disk} "
+            f"bytes; the trace written to a file there measured its whole size)",
+            (code, tally.read_text().split(), 0 <= on_disk < 64 * 1024), (0, [COUNTED, "0"], True))
+        arm("the confining process's temporary directory is empty once the act ends",
+            sorted(path.name for path in confiner_tmp.iterdir()), [])
+        # A COUNTER THAT RETURNS NO VERDICT REFUSES: the act's denials are unjudged, never counted at zero.
+        saved_verb = globals()["COUNT_VERB"]
+        globals()["COUNT_VERB"] = "no-such-verb"
+        try:
+            with contextlib.redirect_stderr(io.StringIO()) as said:
+                code = confine(domain, scratch, tally, ["true"], tracer=tracer)
+        finally:
+            globals()["COUNT_VERB"] = saved_verb
+        arm("RED: a denial counter that writes no verdict REFUSES the act, its tally uncounted, never counted at zero",
+            (code, tally.read_text().split(), "the denial counter returned no verdict" in said.getvalue()),
+            (DENIED, [UNCOUNTED], True))
         # A build's trace grows with its translation units times its include directories (measured: 134 MiB over
         # the preprocessing of coderoast_server's 120 units, ~4 GiB inferred for the gcc create an OOM kill ended).
         trace_mib, growth_mib = 64, 16
@@ -831,7 +926,8 @@ def selftest() -> int:
             [sys.executable, "-I", "-c",
              "import resource, sys\nfrom pathlib import Path\nsys.path.insert(0, sys.argv[1])\nimport malf_closure\n"
              "before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss\n"
-             "malf_closure.counted_denials(Path(sys.argv[2]), malf_closure.Domain((Path(sys.argv[3]),), ()), [])\n"
+             "malf_closure.counted_denials(Path(sys.argv[2]).open(errors='replace'), "
+             "malf_closure.Domain((Path(sys.argv[3]),), ()), [])\n"
              "print((resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before) // 1024)\n",
              str(Path(__file__).resolve().parent), str(base / "large.trace"), str(sibling)],
             capture_output=True, text=True, check=False)
@@ -855,7 +951,8 @@ def selftest() -> int:
 
         globals()["_within"] = counting
         try:
-            crowded_found = counted_denials(base / "denials.trace", domain, crowded)
+            with (base / "denials.trace").open(errors="replace") as lines:
+                crowded_found = counted_denials(lines, domain, crowded)
         finally:
             globals()["_within"] = contained
         ceiling = denials * (len(domain.denied) + len(domain.granted))
@@ -905,7 +1002,12 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="malf_closure.py")
     verbs = parser.add_subparsers(dest="verb", required=True)
     verbs.add_parser("selftest")
-    parser.parse_args(argv)
+    counting = verbs.add_parser(COUNT_VERB)
+    counting.add_argument("job", type=Path)
+    counting.add_argument("verdict", type=Path)
+    given = parser.parse_args(argv)
+    if given.verb == COUNT_VERB:
+        return count_piped(given.job, given.verdict)
     return selftest()
 
 

@@ -817,20 +817,28 @@ def executable_classes(declared: dict) -> dict[str, str]:
     return {path: executable_class(value) for path, value in sorted(declared.items())}
 
 
-def declared_entry(package_dir: Path, package: str) -> dict:
-    """The entry `package` has in the `packages.yml` of the repository holding `package_dir`, read from
-    its RECORDED commit's blob (HEAD), never the disk. Every step malf walks is listed there (RUL-200):
-    raises ValueError naming the step when the file lists no entry for it, so a step nobody declared is
-    refused at its first read, before anything of it is built."""
+def listed_entry(text: str, package: str, manifest: Path, read_at: str) -> dict:
+    """The entry `package` has in `text`, the `packages.yml` at `manifest` as read `read_at` ("at HEAD", or
+    "in its working tree"). Every step malf walks is listed there (RUL-200): raises ValueError naming the
+    step and the file when it lists no entry for it, so a step nobody declared is refused at its first
+    read, before anything of it is built. The one reader of that rule, for every packages.yml read of a
+    step (`declared_entry` here, `build_environment.declared_backends`)."""
     import yaml
 
-    top = Path(_run(["git", "-C", str(package_dir), "rev-parse", "--show-toplevel"]).strip())
-    document = yaml.safe_load(_run(["git", "-C", str(top), "show", "HEAD:packages.yml"])) or {}
-    packages = document.get("packages") or {}
+    packages = (yaml.safe_load(text) or {}).get("packages") or {}
     if package not in packages:
-        raise ValueError(f"{package}: a step {top / 'packages.yml'} does not list at HEAD, and malf builds no step "
+        raise ValueError(f"{package}: a step {manifest} does not list {read_at}, and malf builds no step "
                          "that no packages.yml declares (RUL-200)")
     return packages[package] or {}
+
+
+def declared_entry(package_dir: Path, package: str) -> dict:
+    """The entry `package` has in the `packages.yml` of the repository holding `package_dir`, read from
+    its RECORDED commit's blob (HEAD), never the disk (`listed_entry`: an unlisted step raises
+    ValueError naming it, RUL-200)."""
+    top = Path(_run(["git", "-C", str(package_dir), "rev-parse", "--show-toplevel"]).strip())
+    return listed_entry(_run(["git", "-C", str(top), "show", "HEAD:packages.yml"]), package,
+                        top / "packages.yml", "at HEAD")
 
 
 def declared_executables(package_dir: Path, package: str) -> dict:

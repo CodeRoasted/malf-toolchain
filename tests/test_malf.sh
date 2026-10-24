@@ -406,11 +406,11 @@ check "artefact_store reads \`unconfined: {why}\` from packages.yml at HEAD, and
           && { python3 "$MALF_ROOT/artefact_store.py" unconfined "$uc_tmp/p" pa; python3 "$MALF_ROOT/artefact_store.py" unconfined "$uc_tmp/p" pb 2>/dev/null; echo "rc=$?"; } | paste -sd'|')"
 rm -rf "$uc_tmp"
 
-echo "[7k] malf_closure carries its own proof (selftest): an anchored reference, a function-level import and a directory reference each reach their target, a bare word and a computed path reach nothing, a cycle terminates; a store act's domain denies and counts a read of a sibling repository, another conan home, the store and a corpus not its own, behind a try/except too, and every other read its domain refuses (an entry created beside a denied root's ancestor after the act started, a symlink into the denied ground), and lets its own repository, malf whole, its home and a system path read; every act writes into a TMPDIR and a HOME of its own under the walk's scratch, and a domain whose /tmp holds a denied root is refused before the act (DN-142.D29 (5), (8), DN-142.D30 (9) R8)"
+echo "[7k] malf_closure carries its own proof (selftest): an anchored reference, a function-level import and a directory reference each reach their target, a bare word and a computed path reach nothing, a cycle terminates; a store act's domain denies and counts a read of a sibling repository, another conan home, the store and a corpus not its own, behind a try/except too, and every other read its domain refuses (an entry created beside a denied root's ancestor after the act started, a symlink into the denied ground), and lets its own repository, malf whole, its home and a system path read; the act's trace is piped into the counter and never lands on disk, and a counter that returns no verdict refuses the act; every act writes into a TMPDIR and a HOME of its own under the walk's scratch, and a domain whose /tmp holds a denied root is refused before the act (DN-142.D29 (5), (8), DN-142.D30 (9) R8)"
 closure_selftest_output="$(timeout 120 python3 "$MALF_ROOT/malf_closure.py" selftest 2>&1)"
 closure_selftest_status=$?
-check "malf_closure selftest: 30 arms, 0 failed" \
-      "ok" "$([[ $closure_selftest_status -eq 0 ]] && grep -q '^malf_closure selftest: 30 passed, 0 failed$' <<< "$closure_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$closure_selftest_output")")"
+check "malf_closure selftest: 34 arms, 0 failed" \
+      "ok" "$([[ $closure_selftest_status -eq 0 ]] && grep -q '^malf_closure selftest: 34 passed, 0 failed$' <<< "$closure_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$closure_selftest_output")")"
 
 echo
 
@@ -3515,6 +3515,19 @@ check "with-backends over a package declaring no backend runs its command bare a
       "unset rc=7" "$(tr '\n' ' ' <<< "$wb_plain" | sed 's/ $//')"
 check "RED: with-backends over a malformed declaration refuses before the command runs, naming the image" \
       "0 1 rc=2" "$(grep -c '^ran$' <<< "$wb_broken") $(grep -c "image 'redis:7' is not pinned by digest" <<< "$wb_broken") $(tail -1 <<< "$wb_broken")"
+# RUL-200 reaches the backends read: a step packages.yml does not list is REFUSED naming it, at HEAD and
+# in the working tree alike, never read as a step declaring no backend (`[]`); a listed step declaring
+# none still reads `[]`.
+git -C "$wb_tmp" add packages.yml && git -C "$wb_tmp" -c user.email=t@t -c user.name=t commit --quiet -m one
+wb_unlisted() {   # <backends verb option>... -> rc, stdout length, and whether stderr names the step
+    local out rc
+    out="$(python3 "$MALF_ROOT/build_environment.py" backends "$@" 2>"$wb_tmp/unlisted.err")"; rc=$?
+    printf 'rc=%s out=%s named=%s' "$rc" "${#out}" \
+        "$(grep -c "^build_environment: REFUSED — unlisted_pkg: a step $wb_tmp/packages.yml does not list ${WB_AT}, and malf builds no step that no packages.yml declares (RUL-200)" "$wb_tmp/unlisted.err")"
+}
+check "RED (RUL-200): the backends read REFUSES a step packages.yml does not list, naming it, at HEAD and in the working tree, nothing on stdout; a listed step declaring none reads []" \
+      "rc=1 out=0 named=1|rc=1 out=0 named=1|[]" \
+      "$(WB_AT='at HEAD' wb_unlisted "$wb_tmp/plain" unlisted_pkg)|$(WB_AT='in its working tree' wb_unlisted --worktree "$wb_tmp/plain" unlisted_pkg)|$(python3 "$MALF_ROOT/build_environment.py" backends "$wb_tmp/plain" plain_pkg)"
 rm -rf "$wb_tmp"
 check "every conan create or install under malf's .github that can run tests names user.malf:profile, or carries the consumer set that runs none (DN-142.D23)" \
       "none" "$(python3 - "$MALF_ROOT/.github" <<'PYC'
