@@ -303,6 +303,8 @@ SYSTEM_TMP = Path("/tmp")
 TRACED_CALL = re.compile(r"^\d+ +\w+\((?P<args>.*)\) += -1 EACCES")
 TRACED_FD = re.compile(r"^(?:-?\d+|AT_FDCWD)<(?P<base>[^>]*)>")
 TRACED_STRING = re.compile(r'"((?:[^"\\]|\\.)*)"')
+# The errno every TRACED_CALL names: a line without it holds no denial, and is skipped unparsed.
+DENIAL_MARK = "EACCES"
 
 
 def _within(path: Path, root: Path) -> bool:
@@ -405,30 +407,51 @@ def _read_roots(argv: list[str]) -> tuple[Path, ...]:
     return tuple(Path(os.path.realpath(root)) for flag, root in zip(argv, argv[1:]) if flag == "--read")
 
 
-def counted_denials(trace: Path, domain: Domain, argv: list[str]) -> list[tuple[str, bool]]:
+@dataclass(frozen=True)
+class Denials:
+    """What the counter found in one trace: how many reads the domain refused, and each refused path once, in
+    the order first refused, split by whether its real location lies in the domain's denied ground."""
+
+    count: int
+    ground: tuple[str, ...]
+    beside: tuple[str, ...]
+
+
+def counted_denials(trace: Path, domain: Domain, argv: list[str]) -> Denials:
     """Each path the traced act was denied (EACCES) whose real location the domain that ran (`argv`, the
-    `domain_argv` it was built from) grants no read of, in order, as the tracer printed it, with whether
-    that location lies in the domain's denied ground. A domain built from a listing grants each entry
-    beside a denied root's ancestors as it stood when the act started, so an entry created there later
-    (a temporary file in a directory holding another conan home) is withheld too, and so is a read
-    through a symlink resolving into the denied ground: each is counted, never only the denied ground
-    itself. An EACCES at a location the domain grants is the file's own permission, never counted."""
-    readable = _read_roots(argv)
-    denied = []
-    for line in trace.read_text(errors="replace").splitlines():
-        match = TRACED_CALL.match(line)
-        if not match:
-            continue
-        strings = TRACED_STRING.findall(match["args"])
-        if not strings:
-            continue
-        base = TRACED_FD.match(match["args"])
-        path = os.path.normpath(strings[0] if strings[0].startswith("/") or not base
-                                else os.path.join(base["base"], strings[0]))
-        real = Path(os.path.realpath(path))
-        if not any(_within(real, root) for root in readable):
-            denied.append((path, domain.withholds(real)))
-    return denied
+    `domain_argv` it was built from) grants no read of, as the tracer printed it, with whether that location
+    lies in the domain's denied ground. A domain built from a listing grants each entry beside a denied root's
+    ancestors as it stood when the act started, so an entry created there later (a temporary file in a
+    directory holding another conan home) is withheld too, and so is a read through a symlink resolving into
+    the denied ground: each is counted, never only the denied ground itself. An EACCES at a location the domain
+    grants is the file's own permission, never counted.
+    A build's trace grows with its translation units times its include directories, to gigabytes, so it is
+    READ AS A STREAM, a record judged only when its line names EACCES at all; the read roots are an index, each
+    denial looking up its own ancestors, never a scan of every root; and a path refused again is counted, not
+    held again. Memory is bounded by the distinct refused paths, never by the trace."""
+    readable = frozenset(_read_roots(argv))
+    count = 0
+    ground: dict[str, None] = {}
+    beside: dict[str, None] = {}
+    with trace.open(errors="replace") as lines:
+        for line in lines:
+            if DENIAL_MARK not in line:
+                continue
+            for record in line.splitlines():
+                match = TRACED_CALL.match(record)
+                if not match:
+                    continue
+                strings = TRACED_STRING.findall(match["args"])
+                if not strings:
+                    continue
+                base = TRACED_FD.match(match["args"])
+                path = os.path.normpath(strings[0] if strings[0].startswith("/") or not base
+                                        else os.path.join(base["base"], strings[0]))
+                real = Path(os.path.realpath(path))
+                if readable.isdisjoint((real, *real.parents)):
+                    count += 1
+                    (ground if domain.withholds(real) else beside).setdefault(path, None)
+    return Denials(count, tuple(ground), tuple(beside))
 
 
 @contextlib.contextmanager
@@ -501,21 +524,20 @@ def _confined(domain: Domain, tally: Path, command: list[str], tracer: str | Non
                               "-e", "status=failed", "-s", "4096", "-o", str(trace), *sandbox],
                              env=environment, check=False)
         denied = counted_denials(trace, domain, argv)
-    tally.write_text(f"{COUNTED} {len(denied)}\n")
-    if denied:
-        ground = list(dict.fromkeys(path for path, in_ground in denied if in_ground))
-        beside = list(dict.fromkeys(path for path, in_ground in denied if not in_ground))
-        print(f"malf_closure: REFUSED — the step's domain refused {len(denied)} read(s), and an act a domain refused "
+    tally.write_text(f"{COUNTED} {denied.count}\n")
+    if denied.count:
+        print(f"malf_closure: REFUSED — the step's domain refused {denied.count} read(s), and an act a domain refused "
               f"is never stored (DN-142.D29 (8))", file=sys.stderr)
-        if ground:
-            print(f"malf_closure:   {len(ground)} path(s) of ground the step's key does not name (a sibling repository, "
-                  f"another conan home, the store or a corpus not its own); declare the read in the key if it is a "
-                  f"real input, or remove it, never widen the grant by hand: " + ", ".join(ground), file=sys.stderr)
-        if beside:
-            print(f"malf_closure:   {len(beside)} path(s) outside that ground the domain still withholds: an entry "
-                  f"created after the act started in a directory that holds a denied root (the domain grants that "
-                  f"directory's entries as listed at its start), or a symlink resolving into the denied ground: "
-                  + ", ".join(beside), file=sys.stderr)
+        if denied.ground:
+            print(f"malf_closure:   {len(denied.ground)} path(s) of ground the step's key does not name (a sibling "
+                  f"repository, another conan home, the store or a corpus not its own); declare the read in the key if "
+                  f"it is a real input, or remove it, never widen the grant by hand: " + ", ".join(denied.ground),
+                  file=sys.stderr)
+        if denied.beside:
+            print(f"malf_closure:   {len(denied.beside)} path(s) outside that ground the domain still withholds: an "
+                  f"entry created after the act started in a directory that holds a denied root (the domain grants "
+                  f"that directory's entries as listed at its start), or a symlink resolving into the denied ground: "
+                  + ", ".join(denied.beside), file=sys.stderr)
         return DENIED
     return ran.returncode
 
@@ -778,6 +800,68 @@ def selftest() -> int:
             [line.split(" ", 1)[0] for line in location_refusals(domain, {"TMPDIR": base, "HOME": sibling,
                                                                           "own": scratch})],
             ["TMPDIR", "HOME"])
+        argv = domain_argv(domain)
+        fresh = base / "created-after-the-listing"
+        traced = base / "golden.trace"
+        traced.write_text(
+            f'7 openat(AT_FDCWD</>, "{sibling / "secret.txt"}", O_RDONLY) = -1 EACCES (Permission denied)\n'
+            f'7 openat(AT_FDCWD</>, "{sibling / "secret.txt"}", O_RDONLY) = -1 EACCES (Permission denied)\n'
+            f'7 openat(3<{sibling}>, "relative.txt", O_RDONLY) = -1 EACCES (Permission denied)\n'
+            f'7 openat(AT_FDCWD</>, "{malf / "unreached.py"}", O_RDONLY) = -1 EACCES (Permission denied)\n'
+            f'7 openat(AT_FDCWD</>, "{sibling / "absent.txt"}", O_RDONLY) = -1 ENOENT (No such file or directory)\n'
+            f'7 newfstatat(AT_FDCWD</>, "{fresh}", 0x7ffc, 0) = -1 EACCES (Permission denied)\n'
+            f'7 +++ a record\r8 openat(AT_FDCWD</>, "{store / "records" / "k.json"}", O_RDONLY) = -1 EACCES (Permission denied)\n'
+            f'7 chdir() = -1 EACCES (Permission denied)\n')
+        found = counted_denials(traced, domain, argv)
+        arm("the counter's verdict over a trace of every record shape: a repeated denial counts twice and is named "
+            "once, a relative path joins its descriptor's directory, an EACCES at a granted location (the file's own "
+            "permission), an ENOENT and a call naming no path count nothing, an entry created after the listing is "
+            "denied beside the ground (counted, named apart), and a carriage return splits two records",
+            (found.count, found.ground, found.beside),
+            (5, (str(sibling / "secret.txt"), str(sibling / "relative.txt"), str(store / "records" / "k.json")),
+             (str(fresh),)))
+        # A build's trace grows with its translation units times its include directories (measured: 134 MiB over
+        # the preprocessing of coderoast_server's 120 units, ~4 GiB inferred for the gcc create an OOM kill ended).
+        trace_mib, growth_mib = 64, 16
+        record = f'7 openat(AT_FDCWD</>, "{sibling}/include/never/{"x" * 160}.hpp", O_RDONLY) = -1 ENOENT (No such file)\n'
+        with (base / "large.trace").open("w") as large:
+            for _ in range(trace_mib * 1024 * 1024 // len(record)):
+                large.write(record)
+        measured = subprocess.run(
+            [sys.executable, "-I", "-c",
+             "import resource, sys\nfrom pathlib import Path\nsys.path.insert(0, sys.argv[1])\nimport malf_closure\n"
+             "before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss\n"
+             "malf_closure.counted_denials(Path(sys.argv[2]), malf_closure.Domain((Path(sys.argv[3]),), ()), [])\n"
+             "print((resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before) // 1024)\n",
+             str(Path(__file__).resolve().parent), str(base / "large.trace"), str(sibling)],
+            capture_output=True, text=True, check=False)
+        grown = int(measured.stdout) if measured.returncode == 0 else f"exit {measured.returncode}: {measured.stderr}"
+        arm(f"RED: the counter streams its trace: reading a {trace_mib} MiB trace grows its peak RSS by under "
+            f"{growth_mib} MiB (got {grown} MiB; the trace read whole held twice its size)",
+            isinstance(grown, int) and grown < growth_mib, True)
+        (base / "large.trace").unlink()
+        grants, denials = 500, 200
+        crowded = ["--reads-only", *(item for index in range(grants) for item in ("--read", f"/absent-grant-{index}"))]
+        (base / "denials.trace").write_text("".join(
+            f'7 openat(AT_FDCWD</>, "{sibling}/header-{index}.hpp", O_RDONLY) = -1 EACCES (Permission denied)\n'
+            for index in range(denials)))
+        calls = 0
+        contained = globals()["_within"]
+
+        def counting(path: Path, root: Path) -> bool:
+            nonlocal calls
+            calls += 1
+            return contained(path, root)
+
+        globals()["_within"] = counting
+        try:
+            crowded_found = counted_denials(base / "denials.trace", domain, crowded)
+        finally:
+            globals()["_within"] = contained
+        ceiling = denials * (len(domain.denied) + len(domain.granted))
+        arm(f"RED: the counter indexes the read roots, never scans them per denial: {denials} denials under {grants} "
+            f"grants call the containment test at most {ceiling} times (denials x the domain's own roots; got {calls})",
+            (crowded_found.count, calls <= ceiling), (denials, True))
         (base / "unconfined-tally").write_text("unconfined\n")
         arm("an absent or unreadable tally reads false, never true; so does a declared-unconfined act's",
             (denials_counted(None), denials_counted(base / "no-tally"), denials_counted(base / "unconfined-tally")),
