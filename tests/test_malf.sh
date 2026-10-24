@@ -3760,8 +3760,8 @@ check "the declaration is read from packages.yml at HEAD, never the disk: a work
 # THE SITE FORM (DN-142.D24 (2)): a `published` row may name where it is published; the row is read
 # whole, its sites are the publication plan's, and the create's key holds the class alone.
 check "the site form is read whole from packages.yml, and a row in neither form is refused naming it" \
-      "{\"bin/img\": {\"published\": {\"image\": \"srv\"}}, \"bin/sift\": {\"published\": {\"assets\": [{\"name\": \"sift-linux-x64\", \"repository\": \"sift-action\"}]}}, \"bin/tool\": \"run-from-cache\"}|rc=1 1" \
-      "$(rm -rf "$bi_tmp/sites"; mkdir -p "$bi_tmp/sites/pkg"; cd "$bi_tmp/sites" && git init -q && printf 'packages:\n  bi_tool:\n    path: pkg\n    executables:\n      bin/sift: {published: {assets: [{repository: sift-action, name: sift-linux-x64}]}}\n      bin/img: {published: {image: srv}}\n      bin/tool: run-from-cache\n  bi_bad:\n    path: pkg\n    executables: {bin/x: {publshed: {}}}\n' > packages.yml && git add packages.yml && git -c user.email=t@t -c user.name=t commit -qm sites && python3 "$MALF_ROOT/artefact_store.py" executables "$bi_tmp/sites/pkg" bi_tool)|$(out="$(python3 "$MALF_ROOT/artefact_store.py" executables "$bi_tmp/sites/pkg" bi_bad 2>&1)"; echo -n "rc=$? "; grep -c 'bin/x: {.publshed' <<< "$out")"
+      "{\"bin/img\": {\"published\": {\"image\": \"srv\"}}, \"bin/sift\": {\"published\": {\"assets\": [{\"name\": \"sift-linux-x64\", \"repository\": \"sift-action\"}]}}, \"bin/tool\": \"run-from-cache\"}|rc=2 1" \
+      "$(rm -rf "$bi_tmp/sites"; mkdir -p "$bi_tmp/sites/pkg"; cd "$bi_tmp/sites" && git init -q && printf 'packages:\n  bi_tool:\n    path: pkg\n    executables:\n      bin/sift: {published: {assets: [{repository: sift-action, name: sift-linux-x64}]}}\n      bin/img: {published: {image: srv}}\n      bin/tool: run-from-cache\n  bi_bad:\n    path: pkg\n    executables: {bin/x: {publshed: {}}}\n' > packages.yml && git add packages.yml && git -c user.email=t@t -c user.name=t commit -qm sites && python3 "$MALF_ROOT/artefact_store.py" executables "$bi_tmp/sites/pkg" bi_tool)|$(out="$(python3 "$MALF_ROOT/artefact_store.py" executables "$bi_tmp/sites/pkg" bi_bad 2>&1)"; echo -n "rc=$? "; grep -c '^artefact_store: REFUSED bi_bad: .*bin/x: {.publshed' <<< "$out")"
 bi_sited() {   # <asset name> -> the step's line, into one store kept across calls
     printf '{"bin/tool": {"published": {"assets": [{"repository": "sift-action", "name": "%s"}]}}}' "$1" > "$bi_tmp/declared.json"
     MALF_STEP_EXECUTABLES="$bi_tmp/declared.json" bi_step "$bi_tmp/pub-clean" "$bi_tmp/sstore" | tr -d '\n'
@@ -3772,10 +3772,9 @@ check "the create's key holds the CLASS only: a site-form row is keyed as publis
       "$(bi_sited sift-linux-x64)|$(bi_sited sift-linux-x64-renamed)|$(grep -l '"kind": "conan-create"' "$bi_tmp/sstore/records/"*.json | wc -l | tr -d ' ')|$(python3 -c "import json, glob; print([json.dumps(b['inputs']['step']['executables']) for b in (json.load(open(f)) for f in glob.glob('$bi_tmp/sstore/records/*.json')) if b['inputs']['step']['kind'] == 'conan-create'][0])")"
 check "a conan-step handed a row in neither form REFUSES it, nothing stored" \
       "rc=1 0 1" "$(bi_declared "$bi_tmp/pub-clean" '{"bin/tool": {"publshed": {}}}') $(grep -c 'REFUSED bi_tool: 1 declared executable(s) neither classed nor in the site form' "$bi_tmp/step.log")"
-check "a step packages.yml does not list (an umbrella recipe's shape) reads as no declaration, {}, never an error that stops its record" \
-      "rc=0 {}" "$(out="$(python3 "$MALF_ROOT/artefact_store.py" executables "$bi_tmp/decl/pkg" bi_umbrella 2>&1)"; echo "rc=$? $out")"
-check "an umbrella step that holds an executable is still REFUSED as unclassified: no declaration classifies nothing" \
-      "rc=1 0 1" "$(bi_declared "$bi_tmp/pub-clean" "$(python3 "$MALF_ROOT/artefact_store.py" executables "$bi_tmp/decl/pkg" bi_umbrella)") $(grep -c 'bin/tool: unclassified' "$bi_tmp/step.log")"
+check "RED (RUL-200): a step packages.yml does not list is REFUSED at its first read, naming the step, by the \`executables\` and the \`unconfined\` read alike, exit 2, nothing on stdout" \
+      "rc=2 out=0 named=1|rc=2 out=0 named=1" \
+      "$(for verb in executables unconfined; do out="$(python3 "$MALF_ROOT/artefact_store.py" "$verb" "$bi_tmp/decl/pkg" bi_umbrella 2>"$bi_tmp/unlisted.err")"; rc=$?; printf 'rc=%s out=%s named=%s\n' "$rc" "${#out}" "$(grep -c '^artefact_store: REFUSED bi_umbrella: a step .*packages.yml does not list at HEAD' "$bi_tmp/unlisted.err")"; done | paste -sd'|')"
 
 # The step's TEST VERDICT record (DN-142.D5 (3)): keyed by the build step's key and the selection,
 # holding both populations' result set, the digests judged and the logs as an object; an equal key
@@ -5539,7 +5538,9 @@ tq_first ex_h 'requires = "tpr/0.1"' 'self.output.info("act-locations HOME=" + _
 mkdir -p "$tq_src/ex_b"
 printf 'from conan import ConanFile\n\n\nclass Fixture(ConanFile):\n    name = "ex_b"\n    version = "0.1"\n    package_type = "build-scripts"\n' > "$tq_src/ex_b/conanfile.py"
 printf '\n    def export(self):\n        import time\n        from conan.tools.files import save\n        save(self, self.export_folder + "/stamp", str(time.time_ns()))\n' >> "$tq_src/ex_k/conanfile.py"
-printf 'packages: {}\n' > "$tq_src/packages.yml"
+# Every step malf walks is listed in its repository's packages.yml (RUL-200): each first-party consumer is.
+{ printf 'packages:\n'; for tq_name in ex_v ex_r ex_d ex_w ex_p ex_f ex_z ex_u ex_n ex_t ex_m ex_k ex_h ex_b; do
+      printf '  %s:\n    path: %s\n' "$tq_name" "$tq_name"; done; } > "$tq_src/packages.yml"
 git -C "$tq_src" init -q && git -C "$tq_src" add -A && git -C "$tq_src" -c user.email=t@t -c user.name=t commit -qm fixtures
 tq_home() {   # <home name> — a fresh conan home holding every fixture recipe and no binary
     local home="$tq_tmp/$1" recipe

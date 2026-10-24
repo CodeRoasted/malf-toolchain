@@ -113,7 +113,8 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
         the findings and the record, never an entry or an object (exit 0 a match, 1 a mismatch)
     artefact_store.py executables <package dir> <package>
         the `executables:` map the package declares in its repository's packages.yml at HEAD
-        (DN-142.D22), as canonical JSON; `{}` when it declares none
+        (DN-142.D22), as canonical JSON; `{}` when it declares none; exit 2 refusing a malformed row
+        or a package packages.yml does not list (RUL-200)
     artefact_store.py published-check <folder>
         each linked ELF file under <folder> whose bytes are not in the published form, one
         `<path>: symbol table|runpath` line; exit 1 when there is one
@@ -816,20 +817,27 @@ def executable_classes(declared: dict) -> dict[str, str]:
     return {path: executable_class(value) for path, value in sorted(declared.items())}
 
 
-def declared_executables(package_dir: Path, package: str) -> dict:
-    """The `executables:` map `package` declares in the `packages.yml` of the repository holding
-    `package_dir`, read from its RECORDED commit's blob (HEAD), never the disk; `{}` when it declares
-    none — and when the file names no entry for it at all, a step of malf's walk that packages.yml
-    does not list (an umbrella recipe's shape). That is safe by the store's own rule: an
-    executable the package holds is then unclassified, and refused. A row is a bare class or the
-    site form (DN-142.D24 (2)), returned whole.
-    Raises ValueError on a row that is neither."""
+def declared_entry(package_dir: Path, package: str) -> dict:
+    """The entry `package` has in the `packages.yml` of the repository holding `package_dir`, read from
+    its RECORDED commit's blob (HEAD), never the disk. Every step malf walks is listed there (RUL-200):
+    raises ValueError naming the step when the file lists no entry for it, so a step nobody declared is
+    refused at its first read, before anything of it is built."""
     import yaml
 
     top = Path(_run(["git", "-C", str(package_dir), "rev-parse", "--show-toplevel"]).strip())
     document = yaml.safe_load(_run(["git", "-C", str(top), "show", "HEAD:packages.yml"])) or {}
-    entry = (document.get("packages") or {}).get(package) or {}
-    declared = entry.get("executables") or {}
+    packages = document.get("packages") or {}
+    if package not in packages:
+        raise ValueError(f"{package}: a step {top / 'packages.yml'} does not list at HEAD, and malf builds no step "
+                         "that no packages.yml declares (RUL-200)")
+    return packages[package] or {}
+
+
+def declared_executables(package_dir: Path, package: str) -> dict:
+    """The `executables:` map `package` declares in its packages.yml entry at HEAD (declared_entry), `{}`
+    when its entry declares none. A row is a bare class or the site form (DN-142.D24 (2)), returned whole.
+    Raises ValueError on a row that is neither, and on a step packages.yml does not list."""
+    declared = declared_entry(package_dir, package).get("executables") or {}
     wrong = {path: kind for path, kind in declared.items() if executable_class(kind) is None}
     if wrong:
         raise ValueError(f"{package}: executables neither classed {' nor '.join(EXECUTABLE_CLASSES)} "
@@ -839,15 +847,11 @@ def declared_executables(package_dir: Path, package: str) -> dict:
 
 
 def declared_unconfined(package_dir: Path, package: str) -> str:
-    """The `unconfined: {why: <reason>}` `package` declares beside its `executables:` in the
-    `packages.yml` of the repository holding `package_dir`, read from HEAD: its `why`, or "" when it
-    declares none (DN-142.D29 ruled (v): a package whose tests change mount topology, which no Landlock
-    domain allows). Raises ValueError on a declaration that is not a mapping naming a non-empty `why`."""
-    import yaml
-
-    top = Path(_run(["git", "-C", str(package_dir), "rev-parse", "--show-toplevel"]).strip())
-    document = yaml.safe_load(_run(["git", "-C", str(top), "show", "HEAD:packages.yml"])) or {}
-    entry = (document.get("packages") or {}).get(package) or {}
+    """The `unconfined: {why: <reason>}` `package` declares beside its `executables:` in its packages.yml
+    entry at HEAD (declared_entry): its `why`, or "" when it declares none (DN-142.D29 ruled (v): a package
+    whose tests change mount topology, which no Landlock domain allows). Raises ValueError on a declaration
+    that is not a mapping naming a non-empty `why`, and on a step packages.yml does not list."""
+    entry = declared_entry(package_dir, package)
     if "unconfined" not in entry:
         return ""
     declared = entry["unconfined"]
@@ -3545,7 +3549,11 @@ def main(argv: list[str]) -> int:
             return 2
         return 0
     if len(argv) == 3 and argv[0] == "executables":
-        print(json.dumps(declared_executables(Path(argv[1]), argv[2]), sort_keys=True))
+        try:
+            print(json.dumps(declared_executables(Path(argv[1]), argv[2]), sort_keys=True))
+        except ValueError as malformed:
+            print(f"artefact_store: REFUSED {malformed}", file=sys.stderr)
+            return 2
         return 0
     if len(argv) == 2 and argv[0] == "published-check":
         files = tree_files(Path(argv[1]))
