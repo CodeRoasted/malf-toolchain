@@ -2807,12 +2807,12 @@ echo "[7s] a fan-out's width is derived from BOTH operands, the cores and the me
 # which reads as a slow build, never as a failure. Every figure below is KiB.
 wd_gib=1048576
 wd_cap="$MALF_BUILD_JOB_MEM_KB"; wd_reserve="$MALF_FANOUT_RESERVE_KB"
-check "the declared operands: 1.1 GiB a build job, 3 GiB a sanitizer job, 2 GiB of reserve" \
-      "1153434 3145728 2097152" "$MALF_BUILD_JOB_MEM_KB $MALF_SANITIZER_JOB_MEM_KB $MALF_FANOUT_RESERVE_KB"
-check "an idle 16-core machine (20 GiB available) keeps all 16 jobs" \
-      "16" "$(_malf_width 16 $(( 20 * wd_gib )) "$wd_reserve" "$wd_cap")"
-check "beside a build holding 7.8 GiB (12.2 GiB available) the second build gets 9 jobs, not 16" \
-      "9" "$(_malf_width 16 12792627 "$wd_reserve" "$wd_cap")"
+check "the declared operands: 1.2 GiB a build job, 3 GiB a sanitizer job, 2 GiB of reserve" \
+      "1258291 3145728 2097152" "$MALF_BUILD_JOB_MEM_KB $MALF_SANITIZER_JOB_MEM_KB $MALF_FANOUT_RESERVE_KB"
+check "an idle 16-core machine (20 GiB available) gets 15 jobs: at 1.2 GiB a job the memory binds first" \
+      "15" "$(_malf_width 16 $(( 20 * wd_gib )) "$wd_reserve" "$wd_cap")"
+check "beside a build holding 7.8 GiB (12.2 GiB available) the second build gets 8 jobs, not 16" \
+      "8" "$(_malf_width 16 12792627 "$wd_reserve" "$wd_cap")"
 check "the cores bind when memory is plentiful: 8 cores, 20 GiB available" \
       "8" "$(_malf_width 8 $(( 20 * wd_gib )) "$wd_reserve" "$wd_cap")"
 check "less available than the reserve is one job, never zero and never negative" \
@@ -2829,13 +2829,13 @@ check "the memory operand is the MemAvailable line, never MemTotal or MemFree" \
 check "a meminfo without MemAvailable answers nothing, and says so by its exit code" \
       "rc=1 []" "rc=$(_malf_mem_available_kib "$wd_tmp/meminfo_old" >/dev/null; echo $?) [$(_malf_mem_available_kib "$wd_tmp/meminfo_old")]"
 check "the printed derivation carries the four operands and the width" \
-      "malf build: -j9 = max(1, min(16 cores, floor((memory 12492 MiB - reserve 2048 MiB) / 1126 MiB a job)))" \
-      "$(_malf_width_line "malf build" 9 16 12792627 "$wd_reserve" "$wd_cap")"
+      "malf build: -j8 = max(1, min(16 cores, floor((memory 12492 MiB - reserve 2048 MiB) / 1228 MiB a job)))" \
+      "$(_malf_width_line "malf build" 8 16 12792627 "$wd_reserve" "$wd_cap")"
 check "on a machine reporting neither memory term the derivation says the memory operand was not applied" \
       "malf build: -j16 = 16 cores; neither MemAvailable nor a cgroup memory.max is reported here, so memory does not bound the width" \
       "$(_malf_width_line "malf build" 16 16 "" "$wd_reserve" "$wd_cap")"
 
-echo "[7s2] the memory operand is the SEAT's: min(MemAvailable - other seats' unmet memory.min, least cgroup memory.max - current + inactive_file)"
+echo "[7s2] the memory operand is the SEAT's: min(MemAvailable - other seats' unmet memory.min, least cgroup memory.max - held)"
 
 # DN-119.D9 (1). Inside a seat the VM-wide MemAvailable plans for about twice a 10 GiB cap with no
 # swap, and every heavy build is OOM-killed; on the desk a build planned on memory a seat may
@@ -2845,8 +2845,8 @@ mb_tmp="$(mktemp -d)"; mb_cg="$mb_tmp/cgroup"; mb_gib=1073741824
 mb_set() {   # <cgroup path> <file> <value>
     mkdir -p "$mb_cg$1"; printf '%s\n' "$3" > "$mb_cg$1/$2"
 }
-mb_stat() {   # <cgroup path> <inactive_file bytes>
-    mkdir -p "$mb_cg$1"; printf 'anon 1\nfile 2\ninactive_file %s\nactive_file 3\n' "$2" > "$mb_cg$1/memory.stat"
+mb_stat() {   # <cgroup path> <anon bytes>: a memory.stat whose only held memory is anon
+    mkdir -p "$mb_cg$1"; printf 'anon %s\nfile 2\ninactive_file 4\nactive_file 3\n' "$2" > "$mb_cg$1/memory.stat"
 }
 mb_run() {   # <meminfo> <proc cgroup line> -> "<KiB or empty>|<why>"
     printf '%s\n' "$2" > "$mb_tmp/pcg"
@@ -2869,10 +2869,10 @@ check "the desk's width on 16 cores is then 10 jobs, not the 16 the VM-wide figu
       "10" "$(_malf_width 16 $(( 14 * wd_gib )) "$wd_reserve" "$wd_cap")"
 # Inside the release seat: its own guarantee is never subtracted from its own budget; its cap binds.
 mb_set /seat_release.slice memory.max $(( 10 * mb_gib )); mb_set /seat_release.slice memory.current $(( 3 * mb_gib ))
-mb_stat /seat_release.slice $(( 1 * mb_gib ))
+mb_stat /seat_release.slice $(( 2 * mb_gib ))
 mb_set /seat_release.slice/malf-release.service memory.max max
-check "inside the release seat the cap binds: 10 GiB max - 3 GiB current + 1 GiB inactive_file = 8 GiB" \
-      "$(( 8 * wd_gib ))|MemAvailable 20480 MiB - other seats' unmet memory.min 0 MiB = 20480 MiB, /seat_release.slice memory.max 10240 MiB - current 3072 MiB + inactive_file 1024 MiB = 8192 MiB" \
+check "inside the release seat the cap binds: 10 GiB max - 2 GiB held = 8 GiB" \
+      "$(( 8 * wd_gib ))|MemAvailable 20480 MiB - other seats' unmet memory.min 0 MiB = 20480 MiB, /seat_release.slice memory.max 10240 MiB - held 2048 MiB (anon 2048 + shmem 0 + file_mapped 0 + dirty 0 + unreclaimable kernel 0 MiB) = 8192 MiB" \
       "$(mb_run "$mb_tmp/meminfo20" '0::/seat_release.slice/malf-release.service')"
 mb_set /seat_release.slice memory.max max
 check "a seat's OWN unmet memory.min is never subtracted from its own budget (only OTHER seats')" \
@@ -2881,17 +2881,17 @@ check "a seat's OWN unmet memory.min is never subtracted from its own budget (on
 # The least of every capped ancestor, the leaf included.
 mb_set /seat_release.slice memory.max $(( 10 * mb_gib ))
 mb_set /seat_release.slice/malf-release.service memory.max $(( 6 * mb_gib ))
-mb_set /seat_release.slice/malf-release.service memory.current $(( 1 * mb_gib )); mb_stat /seat_release.slice/malf-release.service 0
+mb_set /seat_release.slice/malf-release.service memory.current $(( 1 * mb_gib )); mb_stat /seat_release.slice/malf-release.service $(( 1 * mb_gib ))
 check "the least capped ancestor wins, and the derivation names it: the service's 6 - 1 GiB under the seat's 8" \
       "$(( 5 * wd_gib ))|/seat_release.slice/malf-release.service memory.max 6144 MiB" \
       "$(mb_run "$mb_tmp/meminfo20" '0::/seat_release.slice/malf-release.service' | sed 's/|.*, \(\/seat[^ ]* memory.max [0-9]* MiB\).*/|\1/')"
 # THE RED-FIRST COORDINATE OF DN-119.D9 R5, through the build's own width function: a 4 GiB cgroup on
 # 4 CPUs (the affinity, set by taskset) is 4 cores and 1 job, where the VM-wide reading gave 4 jobs.
 mb_set /scope.slice/run-x.scope memory.max $(( 4 * mb_gib )); mb_set /scope.slice/run-x.scope memory.current $(( 6 * 1048576 ))
-mb_stat /scope.slice/run-x.scope 0
+mb_stat /scope.slice/run-x.scope $(( 6 * 1048576 ))
 printf '0::/scope.slice/run-x.scope\n' > "$mb_tmp/pcg-scope"
 check "malf build's width line in a 4 GiB cgroup on 4 CPUs: 4 cores, 1 job, both memory terms named" \
-      "malf build: -j1 = max(1, min(4 cores, floor((memory 4090 MiB - reserve 2048 MiB) / 1126 MiB a job))); memory = min(MemAvailable 20480 MiB - other seats' unmet memory.min 7168 MiB = 13312 MiB, /scope.slice/run-x.scope memory.max 4096 MiB - current 6 MiB + inactive_file 0 MiB = 4090 MiB)" \
+      "malf build: -j1 = max(1, min(4 cores, floor((memory 4090 MiB - reserve 2048 MiB) / 1228 MiB a job))); memory = min(MemAvailable 20480 MiB - other seats' unmet memory.min 7168 MiB = 13312 MiB, /scope.slice/run-x.scope memory.max 4096 MiB - held 6 MiB (anon 6 + shmem 0 + file_mapped 0 + dirty 0 + unreclaimable kernel 0 MiB) = 4090 MiB)" \
       "$(env -u MALF_IS_SANITIZER taskset -c 0-3 bash -c 'MALF_SOURCE_ONLY=1 source "$1"; set +e; _malf_build_width "$2" "$3" "$4"; echo "$_MALF_BUILD_WIDTH_LINE"' _ \
            "$MALF_BIN" "$mb_tmp/meminfo20" "$mb_cg" "$mb_tmp/pcg-scope" 2>&1)"
 # The least capped ancestor wins wherever it sits: here the seat (8 GiB) under a looser service (11).
@@ -2900,7 +2900,7 @@ check "a looser leaf under a tighter seat: the seat's 8 GiB binds, and the deriv
       "$(( 8 * wd_gib ))|/seat_release.slice memory.max 10240 MiB" \
       "$(mb_run "$mb_tmp/meminfo20" '0::/seat_release.slice/malf-release.service' | sed 's/|.*, \(\/seat[^ ]* memory.max [0-9]* MiB\).*/|\1/')"
 # A cgroup already past its cap leaves nothing, never a negative figure.
-mb_set /full.slice memory.max $(( 2 * mb_gib )); mb_set /full.slice memory.current $(( 3 * mb_gib )); mb_stat /full.slice 0
+mb_set /full.slice memory.max $(( 2 * mb_gib )); mb_set /full.slice memory.current $(( 3 * mb_gib )); mb_stat /full.slice $(( 3 * mb_gib ))
 check "a cgroup past its cap leaves 0 KiB (one job), never a negative figure" \
       "0" "$(mb_run "$mb_tmp/meminfo20" '0::/full.slice' | cut -d'|' -f1)"
 check "no MemAvailable and no finite memory.max: no memory operand, and the width is the cores" \
@@ -2908,7 +2908,62 @@ check "no MemAvailable and no finite memory.max: no memory operand, and the widt
 check "no MemAvailable but a capped seat: the cap alone is the operand" \
       "$(( 8 * wd_gib ))" \
       "$(mb_set /seat_release.slice/malf-release.service memory.max max; mb_run "$mb_tmp/meminfo_none" '0::/seat_release.slice/malf-release.service' | cut -d'|' -f1)"
+mb_set /nostat.slice memory.max $(( 4 * mb_gib )); mb_set /nostat.slice memory.current $(( 3 * mb_gib ))
+check "a cgroup with no memory.stat counts all of memory.current as held, and says so" \
+      "$(( 1 * wd_gib ))|MemAvailable 20480 MiB - other seats' unmet memory.min 7168 MiB = 13312 MiB, /nostat.slice memory.max 4096 MiB - held 3072 MiB (all of memory.current: no memory.stat to read) = 1024 MiB" \
+      "$(mb_run "$mb_tmp/meminfo20" '0::/nostat.slice')"
 rm -rf "$mb_tmp"
+
+echo "[7s2b] HELD is what the kernel cannot reclaim: the release seat's own memory.stat, idle, full of page cache, and full of anon"
+
+# Step 0 run 40070362161 planned all 22 store-create creates it reached at -j1 and ran into the
+# 360-minute job limit: the term then in force, memory.max - current + inactive_file, counted active
+# page cache and reclaimable slab as used, and the seat stood at its cap. Every figure
+# below is the kernel's, in bytes, read from /sys/fs/cgroup/seat_release.slice; each arm runs the
+# build's own width function on the seat's 6 CPUs (taskset), so the line printed is the line step 0
+# would print.
+hs_tmp="$(mktemp -d)"; hs_cg="$hs_tmp/cgroup"; hs_seat="$hs_cg/seat_release.slice"
+mkdir -p "$hs_seat/malf-release.service"
+printf 'MemTotal:       24608964 kB\nMemAvailable:   19965896 kB\n' > "$hs_tmp/meminfo"
+printf '0::/seat_release.slice/malf-release.service\n' > "$hs_tmp/pcg"
+printf 'max\n' > "$hs_seat/malf-release.service/memory.max"
+printf '10737418240\n' > "$hs_seat/memory.max"
+hs_stat() {   # <memory.current> <anon> <inactive_file> <active_file>: the seat's other fields as read idle
+    printf '%s\n' "$1" > "$hs_seat/memory.current"
+    printf '%s\n' "anon $2" "file 4431908864" "kernel 1476239360" "kernel_stack 14204928" \
+        "pagetables 35295232" "sec_pagetables 0" "percpu 175464" "sock 4096" "vmalloc 45056" \
+        "shmem 133890048" "file_mapped 547594240" "file_dirty 30232576" "file_writeback 0" \
+        "inactive_file $3" "active_file $4" "unevictable 0" "slab_reclaimable 1409516848" \
+        "slab_unreclaimable 15971472" "slab 1425488320" > "$hs_seat/memory.stat"
+}
+hs_line() {
+    env -u MALF_IS_SANITIZER taskset -c 0-5 bash -c 'MALF_SOURCE_ONLY=1 source "$1"; set +e
+        _malf_build_width "$2" "$3" "$4"; echo "$_MALF_BUILD_WIDTH_LINE"' _ \
+        "$MALF_BIN" "$hs_tmp/meminfo" "$hs_cg" "$hs_tmp/pcg" 2>&1
+}
+# The idle seat, 2026-10-24: memory.current 6 619 MiB, of it anon 983 MiB, active_file 2 467 MiB,
+# inactive_file 1 631 MiB, slab_reclaimable 1 344 MiB. The old term read 10 240 - 6 619 + 1 631 = 5 252 MiB: -j2.
+hs_stat 6940508160 1031671808 1710321664 2587697152
+check "RED — the idle release seat plans -j5, not -j2: only its 1 725 MiB of unreclaimable memory is held" \
+      "malf build: -j5 = max(1, min(6 cores, floor((memory 8514 MiB - reserve 2048 MiB) / 1228 MiB a job))); memory = min(MemAvailable 19497 MiB - other seats' unmet memory.min 0 MiB = 19497 MiB, /seat_release.slice memory.max 10240 MiB - held 1725 MiB (anon 983 + shmem 127 + file_mapped 522 + dirty 28 + unreclaimable kernel 62 MiB) = 8514 MiB)" \
+      "$(hs_line)"
+# The seat at its cap with page cache, the coordinate of run 40070362161's first create (07:25:34 UTC):
+# memory.current 10 159 MiB, inactive_file 1 198 MiB, so the old term read 1 279 MiB and -j1. That
+# line printed neither anon nor active_file, so this fixture is COMPOSED: the idle seat's
+# unreclaimable fields, and the rest of memory.current as active page cache.
+hs_stat 10652483584 1031671808 1256194048 6754488320
+check "RED — the seat at its cap with page cache still plans -j5: page cache is reclaimed before an OOM kill, never counted held" \
+      "-j5" "$(hs_line | sed 's/^malf build: \(-j[0-9]*\) .*/\1/')"
+# The OOM-kill of step 0 run 39903608377: 16 cc1plus at about 544 MB each (8 704 000 000 bytes of
+# anon) on top of the idle seat's anon, the seat at its cap.
+hs_stat 10737418240 9735671808 104857600 104857600
+check "a seat full of anon (the 16-cc1plus OOM kill) still plans -j1: anon cannot leave a seat with no swap" \
+      "-j1|memory 213 MiB" "$(hs_line | sed 's/^malf build: \(-j[0-9]*\) .*(memory \([0-9]*\) MiB - reserve.*/\1|memory \2 MiB/')"
+# The ceiling: an EMPTY 10 GiB seat. -j16, the width that was OOM-killed, is out of reach of the
+# memory term on any core count: floor((10 240 - 2 048) / 1 228) = 6.
+check "an empty 10 GiB seat on 16 cores is 6 jobs, never the 16 that were OOM-killed" \
+      "6" "$(_malf_width 16 $(( 10 * wd_gib )) "$wd_reserve" "$wd_cap")"
+rm -rf "$hs_tmp"
 
 echo "[7s3] inside the build environment the width still reads the SEAT, and every conan act that may compile is handed it"
 
@@ -2948,7 +3003,7 @@ wd_out="$(_malf_run_measured "$wd_tmp/peak" bash -c 'exit 7' 2>&1)"; wd_rc=$?
 check "a measured run returns its command's exit code and records a peak" \
       "rc=7 recorded" "rc=$wd_rc $([[ "$(cat "$wd_tmp/peak" 2>/dev/null)" =~ ^[0-9]+$ ]] && echo recorded || echo "GOT: $(cat "$wd_tmp/peak" 2>&1)")"
 check "a largest process above the cap prints the note, naming both figures and the knob" \
-      "noted" "$(_malf_cap_note "malf build" 2097152 "$wd_cap" MALF_BUILD_JOB_MEM_KB 2>&1 | tr '\n' ' ' | grep -q '2048 MiB.*1126 MiB.*MALF_BUILD_JOB_MEM_KB' && echo noted || echo "GOT: $(_malf_cap_note "malf build" 2097152 "$wd_cap" MALF_BUILD_JOB_MEM_KB 2>&1)")"
+      "noted" "$(_malf_cap_note "malf build" 2097152 "$wd_cap" MALF_BUILD_JOB_MEM_KB 2>&1 | tr '\n' ' ' | grep -q '2048 MiB.*1228 MiB.*MALF_BUILD_JOB_MEM_KB' && echo noted || echo "GOT: $(_malf_cap_note "malf build" 2097152 "$wd_cap" MALF_BUILD_JOB_MEM_KB 2>&1)")"
 check "a largest process under the cap, or an unmeasured one, prints nothing" \
       "[] []" "[$(_malf_cap_note "malf build" 500000 "$wd_cap" MALF_BUILD_JOB_MEM_KB 2>&1)] [$(_malf_cap_note "malf build" "" "$wd_cap" MALF_BUILD_JOB_MEM_KB 2>&1)]"
 rm -rf "$wd_tmp"

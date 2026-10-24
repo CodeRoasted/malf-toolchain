@@ -111,15 +111,22 @@ MALF_SOURCE_MEM_LIMIT_KB="${MALF_SOURCE_MEM_LIMIT_KB:-4194304}"
 # (`_malf_width`): width = max(1, min(cores, floor((MemAvailable − reserve) / cap))). The three
 # figures below are KiB, each a MEASUREMENT AT A COORDINATE, and each ages as translation units
 # grow — which is why a build says so when its largest process exceeds its cap (`_malf_cap_note`).
-#   cap, a build job — 1.1 GiB. Measured over the heaviest first-party closure on the shipping
-#     compiler at -j16: the heaviest translation unit peaked at 1 086 MiB (the median 301 MiB), and
-#     the whole build at 7.78 GiB.
+#   cap, a build job — 1.2 GiB. Measured 2026-10-24 on the shipping compiler (gcc-16, the
+#     linux-gcc16-release profile), every cc1plus of a from-clean build of insight-canon,
+#     insight-metalog, insight-eidos and logcraft/core sampled for its VmHWM: 1 846 translation
+#     units, median 334 MiB, 99th percentile 911 MiB, maximum 1 159 MiB (insight-metalog's
+#     serialize.cpp; insight-eidos's heaviest, change_report_serialize.cpp, 1 137 MiB). No linker
+#     or other process of those builds peaked higher. The release seat's own step 0 run 40070362161
+#     noted 1 160 MiB for the same unit. The cap is that maximum plus 6 %; the 1.1 GiB it replaces
+#     (a 1 086 MiB peak, measured earlier) had six compiles of three units above it.
 #   cap, a sanitizer build job — 3 GiB. Under instrumentation the clang frontend's module
 #     instantiation costs about 3 GB a translation unit (see `_malf_build_width`).
-#   reserve — 2 GiB. MemAvailable already excludes what is resident, so this is only the headroom
-#     for what OTHER processes grow by while the fan-out runs. It is also the largest round figure
-#     that leaves an idle 16-core, 23.5 GiB machine its 16 jobs: with about 20 GiB available, 16
-#     jobs of 1.1 GiB fit under any reserve up to about 2.4 GiB.
+#   reserve — 2 GiB. The memory operand already excludes what is held, so this is the headroom for
+#     what grows while the fan-out runs beside the compilers — conan's Python, ninja, cmake, the
+#     linker, none above the largest cc1plus — and the page cache the compilers read from, which
+#     the memory operand counts as reclaimable: logcraft/core's gcc tree alone holds 211 MiB of
+#     module interface files. Re-checked 2026-10-24 and kept: in the 10 GiB release seat at its
+#     idle 1 725 MiB held, it still leaves the seat 5 jobs of its 6 CPUs.
 #   cap, a lint child — 1.75 GiB. Measured over 352 translation units of eight repositories, one
 #     full `malf lint --all-files` each: the peak ADDRESS SPACE of a clang-tidy had a median of
 #     729 MiB, a 99th percentile of 1 184 MiB and a maximum of 1 376 MiB, never more than 165 MiB
@@ -130,7 +137,7 @@ MALF_SOURCE_MEM_LIMIT_KB="${MALF_SOURCE_MEM_LIMIT_KB:-4194304}"
 #     It is ENFORCED, which the build's cap is not: each clang-tidy runs under `ulimit -v` at this
 #     figure, so it bounds ADDRESS SPACE and no child can take more than the width counted it for.
 #     A translation unit that reaches it dies and is reported NOT LINTED, by name and by cause.
-MALF_BUILD_JOB_MEM_KB="${MALF_BUILD_JOB_MEM_KB:-1153434}"
+MALF_BUILD_JOB_MEM_KB="${MALF_BUILD_JOB_MEM_KB:-1258291}"
 MALF_SANITIZER_JOB_MEM_KB="${MALF_SANITIZER_JOB_MEM_KB:-3145728}"
 MALF_FANOUT_RESERVE_KB="${MALF_FANOUT_RESERVE_KB:-2097152}"
 MALF_LINT_MEM_LIMIT_KB="${MALF_LINT_MEM_LIMIT_KB:-1835008}"
@@ -1518,15 +1525,34 @@ _malf_seat_line() {   # [cgroup fs root] [proc cgroup file]
 #     Σ max(0, memory.min − memory.current). On the desk that keeps a build off memory a runner
 #     seat may reclaim at any moment; a build planned on it would be the one the kernel takes back.
 #   term 2, the caps: over this process's cgroup and every ancestor with a finite memory.max, the
-#     least memory.max − memory.current + inactive_file. Inside a seat this is the binding term:
-#     MemAvailable is the VM's, and a 10 GiB seat planning on it plans for twice its cap, with no
-#     swap, and is OOM-killed on every heavy build.
+#     least memory.max − HELD. Inside a seat this is the binding term: MemAvailable is the VM's, and
+#     a 10 GiB seat planning on it plans for twice its cap, with no swap, and is OOM-killed on every
+#     heavy build.
+#
+# HELD IS WHAT THE KERNEL CANNOT RECLAIM BEFORE IT OOM-KILLS, read from memory.stat (`_malf_cgroup_held`):
+#   anon + shmem + file_mapped + file_dirty + file_writeback + the unreclaimable kernel memory
+#   (slab_unreclaimable, kernel_stack, pagetables, sec_pagetables, percpu, sock, vmalloc).
+# Under a cgroup's memory.max the kernel reclaims page cache and reclaimable slab first and kills only
+# when what is left will not fit, so clean unmapped file cache (active_file as much as inactive_file)
+# and slab_reclaimable are AVAILABLE. With no swap (the seats' memory.swap.max is 0), anon and shmem
+# can never leave. file_mapped stays HELD although reclaimable: it is the running processes' text and
+# their mmaps, and evicting it refaults on the next touch — the release seat recorded 276 141 932
+# file refaults (workingset_refault_file, 2026-10-24). Dirty and writeback pages must reach the disk
+# before they can be dropped.
+# THE TERM IT REPLACES, memory.max − memory.current + inactive_file, counted active page cache and
+# reclaimable slab as used. Step 0 run 40070362161 then planned all 22 store-create creates it reached
+# at -j1: the seat stood at its 10 GiB cap (current 10 159 MiB, inactive_file 1 198 MiB, so 1 279 MiB
+# of headroom, at the first create), and the walk ran into the 360-minute job limit. The seat, read
+# idle after that run, held 4 098 MiB of page cache and 1 344 MiB of reclaimable slab beside 983 MiB
+# of anon.
+# A cgroup whose memory.stat cannot be read, or carries no `anon` line, counts ALL of memory.current
+# as held, and its derivation says so.
 #
 # NEVER MemTotal. One machine can host two builds at once that know nothing of each other. Off
 # MemTotal each takes its full width; the sum fits once and not twice, and the failure is swap
 # thrash, which reads as a slow build and never as a red. Off MemAvailable the build that starts
 # second sees what the first already holds: beside a -j16 build at its 7.8 GiB peak, 12.2 GiB are
-# available and the second build gets 9 jobs.
+# available and the second build gets 8 jobs.
 #
 # WHAT IT DOES NOT PROTECT, stated: two fan-outs that start within the same few seconds both read
 # the idle figure, and one sampled before the other reaches its peak sees memory the other will
@@ -1550,13 +1576,29 @@ _malf_mem_available_kib() {   # [meminfo file]
     awk '/^MemAvailable:/ {print $2; found = 1} END {exit !found}' "${1:-/proc/meminfo}" 2>/dev/null
 }
 
+# What one cgroup holds that the kernel cannot reclaim (HELD, above), in bytes, and its parts: prints
+# `<held> <anon> <shmem> <file_mapped> <dirty> <kernel>`, or nothing (non-zero) when the memory.stat
+# file cannot be read or carries no `anon` line.
+_malf_cgroup_held() {   # <memory.stat file>
+    awk '
+        { value[$1] = $2 }
+        END {
+            if (!("anon" in value)) exit 1
+            dirty = value["file_dirty"] + value["file_writeback"]
+            kernel = value["slab_unreclaimable"] + value["kernel_stack"] + value["pagetables"] \
+                + value["sec_pagetables"] + value["percpu"] + value["sock"] + value["vmalloc"]
+            held = value["anon"] + value["shmem"] + value["file_mapped"] + dirty + kernel
+            printf "%d %d %d %d %d %d\n", held, value["anon"], value["shmem"], value["file_mapped"], dirty, kernel
+        }' "$1" 2>/dev/null
+}
+
 # The memory operand, in KiB, and its derivation. Sets _MALF_MEM_KIB (empty when neither term is
 # reported) and _MALF_MEM_WHY (the terms with their operands, for the printed width line). Sets
 # globals rather than printing, so the one reading is both what is used and what is printed.
 _malf_mem_budget() {   # [meminfo file] [cgroup fs root] [proc cgroup file]
     local meminfo="${1:-/proc/meminfo}" fs="${2:-/sys/fs/cgroup}" pcg="${3:-/proc/self/cgroup}"
-    local avail="" own="" top="" seat name min cur unmet=0 term1="" term2="" path max inactive head
-    local term2_why=""
+    local avail="" own="" top="" seat name min cur unmet=0 term1="" term2="" path max head
+    local term2_why="" held_line held anon shmem mapped dirty kernel held_why
     _MALF_MEM_KIB=""; _MALF_MEM_WHY=""
     avail="$(_malf_mem_available_kib "$meminfo")" || avail=""
     own="$(_malf_cgroup_path "$pcg")" || own=""
@@ -1582,12 +1624,17 @@ _malf_mem_budget() {   # [meminfo file] [cgroup fs root] [proc cgroup file]
         if [[ "$max" =~ ^[0-9]+$ ]]; then
             cur="$(_malf_cgroup_value "$fs" "$path" memory.current)" || cur=0
             [[ "$cur" =~ ^[0-9]+$ ]] || cur=0
-            inactive="$(awk '$1 == "inactive_file" {print $2}' "$fs$path/memory.stat" 2>/dev/null)"
-            [[ "$inactive" =~ ^[0-9]+$ ]] || inactive=0
-            head=$(( max + inactive > cur ? (max - cur + inactive) / 1024 : 0 ))
+            if held_line="$(_malf_cgroup_held "$fs$path/memory.stat")"; then
+                read -r held anon shmem mapped dirty kernel <<< "$held_line"
+                held_why="held $(( held / 1048576 )) MiB (anon $(( anon / 1048576 )) + shmem $(( shmem / 1048576 )) + file_mapped $(( mapped / 1048576 )) + dirty $(( dirty / 1048576 )) + unreclaimable kernel $(( kernel / 1048576 )) MiB)"
+            else
+                held="$cur"
+                held_why="held $(( held / 1048576 )) MiB (all of memory.current: no memory.stat to read)"
+            fi
+            head=$(( max > held ? (max - held) / 1024 : 0 ))
             if [[ -z "$term2" ]] || (( head < term2 )); then
                 term2="$head"
-                term2_why="$path memory.max $(( max / 1048576 )) MiB - current $(( cur / 1048576 )) MiB + inactive_file $(( inactive / 1048576 )) MiB = $(( head / 1024 )) MiB"
+                term2_why="$path memory.max $(( max / 1048576 )) MiB - $held_why = $(( head / 1024 )) MiB"
             fi
         fi
         path="${path%/*}"
