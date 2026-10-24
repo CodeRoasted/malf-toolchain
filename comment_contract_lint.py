@@ -31,6 +31,13 @@ key was ripped rather than defaulted: any file this checker is handed is judged,
 is printed with its site, and one violation anywhere reds the run. A repo that starts outside the
 grammar is migrated by OPS-8 before it lands; there is no report-only window to land it into.
 
+ONE CODE RULE RIDES THIS PHASE: the self-compare assertion (RUL-206). `EXPECT_EQ(count, count)` is a
+contract claim that cannot fail, and this phase is the one place every commit already judges every
+C++ source a change touches (Pharos's `cpp_format`), at the edit (`./pharos judge-comments`) and over
+every armed repository at step 0 — so the rule is a violation class here, printed and fixed like the
+others, rather than a second walk. It is the near-exact form only, and its blind side is declared
+beside it (`self_compares`): it never sees an operand compared with what it was computed from.
+
 WHAT IT DELIBERATELY DOES NOT DO. It checks the FORM of a `refs:` address, never its RESOLUTION
 — that is `scripts/registry_grammar_lint.py`'s (G4, G5, G7, the LSRC arm), and one source per rule
 (ADR-6.D14). It does not check WHERE a tag sits (a `pre:` at a declaration versus in a body) —
@@ -108,7 +115,7 @@ NAMED_PARAM_COMMENT = re.compile(r"^/\*[A-Za-z_]\w*\*/$")
 VIOLATION_CLASSES = (
     "bare", "tag-mid-line", "slash3", "spacer", "ruler", "trailing", "trailing-nolint",
     "nolint-unscoped", "suppression-without-why", "empty-claim", "refs-prose", "note-run", "block-prose",
-    "law-malformed",
+    "law-malformed", "self-compare",
 )
 CONTRACT_TAGS = ("pre", "post", "invariant", "assert")
 FORM_CLASSES = TAGS + ("continuation", "law", "tool")
@@ -143,6 +150,8 @@ REMEDY: dict[str, str] = {
                    "framed D-LSRC-n law block)",
     "law-malformed": "frame a law block as /* plus 20 or more stars, a `D-LSRC-n — title` line, the "
                      "body, then 20 or more stars plus */, each on its own line",
+    "self-compare": "the assertion compares an expression with itself and cannot fail: compare the "
+                    "value under test against an independently stated expectation, or delete it",
 }
 # The line printed after every violation: two spaces, then `fix: ` and the class's REMEDY. Readers
 # match it at the start of the line, as they match the violation line above it.
@@ -186,7 +195,15 @@ def _skip_quoted(text: str, pos: int, quote: str) -> int:
 
 
 def scan_comments(text: str) -> list[Comment]:
+    return scan(text)[0]
+
+
+def scan(text: str) -> tuple[list[Comment], list[tuple[int, int, bool]]]:
+    """The comments, and every span of the text that is not code — each comment and each string or
+    character literal — as `(start, end, is_literal)`, so a code rule reads the same text the grammar
+    reads with nothing quoted or commented counted as code."""
     comments: list[Comment] = []
+    spans: list[tuple[int, int, bool]] = []
     pos, line, line_start = 0, 1, 0
     while True:
         match = INTEREST.search(text, pos)
@@ -209,12 +226,14 @@ def scan_comments(text: str) -> list[Comment]:
                 if newlines:
                     line += newlines
                     line_start = text.rfind("\n", start, end) + 1
+                spans.append((back, end, True))
                 pos = end
                 continue
             pos = start + 1  # an identifier ending in R, then a plain string: re-scan at the quote
             continue
         if tok == '"':
             pos = _skip_quoted(text, match.end(), '"')
+            spans.append((start, pos, True))
             continue
         if tok == "'":
             prev = text[start - 1] if start > 0 else ""
@@ -223,12 +242,14 @@ def scan_comments(text: str) -> list[Comment]:
                 pos = match.end()  # a digit separator: 1'000'000, 0xFF'FF
                 continue
             pos = _skip_quoted(text, match.end(), "'")
+            spans.append((start, pos, True))
             continue
         if tok == "//":
             end = text.find("\n", match.end())
             end = len(text) if end < 0 else end
             comments.append(Comment("line", line, start - line_start + 1,
                                     [text[start:end]], text[line_start:start]))
+            spans.append((start, end, False))
             pos = end
             continue
         # "/*"
@@ -239,12 +260,13 @@ def scan_comments(text: str) -> list[Comment]:
         after_end = len(text) if after_end < 0 else after_end
         comments.append(Comment("block", line, start - line_start + 1, raw.split("\n"),
                                 text[line_start:start], text[end:after_end]))
+        spans.append((start, end, False))
         newlines = raw.count("\n")
         if newlines:
             line += newlines
             line_start = start + raw.rfind("\n") + 1
         pos = end
-    return comments
+    return comments, spans
 
 
 # ── the grammar ───────────────────────────────────────────────────────────────────────────────
@@ -366,6 +388,86 @@ def classify(comments: list[Comment]) -> list[Finding]:
     return findings
 
 
+# ── the one code rule: a self-compare assertion (RUL-206) ─────────────────────────────────────
+# `EXPECT_EQ(count, count)` cannot fail, so a test that rests on it proves nothing while reading as
+# coverage. The rule is the NEAR-EXACT form only: one of the four gtest comparisons that PASS on an
+# operand equal to itself (EQ, LE, GE, STREQ — NE, LT and GT fail on it, so they are not vacuous),
+# under EXPECT_ or ASSERT_, whose argument list splits at top level into exactly two operands that
+# are equal once whitespace is removed and contain no `(`. The `(` exclusion is the one false
+# positive the census found, kept out by construction: a call can differ between two evaluations,
+# and `hash(seed)` compared with `hash(seed)` is how a determinism test asserts that it does not.
+# Measured 2026-10-24 over the walked C++ of every armed repository: zero sites.
+#
+# WHAT IT DOES NOT SEE, declared rather than implied. It compares TEXT at one site, so it is blind
+# to an operand compared with what it was computed from (`auto copy = count; EXPECT_EQ(copy,
+# count);`), to an alias, to a macro that expands to a self-compare, and to any call-bearing form,
+# vacuous or not. Those belong to the report-only census RUL-206 sends to the recurring audit.
+#
+# It reads the post-format text the grammar reads, with every comment and literal blanked, so a
+# claim that quotes the shape (`// note: EXPECT_EQ(count, count) ...`) or a fixture string never
+# fires.
+SELF_COMPARE_MACRO = re.compile(r"(?<![\w])(?:EXPECT|ASSERT)_(?:EQ|LE|GE|STREQ)\s*\(")
+OPENERS, CLOSERS = "([{", ")]}"
+
+
+def code_only(text: str, spans: list[tuple[int, int, bool]]) -> str:
+    chars = list(text)
+    for start, end, _literal in spans:
+        for index in range(start, min(end, len(chars))):
+            if chars[index] != "\n":
+                chars[index] = " "
+    return "".join(chars)
+
+
+def _operands(code: str, pos: int) -> tuple[list[tuple[int, int]], int] | None:
+    """The top-level comma-separated operands from `pos` (just past the opening parenthesis) to its
+    matching close, as `(start, end)` offsets, and the offset past that close; None when the list
+    never closes. Structure is read on the blanked code, so a `,` or `)` in a literal splits nothing."""
+    depth, start, operands = 0, pos, []
+    for index in range(pos, len(code)):
+        char = code[index]
+        if char in OPENERS:
+            depth += 1
+        elif char in CLOSERS:
+            if depth == 0:
+                operands.append((start, index))
+                return operands, index + 1
+            depth -= 1
+        elif char == "," and depth == 0:
+            operands.append((start, index))
+            start = index + 1
+    return None
+
+
+def self_compares(text: str, spans: list[tuple[int, int, bool]]) -> list[Finding]:
+    code = code_only(text, spans)
+    # An operand's identity is its code without whitespace PLUS every literal byte for byte: a
+    # blanked literal would make `prefix + "a"` and `prefix + "b"` one operand, and stripping the
+    # space inside `"a b"` would make it equal to `"ab"`.
+    literal = bytearray(len(text))
+    for start, end, is_literal in spans:
+        if is_literal:
+            literal[start:end] = b"\x01" * (min(end, len(text)) - start)
+
+    def identity(start: int, end: int) -> str:
+        return "".join(text[index] for index in range(start, end)
+                       if literal[index] or not code[index].isspace())
+
+    findings: list[Finding] = []
+    for match in SELF_COMPARE_MACRO.finditer(code):
+        parsed = _operands(code, match.end())
+        if parsed is None or len(parsed[0]) != 2:
+            continue
+        left, right = (identity(*operand) for operand in parsed[0])
+        if not left or left != right or "(" in code[parsed[0][0][0]:parsed[0][0][1]]:
+            continue
+        line = code.count("\n", 0, match.start()) + 1
+        col = match.start() - (code.rfind("\n", 0, match.start()) + 1) + 1
+        findings.append(Finding(line, col, "self-compare", " ".join(text[match.start():parsed[1]].split()),
+                                True))
+    return findings
+
+
 # ── reading a file, pre- or post-format ───────────────────────────────────────────────────────
 # The text arrives on stdin and `--assume-filename` names where it sits, so clang-format's `-style=file`
 # search runs upward from that path whether or not a file exists there. Measured 2026-10-09 over the
@@ -414,9 +516,10 @@ def judge_text(data: bytes, assume_filename: Path, format_via: str | None, style
             return result
     else:
         text = data.decode("utf-8", "replace")
-    comments = scan_comments(text)
+    comments, spans = scan(text)
     result.comment_lines = sum(len(c.lines) for c in comments)
-    result.findings = classify(comments)
+    result.findings = sorted(classify(comments) + self_compares(text, spans),
+                             key=lambda finding: (finding.line, finding.col))
     return result
 
 
@@ -559,6 +662,35 @@ VIOLATION_FIXTURES: dict[str, str] = {
     "note-run": "int x;\n// note: one line is the whole budget\n// note: and a second line is a doc paragraph\n",
     "block-prose": "int x;\n/* a block of prose\n   over two lines */\n",
     "law-malformed": "int x;\n/**************************\nnot a D-LSRC title line\n**************************/\n",
+    "self-compare": "TEST(Demo, Vacuous)\n{\n    const int count = 3;\n    EXPECT_EQ(count, count);\n}\n",
+    "self-compare (whitespace is not a difference, and ASSERT_STREQ is in the family)":
+        "TEST(Demo, Vacuous)\n{\n    ASSERT_STREQ(name . c_str , name.c_str);\n}\n",
+    "self-compare (an identical literal operand is the same operand)":
+        "TEST(Demo, Vacuous)\n{\n    EXPECT_EQ(prefix + \"a b\", prefix+\"a b\");\n}\n",
+    "self-compare (a subscript and a member access are call-free)":
+        "TEST(Demo, Vacuous)\n{\n    EXPECT_GE(rows[2].width, rows[2] . width) << \"message\";\n}\n",
+}
+
+# THE GREEN SIDE OF THE SELF-COMPARE RULE: each source below holds zero violations. A call on both
+# sides is never judged (the salted-hash shape, `hash(seed)` twice, is a determinism assertion that
+# can fail); two different operands are the ordinary assertion; a self-compare inside a comment
+# claim or a string literal is not code; a family member outside EQ/LE/GE/STREQ fails on itself
+# rather than passing, so it is not vacuous; a prefixed macro is not gtest's.
+SELF_COMPARE_GREEN: dict[str, str] = {
+    "a call on both sides, f(x) against f(x)": "TEST(Demo, Call)\n{\n    EXPECT_EQ(f(x), f(x));\n}\n",
+    "two different operands, a against b": "TEST(Demo, Plain)\n{\n    EXPECT_EQ(a, b);\n}\n",
+    "inside a comment claim and a string literal":
+        "// note: EXPECT_EQ(count, count) is the shape the gate refuses.\n"
+        "const char* text = \"EXPECT_EQ(count, count)\";\n",
+    "EXPECT_NE and EXPECT_LT on one operand fail rather than pass":
+        "TEST(Demo, Red)\n{\n    EXPECT_NE(count, count);\n    EXPECT_LT(count, count);\n}\n",
+    "operands that differ only inside a literal, or by a space inside one":
+        "TEST(Demo, Literal)\n{\n    EXPECT_EQ(prefix + \"a\", prefix + \"b\");\n    EXPECT_EQ(prefix + \"a b\", prefix + \"ab\");\n}\n",
+    "a comma and a parenthesis inside a literal split nothing":
+        "TEST(Demo, Quoted)\n{\n    EXPECT_EQ(label, \"label, label)\");\n}\n",
+    "a prefixed macro is not gtest's": "TEST(Demo, Other)\n{\n    MY_EXPECT_EQ(count, count);\n}\n",
+    "an argument list that does not split into two is not judged":
+        "TEST(Demo, Template)\n{\n    EXPECT_EQ(std::pair<int, int>{1, 2}, std::pair<int, int>{1, 2});\n}\n",
 }
 
 
@@ -603,6 +735,19 @@ def selftest(format_via: str | None) -> int:
             [res] = check_files([fixture], None, "", None)
             got = sorted({f.klass for f in res.findings if f.is_violation})
             check(f"violation class fires: {label}", [klass], got)
+
+        for label, source in SELF_COMPARE_GREEN.items():
+            fixture = repo / "src" / f"green_{len(label)}.cpp"
+            fixture.write_text(source)
+            [res] = check_files([fixture], None, "", None)
+            check(f"self-compare stays silent: {label}", [],
+                  [(f.klass, f.text) for f in res.findings if f.is_violation])
+        located = repo / "src" / "located.cpp"
+        located.write_text(VIOLATION_FIXTURES["self-compare"])
+        [res] = check_files([located], None, "", None)
+        check("self-compare names its site and the assertion as written",
+              [(4, 5, "EXPECT_EQ(count, count)")],
+              [(f.line, f.col, f.text) for f in res.findings if f.is_violation])
 
         check("REMEDY holds one fix text for every violation class and for nothing else",
               sorted(VIOLATION_CLASSES), sorted(REMEDY))
