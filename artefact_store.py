@@ -1907,7 +1907,7 @@ def verdict_record(store: Path, build_key: str, package: str, package_id: str, p
     if undeclared or defects:
         print(f"artefact_store: SKIP RED {package}: " + "; ".join(undeclared + defects))
     document = {"step": {"kind": "test-verdict", "package": package, "profile": profile},
-                "build": build_key, "selection": selection_member(malf_dir)}
+                "build": build_key, "selection": selection_member(malf_dir), "system": system_member()}
     scratch = Path(tempfile.mkdtemp(prefix="artefact_store."))
     log = scratch / "results.tar"
     with tarfile.open(log, "w") as bundle:
@@ -1974,7 +1974,7 @@ def corpus_record(store: Path, build_key: str, package: str, package_id: str, pr
     selection.update({"labels": ["-L", "corpus"],
                       "legs": [{"leg": leg["leg"], "suites": sorted(leg["suites"])} for leg in legs]})
     document = {"step": {"kind": "test-verdict", "package": package, "profile": profile},
-                "build": build_key, "selection": selection, "data": document_in["data"]}
+                "build": build_key, "selection": selection, "data": document_in["data"], "system": system_member()}
     verdict = "pass" if rows and all(row[2] == "passed" for row in rows) else "fail"
     scratch = Path(tempfile.mkdtemp(prefix="artefact_store."))
     log = scratch / "corpus.tar"
@@ -2097,8 +2097,10 @@ def bench_record(store: Path, build_key: str, package: str, package_id: str, pro
 # the walk writes (its package, its test verdict, its corpus and bench verdicts) was stored or matched,
 # so its existence says the step COMPLETED and its `records` name each of them by key. Its key is what
 # those records' keys add to the build key that the walk can know BEFORE the step runs: the corpus
-# legs and data the corpus gates document hands this package, and, for a package the bench document
-# names, the runner and the image its benchmarks would measure on. A step that failed, was refused,
+# legs and data the corpus gates document hands this package, for a package the bench document names
+# the runner its benchmarks would measure on, and the system member, the pinned image the step runs in,
+# carried by the outcome itself because a `stored: false` step holds no record at its build key
+# (DN-142.D14, DN-142.D30 E4). A step that failed, was refused,
 # crashed, timed out or judged nothing writes none (R6), so nothing of it can ever be served.
 OUTCOME_KIND = "step-outcome"
 OUTCOME_OUTPUT = "outcome"
@@ -2116,8 +2118,7 @@ def outcome_document(build_key: str, package: str, profile: str, corpus_gates: P
     bench_path = os.environ.get(BENCH_ENV)
     benched = bool(bench_path) and package in json.loads(Path(bench_path).read_text()).get("packages", [])
     return {"step": {"kind": OUTCOME_KIND, "package": package, "profile": profile}, "build": build_key,
-            "corpus": corpus,
-            "bench": {"runner": bench_runner(), "system": system_member()} if benched else None}
+            "corpus": corpus, "bench": {"runner": bench_runner()} if benched else None, "system": system_member()}
 
 
 def _record_verdict(record: dict) -> str:
@@ -3482,6 +3483,35 @@ def selftest() -> int:
         code, printed = served(root / "walk-absent")
         expect("RED: an outcome naming a record the store no longer holds is never served",
                (code, "its verdict record is absent from the store" in printed), (SERVE_MISS, True))
+
+        # THE SYSTEM READING OVER WHAT THE WRITERS STORE (DN-142.D30 E4): the manifest's reading runs on the
+        # records verdict_record and outcome_record write, at a build key the store holds no record for, as a
+        # `stored: false` step's is (DN-142.D14). Step 0 run 40203426790's B6 refused 34 outcomes and
+        # insight_twin's verdict, read only against hand-written fixtures until then.
+        import store_manifest
+
+        ystore, yresults, unheld = root / "system-store", root / "system-results", "4" * 64
+        (yresults / "ex_low").mkdir(parents=True)
+        (yresults / "ex_low" / "pid.xml").write_text(
+            '<testsuites><testsuite name="S"><testcase classname="S" name="passes"/></testsuite></testsuites>')
+        (root / "tally").write_text("counted 0\n")
+        saved = os.environ.get(TALLY_ENV)
+        os.environ[TALLY_ENV] = str(root / "tally")
+        ykeys: dict = {}
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                written = (verdict_record(ystore, unheld, "ex_low", "pid", profile, malf_dir, yresults, {}, [], ykeys),
+                           outcome_record(ystore, unheld, "ex_low", profile, None, ykeys))
+        finally:
+            os.environ.pop(TALLY_ENV, None)
+            if saved is not None:
+                os.environ[TALLY_ENV] = saved
+        ysteps = {"ex_low/verdict": {"key": ykeys.get("verdict")},
+                  "ex_low/outcome": {"key": key_of(outcome_document(unheld, "ex_low", profile, None))}}
+        expect("RED-FIRST (DN-142.D30 E4, step 0 run 40203426790): a test verdict and a step outcome each carry "
+               "the pinned system member themselves, so the manifest's reading passes them with no record held "
+               "at their build key",
+               (written, store_manifest.system_findings(ystore, ysteps, store_manifest.pinned_system())), ((0, 0), []))
 
     if outside is None:
         os.environ.pop(SYSTEM_ENV, None)

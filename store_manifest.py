@@ -343,11 +343,12 @@ def pinned_system() -> dict:
 
 def system_findings(store: Path, steps: dict[str, dict], pinned: dict) -> list[str]:
     """THE SYSTEM READING (DN-142.D30 E4, (11) R22): every record the step-0 run lists carries `pinned`, the
-    build environment's `{image: <config digest>}`; or names the keyed parent record that carries it (a test
-    verdict its `build`, an image each executable's `record`); or, produced outside the writer's domain, names
-    its seat and its dated exception (an ingestion, DN-142.D7, DN-142.D20 (2)). Another ID, the retired `host`
-    attestation, an empty or null member and a record naming neither are each a finding, so a host-built
-    binary never shares a key with an image-built one."""
+    build environment's `{image: <config digest>}`; or names the keyed parent record that carries it (an image,
+    each executable's `record`); or, produced outside the writer's domain, names its seat and its dated
+    exception (an ingestion, DN-142.D7, DN-142.D20 (2)). A test verdict and a step outcome carry the member
+    themselves: a `stored: false` step holds no record at their `build` key (DN-142.D14). Another ID, the
+    retired `host` attestation, an empty or null member and a record naming neither are each a finding, so a
+    host-built binary never shares a key with an image-built one."""
     def held(key: object) -> dict | None:
         path = store / "records" / f"{key}.json"
         return json.loads(path.read_text()) if isinstance(key, str) and path.is_file() else None
@@ -372,8 +373,7 @@ def system_findings(store: Path, steps: dict[str, dict], pinned: dict) -> list[s
                                 f"its dated exception, and it names {output.get('seat')!r} and "
                                 f"{output.get('exception')!r} (DN-142.D7)")
             continue
-        named = ([inputs.get("build")] if kind == "test-verdict" else
-                 [row.get("record") for row in inputs.get("executables") or []] if kind == "image" else [])
+        named = [row.get("record") for row in inputs.get("executables") or []] if kind == "image" else []
         parents = [parent for parent in named if parent]
         if not parents:
             findings.append(f"{step_id}: its {kind} record carries no system member and names no keyed parent "
@@ -820,9 +820,12 @@ def _fixture(root: Path) -> tuple[Path, bytes, dict, dict[str, Path]]:
                   {"package": {"content": content, "entries": entries, "transport": transport,
                                "build_ids": build_ids}})
         steps.append({"id": f"{name}/package", "key": key, "verdict": None})
-        verdict = put({"step": {"kind": "test-verdict", "package": name}, "build": key},
+        verdict = put({"step": {"kind": "test-verdict", "package": name}, "build": key, "system": system},
                       {"verdict": {"verdict": "pass", "judged": {name: content}}})
         steps.append({"id": f"{name}/verdict", "key": verdict, "verdict": "pass"})
+        outcome = put({"step": {"kind": "step-outcome", "package": name}, "build": key, "system": system},
+                      {"outcome": {"verdict": "pass", "records": {"package": key, "verdict": verdict}}})
+        steps.append({"id": f"{name}/outcome", "key": outcome, "verdict": "pass"})
 
     package("pub_lib", {"include/a.h": ("file", b"int a;\n")}, {})
     package("priv_tools", {"bin/tool": ("executable", b"\x7fELF tool bytes"),
@@ -1309,12 +1312,13 @@ def selftest() -> int:
             ("RED-FIRST (DN-142.D30 (11) R22): a tracked record carrying no member and naming no parent is refused",
              "priv_tools/tracked", lambda body: body["inputs"].pop("system"),
              "priv_tools/tracked: its tracked record carries no system member and names no keyed parent"),
-            ("RED-FIRST (DN-142.D30 (11) R22): a test verdict naming no keyed parent is refused",
-             "pub_lib/verdict", lambda body: body["inputs"].pop("build"),
+            ("RED-FIRST (DN-142.D30 E4, step 0 run 40203426790): a test verdict carrying no member is refused, "
+             "though its build key names a held package record: a `stored: false` step holds none",
+             "pub_lib/verdict", lambda body: body["inputs"].pop("system"),
              "pub_lib/verdict: its test-verdict record carries no system member and names no keyed parent"),
-            ("RED-FIRST (DN-142.D30 (11) R22): a test verdict whose parent attests another ID is refused",
-             "pub_lib/verdict", lambda body: body["inputs"].update(build="9" * 64),
-             f"pub_lib/verdict: its test-verdict record names the keyed parent {'9' * 64}, which the store does not hold"),
+            ("RED-FIRST (DN-142.D30 E4, step 0 run 40203426790): a step outcome carrying no member is refused",
+             "pub_lib/outcome", lambda body: body["inputs"].pop("system"),
+             "pub_lib/outcome: its step-outcome record carries no system member and names no keyed parent"),
             ("RED-FIRST (DN-142.D30 (11) R22): an image naming no executable's record is refused",
              "srv-image/image", lambda body: body["inputs"].update(executables=[]),
              "srv-image/image: its image record carries no system member and names no keyed parent"),

@@ -3284,7 +3284,7 @@ print(json.dumps({"data": {"rt_role": "0" * 64}, "packages": {"rt_probe": [
 }
 rc_verdict() {   # -> `<verdict> <outcome>...` of the corpus record artefact_store keeps from the last create
     rm -rf "$tp_tmp/cstore"
-    python3 -c 'import json, sys
+    MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 -c 'import json, sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 import artefact_store as store
@@ -6082,7 +6082,7 @@ check "a test_package skip is a red even when a row names the test" \
 mkdir -p "$sk_tmp/res/sk_pkg"; cp "$sk_tmp/skip.xml" "$sk_tmp/res/sk_pkg/da39a3ee5e6b4b0d3255bfef95601890afd80709.xml"
 check "the stored test verdict over an undeclared skip is fail, and over a declared one pass with the row kept as excused" \
       "fail [] pass [['build', 'Suite.Skips', 'skipped']]" \
-      "$(python3 -c 'import json, sys
+      "$(MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 -c 'import json, sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 import artefact_store as store
