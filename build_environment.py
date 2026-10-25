@@ -217,13 +217,18 @@ def daemon_store(docker: str) -> str:
 
 
 def inspected(docker: str, reference: str) -> tuple[str, str] | None:
-    """(the ID, the `config.digest` annotation) the daemon reports for `reference`, None when it holds none."""
-    done = _docker(docker, "image", "inspect", "--format", '{{.Id}}|{{index .Descriptor.annotations "config.digest"}}',
-                   reference)
+    """(the ID, the `config.digest` annotation, empty when its descriptor carries none) the daemon reports
+    for `reference`, None when it holds none. raises Refused when the daemon answers what is not one image."""
+    # note: read whole and parsed here: a registry-pulled index carries no `annotations`, and a template naming it exits 1.
+    done = _docker(docker, "image", "inspect", reference)
     if done.returncode != 0:
         return None
-    image_id, _sep, config = done.stdout.strip().partition("|")
-    return image_id, ("" if config == "<no value>" else config)
+    try:
+        [image] = json.loads(done.stdout)
+        annotations = (image.get("Descriptor") or {}).get("annotations") or {}
+        return str(image["Id"]), str(annotations.get("config.digest", ""))
+    except (ValueError, TypeError, KeyError, AttributeError) as unread:
+        raise Refused(f"`docker image inspect {reference}` answered no single image: {unread!r}") from unread
 
 
 def check(pin: Pin, docker: str) -> None:
@@ -718,7 +723,10 @@ def run_probe(docker: str, image: str, argv: list[str], stdin: Path, capture: Pa
     """`argv` in the probe image, `stdin`'s bytes on its stdin; `capture` receives `{image, code, stdout,
     stderr}`. post: exit 0 the probe ran (its own exit is in the capture), UNJUDGED when the image could not
     be held as its digest (no capture is written)."""
-    held = probe_held(docker, image)
+    try:
+        held = probe_held(docker, image)
+    except Refused as refused:
+        held = str(refused)
     if held is not None:
         print(f"build_environment: UNJUDGED — {held}; the probe did not run (DN-142.D30 (11) R21)", file=sys.stderr)
         return UNJUDGED
@@ -1164,6 +1172,12 @@ exit 64
 """
 
 
+def _registry_answer(image_id: str) -> str:
+    """`docker image inspect`'s answer for an image pulled from a registry: an index descriptor, no annotations."""
+    return json.dumps([{"Id": image_id, "Descriptor": {"mediaType": "application/vnd.oci.image.index.v1+json",
+                                                        "digest": image_id, "size": 6688}}]) + "\n"
+
+
 def _probe_arms(arm, base: Path) -> None:
     """The probe (DN-142.D30 (11) R21) over a fake daemon: pulled by digest and verified or unjudged, its
     stdin streamed whole, its exit and streams captured, its container holding no mount and no network."""
@@ -1184,7 +1198,7 @@ def _probe_arms(arm, base: Path) -> None:
         return (code, json.loads(capture.read_text()) if capture.is_file() else None, (state / "argv").is_file(),
                 (state / "pulled").is_file())
 
-    (state / "held").write_text(f"{digest}|\n")
+    (state / "held").write_text(_registry_answer(digest))
     arm("a probe image the daemon holds as its digest runs, its stdin streamed whole, its exit and both streams "
         "captured, nothing pulled",
         (ran(), (state / "stdin").read_bytes() == stdin.read_bytes()),
@@ -1192,13 +1206,23 @@ def _probe_arms(arm, base: Path) -> None:
     (state / "held").unlink()
     arm("RED: a probe image the daemon lacks and cannot pull is UNJUDGED: nothing runs, nothing is captured",
         ran(), (UNJUDGED, None, False, True))
-    (state / "pullable").write_text("sha256:" + "6" * 64 + "|\n")
+    (state / "pullable").write_text(_registry_answer("sha256:" + "6" * 64))
     arm("RED: a probe image pulled under another ID than its digest is UNJUDGED, never run",
         (ran(), (state / "pulled").read_text().split()), ((UNJUDGED, None, False, True), ["pull", "--quiet", image]))
     (state / "held").unlink()
-    (state / "pullable").write_text(f"{digest}|\n")
+    (state / "pullable").write_text(_registry_answer(digest))
     arm("a probe image the daemon lacks is pulled by its digest, verified, then run",
         ran()[0::2], (0, True))
+    (state / "held").write_text("not json\n")
+
+    def refused_held() -> str:
+        try:
+            return probe_held(str(docker), image) or ""
+        except Refused as refused:
+            return str(refused)
+
+    arm("RED: a daemon answer that is not one image is UNJUDGED, never read as an absent image and pulled",
+        (ran(), "answered no single image" in refused_held()), ((UNJUDGED, None, False, False), True))
     arm("RED: a probe image named by a tag alone is UNJUDGED before any pull",
         (run_probe(str(docker), "ubuntu:24.04", ["true"], stdin, capture), probe_held(str(docker), "ubuntu:24.04")),
         (UNJUDGED, "the probe image 'ubuntu:24.04' is not pinned by digest (<ref>@sha256:<64 hex>)"))
@@ -1209,6 +1233,56 @@ def _probe_arms(arm, base: Path) -> None:
          [argv[at + 1].split(":")[0] for at, word in enumerate(argv) if word == "--tmpfs"],
          argv[argv.index(image):]),
         ([], "none", True, True, ["/tmp", PROBE_WORK], [image, "sh", "-c", "true"]))
+
+
+def _annotationless_archive(path: Path) -> str:
+    """An OCI archive at `path` whose index entry carries no annotations, the descriptor shape a registry
+    pull leaves on the containerd store; returns its manifest digest."""
+    def digest_of(data: bytes) -> str:
+        return "sha256:" + hashlib.sha256(data).hexdigest()
+
+    layer_bytes = io.BytesIO()
+    with tarfile.open(fileobj=layer_bytes, mode="w", format=tarfile.USTAR_FORMAT) as layer_tar:
+        payload = b"annotation-less\n"
+        member = tarfile.TarInfo("marker")
+        member.size = len(payload)
+        layer_tar.addfile(member, io.BytesIO(payload))
+    layer = layer_bytes.getvalue()
+    config = json.dumps({"architecture": "amd64", "os": "linux", "config": {},
+                         "rootfs": {"type": "layers", "diff_ids": [digest_of(layer)]}}, sort_keys=True).encode()
+    manifest = json.dumps({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                           "config": {"mediaType": "application/vnd.oci.image.config.v1+json",
+                                      "digest": digest_of(config), "size": len(config)},
+                           "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar",
+                                       "digest": digest_of(layer), "size": len(layer)}]}, sort_keys=True).encode()
+    index = json.dumps({"schemaVersion": 2, "manifests": [{"mediaType": "application/vnd.oci.image.manifest.v1+json",
+                                                           "digest": digest_of(manifest),
+                                                           "size": len(manifest)}]}).encode()
+    entries = [("oci-layout", b'{"imageLayoutVersion":"1.0.0"}'), ("index.json", index),
+               *((f"blobs/sha256/{digest_of(blob)[len('sha256:'):]}", blob) for blob in (layer, config, manifest))]
+    with tarfile.open(path, "w", format=tarfile.USTAR_FORMAT) as archive:
+        for name, data in entries:
+            member = tarfile.TarInfo(name)
+            member.size = len(data)
+            archive.addfile(member, io.BytesIO(data))
+    return digest_of(manifest)
+
+
+def _registry_shape_arms(arm, base: Path, docker: str) -> None:
+    """The real daemon's answer for an image whose descriptor carries no annotations (every registry pull of an
+    index): held as its digest, never read as absent (step 0 run 40129928602's B2)."""
+    digest = _annotationless_archive(base / "annotationless.tar")
+    reference = f"malf-build-environment-registry-shape:{os.getpid()}"
+    loaded = _docker(docker, "load", "--quiet", "--input", str(base / "annotationless.tar"))
+    tagged = _docker(docker, "tag", digest, reference)
+    try:
+        arm("RED: an image whose descriptor carries no annotations is held as its digest, with no config digest, "
+            "and a probe naming it by digest finds it held",
+            (loaded.returncode, tagged.returncode, inspected(docker, digest),
+             probe_held(docker, f"{reference.partition(':')[0]}@{digest}")),
+            (0, 0, (digest, ""), None))
+    finally:
+        _docker(docker, "rmi", "--force", reference, digest)
 
 
 def _act_user_arms(arm, pin: Pin, mount: Path, docker: str) -> None:
@@ -1456,6 +1530,7 @@ def selftest() -> int:
         finally:
             subprocess.run([docker, "rmi", "--force", pin.id], capture_output=True, check=False)
         _backend_arms(arm, refusal, base, docker)
+        _registry_shape_arms(arm, base, docker)
     print(f"build_environment selftest: {passed} passed, {failed} failed")
     return 1 if failed else 0
 
