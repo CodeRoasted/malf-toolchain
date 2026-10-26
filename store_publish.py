@@ -77,6 +77,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -93,6 +94,11 @@ CANDIDATE = re.compile(r"^candidate/[0-9]+\.[0-9]+\.[0-9]+/[0-9a-f]{16}$")
 REHEARSAL_TOKEN_ENV = "MALF_STORE_REHEARSAL_TOKEN_FILE"
 # One page of the Releases listing: a page this full cannot prove a candidate's draft is absent.
 RELEASES_PAGE = 100
+# The listing trails a create: measured on CodeRoasted/logcraft 2026-10-26, a draft created by an exit-0
+# `gh release create` was absent from the listing read 0.7 s later and present at 2.5 s. The rehearsal
+# reads the listing up to REHEARSAL_READS times, REHEARSAL_READ_SECONDS apart, before it refuses.
+REHEARSAL_READS = 30
+REHEARSAL_READ_SECONDS = 2
 GH_TIMEOUT_SECONDS = 900
 # `gh` as the rehearsal runs it: argv after `gh` -> (exit code, stdout, stderr).
 Gh = Callable[[list[str]], "tuple[int, str, str]"]
@@ -339,22 +345,55 @@ def _named(gh: Gh, repo_path: str, candidate: str) -> list[dict]:
     return [row for row in listed if row.get("tag_name") == candidate]
 
 
-def _delete(gh: Gh, repo_path: str, release_id: object) -> None:
+def _delete(gh: Gh, repo_path: str, release_id: object, sleep: Callable[[float], None]) -> None:
+    """The draft deleted, then read by its id until the forge answers 404: the listing trails a delete
+    as it trails a create, so absence is read where it is authoritative. A DELETE answered 404 is a
+    draft already gone, which the reading confirms."""
     code, out, err = gh(["api", "-X", "DELETE", f"{repo_path}/releases/{release_id}"])
-    if code != 0:
+    if code != 0 and "HTTP 404" not in err:
         raise Refused(f"the draft {release_id} of {repo_path} could not be deleted (exit {code}): "
                       f"{(err or out).strip()[-400:]}")
+    for _read in range(REHEARSAL_READS):
+        code, out, err = gh(["api", f"{repo_path}/releases/{release_id}"])
+        if code != 0:
+            if "HTTP 404" in err:
+                return
+            raise Refused(f"the draft {release_id} of {repo_path} could not be read after its deletion "
+                          f"(exit {code}): {(err or out).strip()[-400:]}")
+        sleep(REHEARSAL_READ_SECONDS)
+    raise Refused(f"the draft {release_id} of {repo_path} is still present after its deletion, read "
+                  f"{REHEARSAL_READS} times over {REHEARSAL_READS * REHEARSAL_READ_SECONDS} s")
+
+
+def _created(gh: Gh, repo_path: str, candidate: str, url: str, sleep: Callable[[float], None],
+             gone: set[object]) -> dict:
+    """The one draft the create made, found by the URL `gh release create` printed: the listing is read
+    until it shows that draft, at most REHEARSAL_READS times. Any other draft of the candidate's name
+    (a deleted leftover excepted) is refused at once; a draft never listed is refused, never passed."""
+    for _read in range(REHEARSAL_READS):
+        named = [row for row in _named(gh, repo_path, candidate) if row.get("draft") and row.get("id") not in gone]
+        foreign = [row.get("id") for row in named if row.get("html_url") != url]
+        if foreign or len(named) > 1:
+            raise Refused(f"{len(named)} draft(s) named {candidate} after one create, not 1: {foreign or named} "
+                          f"not the one the create printed ({url})")
+        if named:
+            return named[0]
+        sleep(REHEARSAL_READ_SECONDS)
+    raise Refused(f"0 draft(s) named {candidate} after one create, not 1: the draft the create printed ({url}) "
+                  f"was never listed, read {REHEARSAL_READS} times over "
+                  f"{REHEARSAL_READS * REHEARSAL_READ_SECONDS} s")
 
 
 def rehearse(registry: store_replica.Registry, repository: str, record_hex: str, allowed: Path, candidate: str,
-             out: Path, gh: Gh, say: Callable[[str], None]) -> list[str]:
+             out: Path, gh: Gh, say: Callable[[str], None], sleep: Callable[[float], None] = time.sleep) -> list[str]:
     """THE PUBLISH REHEARSED AT THE CANDIDATE (ROADMAP N393, RUL-152): the repository's visibility read
     from GitHub (the second producer `stage` compares the slice against), its slice staged exactly as
     the tag's `stage` stages it, every destination slice it binds verified and staged, then ONE draft
-    pre-release named by the candidate created with those files by `gh release create`, read back by
-    `check-release`, and deleted. A draft creates no tag and is visible only to accounts that can push.
-    A leftover draft of an earlier rehearsal is deleted first; a PUBLISHED Release of that name is
-    refused and never touched. The staged names, once the draft held exactly them and is gone."""
+    pre-release named by the candidate created with those files by `gh release create`, found by the
+    URL it printed, read back by `check-release`, and deleted. A draft creates no tag and is visible
+    only to accounts that can push. A leftover draft of an earlier rehearsal is deleted first; a
+    PUBLISHED Release of that name is refused and never touched. The staged names, once the draft held
+    exactly them and is gone."""
     if not CANDIDATE.match(candidate):
         raise Refused(f"{candidate!r} is not a candidate name (candidate/<V>/<16 hex>): a rehearsal never "
                       f"names a release tag")
@@ -369,36 +408,42 @@ def rehearse(registry: store_replica.Registry, repository: str, record_hex: str,
     if published:
         raise Refused(f"{repository} has a published Release named {candidate} (id {published}): a rehearsal "
                       f"never touches a published Release")
+    gone: set[object] = set()
     for row in found:
         say(f"store_publish: deleting the leftover rehearsal draft {row.get('id')} of {repository}")
-        _delete(gh, repo_path, row.get("id"))
+        _delete(gh, repo_path, row.get("id"), sleep)
+        gone.add(row.get("id"))
     failure: Refused | None = None
+    created: dict | None = None
+    url = ""
     try:
         notes = (f"A step-0 rehearsal of the store publish for {candidate} (step-0 record sha256 {record_hex}): "
                  f"a draft, never published, deleted by the run that created it (ROADMAP N393).")
         code, out_text, err = gh(["release", "create", "--repo", f"{store_replica.ORG}/{repository}", "--draft",
                                   "--prerelease", "--title", f"{candidate} (rehearsal)", "--notes", notes,
                                   candidate, *[str(release_dir / name) for name in staged]])
+        url = next((line.strip() for line in reversed(out_text.splitlines()) if line.strip()), "")
         if code != 0:
             raise Refused(f"gh release create exited {code}: {(err or out_text).strip()[-400:]}")
-        created = [row for row in _named(gh, repo_path, candidate) if row.get("draft")]
-        if len(created) != 1:
-            raise Refused(f"{len(created)} draft(s) named {candidate} after one create, not 1")
-        release = _gh_json(gh, ["api", f"{repo_path}/releases/{created[0].get('id')}"])
+        if not url.startswith("https://"):
+            raise Refused(f"gh release create exited 0 and printed no Release URL: {out_text.strip()[-400:]!r}")
+        created = _created(gh, repo_path, candidate, url, sleep, gone)
+        release = _gh_json(gh, ["api", f"{repo_path}/releases/{created.get('id')}"])
         check_release(release_dir, release if isinstance(release, dict) else {})
     except Refused as refused:
         failure = refused
     try:
-        for row in _named(gh, repo_path, candidate):
-            if row.get("draft"):
-                _delete(gh, repo_path, row.get("id"))
-        left = [row.get("id") for row in _named(gh, repo_path, candidate) if row.get("draft")]
+        doomed = {row.get("id") for row in _named(gh, repo_path, candidate) if row.get("draft")} - gone
+        if created is not None:
+            doomed.add(created.get("id"))
+        for release_id in sorted(doomed, key=str):
+            _delete(gh, repo_path, release_id, sleep)
     except Refused as cleanup:
         raise Refused(f"{failure}; and the cleanup failed: {cleanup}" if failure else str(cleanup)) from cleanup
-    if left:
-        raise Refused(f"the draft(s) {left} named {candidate} are still listed after its deletion"
-                      + (f" (after: {failure})" if failure else ""))
     if failure is not None:
+        if created is None and url and not doomed:
+            raise Refused(f"{failure}; the draft at {url} was not listed for the cleanup either, so the next "
+                          f"rehearsal deletes it as a leftover") from failure
         raise failure
     say(f"store_publish: REHEARSED {repository} at {candidate}: a draft pre-release held exactly the "
         f"{len(staged)} staged asset(s), read back by check-release, then deleted")
@@ -417,13 +462,28 @@ def live_gh(token: str) -> Gh:
 
 class _FakeForge:
     """The selftest's GitHub: one repository's Releases, answering the `gh` calls `rehearse` makes.
-    `drop` loses one named asset at upload; `keep_on_delete` answers a DELETE without deleting."""
+    `drop` loses one named asset at upload; `keep_on_delete` answers a DELETE without deleting; `lag`
+    hides a created draft from that many listings after its create (the listing GitHub serves trails a
+    create, step 0 run 40305270614); ids are never reused, as GitHub's are not; `twin` adds a second
+    draft of the same name the create never made."""
 
     def __init__(self, full_name: str, visibility: str = "public", seeded: list[dict] | None = None,
-                 drop: str | None = None, keep_on_delete: bool = False) -> None:
+                 drop: str | None = None, keep_on_delete: bool = False, lag: int = 0, twin: bool = False) -> None:
         self.full_name, self.visibility, self.drop, self.keep_on_delete = full_name, visibility, drop, keep_on_delete
-        self.releases = [{**row, "id": index + 1} for index, row in enumerate(seeded or [])]
+        self.lag, self.twin = lag, twin
+        self.releases = [{**row, "id": index + 1, "html_url": self._url(index + 1)}
+                         for index, row in enumerate(seeded or [])]
+        self.hidden: dict[int, int] = {}
+        self.minted = len(self.releases)
         self.calls: list[list[str]] = []
+
+    def _url(self, release_id: int) -> str:
+        return f"https://github.com/{self.full_name}/releases/tag/untagged-{release_id:020x}"
+
+    def _listing(self) -> list[dict]:
+        shown = [row for row in self.releases if not self.hidden.get(row["id"])]
+        self.hidden = {key: reads - 1 for key, reads in self.hidden.items() if reads > 1}
+        return shown[:RELEASES_PAGE]
 
     def __call__(self, argv: list[str]) -> tuple[int, str, str]:
         self.calls.append(list(argv))
@@ -431,13 +491,15 @@ class _FakeForge:
         if argv == ["api", path]:
             return 0, json.dumps({"visibility": self.visibility}), ""
         if argv == ["api", f"{path}/releases?per_page={RELEASES_PAGE}"]:
-            return 0, json.dumps(self.releases[:RELEASES_PAGE]), ""
+            return 0, json.dumps(self._listing()), ""
         if len(argv) == 2 and argv[0] == "api" and argv[1].startswith(f"{path}/releases/"):
             wanted = int(argv[1].rsplit("/", 1)[1])
             hit = [row for row in self.releases if row["id"] == wanted]
-            return (0, json.dumps(hit[0]), "") if hit else (1, "", "HTTP 404")
+            return (0, json.dumps(hit[0]), "") if hit else (1, "", "gh: Not Found (HTTP 404)")
         if argv[:3] == ["api", "-X", "DELETE"]:
             wanted = int(argv[3].rsplit("/", 1)[1])
+            if not any(row["id"] == wanted for row in self.releases):
+                return 1, "", "gh: Not Found (HTTP 404)"
             if not self.keep_on_delete:
                 self.releases = [row for row in self.releases if row["id"] != wanted]
             return 0, "", ""
@@ -452,10 +514,18 @@ class _FakeForge:
                     positional.append(argv[index])
                 index += 1
             names = [Path(path).name for path in positional[1:] if Path(path).name != self.drop]
-            self.releases.append({"id": max([row["id"] for row in self.releases], default=0) + 1,
-                                  "tag_name": positional[0], "draft": "--draft" in argv,
-                                  "prerelease": "--prerelease" in argv, "assets": [{"name": n} for n in names]})
-            return 0, "", ""
+            made = []
+            for _copy in range(2 if self.twin else 1):
+                self.minted += 1
+                release_id = self.minted
+                self.releases.append({"id": release_id, "html_url": self._url(release_id),
+                                      "tag_name": positional[0], "draft": "--draft" in argv,
+                                      "prerelease": "--prerelease" in argv,
+                                      "assets": [{"name": name} for name in names]})
+                made.append(release_id)
+                if self.lag:
+                    self.hidden[release_id] = self.lag
+            return 0, f"{self._url(made[0])}\n", ""
         return 1, "", f"the fake forge has no answer for {argv}"
 
 
@@ -477,6 +547,7 @@ def selftest() -> int:
         return result
 
     quiet: Callable[[str], None] = lambda _line: None  # noqa: E731 — a sink for the writer's lines
+    idle: Callable[[float], None] = lambda _seconds: None  # noqa: E731 — the fake forge needs no wall-clock wait
     with tempfile.TemporaryDirectory() as scratch:
         root = Path(scratch)
         store, record, plan, _transports = store_manifest._fixture(root / "fixture")
@@ -724,8 +795,15 @@ def selftest() -> int:
                     ("RED: a PUBLISHED Release named by the candidate is refused and never touched",
                      {"seeded": [{"tag_name": candidate, "draft": False, "assets": []}]}, candidate,
                      "a published Release named"),
+                    ("a draft the listing shows only on its third read after the create still rehearses: it "
+                     "is judged by the URL the create printed, not by the first listing (step 0 run "
+                     "40305270614)", {"lag": 2}, candidate, None),
+                    ("RED: a draft never listed within the bounded wait is refused, never passed",
+                     {"lag": REHEARSAL_READS + 1}, candidate, "was never listed"),
+                    ("RED: a second draft named by the candidate that the create did not make is refused",
+                     {"twin": True}, candidate, "not the one the create printed"),
                     ("RED: a deletion the forge did not perform reds the rehearsal",
-                     {"keep_on_delete": True}, candidate, "still listed after its deletion"),
+                     {"keep_on_delete": True}, candidate, "still present after its deletion"),
                     ("RED: a name that is no candidate's is refused before any call", {}, "v9.9.9",
                      "is not a candidate name"),
                     ("RED: a repository whose visibility differs from the slice's is refused before any draft",
@@ -736,21 +814,29 @@ def selftest() -> int:
                 forge = _FakeForge(f"{store_replica.ORG}/pub-repo", **forge_knobs)
                 _fake, rehearsed_registry = registry_with(pub, signed(pub, "writer"))
                 done = arm(label, lambda: rehearse(rehearsed_registry, "pub-repo", record_hex, allowed, run_with,
-                                                   root / f"rehearsal-{name}", forge, quiet), refusal)
+                                                   root / f"rehearsal-{name}", forge, quiet, idle), refusal)
                 creates = [call for call in forge.calls if call[:2] == ["release", "create"]]
                 drafts = [row for row in forge.releases if row["draft"]]
                 if refusal is None and (done != want or len(creates) != 1 or drafts or
                                         not {"--draft", "--prerelease"} <= set(creates[0]) or
                                         "--verify-tag" in creates[0] or creates[0][-len(want) - 1] != candidate):
                     failures.append(f"{label}: returned {done}, created {creates}, drafts left {drafts}")
-                if refusal is not None and drafts and not forge_knobs.get("keep_on_delete"):
+                if refusal is not None and drafts and not forge_knobs.get("keep_on_delete") and \
+                        not forge_knobs.get("lag"):
                     failures.append(f"{label}: a refused rehearsal left the draft(s) {drafts}")
+                if refusal is not None and forge_knobs.get("lag"):
+                    forge.lag = 0
+                    arm(f"{label}: the next rehearsal deletes the draft that was never listed as a leftover",
+                        lambda: rehearse(rehearsed_registry, "pub-repo", record_hex, allowed, run_with,
+                                         root / f"rehearsal-{name}-next", forge, quiet, idle), None)
+                    if [row for row in forge.releases if row["draft"]]:
+                        failures.append(f"{label}: the next rehearsal left the draft(s) {forge.releases}")
                 if run_with != candidate and forge.calls:
                     failures.append(f"{label}: a refused name still called the forge {forge.calls}")
                 if forge_knobs.get("visibility") and creates:
                     failures.append(f"{label}: a refused visibility still created {creates}")
                 if any(not row["draft"] and row["tag_name"] == candidate for row in forge_knobs.get("seeded", [])) \
-                        and (creates or [{key: value for key, value in row.items() if key != "id"}
+                        and (creates or [{key: value for key, value in row.items() if key not in ("id", "html_url")}
                                          for row in forge.releases if row["tag_name"] == candidate] !=
                              forge_knobs["seeded"]):
                     failures.append(f"{label}: the published Release was touched: {forge.releases}, {creates}")
@@ -760,7 +846,7 @@ def selftest() -> int:
             rehearsed_private = arm("the rehearsal of an owner binding a destination also verifies and stages that "
                                     "destination's slice, and drafts nothing on the destination",
                                     lambda: rehearse(private_registry, "priv-repo", record_hex, allowed, candidate,
-                                                     root / "rehearsal-private", private_forge, quiet), None)
+                                                     root / "rehearsal-private", private_forge, quiet, idle), None)
             listed_tsv = root / "rehearsal-private" / "destinations" / "destinations.tsv"
             if rehearsed_private is not None and (
                     not listed_tsv.is_file() or listed_tsv.read_text() != "pub-repo\tengine-v9.9.9\tpublic\n"
