@@ -3867,6 +3867,7 @@ mkdir -p "$bi_tmp/res/bi_tool" "$bi_tmp/res/bi_tool.other"
 bi_junit "$bi_tmp/res/bi_tool/$bi_empty_id.xml" BiTool.One:passed BiTool.Two:passed
 bi_junit "$bi_tmp/res/bi_tool/$bi_empty_id.test_package.xml" BiToolTp.Links:passed
 bi_junit "$bi_tmp/res/bi_tool/$(printf 'f%.0s' {1..40}).xml" BiTool.Variant:passed
+printf '[]\n' > "$bi_tmp/res/bi_tool/$bi_empty_id.corpus-listed.json"
 check "a create's step with result files stores its package record AND a verdict record of both populations, judging the package's content digest, then its outcome naming both" \
       "rc=0 STORED bi_tool,STORED bi_tool verdict,STORED bi_tool outcome [[\"build\", \"BiTool.One\", \"passed\"], [\"build\", \"BiTool.Two\", \"passed\"], [\"test_package\", \"BiToolTp.Links\", \"passed\"]] same" \
       "$(bi_verdict "$bi_tmp/res") $(python3 -c "
@@ -3886,6 +3887,29 @@ check "a rebuilt step at an equal key whose result set differs is a verdict MISM
 mkdir -p "$bi_tmp/none"
 check "a step that wrote no result file stores no verdict, saying so; at the key whose step once ran tests, its outcome naming no verdict is a MISMATCH, never a silent loss of the tests" \
       "rc=1 MATCH bi_tool,NO VERDICT bi_tool,MISMATCH bi_tool outcome" "$(bi_verdict "$bi_tmp/none")"
+# THE SERVE HOLE (DN-142.D31 (1)): an outcome is served only when it holds every record its step
+# PROMISED. The helper's promise of its default selection is the `<package id>.corpus-listed.json` it
+# writes before the selection runs; a step that promised it and wrote no result file is never served,
+# and a step that promised nothing (a content-only package) is.
+bi_served() {   # <results dir> <store> -> rc=<step status> <serve's word>
+    printf 'counted 0\n' > "$bi_tmp/counted"
+    CONAN_HOME="$bi_home" MALF_STEP_TEST_FOLDER=none MALF_STEP_TALLY="$bi_tmp/counted" MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$2" "$bi_home" "$bi_tmp/graph.json" bi_tool fixture "$MALF_ROOT" "$bi_tmp/toolchain.json" "bi_" "$1" > "$bi_tmp/s.log" 2>&1
+    printf 'rc=%s ' "$?"
+    MALF_STEP_TALLY="$bi_tmp/counted" MALF_SYSTEM="$MALF_TEST_SYSTEM" bi_py "
+import json
+from pathlib import Path
+store = Path('$2')
+build = next(r for r in (json.loads(p.read_text()) for p in (store / 'records').glob('*.json'))
+             if r['inputs']['step']['kind'] == 'conan-create')['key']
+outcome, why = a.unservable(store, a.outcome_document(build, 'bi_tool', 'fixture', None), False)
+print('SERVED' if outcome is not None else 'EXECUTES ' + why)" 2>&1 | tail -1
+}
+mkdir -p "$bi_tmp/promised/bi_tool"; printf '[]\n' > "$bi_tmp/promised/bi_tool/$bi_empty_id.corpus-listed.json"
+rm -rf "$bi_tmp/hstore" "$bi_tmp/cstore"
+check "RED-FIRST (DN-142.D31 (1), the serve hole): a step whose helper promised its selection and wrote no result file is never served — its outcome lacks the verdict it expected" \
+      "rc=0 EXECUTES its outcome lacks the record(s) it expected: verdict" "$(bi_served "$bi_tmp/promised" "$bi_tmp/hstore")"
+check "a content-only step, which promised no test, is served over its package alone" \
+      "rc=0 SERVED" "$(bi_served "$bi_tmp/none" "$bi_tmp/cstore")"
 # A content recipe (`package_type = "build-scripts"`) is created in the BUILD context alone; its
 # step is recorded all the same (measured on insight_scenarios: the graph holds no host node).
 bi_data="$bi_tmp/bi_data"; mkdir -p "$bi_data"; printf 'scenario\n' > "$bi_data/notes.txt"

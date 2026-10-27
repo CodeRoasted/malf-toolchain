@@ -1796,7 +1796,10 @@ def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile:
     if bench:
         judged = max(judged, bench_record(store, key_of(document), package, package_id, profile, malf_dir,
                                           results, {package: content}, Path(bench), keys))
-    return judged or outcome_record(store, key_of(document), package, profile, corpus_gates, keys)
+    tested = document["test_package"] is not None \
+        or (results / package / f"{package_id}{LISTED_SUFFIX}").is_file()
+    return judged or outcome_record(store, key_of(document), package, profile, corpus_gates, keys,
+                                    packaged=True, tested=tested)
 
 
 def build_step(store: Path, home: Path, graph_json: Path, package: str, profile: str,
@@ -1831,7 +1834,8 @@ def build_step(store: Path, home: Path, graph_json: Path, package: str, profile:
                             profile, malf_dir, results,
                             {name.split("/")[0]: digest for name, digest in upstream.items()},
                             _helper().read_declarations(source), keys)
-    return judged or outcome_record(store, key_of(document), package, profile, None, keys)
+    return judged or outcome_record(store, key_of(document), package, profile, None, keys,
+                                    packaged=False, tested=True)
 
 
 VERDICT_POPULATIONS = (("build", "{pid}.xml"), ("test_package", "{pid}.test_package.xml"))
@@ -1919,7 +1923,7 @@ def verdict_record(store: Path, build_key: str, package: str, package_id: str, p
     output = {"verdict": verdict, "results": rows, "findings": key_of(rows), "judged": judged,
               "tests": len(rows), "excused": excused}
     if keys is not None:
-        keys["verdict"] = key_of(document)
+        keys[VERDICT_OUTPUT] = key_of(document)
     return LocalStore(store).commit(document, {"verdict": output}, {"verdict": ("log", lambda: log)})
 
 
@@ -1987,7 +1991,7 @@ def corpus_record(store: Path, build_key: str, package: str, package_id: str, pr
     output = {"verdict": verdict, "results": rows, "findings": key_of(rows), "judged": judged,
               "tests": len(rows)}
     if keys is not None:
-        keys["corpus"] = key_of(document)
+        keys[CORPUS_OUTPUT] = key_of(document)
     stored = LocalStore(store).commit(document, {"corpus": output}, {"corpus": ("log", lambda: log)})
     if verdict != "pass":
         bad = [row for row in rows if row[2] != "passed"]
@@ -2102,8 +2106,23 @@ def bench_record(store: Path, build_key: str, package: str, package_id: str, pro
 # carried by the outcome itself because a `stored: false` step holds no record at its build key
 # (DN-142.D14, DN-142.D30 E4). A step that failed, was refused,
 # crashed, timed out or judged nothing writes none (R6), so nothing of it can ever be served.
+# THE EXPECTED RECORD SET (DN-142.D31 (1), the serve hole): the outcome also DECLARES every record its
+# step promised, decided from what the step was asked to do and never from what it happened to write:
+# the package when the step stores one; the test verdict when the step's key holds a test_package (whose
+# run always selects a test, DN-142.D13 (2)), when it is a `conan build` (its one product, DN-142.D14),
+# or when malf's helper promised its default selection, the `<package id>.corpus-listed.json` that
+# `run_tests` writes only once the tree enabled testing and before any test runs, past the guard that
+# fails a create whose enabled tree selects no test; the corpus verdict when the gates document names the
+# package; the bench verdict when the bench document does. A content-only package's create, which never
+# reaches the helper's selection, promises no verdict. The outcome is `pass` only when the records it
+# names are exactly the expected ones and each passed; otherwise it is `incomplete` or `fail` and never
+# served. The set is an OUTPUT, not a key member: the helper's promise is made inside the act, and the
+# outcome's key must be known before it.
 OUTCOME_KIND = "step-outcome"
 OUTCOME_OUTPUT = "outcome"
+EXPECTED_FIELD = "expected"
+VERDICT_OUTPUT = "verdict"
+CORPUS_OUTPUT = "corpus"
 SERVE_MISS = 3
 
 
@@ -2129,29 +2148,63 @@ def _record_verdict(record: dict) -> str:
     return next(iter(outputs.values())).get("verdict", "unjudged")
 
 
+def expected_records(document: dict, packaged: bool, tested: bool) -> list[str]:
+    """The records a step promised, sorted, from its outcome document and the two promises its caller
+    read: `packaged` the step stores a package, `tested` it promised a test verdict."""
+    promised = {PACKAGE_OUTPUT: packaged, VERDICT_OUTPUT: tested, CORPUS_OUTPUT: document["corpus"] is not None,
+                BENCH_OUTPUT: document["bench"] is not None}
+    return sorted(name for name, made in promised.items() if made)
+
+
+def record_set_defects(expected: list[str], records: dict) -> list[str]:
+    """What separates the records an outcome names from the ones its step promised, empty when equal."""
+    defects = []
+    missing = sorted(set(expected) - records.keys())
+    if missing:
+        defects.append(f"its outcome lacks the record(s) it expected: {', '.join(missing)}")
+    undeclared = sorted(records.keys() - set(expected))
+    if undeclared:
+        defects.append(f"its outcome names record(s) its step never promised: {', '.join(undeclared)}")
+    return defects
+
+
 def outcome_record(store: Path, build_key: str, package: str, profile: str, corpus_gates: Path | None,
-                   keys: dict) -> int:
-    """Store or compare `package`'s outcome over the records `keys` names (every one already committed).
-    post: as LocalStore.commit."""
+                   keys: dict, packaged: bool, tested: bool) -> int:
+    """Store or compare `package`'s outcome over the records `keys` names (every one already committed),
+    declaring the set its step promised (`expected_records`).
+    post: as LocalStore.commit; the outcome is `pass` only when `keys` names exactly the expected records
+          and each passed, `incomplete` when the two sets differ (each difference printed), else `fail`."""
     local = LocalStore(store)
+    document = outcome_document(build_key, package, profile, corpus_gates)
+    expected = expected_records(document, packaged, tested)
     verdicts = {name: _record_verdict(local.record(key)) for name, key in sorted(keys.items())}
-    verdict = "pass" if all(value == "pass" for value in verdicts.values()) else "fail"
-    return local.commit(outcome_document(build_key, package, profile, corpus_gates),
+    defects = record_set_defects(expected, keys)
+    for defect in defects:
+        print(f"artefact_store: INCOMPLETE {package} {OUTCOME_OUTPUT}: {defect} (DN-142.D31 (1))")
+    verdict = "incomplete" if defects else "pass" if all(value == "pass" for value in verdicts.values()) else "fail"
+    return local.commit(document,
                         {OUTCOME_OUTPUT: {"verdict": verdict, "records": dict(sorted(keys.items())),
-                                          "findings": key_of(verdicts)}}, {})
+                                          EXPECTED_FIELD: expected, "findings": key_of(verdicts)}}, {})
 
 
 def unservable(store: Path, document: dict, rejudge: bool) -> tuple[dict | None, str | None]:
     """(the outcome record a step may be SERVED from instead of executing, None) or (None, why it runs).
-    It is served only when its outcome and every record the outcome names are stored, were each produced
-    by an act that ran in its domain with its denials counted at zero (`servable`), and judged `pass`;
-    `rejudge` (the walk's explicit flag, never a retry) runs every step and compares it."""
+    It is served only when its outcome names exactly the records it declares its step promised (DN-142.D31
+    (1)), and the outcome and each of them are stored, were each produced by an act that ran in its domain
+    with its denials counted at zero (`servable`), and judged `pass`; `rejudge` (the walk's explicit flag,
+    never a retry) runs every step and compares it."""
     if rejudge:
         return None, "a re-judge was asked for (MALF_STORE_REJUDGE), so every step executes and is compared"
     local = LocalStore(store)
     outcome = local.record(key_of(document))
     if outcome is None:
         return None, "no completed step at this key"
+    expected = outcome["outputs"][OUTCOME_OUTPUT].get(EXPECTED_FIELD)
+    if not isinstance(expected, list):
+        return None, "its outcome declares no expected record set, so nothing says what its step promised"
+    defects = record_set_defects(expected, outcome["outputs"][OUTCOME_OUTPUT]["records"])
+    if defects:
+        return None, "; ".join(defects)
     named = {OUTCOME_OUTPUT: outcome} | {name: local.record(key)
                                          for name, key in outcome["outputs"][OUTCOME_OUTPUT]["records"].items()}
     for name, record in named.items():
@@ -3392,7 +3445,7 @@ def selftest() -> int:
         key_first.write_text(json.dumps({"sources": {"ex_low/host": "s" * 64}, "step": {"package": "ex_low"}}))
         os.environ.pop(REJUDGE_ENV, None)
 
-        def outcome_with(keys: dict, tally: str) -> tuple[int, str]:
+        def outcome_with(keys: dict, tally: str, tested: bool = True) -> tuple[int, str]:
             (root / "tally").write_text(tally)
             saved = os.environ.get(TALLY_ENV)
             os.environ[TALLY_ENV] = str(root / "tally")
@@ -3400,7 +3453,7 @@ def selftest() -> int:
                 with contextlib.redirect_stdout(io.StringIO()) as out, \
                         contextlib.redirect_stderr(io.StringIO()) as err:
                     code = outcome_record(sstore, key_of(json.loads(key_first.read_text())), "ex_low", profile,
-                                          None, keys)
+                                          None, keys, packaged=True, tested=tested)
             finally:
                 os.environ.pop(TALLY_ENV, None)
                 if saved is not None:
@@ -3483,6 +3536,38 @@ def selftest() -> int:
         code, printed = served(root / "walk-absent")
         expect("RED: an outcome naming a record the store no longer holds is never served",
                (code, "its verdict record is absent from the store" in printed), (SERVE_MISS, True))
+        put_counted(verdict_key, {"verdict": {"verdict": "pass", "tests": 3, "findings": "f" * 64}},
+                    kind="test-verdict")
+        for name in os.listdir(sstore / "records"):
+            if LocalStore(sstore).record(name[:-len(".json")])["inputs"]["step"].get("kind") == OUTCOME_KIND:
+                (sstore / "records" / name).unlink()
+        code, printed = outcome_with({PACKAGE_OUTPUT: build_key}, "counted 0\n")
+        outcome_key = key_of(outcome_document(key_of(json.loads(key_first.read_text())), "ex_low", profile, None))
+        stored_outcome = LocalStore(sstore).record(outcome_key)["outputs"][OUTCOME_OUTPUT]
+        expect("RED (DN-142.D31 (1), the serve hole): a step that promised a verdict and names its package alone "
+               "is stored `incomplete`, declaring both records, and is never served",
+               (code, "INCOMPLETE ex_low outcome: its outcome lacks the record(s) it expected: verdict" in printed,
+                stored_outcome["verdict"], stored_outcome[EXPECTED_FIELD], served(root / "walk-unpromised")[0]),
+               (0, True, "incomplete", [PACKAGE_OUTPUT, VERDICT_OUTPUT], SERVE_MISS))
+        record_path = sstore / "records" / f"{outcome_key}.json"
+        forged = json.loads(record_path.read_text())
+        forged["outputs"][OUTCOME_OUTPUT]["verdict"] = "pass"
+        record_path.write_text(json.dumps(forged))
+        code, printed = served(root / "walk-forged")
+        expect("RED: an outcome whose records lack an expected one is never served, whatever verdict it states",
+               (code, "its outcome lacks the record(s) it expected: verdict" in printed), (SERVE_MISS, True))
+        forged["outputs"][OUTCOME_OUTPUT]["records"] = {PACKAGE_OUTPUT: build_key, VERDICT_OUTPUT: verdict_key,
+                                                         CORPUS_OUTPUT: verdict_key}
+        forged["outputs"][OUTCOME_OUTPUT][EXPECTED_FIELD] = [PACKAGE_OUTPUT, VERDICT_OUTPUT]
+        record_path.write_text(json.dumps(forged))
+        code, printed = served(root / "walk-undeclared")
+        expect("RED: an outcome naming a record its step never promised is never served",
+               (code, "its outcome names record(s) its step never promised: corpus" in printed), (SERVE_MISS, True))
+        del forged["outputs"][OUTCOME_OUTPUT][EXPECTED_FIELD]
+        record_path.write_text(json.dumps(forged))
+        code, printed = served(root / "walk-undeclaring")
+        expect("RED: an outcome that declares no expected record set is never served",
+               (code, "its outcome declares no expected record set" in printed), (SERVE_MISS, True))
 
         # THE SYSTEM READING OVER WHAT THE WRITERS STORE (DN-142.D30 E4): the manifest's reading runs on the
         # records verdict_record and outcome_record write, at a build key the store holds no record for, as a
@@ -3501,7 +3586,8 @@ def selftest() -> int:
         try:
             with contextlib.redirect_stdout(io.StringIO()):
                 written = (verdict_record(ystore, unheld, "ex_low", "pid", profile, malf_dir, yresults, {}, [], ykeys),
-                           outcome_record(ystore, unheld, "ex_low", profile, None, ykeys))
+                           outcome_record(ystore, unheld, "ex_low", profile, None, ykeys,
+                                          packaged=False, tested=True))
         finally:
             os.environ.pop(TALLY_ENV, None)
             if saved is not None:

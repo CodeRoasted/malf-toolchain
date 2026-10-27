@@ -824,7 +824,8 @@ def _fixture(root: Path) -> tuple[Path, bytes, dict, dict[str, Path]]:
                       {"verdict": {"verdict": "pass", "judged": {name: content}}})
         steps.append({"id": f"{name}/verdict", "key": verdict, "verdict": "pass"})
         outcome = put({"step": {"kind": "step-outcome", "package": name}, "build": key, "system": system},
-                      {"outcome": {"verdict": "pass", "records": {"package": key, "verdict": verdict}}})
+                      {"outcome": {"verdict": "pass", "records": {"package": key, "verdict": verdict},
+                                  "expected": ["package", "verdict"]}})
         steps.append({"id": f"{name}/outcome", "key": outcome, "verdict": "pass"})
 
     package("pub_lib", {"include/a.h": ("file", b"int a;\n")}, {})

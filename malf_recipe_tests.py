@@ -59,7 +59,10 @@ create without it stores. A `user.*` conf is never a package-id input.
 
 WHAT THE DEFAULT RUN ALSO RECORDS. `<package id>.corpus-listed.json`, every `corpus`-labelled test
 name of the tree, listed and never run, so the corpus label closes against the registry from the
-records alone.
+records alone. It is written once the tree enabled testing and selected at least one test, BEFORE the
+selection runs, so it is also the create's PROMISE of a test verdict: the store's outcome expects a
+verdict from every step whose results hold it, and a step that promised one and recorded none is never
+served (artefact_store `expected_records`, DN-142.D31 (1)).
 
 A SKIP IS A RED UNLESS THE PACKAGE DECLARES IT (DN-142.D23; the Founder, 2026-10-11). After a green
 run, every `skipped` or `disabled` row of the default selection or a test_package must be covered by
