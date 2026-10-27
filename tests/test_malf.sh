@@ -3373,6 +3373,17 @@ cs_tmp="$(realpath "$(mktemp -d)")"
 check "the consumer conf set is skip_test plus an empty test folder, one argument per line" \
       "-c|tools.build:skip_test=True|--test-folder=" \
       "$(python3 "$MALF_ROOT/malf_recipe_tests.py" create-args consumer | paste -sd'|')"
+check "RED-FIRST (DN-142.D31 (1), S2): the ship conf set is skip_test plus the test_package run conf, the test folder kept" \
+      "rc=0 -c|tools.build:skip_test=True|-c|user.malf:run_test_package=True" \
+      "$(out="$(python3 "$MALF_ROOT/malf_recipe_tests.py" create-args ship)"; echo "rc=$? $(paste -sd'|' <<< "$out")")"
+mkdir -p "$cs_tmp/shipmutant"; cp "$MALF_BIN" "$MALF_ROOT/malf_recipe_tests.py" "$cs_tmp/shipmutant/"; malf_sync_files "$cs_tmp/shipmutant"
+sed -i 's/^    "ship": (.*),$/    "ship": ("-c", "user.probe:ship=1"),/' "$cs_tmp/shipmutant/malf_recipe_tests.py"
+check "the ship form's set is READ from the helper and rides the create alone: the writer's set is untouched, the third-party phases run it" \
+      "-c|user.malf:profile=linux-gcc16-release / -c|user.probe:ship=1" \
+      "$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; MALF_PROFILE_NAME=linux-gcc16-release MALF_STEP_FORM=ship _malf_writer_create_args && echo "$(printf "%s\n" "${_MALF_WRITER_ARGS[@]}" | paste -sd"|") / $(printf "%s\n" "${_MALF_FORM_ARGS[@]}" | paste -sd"|")"' _ "$cs_tmp/shipmutant/malf")"
+check "store-create --ship refuses the corpus gates and the benchmarks before anything runs (exit 2), and an unknown option still" \
+      "rc=2 1 rc=1" \
+      "$(MALF_BENCH=/nonexistent bash "$MALF_BIN" store-create --ship > "$cs_tmp/ship.log" 2>&1; echo "rc=$?") $(grep -c 'REFUSED — --ship runs no gate of its own' "$cs_tmp/ship.log") $(bash "$MALF_BIN" store-create --writer > /dev/null 2>&1; echo "rc=$?")"
 check "the writer conf set is empty, and an unknown set is a usage error (exit 2)" \
       "rc=0 0 rc=2" \
       "$(out="$(python3 "$MALF_ROOT/malf_recipe_tests.py" create-args writer)"; echo "rc=$? ${#out}") $(python3 "$MALF_ROOT/malf_recipe_tests.py" create-args vendor 2>/dev/null; echo "rc=$?")"
@@ -3387,10 +3398,10 @@ mkdir -p "$cs_tmp/mutant"; cp "$MALF_BIN" "$MALF_ROOT/malf_recipe_tests.py" "$cs
 sed -i 's/^    "writer": (),$/    "writer": ("-c", "user.probe:writer=1"),/' "$cs_tmp/mutant/malf_recipe_tests.py"
 check "the writers' conf set is READ from the helper: a mutated set in the helper is the set malf hands its creates, then the profile its skips are judged at (DN-142.D23)" \
       "-c|user.probe:writer=1|-c|user.malf:profile=$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; printf %s "$MALF_PROFILE_NAME"' _ "$MALF_BIN")" \
-      "$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; _malf_writer_create_args && printf "%s\n" "${_MALF_WRITER_ARGS[@]}"' _ "$cs_tmp/mutant/malf" | paste -sd'|')"
+      "$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; MALF_STEP_FORM=writer _malf_writer_create_args && printf "%s\n" "${_MALF_WRITER_ARGS[@]}"' _ "$cs_tmp/mutant/malf" | paste -sd'|')"
 check "store-create splices the set read, malf spells no skip conf of its own, and its one test folder is the copy (DN-142.D26)" \
       "1 0 1" \
-      "$(grep -c -- '-s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS\[@\]}" "${build_args\[@\]}"' "$MALF_BIN") $(grep -vE '^\s*#' "$MALF_BIN" | grep -cE "skip_test=|--test-folder[= ]?(\"\"|''|\$)") $(grep -vE '^\s*#' "$MALF_BIN" | grep -c -- '--test-folder')"
+      "$(grep -c -- '-s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS\[@\]}" "${_MALF_FORM_ARGS\[@\]}" "${build_args\[@\]}"' "$MALF_BIN") $(grep -vE '^\s*#' "$MALF_BIN" | grep -cE "skip_test=|--test-folder[= ]?(\"\"|''|\$)") $(grep -vE '^\s*#' "$MALF_BIN" | grep -c -- '--test-folder')"
 
 cs_home="$cs_tmp/home"; cs_pkg="$cs_tmp/cs_probe"; mkdir -p "$cs_pkg/test_package" "$cs_pkg/tests"
 CONAN_HOME="$cs_home" bash "$MALF_BIN" profiles > /dev/null 2>&1
@@ -3462,6 +3473,15 @@ check "a red test_package test FAILS the writer's create, after the package's ow
 check "under tools.build:skip_test alone the test_package is built and its red test does not run, saying so, and nothing is written" \
       "rc=0 1 none" \
       "$(cs_create -c tools.build:skip_test=True) $(grep -c 'tools.build:skip_test is set, so no test_package test runs' "$cs_tmp/cs.log") $(cs_results)"
+mapfile -t cs_ship < <(python3 "$MALF_ROOT/malf_recipe_tests.py" create-args ship)
+cs_ctest "$cs_pkg/CTestTestfile.cmake" "CsProbe.Fails:$cs_false"
+check "the ship form's create runs no test of the package (a red one passes) and RUNS its test_package, whose red fails the create (DN-142.D31 (1))" \
+      "rc=1 1 1 cs_probe.test_package.xml" \
+      "$(cs_create "${cs_ship[@]}") $(grep -c 'tools.build:skip_test is set, so no test runs in this build' "$cs_tmp/cs.log") $(grep -cE '[0-9]+ - CsProbeTp.Fails \(Failed\)' "$cs_tmp/cs.log") $(cs_results)"
+cs_ctest "$cs_pkg/test_package/CTestTestfile.cmake" "CsProbeTp.Passes:$cs_true"
+check "the ship form's green create leaves the test_package's result alone, never the package's own" \
+      "rc=0 cs_probe.test_package.xml" "$(cs_create "${cs_ship[@]}") $(cs_results)"
+cs_ctest "$cs_pkg/CTestTestfile.cmake" "CsProbe.Passes:$cs_true"
 cs_ctest "$cs_pkg/test_package/CTestTestfile.cmake"
 check "a test_package that registers no test FAILS the writer's create, never passes vacuously" \
       "rc=1 1" "$(cs_create) $(grep -c 'a test_package must run at least one test' "$cs_tmp/cs.log")"
@@ -3768,7 +3788,7 @@ export MALF_STEP_EXECUTABLES="$bi_tmp/executables.json"
 bi_step() {   # <tool file> <store> [profile] -> rc=<status>; the step's output in $bi_tmp/step.log
     cp "$1" "$bi_pkg/tool"
     CONAN_HOME="$bi_home" conan create "$bi_pkg" -pr:a fixture --build="bi_tool/*" --format=json > "$bi_tmp/graph.json" 2> "$bi_tmp/create.log" || { echo "rc=create-failed"; return; }
-    CONAN_HOME="$bi_home" MALF_STEP_TEST_FOLDER=none MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$2" "$bi_home" "$bi_tmp/graph.json" bi_tool "${3:-fixture}" "$MALF_ROOT" "$bi_tmp/toolchain.json" "bi_" > "$bi_tmp/step.log" 2>&1
+    CONAN_HOME="$bi_home" MALF_STEP_FORM=writer MALF_STEP_TEST_FOLDER=none MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$2" "$bi_home" "$bi_tmp/graph.json" bi_tool "${3:-fixture}" "$MALF_ROOT" "$bi_tmp/toolchain.json" "bi_" > "$bi_tmp/step.log" 2>&1
     echo "rc=$?"
 }
 check "a package whose linked ELF file carries no build-id is REFUSED by the step, naming the file, and nothing is stored" \
@@ -3859,7 +3879,7 @@ bi_junit() {   # <file> <name:outcome>... — a JUnit file of malf's helper's sh
       done; printf '</testsuite>\n'; } > "$1"
 }
 bi_verdict() {   # <results dir> -> rc=<status> and the step output's verdict lines
-    CONAN_HOME="$bi_home" MALF_STEP_TEST_FOLDER=none MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$bi_tmp/vstore" "$bi_home" "$bi_tmp/graph.json" bi_tool fixture "$MALF_ROOT" "$bi_tmp/toolchain.json" "bi_" "$1" > "$bi_tmp/v.log" 2>&1
+    CONAN_HOME="$bi_home" MALF_STEP_FORM=writer MALF_STEP_TEST_FOLDER=none MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$bi_tmp/vstore" "$bi_home" "$bi_tmp/graph.json" bi_tool fixture "$MALF_ROOT" "$bi_tmp/toolchain.json" "bi_" "$1" > "$bi_tmp/v.log" 2>&1
     printf 'rc=%s %s' "$?" "$(grep -oE '(STORED|MATCH|MISMATCH|NO VERDICT) bi_tool( verdict| outcome)?' "$bi_tmp/v.log" | paste -sd,)"
 }
 bi_empty_id="da39a3ee5e6b4b0d3255bfef95601890afd80709"
@@ -3893,7 +3913,7 @@ check "a step that wrote no result file stores no verdict, saying so; at the key
 # and a step that promised nothing (a content-only package) is.
 bi_served() {   # <results dir> <store> -> rc=<step status> <serve's word>
     printf 'counted 0\n' > "$bi_tmp/counted"
-    CONAN_HOME="$bi_home" MALF_STEP_TEST_FOLDER=none MALF_STEP_TALLY="$bi_tmp/counted" MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$2" "$bi_home" "$bi_tmp/graph.json" bi_tool fixture "$MALF_ROOT" "$bi_tmp/toolchain.json" "bi_" "$1" > "$bi_tmp/s.log" 2>&1
+    CONAN_HOME="$bi_home" MALF_STEP_FORM=writer MALF_STEP_TEST_FOLDER=none MALF_STEP_TALLY="$bi_tmp/counted" MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$2" "$bi_home" "$bi_tmp/graph.json" bi_tool fixture "$MALF_ROOT" "$bi_tmp/toolchain.json" "bi_" "$1" > "$bi_tmp/s.log" 2>&1
     printf 'rc=%s ' "$?"
     MALF_STEP_TALLY="$bi_tmp/counted" MALF_SYSTEM="$MALF_TEST_SYSTEM" bi_py "
 import json
@@ -3910,6 +3930,68 @@ check "RED-FIRST (DN-142.D31 (1), the serve hole): a step whose helper promised 
       "rc=0 EXECUTES its outcome lacks the record(s) it expected: verdict" "$(bi_served "$bi_tmp/promised" "$bi_tmp/hstore")"
 check "a content-only step, which promised no test, is served over its package alone" \
       "rc=0 SERVED" "$(bi_served "$bi_tmp/none" "$bi_tmp/cstore")"
+# THE SHIP FORM (DN-142.D31 (1), slice S2): a candidate's create runs no test of its own package and runs
+# its test_package; it is another act than the writer's, so its form is a member of the create's key.
+bi_form() {   # <form|unset> <results dir> <store> [test folder] -> rc=<status>; the output in $bi_tmp/f.log
+    local -a form=(MALF_STEP_FORM="$1")
+    [[ "$1" != unset ]] || form=()
+    printf 'counted 0\n' > "$bi_tmp/counted"
+    env "${form[@]}" CONAN_HOME="$bi_home" MALF_STEP_TEST_FOLDER="${4:-none}" MALF_STEP_TALLY="$bi_tmp/counted" MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$3" "$bi_home" "$bi_tmp/graph.json" bi_tool fixture "$MALF_ROOT" "$bi_tmp/toolchain.json" "bi_" "$2" > "$bi_tmp/f.log" 2>&1
+    echo "rc=$?"
+}
+bi_creates() {   # <store> -> the conan-create records' forms, distinct keys and distinct contents
+    bi_py "
+import json
+from pathlib import Path
+records = [json.loads(p.read_text()) for p in sorted(Path('$1/records').glob('*.json'))]
+creates = [r for r in records if r['inputs']['step']['kind'] == 'conan-create']
+print(','.join(sorted(r['inputs']['step'].get('form', 'none') for r in creates)),
+      len({r['key'] for r in creates}), len({r['outputs']['package']['content'] for r in creates}))" 2>&1 | tail -1
+}
+rm -rf "$bi_tmp/fstore" "$bi_tmp/wstore" "$bi_tmp/sstore" "$bi_tmp/ustore0" "$bi_tmp/rstore"
+check "RED-FIRST (DN-142.D31 (1), S2): the writer and the ship form of one create are two keys over equal content, each with its own outcome" \
+      "rc=0 rc=0 ship,writer 2 1" \
+      "$(bi_form writer "$bi_tmp/none" "$bi_tmp/fstore" | tr -d '\n') $(bi_form ship "$bi_tmp/none" "$bi_tmp/fstore" | tr -d '\n') $(bi_creates "$bi_tmp/fstore")"
+check "a ship-form request is never served from a writer-form outcome: the writer's store holds no completed step at the ship key" \
+      "rc=0 rc=0 EXECUTES no completed step at this key" \
+      "$(bi_form writer "$bi_tmp/none" "$bi_tmp/wstore" | tr -d '\n') $(bi_form ship "$bi_tmp/none" "$bi_tmp/sstore") $(MALF_SYSTEM="$MALF_TEST_SYSTEM" bi_py "
+import json
+from pathlib import Path
+ship = next(r for r in (json.loads(p.read_text()) for p in Path('$bi_tmp/sstore/records').glob('*.json'))
+            if r['inputs']['step']['kind'] == 'conan-create')['key']
+outcome, why = a.unservable(Path('$bi_tmp/wstore'), a.outcome_document(ship, 'bi_tool', 'fixture', None), False)
+print('EXECUTES' if outcome is None else 'SERVED', why)" 2>&1 | tail -1)"
+check "a create whose form nobody named is REFUSED and stores nothing: a form is never assumed" \
+      "rc=1 1 0" \
+      "$(bi_form unset "$bi_tmp/none" "$bi_tmp/ustore0") $(grep -c 'REFUSED MALF_STEP_FORM is None, not one of writer, ship' "$bi_tmp/f.log") $(ls "$bi_tmp/ustore0/records" 2>/dev/null | wc -l | tr -d ' ')"
+check "a ship-form create that left a result of its own tests is REFUSED before anything is stored" \
+      "rc=1 1 0" \
+      "$(bi_form ship "$bi_tmp/promised" "$bi_tmp/rstore") $(grep -c "REFUSED bi_tool: its key names the ship form, and its create left $bi_empty_id.corpus-listed.json" "$bi_tmp/f.log") $(ls "$bi_tmp/rstore/records" 2>/dev/null | wc -l | tr -d ' ')"
+mkdir -p "$bi_tmp/tpcopy/test_package" "$bi_tmp/tponly/bi_tool"
+printf 'probe\n' > "$bi_tmp/tpcopy/test_package/conanfile.py"; printf 'conanfile.py\0' > "$bi_tmp/tpcopy/tracked"
+bi_junit "$bi_tmp/tponly/bi_tool/$bi_empty_id.test_package.xml" BiToolTp.Links:passed
+rm -rf "$bi_tmp/tstore" "$bi_tmp/t0store"
+check "a ship-form create of a recipe tracking a test_package expects its test_package verdict and no other, and is served on it" \
+      "rc=0 [\"package\", \"verdict\"] 1 SERVED" \
+      "$(bi_form ship "$bi_tmp/tponly" "$bi_tmp/tstore" "$bi_tmp/tpcopy/test_package") $(MALF_SYSTEM="$MALF_TEST_SYSTEM" bi_py "
+import json
+from pathlib import Path
+records = [json.loads(p.read_text()) for p in Path('$bi_tmp/tstore/records').glob('*.json')]
+outcome = next(r for r in records if r['inputs']['step']['kind'] == 'step-outcome')
+verdict = next(r for r in records if r['inputs']['step']['kind'] == 'test-verdict')
+build = next(r for r in records if r['inputs']['step']['kind'] == 'conan-create')['key']
+served, _why = a.unservable(Path('$bi_tmp/tstore'), a.outcome_document(build, 'bi_tool', 'fixture', None), False)
+print(json.dumps(outcome['outputs']['outcome']['expected']), len(verdict['outputs']['verdict']['results']),
+      'SERVED' if served else 'EXECUTES')" 2>&1 | tail -1)"
+check "the same ship-form create whose test_package wrote no result is never served: its outcome lacks the verdict it expected" \
+      "rc=0 EXECUTES its outcome lacks the record(s) it expected: verdict" \
+      "$(bi_form ship "$bi_tmp/none" "$bi_tmp/t0store" "$bi_tmp/tpcopy/test_package") $(MALF_SYSTEM="$MALF_TEST_SYSTEM" bi_py "
+import json
+from pathlib import Path
+build = next(r for r in (json.loads(p.read_text()) for p in Path('$bi_tmp/t0store/records').glob('*.json'))
+             if r['inputs']['step']['kind'] == 'conan-create')['key']
+outcome, why = a.unservable(Path('$bi_tmp/t0store'), a.outcome_document(build, 'bi_tool', 'fixture', None), False)
+print('SERVED' if outcome else 'EXECUTES ' + why)" 2>&1 | tail -1)"
 # A content recipe (`package_type = "build-scripts"`) is created in the BUILD context alone; its
 # step is recorded all the same (measured on insight_scenarios: the graph holds no host node).
 bi_data="$bi_tmp/bi_data"; mkdir -p "$bi_data"; printf 'scenario\n' > "$bi_data/notes.txt"
@@ -3931,13 +4013,133 @@ class BiData(ConanFile):
 PYR
 check "a content recipe created in the build context alone is recorded, its node found in that context" \
       "rc=0 1" \
-      "$(CONAN_HOME="$bi_home" conan create "$bi_data" -pr:a fixture --build="bi_data/*" --format=json > "$bi_tmp/data.json" 2>/dev/null; MALF_STEP_EXECUTABLES= CONAN_HOME="$bi_home" MALF_STEP_TEST_FOLDER=none MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$bi_tmp/dstore" "$bi_home" "$bi_tmp/data.json" bi_data fixture "$MALF_ROOT" "$bi_tmp/toolchain.json" "bi_" > "$bi_tmp/d.log" 2>&1; echo "rc=$?") $(grep -c 'STORED bi_data package' "$bi_tmp/d.log")"
+      "$(CONAN_HOME="$bi_home" conan create "$bi_data" -pr:a fixture --build="bi_data/*" --format=json > "$bi_tmp/data.json" 2>/dev/null; MALF_STEP_EXECUTABLES= CONAN_HOME="$bi_home" MALF_STEP_FORM=writer MALF_STEP_TEST_FOLDER=none MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$bi_tmp/dstore" "$bi_home" "$bi_tmp/data.json" bi_data fixture "$MALF_ROOT" "$bi_tmp/toolchain.json" "bi_" > "$bi_tmp/d.log" 2>&1; echo "rc=$?") $(grep -c 'STORED bi_data package' "$bi_tmp/d.log")"
 cp "$bi_home/profiles/fixture" "$bi_home/profiles/fixture-b"
 check "two records holding the same bytes under two keys both answer the build-id lookup, and an unknown id answers nothing (exit 1)" \
       "rc=0 2 rc=1" \
       "$(bi_step "$bi_true" "$bi_tmp/store" fixture-b | tr -d '\n') $(python3 "$MALF_ROOT/artefact_store.py" build-id "$bi_tmp/store" "$bi_expected" | grep -c ' bi_tool/0.0.1.* bin/tool$') $(python3 "$MALF_ROOT/artefact_store.py" build-id "$bi_tmp/store" "$(printf '0%.0s' {1..40})" > /dev/null; echo "rc=$?")"
 rm -rf "$bi_tmp"
 unset MALF_STEP_EXECUTABLES
+echo
+
+echo "[9c2] the source verdict: the dev leg's clang tests judge sources, keyed before the act, served at an equal key, and bound to a ship-form package by equal inputs (DN-142.D31 (1), slice S3)"
+
+sv_tmp="$(realpath "$(mktemp -d)")"
+sv_py() { MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 -c "import sys; sys.path.insert(0, '$MALF_ROOT'); import artefact_store as a; $1"; }
+# A fixture key document of the source-verdict shape, its system the pin's: the verb stores over it.
+sv_py "
+import json
+from pathlib import Path
+document = {'step': {'kind': a.SOURCE_VERDICT_KIND, 'package': 'sv_core', 'profile': 'linux-clang21-libcxx-release'},
+            'definition': {'malf': 'tree-1', 'parameters': {'argv': ['malf', 'source-verdict'], 'env': {}, 'profile': 'linux-clang21-libcxx-release'}},
+            'sources': {'sv_core/host': 'export-core'}, 'third_party': ['gtest/1.17.0#abc'], 'profile': 'dev',
+            'selection': {'helper': 'blob', 'labels': ['-LE', 'corpus']}, 'system': a.system_member()}
+Path('$sv_tmp/key.json').write_text(json.dumps(document))
+" 2>&1 | tail -1
+mkdir -p "$sv_tmp/src/tests"
+sv_junit() {   # <file> <name:outcome>...
+    local file="$1" spec name outcome; shift
+    { printf '<?xml version="1.0" encoding="UTF-8"?>\n<testsuite name="x" tests="%s">\n' "$#"
+      for spec in "$@"; do
+          IFS=: read -r name outcome <<< "$spec"
+          case "$outcome" in
+              passed) printf '  <testcase name="%s" classname="%s" status="run"/>\n' "$name" "$name" ;;
+              failed) printf '  <testcase name="%s" classname="%s" status="fail"><failure message="x"/></testcase>\n' "$name" "$name" ;;
+          esac
+      done
+      printf '</testsuite>\n'; } > "$file"
+}
+sv_record() {   # <store> <junit> <tally word|none> -> rc=<status>; output in $sv_tmp/r.log
+    local -a tally=()
+    if [[ "$3" != none ]]; then printf '%s\n' "$3" > "$sv_tmp/tally"; tally=(MALF_STEP_TALLY="$sv_tmp/tally"); fi
+    env "${tally[@]}" MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" source-verdict "$1" "$sv_tmp/key.json" "$2" "$sv_tmp/src" > "$sv_tmp/r.log" 2>&1
+    echo "rc=$?"
+}
+sv_serve() {   # <store> -> rc=<status> <SERVED|EXECUTES>
+    local out rc=0
+    out="$(MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" source-serve "$1" "$sv_tmp/key.json" 2>&1)" || rc=$?
+    echo "rc=$rc $(grep -oE 'SERVED|EXECUTES' <<< "$out" | head -1)"
+}
+sv_junit "$sv_tmp/green.xml" SvCore.One:passed SvCore.Two:passed
+sv_junit "$sv_tmp/red.xml" SvCore.One:passed SvCore.Two:failed
+check "RED-FIRST (DN-142.D31 (1), S3): a passing source verdict from a counted domain is STORED, and a rerun at its equal key is SERVED, no test run" \
+      "rc=0 1 rc=0 SERVED" \
+      "$(sv_record "$sv_tmp/s1" "$sv_tmp/green.xml" 'counted 0') $(grep -c 'STORED sv_core verdict' "$sv_tmp/r.log") $(sv_serve "$sv_tmp/s1")"
+check "the same tests again at the equal key MATCH; a different result set at that key is a MISMATCH (exit 1)" \
+      "rc=0 1 rc=1 1" \
+      "$(sv_record "$sv_tmp/s1" "$sv_tmp/green.xml" 'counted 0') $(grep -c 'MATCH sv_core verdict' "$sv_tmp/r.log") $(sv_record "$sv_tmp/s1" "$sv_tmp/red.xml" 'counted 0') $(grep -c 'MISMATCH sv_core verdict at an equal key' "$sv_tmp/r.log")"
+check "a red source verdict is stored as a fail and never served" \
+      "rc=0 fail rc=3 EXECUTES" \
+      "$(sv_record "$sv_tmp/s2" "$sv_tmp/red.xml" 'counted 0') $(python3 -c "import json, glob; print(json.load(open(glob.glob('$sv_tmp/s2/records/*.json')[0]))['outputs']['verdict']['verdict'])") $(sv_serve "$sv_tmp/s2")"
+check "a source verdict an uncounted or unconfined act produced is never served: its reads were never judged (DN-142.D29 (8))" \
+      "rc=0 rc=3 EXECUTES rc=0 rc=3 EXECUTES" \
+      "$(sv_record "$sv_tmp/s3" "$sv_tmp/green.xml" none) $(sv_serve "$sv_tmp/s3") $(sv_record "$sv_tmp/s4" "$sv_tmp/green.xml" unconfined) $(sv_serve "$sv_tmp/s4")"
+check "the explicit re-judge (MALF_STORE_REJUDGE=1) runs a served source verdict's tests again" \
+      "rc=3 EXECUTES" "$(MALF_STORE_REJUDGE=1 sv_serve "$sv_tmp/s1")"
+check "a package that registered no test leaves no JUnit and is judged over none, a pass of 0 tests" \
+      "rc=0 0 pass" \
+      "$(sv_record "$sv_tmp/s5" "$sv_tmp/absent.xml" 'counted 0') $(python3 -c "import json, glob; o = json.load(open(glob.glob('$sv_tmp/s5/records/*.json')[0]))['outputs']['verdict']; print(o['tests'], o['verdict'])")"
+# THE BINDING (DN-142.D31 (1)): a ship-form package record and a source verdict are bound by EQUAL inputs.
+sv_bind() {   # <python edits to `package` / `verdict` before the binding> -> what source_binding names
+    sv_py "
+import json
+package = {'inputs': {'step': {'kind': 'conan-create', 'package': 'sv_core', 'profile': 'linux-gcc16-release', 'form': 'ship'},
+                      'definition': {'malf': 'tree-1', 'parameters': {}}, 'sources': {'sv_core/host': 'export-core', 'sv_base/host': 'export-base'},
+                      'third_party': {'gtest/host': {'ref': 'gtest/1.17.0#abc', 'package_id': 'p', 'content': 'c'}},
+                      'system': {'image': 'sha256:' + 'a' * 64}}}
+verdict = {'inputs': {'step': {'kind': a.SOURCE_VERDICT_KIND, 'package': 'sv_core', 'profile': 'linux-clang21-libcxx-release'},
+                      'definition': {'malf': 'tree-1', 'parameters': {}}, 'sources': {'sv_core/host': 'export-core', 'sv_base/host': 'export-base'},
+                      'third_party': ['gtest/1.17.0#abc'], 'system': {'image': 'sha256:' + 'a' * 64}}}
+$1
+found = a.source_binding(package, verdict)
+print(a.BINDING_EQUAL if not found else ' | '.join(found))" 2>&1 | tail -1
+}
+check "RED-FIRST (DN-142.D31 (1), S3): a ship-form package and a source verdict over the same inputs are EQUAL-INPUTS" \
+      "EQUAL-INPUTS" "$(sv_bind '')"
+check "RED: a source verdict over OTHER SOURCES (one upstream's export differs) is refused by the binding, naming the member" \
+      "sources: sv_base/host" "$(sv_bind "verdict['inputs']['sources']['sv_base/host'] = 'export-other'")"
+check "RED: each other member unequal is named: malf's tree, the image, a third-party revision, the package" \
+      "definition.malf: tree-1 against tree-2|system: {'image': 'sha256:$(printf 'a%.0s' {1..64})'} against {'image': 'sha256:$(printf 'b%.0s' {1..64})'}|third_party: only the package's gtest/1.17.0#abc; only the verdict's gtest/1.17.0#def|step.package: sv_core against sv_other" \
+      "$(sv_bind "verdict['inputs']['definition']['malf'] = 'tree-2'" | sed 's/ | /|/g')|$(sv_bind "verdict['inputs']['system'] = {'image': 'sha256:' + 'b' * 64}")|$(sv_bind "verdict['inputs']['third_party'] = ['gtest/1.17.0#def']")|$(sv_bind "verdict['inputs']['step']['package'] = 'sv_other'")"
+check "RED: a writer-form package is never bound to a source verdict: its own tests judged it" \
+      "1" "$(sv_bind "package['inputs']['step']['form'] = 'writer'" | grep -c '^step: the package record is a conan-create of form .writer., and only a ship-form create is bound')"
+check "the binding verb prints EQUAL-INPUTS over two stored records (exit 0), UNEQUAL over other sources (exit 1), and exit 2 for an absent record" \
+      "rc=0 rc=1 rc=2" \
+      "$(sv_py "
+import json
+from pathlib import Path
+store = a.LocalStore(Path('$sv_tmp/b'))
+probe = Path('$sv_tmp/probe'); probe.write_bytes(b'p')
+package = {'step': {'kind': 'conan-create', 'package': 'sv_core', 'profile': 'gcc', 'form': 'ship'}, 'definition': {'malf': 't'},
+           'sources': {'sv_core/host': 'e'}, 'third_party': {}, 'system': {'image': 'i'}}
+store.commit(package, {'package': {'alias': 'x', 'content': 'c', 'entries': []}}, {'package': ('transport', lambda: probe)})
+for sources, name in (({'sv_core/host': 'e'}, 'same'), ({'sv_core/host': 'other'}, 'other')):
+    verdict = {'step': {'kind': a.SOURCE_VERDICT_KIND, 'package': 'sv_core', 'profile': 'clang'}, 'definition': {'malf': 't'},
+               'sources': sources, 'third_party': [], 'system': {'image': 'i'}}
+    store.commit(verdict, {'verdict': {'verdict': 'pass', 'tests': 0, 'findings': 'f'}}, {})
+    Path('$sv_tmp/' + name).write_text(a.key_of(verdict))
+Path('$sv_tmp/package').write_text(a.key_of(package))
+" > /dev/null 2>&1
+      for sv_which in same other; do python3 "$MALF_ROOT/artefact_store.py" binding "$sv_tmp/b" "$(cat "$sv_tmp/package")" "$(cat "$sv_tmp/$sv_which")" > /dev/null 2>&1; printf 'rc=%s ' "$?"; done
+      python3 "$MALF_ROOT/artefact_store.py" binding "$sv_tmp/b" "$(cat "$sv_tmp/package")" "$(printf '0%.0s' {1..64})" > /dev/null 2>&1; printf 'rc=%s' "$?")"
+# THE VERB'S REFUSALS, before any act.
+mkdir -p "$sv_tmp/repo"; git -C "$sv_tmp/repo" init -q; printf 'packages:\n  sv_core: {path: core, version: 0.1, depends: []}\n' > "$sv_tmp/repo/packages.yml"
+git -C "$sv_tmp/repo" add packages.yml && git -C "$sv_tmp/repo" -c user.name=t -c user.email=t@t commit -qm fixture
+check "source-verdict refuses a non-clang profile and a directory holding no packages.yml (exit 2), and an unknown option" \
+      "rc=2 1 rc=2 rc=1" \
+      "$(bash "$MALF_BIN" source-verdict --profile linux-gcc16-release "$sv_tmp/repo" > "$sv_tmp/v.log" 2>&1; echo "rc=$?") $(grep -c "REFUSED — 'linux-gcc16-release' is no clang profile" "$sv_tmp/v.log") $(bash "$MALF_BIN" source-verdict "$sv_tmp" > /dev/null 2>&1; echo "rc=$?") $(bash "$MALF_BIN" source-verdict --fast "$sv_tmp/repo" > /dev/null 2>&1; echo "rc=$?")"
+printf 'stray\n' > "$sv_tmp/repo/stray.txt"
+check "inside the environment the dev leg's workspace is its repository, and an untracked file is refused before any act (exit 2)" \
+      "rc=2 1 rc=2 1" \
+      "$(CONAN_HOME="$sv_tmp/home" MALF_SYSTEM="$MALF_TEST_SYSTEM" MALF_WORKSPACE_ROOT="$sv_tmp" bash "$MALF_BIN" source-verdict "$sv_tmp/repo" > "$sv_tmp/v.log" 2>&1; echo "rc=$?") $(grep -c "the dev leg's workspace is its repository" "$sv_tmp/v.log") $(CONAN_HOME="$sv_tmp/home" MALF_SYSTEM="$MALF_TEST_SYSTEM" MALF_WORKSPACE_ROOT="$sv_tmp/repo" bash "$MALF_BIN" source-verdict "$sv_tmp/repo" > "$sv_tmp/v.log" 2>&1; echo "rc=$?") $(grep -c 'holds 1 untracked file(s).*stray.txt' "$sv_tmp/v.log")"
+# A REPOSITORY'S WORKSPACE derives its namespaces from its own packages.yml and the lock's floating
+# (first-party) requirements, never from the superproject (DN-142.D31 (5)).
+printf '{"requires": ["sv_core/0.1", "other_lib/0.1", "zlib/1.3#abc%%1"], "build_requires": ["tool_x/1.0"]}\n' > "$sv_tmp/conan.lock"
+mkdir -p "$sv_tmp/lockdir"; mv "$sv_tmp/conan.lock" "$sv_tmp/lockdir/"
+check "a repository's workspace owns its packages' namespaces and every namespace malf's lock leaves floating, and no pinned one" \
+      "other_ sv_ tool_" \
+      "$(CONAN_HOME="$sv_tmp/home" MALF_WORKSPACE_ROOT="$sv_tmp/repo" bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; MALF_DIR="$2"; MALF_WORKSPACE_ROOT="$3"; _malf_owned_prefixes' _ "$MALF_BIN" "$sv_tmp/lockdir" "$sv_tmp/repo")"
+rm -rf "$sv_tmp"
 echo
 
 echo "[7q3] a build SWEEP settles every member in target role and recomposes the repo database"
@@ -5305,7 +5507,7 @@ as_create() {   # <home name> — the graph of a create of ex_top in that home
 as_step() {   # <home name> — the step's verdict line and exit, the key and digests elided; tpdep's own step recorded first (DN-142.D17 (4))
     local out rc
     MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" third-party-step "$as_tmp/store" "$as_tmp/$1" "$as_tmp/$1.tp.json" ex_ fixture "$MALF_ROOT" "$as_tmp/toolchain.json" > /dev/null 2>&1
-    out="$(MALF_STEP_TEST_FOLDER=none MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$as_tmp/store" "$as_tmp/$1" "$as_tmp/$1.graph.json" ex_top fixture "$MALF_ROOT" "$as_tmp/toolchain.json" "ex_" 2>&1)"; rc=$?
+    out="$(MALF_STEP_FORM=writer MALF_STEP_TEST_FOLDER=none MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$as_tmp/store" "$as_tmp/$1" "$as_tmp/$1.graph.json" ex_top fixture "$MALF_ROOT" "$as_tmp/toolchain.json" "ex_" 2>&1)"; rc=$?
     printf 'rc=%s %s' "$rc" "$(grep -oE 'artefact_store: [A-Z]+ ex_top package|[0-9]+ file\(s\): .*' <<< "$out" | sed 's/artefact_store: //' | tr '\n' ' ')"
 }
 as_key() { python3 -c 'import json, sys; print(*sorted(r.rsplit("/", 1)[-1].removesuffix(".json") for r in sys.argv[1:]))' $(grep -l '"package": "ex_top"' "$as_tmp/store/records/"*.json); }
@@ -5365,7 +5567,7 @@ check "(a) once ex_mid's own create made it, the consumer's create passes, its t
       "rc=0 |rc=0 " "$(as_act home-act ex_mid "${as_mid_args[@]}")|$(as_act home-act ex_low "${as_low_args[@]}")"
 as_record_step() {   # <package> — the step's verdict word and exit over the upstream store
     local out rc
-    out="$(MALF_STEP_TEST_FOLDER=none MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$as_tmp/ustore" "$as_tmp/home-act" "$as_tmp/home-act.$1.graph.json" "$1" fixture "$MALF_ROOT" "$as_tmp/toolchain.json" "ex_" 2>&1)"; rc=$?
+    out="$(MALF_STEP_FORM=writer MALF_STEP_TEST_FOLDER=none MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$as_tmp/ustore" "$as_tmp/home-act" "$as_tmp/home-act.$1.graph.json" "$1" fixture "$MALF_ROOT" "$as_tmp/toolchain.json" "ex_" 2>&1)"; rc=$?
     printf 'rc=%s %s' "$rc" "$(grep -oE "(STORED|MATCH) $1 package|REFUSED $1: [0-9]+ upstream|ex_mid/host" <<< "$out" | tr '\n' ' ')"
 }
 check "(b) RED — a step linking a first-party upstream no record of that package's own step holds is REFUSED, naming it, and stores nothing" \
@@ -5646,7 +5848,8 @@ tq_step() {   # <home name> <store name> <package> — malf's step function over
     mkdir -p "$tq_tmp/scratch-$1"; printf '{"compiler": "fixture"}' > "$tq_tmp/scratch-$1/toolchain.json"
     MALF_STORE_REJUDGE="${TQ_REJUDGE:-}" MALF_SYSTEM="$MALF_TEST_SYSTEM" bash -c 'MALF_SOURCE_ONLY=1 source "$1" > /dev/null 2>&1; set +e
         export CONAN_HOME="$2"; MALF_PROFILE="$2/profiles/fixture"; MALF_BUILD_PROFILE="$MALF_PROFILE"
-        MALF_CONFIG=Release; MALF_PROFILE_NAME=fixture; _MALF_WRITER_ARGS=(); _MALF_SHIP_LOCK=(${TQ_LOCK:+--lockfile=$TQ_LOCK})
+        MALF_CONFIG=Release; MALF_PROFILE_NAME=fixture; _MALF_WRITER_ARGS=(); _MALF_FORM_ARGS=(); export MALF_STEP_FORM=writer
+        _MALF_SHIP_LOCK=(${TQ_LOCK:+--lockfile=$TQ_LOCK})
         _MALF_DOMAIN=(--workspace "$(dirname "$2")" --store "$3" --scratch "$4" --conan-home "$2")
         _malf_writer_environment || exit 9
         _malf_store_run_step 1 "$5" "$6/$5" create "$3" "$4" ex_ 0' \
@@ -5716,7 +5919,7 @@ tq_home b
 CONAN_HOME="$tq_tmp/b" conan create "$tq_src/ex_v" -pr:a fixture --build=missing --format=json > "$tq_tmp/b.json" 2> /dev/null
 check "(b) RED — a first-party create that built a third-party package is REFUSED, naming it, and stores nothing" \
       "rc=1 1 0" \
-      "$(MALF_STEP_TEST_FOLDER=none MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$tq_tmp/store-b" "$tq_tmp/b" "$tq_tmp/b.json" ex_v fixture "$MALF_ROOT" "$tq_tmp/scratch-a/toolchain.json" ex_ > "$tq_tmp/out" 2>&1; echo -n "rc=$? "; echo -n "$(tq_has 'REFUSED ex_v: its create built or downloaded 1 third-party package(s).*tpv/0.1 (host) Build') "; ls "$tq_tmp/store-b/records" 2>/dev/null | wc -l | tr -d ' ')"
+      "$(MALF_STEP_FORM=writer MALF_STEP_TEST_FOLDER=none MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$tq_tmp/store-b" "$tq_tmp/b" "$tq_tmp/b.json" ex_v fixture "$MALF_ROOT" "$tq_tmp/scratch-a/toolchain.json" ex_ > "$tq_tmp/out" 2>&1; echo -n "rc=$? "; echo -n "$(tq_has 'REFUSED ex_v: its create built or downloaded 1 third-party package(s).*tpv/0.1 (host) Build') "; ls "$tq_tmp/store-b/records" 2>/dev/null | wc -l | tr -d ' ')"
 
 # (c) a third-party content no record holds is refused, in the act and in the read-only replay.
 tq_home c
@@ -5724,7 +5927,7 @@ CONAN_HOME="$tq_tmp/c" conan create "$tq_src/tpr" -pr:a fixture > /dev/null 2>&1
 CONAN_HOME="$tq_tmp/c" conan create "$tq_src/ex_r" -pr:a fixture --build='ex_r/*' --no-remote --format=json > "$tq_tmp/c.json" 2> /dev/null
 check "(c) RED — a first-party step linking a third-party binary no third-party-create record holds is REFUSED, naming it, and stores nothing" \
       "rc=1 1 0" \
-      "$(MALF_STEP_EXECUTABLES= MALF_STEP_TEST_FOLDER=none MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$tq_tmp/store-c" "$tq_tmp/c" "$tq_tmp/c.json" ex_r fixture "$MALF_ROOT" "$tq_tmp/scratch-a/toolchain.json" ex_ > "$tq_tmp/out" 2>&1; echo -n "rc=$? "; echo -n "$(tq_has 'REFUSED ex_r: 1 third-party package(s).*tpr/host tpr/0.1#[0-9a-f]*:[0-9a-f]* at content [0-9a-f]*: no third-party-create record holds it') "; ls "$tq_tmp/store-c/records" 2>/dev/null | wc -l | tr -d ' ')"
+      "$(MALF_STEP_EXECUTABLES= MALF_STEP_FORM=writer MALF_STEP_TEST_FOLDER=none MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$tq_tmp/store-c" "$tq_tmp/c" "$tq_tmp/c.json" ex_r fixture "$MALF_ROOT" "$tq_tmp/scratch-a/toolchain.json" ex_ > "$tq_tmp/out" 2>&1; echo -n "rc=$? "; echo -n "$(tq_has 'REFUSED ex_r: 1 third-party package(s).*tpr/host tpr/0.1#[0-9a-f]*:[0-9a-f]* at content [0-9a-f]*: no third-party-create record holds it') "; ls "$tq_tmp/store-c/records" 2>/dev/null | wc -l | tr -d ' ')"
 mkdir -p "$tq_tmp/store-replay/records"
 printf '{"key": "k", "inputs": {"step": {"kind": "conan-create", "package": "ex_r", "profile": "fixture"}, "upstream": {}, "third_party": {"tpr/host": {"ref": "tpr/0.1#r", "package_id": "p", "content": "%s"}}}, "outputs": {}}' "$(printf 'c%.0s' {1..64})" > "$tq_tmp/store-replay/records/k.json"
 check "(c) RED — the read-only replay names a stored record whose third-party content no record holds" \
@@ -5783,7 +5986,7 @@ CONAN_HOME="$tq_tmp/f" conan create "$tq_src/tpp" -pr:a fixture > /dev/null 2>&1
 CONAN_HOME="$tq_tmp/f" conan create "$tq_src/ex_p" -pr:a fixture --build='ex_p/*' --format=json > "$tq_tmp/f.json" 2> /dev/null
 check "(f) RED — the key derivation of a first-party step refuses a graph carrying a python_requires, naming it" \
       "rc=1 1" \
-      "$(MALF_STEP_EXECUTABLES= MALF_STEP_TEST_FOLDER=none MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$tq_tmp/store-f2" "$tq_tmp/f" "$tq_tmp/f.json" ex_p fixture "$MALF_ROOT" "$tq_tmp/scratch-a/toolchain.json" ex_ > "$tq_tmp/out" 2>&1; echo -n "rc=$? "; tq_has 'tpp/0.1 carries pyreq/0.1#')"
+      "$(MALF_STEP_EXECUTABLES= MALF_STEP_FORM=writer MALF_STEP_TEST_FOLDER=none MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 "$MALF_ROOT/artefact_store.py" conan-step "$tq_tmp/store-f2" "$tq_tmp/f" "$tq_tmp/f.json" ex_p fixture "$MALF_ROOT" "$tq_tmp/scratch-a/toolchain.json" ex_ > "$tq_tmp/out" 2>&1; echo -n "rc=$? "; tq_has 'tpp/0.1 carries pyreq/0.1#')"
 # (g) a build outside CMake writes the absolute path of what it compiles into the bytes; malf's
 # wrapper maps every folder of the home, so two homes of different path LENGTH build equal bytes.
 tq_home g; tq_home g-a-second-home-at-a-much-longer-path
@@ -6239,7 +6442,7 @@ ls_step() {   # <malf dir> <package>
     CONAN_HOME="$ls_home" MALF_SYSTEM="$MALF_TEST_SYSTEM" bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e
         MALF_DIR="$2"; MALF_PROFILE="$3"; MALF_BUILD_PROFILE="$3"; MALF_CONFIG=Release
         _MALF_WRITER_PROFILES=(--profile:host="$3" --profile:build="$3")
-        _malf_writer_create_args || exit 3
+        MALF_STEP_FORM=writer _malf_writer_create_args || exit 3
         _malf_ship_lock_args || exit 2
         # These arms judge the LOCK a create resolves against, over a fixture MALF_DIR holding only its
         # lock; the create runs unconfined here, and the domain is judged by the malf_closure selftest ([7k]).

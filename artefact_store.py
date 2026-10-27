@@ -20,7 +20,29 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
         the corpus gates parameter document naming the package, its corpus verdict too
         (DN-142.D21 (1)), whose red is that record's verdict and never this command's exit; and,
         once every record of the step is stored or matching, its `step-outcome` record naming them
-        by key, the one record `serve` serves the step from
+        by key, the one record `serve` serves the step from. Its key's `step.form` is MALF_STEP_FORM
+        (`writer` or `ship`, refused unset, DN-142.D31 (1)); a ship-form step whose results hold a
+        result of the package's own tests is refused and stores nothing
+    artefact_store.py source-key <conan home> <graph info.json> <package> <profile name> <malf dir>
+                                 <prefixes> <reference> <document out>
+        the key of a package's SOURCE VERDICT (DN-142.D31 (1)), one line of 64 hex, its document written
+        to <document out>: from `conan graph info` over its recipe path at the dev profile, in a home
+        holding every first-party export of its closure and every third-party recipe; <reference> is the
+        `<ref>#<rrev>` its own export gave
+    artefact_store.py source-serve <store> <source-key document>
+        exit 0 printing SERVED when the store holds a passing source verdict at that key from a counted
+        domain, 3 printing EXECUTES and why otherwise (always under MALF_STORE_REJUDGE=1)
+    artefact_store.py source-verdict <store> <source-key document> <junit> <package source dir>
+        store or compare the source verdict over the dev leg's JUnit file for the package (exit as
+        conan-step's: 0 stored or matching, 1 differing at an equal key)
+    artefact_store.py binding <store> <package record key> <source-verdict record key>
+        DN-142.D31 (1)'s binding: EQUAL-INPUTS (exit 0) when a ship-form package record and a source
+        verdict name one package over equal sources, malf tree, image and third-party `ref#rrev` set;
+        UNEQUAL naming each member (exit 1); 2 when a record is absent
+    artefact_store.py ship-equal <store>
+        gate G-ship (DN-142.D31 (1)): each ship-form create paired with the writer-form create of equal
+        inputs but the form, EQUAL when package id, revision and content digest agree; exit 0 when a
+        pair exists and every ship-form record is paired and equal
     artefact_store.py key-first <store> <conan home> <graph info.json> <package> <profile name>
                                 <malf dir> <toolchain.json> <prefixes> <document out>
                                 reference=<ref>#<rrev>|tree=<source tree id>
@@ -543,14 +565,15 @@ def system_member(environ: "dict[str, str] | None" = None, pin: Path = ENVIRONME
 WRITER_PROFILE = Path("config") / "writer.profile"
 
 
-def profile_member(home: Path, profile: str, malf_dir: Path) -> str:
+def profile_member(home: Path, profile: str, malf_dir: Path, writer: bool = True) -> str:
     """DN-142.D2's `profile` member: `conan profile show` at the step's profile with malf's writer
-    layer composed over it, as every writer act composes it (DN-142.D17 (8)), with the two
+    layer composed over it, as every writer act composes it (DN-142.D17 (8)), or alone for the dev
+    leg's source verdict (`writer` false), which composes none, with the two
     absolute prefixes it can carry (the conan home, malf's checkout) replaced by fixed tokens;
     what those files contain is keyed by `definition` (malf's tree) and nothing else."""
-    layer = str(malf_dir / WRITER_PROFILE)
-    shown = _run(["conan", "profile", "show", f"--profile:host={profile}", f"--profile:host={layer}",
-                  f"--profile:build={profile}", f"--profile:build={layer}"],
+    layers = [str(malf_dir / WRITER_PROFILE)] if writer else []
+    shown = _run(["conan", "profile", "show", *(f"--profile:{context}={name}" for context in ("host", "build")
+                                                 for name in (profile, *layers))],
                  {**os.environ, "CONAN_HOME": str(home)})
     for prefix, token in ((str(home), "<conan-home>"), (str(malf_dir), "<malf>")):
         shown = shown.replace(prefix, token)
@@ -1004,11 +1027,31 @@ def step_backends() -> list:
     return json.loads(Path(named).read_text()) if named else []
 
 
+# THE FORM OF A CREATE (DN-142.D31 (1)): `writer`, step 0's create running every test and test_package,
+# or `ship`, a candidate's create running its test_package alone (`malf_recipe_tests.CREATE_ARGS`). Two
+# acts, so two keys: the form is a member of every `conan-create` step, and through the step's key it
+# reaches its verdict's and its outcome's, so an outcome of one form never serves a request of the other.
+STEP_FORM_ENV = "MALF_STEP_FORM"
+STEP_FORMS = ("writer", "ship")
+
+
+def step_form() -> str:
+    """The form MALF_STEP_FORM names. raises Refused when it is unset or names no form: a create's
+    form is never assumed, since a ship act keyed as a writer would serve a writer request with no
+    unit-test verdict."""
+    named = os.environ.get(STEP_FORM_ENV)
+    if named not in STEP_FORMS:
+        raise Refused(f"{STEP_FORM_ENV} is {named!r}, not one of {', '.join(STEP_FORMS)}: a create's form "
+                      "is a member of its key and is never assumed (DN-142.D31 (1))")
+    return named
+
+
 def _step_document(kind: str, package: str, profile: str, home: Path, malf_dir: Path,
                    toolchain: Path, sources: dict, upstream: dict, third_party: dict) -> dict:
     backends = step_backends()
     return {
         "step": {"kind": kind, "package": package, "profile": profile,
+                 **({"form": step_form()} if kind == "conan-create" else {}),
                  **({"backends": backends} if backends else {})},
         "definition": definition_member(malf_dir, step_parameters(profile)),
         "sources": sources,
@@ -1762,6 +1805,13 @@ def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile:
     if not key_first_agrees(document) or refused:
         return 1
     binary, folder = target
+    ran = [] if results is None else ship_form_tests(document, results, package,
+                                                     binary.split(":", 1)[1].split("#", 1)[0])
+    if ran:
+        print(f"artefact_store: REFUSED {package}: its key names the ship form, and its create left "
+              f"{', '.join(ran)}, a run of its own tests that form never makes, so nothing is stored "
+              "(DN-142.D31 (1))", file=sys.stderr)
+        return 1
     content, entries = tree_digest(folder)
     files = tree_files(folder)
     _ids, missing = build_ids_of(files)
@@ -1800,6 +1850,53 @@ def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile:
         or (results / package / f"{package_id}{LISTED_SUFFIX}").is_file()
     return judged or outcome_record(store, key_of(document), package, profile, corpus_gates, keys,
                                     packaged=True, tested=tested)
+
+
+def ship_form_tests(document: dict, results: Path, package: str, package_id: str) -> list[str]:
+    """The result files of the package's OWN tests a ship-form create left, empty for a writer-form step:
+    the ship form promises a test_package verdict at most, never the unit tests', which the source
+    verdict judges, so such a file says the act ran another form than its key names."""
+    if document["step"].get("form") != "ship":
+        return []
+    return [path.name for path in (results / package / f"{package_id}.xml",
+                                   results / package / f"{package_id}{LISTED_SUFFIX}") if path.is_file()]
+
+
+def ship_equal(store: Path) -> int:
+    """`ship-equal`, gate G-ship (DN-142.D31 (1)): every ship-form `conan-create` record of `store` paired with
+    the writer-form record whose inputs are equal but for the form, and the two packages compared by
+    binary alias (package id and revision) and content digest. Prints EQUAL or UNEQUAL per pair and UNPAIRED
+    per ship-form record no writer-form record matches.
+    post: exit 0 when at least one pair exists and every ship-form record is paired and equal, 1 otherwise."""
+    records = [json.loads(path.read_text()) for path in sorted((store / "records").glob("*.json"))]
+    creates = [record for record in records if record["inputs"]["step"].get("kind") == "conan-create"]
+
+    def unformed(record: dict) -> str:
+        inputs = json.loads(json.dumps(record["inputs"]))
+        inputs["step"].pop("form", None)
+        return key_of(inputs)
+
+    writers = {unformed(record): record for record in creates if record["inputs"]["step"].get("form") == "writer"}
+    pairs = defects = 0
+    for record in creates:
+        if record["inputs"]["step"].get("form") != "ship":
+            continue
+        package, held = record["inputs"]["step"]["package"], record["outputs"][PACKAGE_OUTPUT]
+        writer = writers.get(unformed(record))
+        if writer is None:
+            defects += 1
+            print(f"artefact_store: UNPAIRED {package} ship {record['key']}: no writer-form record has its inputs")
+            continue
+        pairs += 1
+        other = writer["outputs"][PACKAGE_OUTPUT]
+        if (held["alias"], held["content"]) == (other["alias"], other["content"]):
+            print(f"artefact_store: EQUAL {package} {held['alias']} content {held['content']}")
+        else:
+            defects += 1
+            print(f"artefact_store: UNEQUAL {package}: ship {held['alias']} content {held['content']}, "
+                  f"writer {other['alias']} content {other['content']}")
+    print(f"artefact_store: G-ship {pairs} pair(s), {defects} defect(s) in {store}")
+    return 0 if pairs and not defects else 1
 
 
 def build_step(store: Path, home: Path, graph_json: Path, package: str, profile: str,
@@ -1925,6 +2022,136 @@ def verdict_record(store: Path, build_key: str, package: str, package_id: str, p
     if keys is not None:
         keys[VERDICT_OUTPUT] = key_of(document)
     return LocalStore(store).commit(document, {"verdict": output}, {"verdict": ("log", lambda: log)})
+
+
+# THE SOURCE VERDICT (DN-142.D31 (1), slice S3): what the dev leg's clang tests judge. They judge SOURCES,
+# never bytes: the dev leg compiles every first-party package of its closure from its working tree, against
+# third-party binaries the image built and no store holds (DN-142.D19 (11)). So its key names the export
+# digest of every first-party node of the package's graph (DN-142.D2, the very digests a create's `sources`
+# holds), each third-party node by `ref#rrev` alone, the rendered dev profile, the selection, malf's tree
+# and the image, and its one output is the verdict over the package's own test population. A gcc package of
+# the same inputs is bound to it by equal members (`source_binding`), never by a judged digest.
+SOURCE_VERDICT_KIND = "source-verdict"
+BINDING_EQUAL = "EQUAL-INPUTS"
+
+
+def source_verdict_document(home: Path, graph_json: Path, package: str, profile: str, malf_dir: Path,
+                            prefixes: tuple[str, ...], reference: str) -> dict:
+    """The key document of `package`'s source verdict, from `conan graph info` over its recipe path at the
+    dev profile, in a home holding every first-party export of the closure and every third-party RECIPE
+    (no binary): `reference` is the `<ref>#<rrev>` its own `conan export` gave. A node conan skips is no
+    member, as in a create's key."""
+    root = json.loads(graph_json.read_text())["graph"]["nodes"]["0"]
+    nodes = graph_nodes(graph_json)
+    refuse_python_requires([root, *nodes], graph_json)
+    sources, third_party = {}, set()
+    for node in nodes:
+        if node.get("binary") == "Skip":
+            continue
+        recipe = _alias(node)[0]
+        if _owned(node["name"], prefixes):
+            sources[f"{node['name']}/{node['context']}"] = _export_digest(home, recipe)
+        else:
+            third_party.add(recipe)
+    context = "build" if root.get("package_type") == "build-scripts" else "host"
+    sources[f"{package}/{context}"] = _export_digest(home, reference)
+    return {"step": {"kind": SOURCE_VERDICT_KIND, "package": package, "profile": profile},
+            "definition": definition_member(malf_dir, step_parameters(profile)),
+            "sources": sources, "third_party": sorted(third_party),
+            "profile": profile_member(home, profile, malf_dir, writer=False),
+            "selection": selection_member(malf_dir), "system": system_member()}
+
+
+def source_verdict_record(store: Path, document: dict, junit: Path, source_dir: Path) -> int:
+    """Store or compare `document`'s source verdict over the JUnit file the dev leg's `malf test` wrote for
+    the package (`<build tree>/malf-test.junit.xml`), its skips judged against the package's own
+    declarations at the document's profile (DN-142.D23). A package whose tree registered no test leaves no
+    file and is judged over none: `malf test`'s own guard already refused a tree that owed one and ran none.
+    post: as LocalStore.commit; the verdict `fail` on a failed row, an undeclared skip or a declaration
+    defect, `pass` otherwise."""
+    package, profile = document["step"]["package"], document["step"]["profile"]
+    rows = sorted(junit_rows(junit, "build")) if junit.is_file() else []
+    undeclared, excused, defects = _helper().skip_findings(rows, _helper().read_declarations(source_dir),
+                                                           profile, unfiltered=True)
+    verdict = "fail" if any(row[2] == "failed" for row in rows) or undeclared or defects else "pass"
+    if excused:
+        print(f"artefact_store: EXCUSED {package} {len(excused)} declared skip(s): " + ", ".join(row[1] for row in excused))
+    if undeclared or defects:
+        print(f"artefact_store: SKIP RED {package}: " + "; ".join(undeclared + defects))
+    scratch = Path(tempfile.mkdtemp(prefix="artefact_store."))
+    log = scratch / "results.tar"
+    with tarfile.open(log, "w") as bundle:
+        if junit.is_file():
+            info = bundle.gettarinfo(str(junit), arcname=junit.name)
+            info.mtime, info.uid, info.gid, info.uname, info.gname = 0, 0, 0, "", ""
+            with junit.open("rb") as handle:
+                bundle.addfile(info, handle)
+    output = {"verdict": verdict, "results": rows, "findings": key_of(rows), "tests": len(rows),
+              "excused": excused}
+    return LocalStore(store).commit(document, {VERDICT_OUTPUT: output}, {VERDICT_OUTPUT: ("log", lambda: log)})
+
+
+def source_verdict_unservable(store: Path, document: dict, rejudge: bool) -> str | None:
+    """None when the source verdict at `document`'s key may be SERVED in place of running the dev leg's
+    tests again (stored, produced in a counted domain, judged `pass`), else why it runs."""
+    if rejudge:
+        return "a re-judge was asked for (MALF_STORE_REJUDGE), so every package's tests run and are compared"
+    record = LocalStore(store).record(key_of(document))
+    if record is None:
+        return "no source verdict at this key"
+    why = servable(record)
+    if why is not None:
+        return why
+    verdict = record["outputs"][VERDICT_OUTPUT]["verdict"]
+    return None if verdict == "pass" else f"its source verdict judged {verdict}, and only a pass is served"
+
+
+def source_binding(package: dict, verdict: dict) -> list[str]:
+    """DN-142.D31 (1)'s binding of a ship-form package record to a source verdict record: empty when their
+    inputs are EQUAL — one package, the same first-party `sources` (export digests of the whole closure),
+    the same malf tree, the same image, and the same set of third-party `ref#rrev` — else one line per
+    unequal member, naming it and what differs. Inputs only: whether the verdict passed is its own output."""
+    held, judged = package["inputs"], verdict["inputs"]
+    unequal = []
+    if held["step"].get("kind") != "conan-create" or held["step"].get("form") != "ship":
+        unequal.append(f"step: the package record is a {held['step'].get('kind')} of form "
+                       f"{held['step'].get('form')!r}, and only a ship-form create is bound to a source verdict")
+    if judged["step"].get("kind") != SOURCE_VERDICT_KIND:
+        unequal.append(f"step: the verdict record is a {judged['step'].get('kind')}, not a {SOURCE_VERDICT_KIND}")
+    if held["step"].get("package") != judged["step"].get("package"):
+        unequal.append(f"step.package: {held['step'].get('package')} against {judged['step'].get('package')}")
+    sources = document_differences(held.get("sources"), judged.get("sources"))
+    if sources:
+        unequal.append("sources: " + ", ".join(sources[:NAMED_FILES]))
+    for member, left, right in (("definition.malf", held["definition"]["malf"], judged["definition"]["malf"]),
+                                ("system", held.get("system"), judged.get("system"))):
+        if left != right:
+            unequal.append(f"{member}: {left} against {right}")
+    refs = {member["ref"] for member in held.get("third_party", {}).values()}
+    named = set(judged.get("third_party", []))
+    if refs != named:
+        unequal.append("third_party: only the package's " + (", ".join(sorted(refs - named)) or "none")
+                       + "; only the verdict's " + (", ".join(sorted(named - refs)) or "none"))
+    return unequal
+
+
+def binding(store: Path, package_key: str, verdict_key: str) -> int:
+    """`binding`: prints EQUAL-INPUTS with both keys, or UNEQUAL naming each member (exit 1); exit 2 when a
+    record is absent."""
+    local = LocalStore(store)
+    package, verdict = local.record(package_key), local.record(verdict_key)
+    if package is None or verdict is None:
+        print(f"artefact_store: {store} holds no record {package_key if package is None else verdict_key}",
+              file=sys.stderr)
+        return 2
+    unequal = source_binding(package, verdict)
+    subject = package["inputs"]["step"].get("package")
+    if not unequal:
+        print(f"artefact_store: {BINDING_EQUAL} {subject} package {package_key} source-verdict {verdict_key}")
+        return 0
+    print(f"artefact_store: UNEQUAL {subject} package {package_key} source-verdict {verdict_key}: "
+          + "; ".join(unequal))
+    return 1
 
 
 def _link_step_files(results: Path, package: str, package_id: str, files: list[Path]) -> None:
@@ -3700,10 +3927,43 @@ def main(argv: list[str]) -> int:
         Path(argv[2]).write_text(json.dumps(measure_toolchain(Path(argv[1])), sort_keys=True))
         return 0
     if len(argv) in (9, 10, 11) and argv[0] == "conan-step":
-        return conan_step(Path(argv[1]), Path(argv[2]), Path(argv[3]), argv[4], argv[5],
-                          Path(argv[6]), Path(argv[7]), tuple(argv[8].split()),
-                          Path(argv[9]) if len(argv) >= 10 else None,
-                          Path(argv[10]) if len(argv) == 11 else None)
+        try:
+            return conan_step(Path(argv[1]), Path(argv[2]), Path(argv[3]), argv[4], argv[5],
+                              Path(argv[6]), Path(argv[7]), tuple(argv[8].split()),
+                              Path(argv[9]) if len(argv) >= 10 else None,
+                              Path(argv[10]) if len(argv) == 11 else None)
+        except Refused as refused:
+            print(f"artefact_store: REFUSED {refused}", file=sys.stderr)
+            return 1
+    if len(argv) == 9 and argv[0] == "source-key":
+        try:
+            document = source_verdict_document(Path(argv[1]), Path(argv[2]), argv[3], argv[4], Path(argv[5]),
+                                               tuple(argv[6].split()), argv[7])
+        except Refused as refused:
+            print(f"artefact_store: REFUSED {refused}", file=sys.stderr)
+            return 1
+        Path(argv[8]).write_text(json.dumps(document, sort_keys=True))
+        print(key_of(document))
+        return 0
+    if len(argv) == 3 and argv[0] == "source-serve":
+        document = json.loads(Path(argv[2]).read_text())
+        package = document["step"]["package"]
+        why = source_verdict_unservable(Path(argv[1]), document, os.environ.get(REJUDGE_ENV) == "1")
+        if why is not None:
+            print(f"artefact_store: EXECUTES {package} source-verdict key {key_of(document)}: {why}")
+            return SERVE_MISS
+        record = LocalStore(Path(argv[1])).record(key_of(document))
+        print(f"artefact_store: REUSED {package} source-verdict key {record['key']} "
+              f"{_described(record['outputs'][VERDICT_OUTPUT])}")
+        print(f"artefact_store: SERVED {package} source verdict at key {record['key']}, no test run (DN-142.D31 (2))")
+        return 0
+    if len(argv) == 5 and argv[0] == "source-verdict":
+        document = json.loads(Path(argv[2]).read_text())
+        return source_verdict_record(Path(argv[1]), document, Path(argv[3]), Path(argv[4]))
+    if len(argv) == 2 and argv[0] == "ship-equal":
+        return ship_equal(Path(argv[1]))
+    if len(argv) == 4 and argv[0] == "binding":
+        return binding(Path(argv[1]), argv[2], argv[3])
     if len(argv) == 11 and argv[0] == "key-first":
         try:
             document = key_first_document(Path(argv[1]), Path(argv[2]), Path(argv[3]), argv[4], argv[5],

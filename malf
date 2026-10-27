@@ -5123,7 +5123,8 @@ Commands:
                                    and a fresh clone of its commit; exit 0 only when every pair of recipe
                                    revisions is equal, 1 when one differs, 2 when a package is
                                    not judged, 3 when the verb failed. No compile; seconds
-    store-create [<pkg>...]        ROADMAP N358's one build act over a local store (DN-142.D2,
+    store-create [--ship] [<pkg>...]
+                                   ROADMAP N358's one build act over a local store (DN-142.D2,
                                    DN-142.D3, DN-142.D5, DN-142.D6): every step of malf's walk (named:
                                    their closure), each created
                                    from its export with its tests run (a stored: false one conan-built),
@@ -5131,7 +5132,15 @@ Commands:
                                    records keyed by inputs; a failed step skips its dependents — exit 1 on a failed or
                                    skipped step or a differing output at an equal key. A failed step's
                                    log is quoted (ctest's roll-up, its last 200 lines); a red walk
-                                   archives its logs into MALF_STORE_LOG_ARCHIVE when set
+                                   archives its logs into MALF_STORE_LOG_ARCHIVE when set.
+                                   --ship: a candidate's form (DN-142.D31 (1)), no test of the
+                                   package built or run, its test_package run; keyed apart
+    source-verdict [--profile <clang profile>] <repository>
+                                   a candidate's dev leg in the build environment (DN-142.D31
+                                   (1)): every package of the repository tested on clang, each
+                                   its own act, one source-verdict record each, keyed before the
+                                   act; a key holding a passing verdict is served; the build
+                                   trees stay for the postflight. Exit 1 a red, 2 refused
     sandbox [--read <root>]... [--write <root>]... -- <command>...
                                    run <command> under a Landlock domain (gate G4): readable only
                                    beneath each --read root, writable only beneath each --write
@@ -5590,6 +5599,7 @@ _malf_home_profiles() {   # <home>
 
 _malf_writer_create_args() {
     _MALF_WRITER_ARGS=()
+    _MALF_FORM_ARGS=()
     local listed
     listed="$(python3 "$MALF_DIR/malf_recipe_tests.py" create-args writer)" \
         || { echo "malf: the writer's conf set could not be read from malf_recipe_tests.py" >&2; return 1; }
@@ -5598,6 +5608,12 @@ _malf_writer_create_args() {
     [[ -n "${MALF_PROFILE_NAME:-}" ]] \
         || { echo "malf: no profile is resolved, so a writer create's skips could not be judged" >&2; return 1; }
     _MALF_WRITER_ARGS+=(-c "user.malf:profile=$MALF_PROFILE_NAME")
+    # THE FORM'S OWN CONF SET (DN-142.D31 (1)) rides the first-party create and the resolve of its key
+    # alone, never a third-party phase: a third-party binary is one act whatever form consumes it.
+    [[ "${MALF_STEP_FORM:-}" == writer ]] && return 0
+    listed="$(python3 "$MALF_DIR/malf_recipe_tests.py" create-args "${MALF_STEP_FORM:-}")" \
+        || { echo "malf: the conf set of the form '${MALF_STEP_FORM:-}' could not be read from malf_recipe_tests.py" >&2; return 1; }
+    [[ -z "$listed" ]] || mapfile -t _MALF_FORM_ARGS <<< "$listed"
 }
 
 # THE STORE'S ROOT (DN-142.D6, the Founder's ruling R-2): MALF_STORE_DIR, else $HOME/coderoast-store,
@@ -5659,9 +5675,11 @@ _malf_conan_home_fresh() {   # <home>
 # as on the host. Its environment is exactly the walk's declared variables. The walk runs as uid 1000 with
 # no capability in a nested user namespace, as every act container does (DN-142.D30 (8) R4).
 # post: the container's exit, or 2 refused before it ran.
-_malf_store_create_in_environment() {   # <package>...
-    local store name
-    local -a bench_args=()
+_malf_store_create_in_environment() {   # <writer|ship> <package>...
+    local form="$1" store name
+    shift
+    local -a bench_args=() form_args=()
+    [[ "$form" == writer ]] || form_args=(--ship)
     # The slot's refusals come first, on the host, before any container starts (the walk inside judges
     # the slot again, through the host's process ids).
     mapfile -t bench_args < <(_malf_store_bench_args) && [[ "${bench_args[0]:-}" != REFUSED ]] || return 2
@@ -5711,7 +5729,7 @@ _malf_store_create_in_environment() {   # <package>...
     _malf_store_walk_backends "$declared" "$@" || rc=$?
     if [[ $rc -eq 0 ]]; then
         [[ "$(cat "$declared")" == "[]" ]] || args+=(--backends "$declared")
-        python3 "$MALF_DIR/build_environment.py" run "${args[@]}" -- "$MALF_DIR/malf" store-create "$@" || rc=$?
+        python3 "$MALF_DIR/build_environment.py" run "${args[@]}" -- "$MALF_DIR/malf" store-create "${form_args[@]}" "$@" || rc=$?
     fi
     rm -f "$declared"
     return "$rc"
@@ -5757,6 +5775,18 @@ _malf_store_walk_backends() {   # <out> [<package>...]
 # MALF_STEP_EXECUTABLES; the store refuses an unclassified or stale executable and a published one
 # that is not stripped, carries a runpath or has no build-id.
 #
+# THE SHIP FORM (DN-142.D31 (1)): `--ship` creates every stored step under malf_recipe_tests.py's `ship`
+# conf set, `tools.build:skip_test=True` with the test folder kept and `user.malf:run_test_package`: the
+# package's own tests are neither built nor run (a candidate judges them on clang, `malf source-verdict`),
+# and its test_package is built and run, its result the step's test verdict. The form is a member of the
+# create's key (`step.form`, from MALF_STEP_FORM, which this verb exports), so a ship-form record and a
+# writer-form record of one package never share a key, a verdict or an outcome, and neither form is ever
+# served for the other; a ship-form create that leaves a result of its own tests is refused. Its outcome
+# expects the package, and a test verdict only when the recipe tracks a test_package. A `stored: false`
+# step has nothing to create in this form and is left out of the walk, printed; corpus gates and
+# benchmarks (MALF_CORPUS_GATES, MALF_BENCH) run inside writer-form creates, so naming one under
+# `--ship` is refused. The third-party phases run under the writer's set in both forms: one act.
+#
 # THE CORPUS GATES (DN-142.D21): MALF_CORPUS_GATES, when set, names the parameter document step 0's
 # Pharos writes. Every create then carries `-c user.malf:corpus_gates=<document>`, so the package the
 # document names runs its corpus legs inside its create (malf_recipe_tests.py), and its corpus
@@ -5780,16 +5810,29 @@ _malf_store_walk_backends() {   # <out> [<package>...]
 #
 # Exit 0 every step green and every output stored or matching; 1 a step failed, was skipped, or
 # rebuilt at an equal key differs; 2 refused before any step.
-# Usage: malf store-create [<package>...]   (MALF_STORE_DIR: the store, default ~/coderoast-store;
+# Usage: malf store-create [--ship] [<package>...]   (MALF_STORE_DIR: the store, default ~/coderoast-store;
 #        a root under a cache is refused, _malf_store_root; MALF_STORE_LOG_ARCHIVE: where a red walk
 #        archives its logs, _malf_store_keep_logs)
 cmd_store_create() {
-    local arg
-    for arg in "$@"; do [[ "$arg" != -* ]] || _malf_refuse_option store-create "$arg"; done
+    local arg form=writer
+    local -a names=()
+    for arg in "$@"; do
+        case "$arg" in
+            --ship) form=ship ;;
+            -*) _malf_refuse_option store-create "$arg" ;;
+            *) names+=("$arg") ;;
+        esac
+    done
+    set -- "${names[@]}"
+    if [[ "$form" == ship && ( -n "${MALF_CORPUS_GATES:-}" || -n "${MALF_BENCH:-}" ) ]]; then
+        echo "malf store-create: REFUSED — --ship runs no gate of its own: the corpus legs and the benchmarks run inside step 0's writer-form creates, and MALF_CORPUS_GATES='${MALF_CORPUS_GATES:-}' MALF_BENCH='${MALF_BENCH:-}' name some (DN-142.D31 (1))" >&2
+        return 2
+    fi
     if [[ -z "${MALF_SYSTEM:-}" ]]; then
-        _malf_store_create_in_environment "$@"
+        _malf_store_create_in_environment "$form" "$@"
         return
     fi
+    export MALF_STEP_FORM="$form"
     # THE DRIVER RUNS WITH NO DOMAIN, ITS ACTS EACH IN THEIRS (DN-142.D29 (5), (9)): a Landlock domain is
     # inherited by every child and never lifted, so a confined driver would confine the acts a package
     # declares `unconfined:` (its tests change mount topology, which no domain allows). Its malf reads
@@ -5814,6 +5857,16 @@ cmd_store_create() {
         || { echo "malf store-create: the owned package namespaces of $MALF_WORKSPACE_ROOT could not be derived" >&2; return 2; }
     local wanted
     wanted="$(_malf_store_walk "$steps" "$unstored" "$@")" || return 2
+    if [[ "$form" == ship ]]; then
+        # A `stored: false` step stores no package and judges only its tests, which the ship form runs
+        # none of: it has nothing to do in this form (DN-142.D14, DN-142.D31 (1)).
+        local unstored_step
+        while IFS=$'\t' read -r unstored_step _ _ _; do
+            echo "--- store-create: $unstored_step is stored: false, so the ship form has nothing to create ---"
+        done < <(awk -F'\t' '$4 == "build"' <<< "$wanted")
+        wanted="$(awk -F'\t' '$4 != "build"' <<< "$wanted")"
+        [[ -n "$wanted" ]] || { echo "malf store-create: --ship selected no stored step" >&2; return 2; }
+    fi
     _malf_ship_lock_args || return 2
 
     export CONAN_HOME="${MALF_STORE_CONAN_HOME:-$cut_home}"
@@ -5839,7 +5892,7 @@ cmd_store_create() {
     local compiler
     compiler="$(sed -n 's/^CXX=//p' "$MALF_PROFILE")"
     [[ -x "$compiler" ]] || { echo "malf store-create: the profile $MALF_PROFILE_NAME names no executable CXX" >&2; return 2; }
-    echo "=== malf store-create: $(wc -l <<< "$wanted") step(s), home $CONAN_HOME, store $store ==="
+    echo "=== malf store-create: $(wc -l <<< "$wanted") step(s), $form form, home $CONAN_HOME, store $store ==="
     python3 "$MALF_DIR/artefact_store.py" toolchain "$(dirname "$(dirname "$compiler")")" "$scratch/toolchain.json" || return 2
     _malf_writer_create_args || return 2
     _malf_writer_environment || return 2
@@ -6276,7 +6329,7 @@ _malf_store_key_first() {   # <name> <prefixes> <store> <scratch> <log> <recipe 
     # to `--requires`. And never from the caller's directory: conan reads a `conan.lock` from the
     # current one when no --lockfile is named, while a create over <path> reads the one beside it.
     (cd "$path" && conan graph info . "${_MALF_WRITER_PROFILES[@]}" -s build_type="$MALF_CONFIG" \
-        "${_MALF_WRITER_ARGS[@]}" "${build_args[@]}" "${_MALF_SHIP_LOCK[@]}" --no-remote --format=json) \
+        "${_MALF_WRITER_ARGS[@]}" "${_MALF_FORM_ARGS[@]}" "${build_args[@]}" "${_MALF_SHIP_LOCK[@]}" --no-remote --format=json) \
         > "$graph" 2>> "$log" || return 1
     key="$(MALF_STEP_TEST_FOLDER="$_MALF_TEST_FOLDER" MALF_STEP_SOURCE="${tree:+$path}" python3 "$MALF_DIR/artefact_store.py" key-first "$store" "$CONAN_HOME" "$graph" "$name" \
         "$MALF_PROFILE_NAME" "$MALF_DIR" "$scratch/toolchain.json" "$prefixes" "$scratch/$name.key-first.json" \
@@ -6332,7 +6385,7 @@ _malf_store_create_step() {   # <name> <path> <prefixes> <graph> <log> <test fol
     _malf_home_profiles "$CONAN_HOME"
     _malf_conan_jobs "malf store-create: conan create $1"
     _malf_confined "${_MALF_STEP_TALLY:-}" "$1" "$2" conan create "$2" "${_MALF_HOME_PROFILES[@]}" \
-        -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${build_args[@]}" "${_MALF_SHIP_LOCK[@]}" \
+        -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${_MALF_FORM_ARGS[@]}" "${build_args[@]}" "${_MALF_SHIP_LOCK[@]}" \
         -c "tools.build:jobs=$_MALF_CONAN_JOBS" "${test_args[@]}" --no-remote --format=json > "$4" 2> "$5"
 }
 
@@ -6485,8 +6538,33 @@ _malf_store_third_party_in() {   # <name> <path> <prefixes> <store> <scratch> <g
     esac
 }
 
+# THE OWNED NAMESPACES. In the superproject, its workspace declaration (`scripts/workspace_layout.py`). In
+# a REPOSITORY's own workspace (a `packages.yml` at MALF_WORKSPACE_ROOT: the dev leg of a candidate,
+# DN-142.D31 (5), which never reads the superproject), the leading token of every package that repository
+# declares together with every package malf's lock leaves FLOATING (a requirement with no recipe
+# revision: first-party editables float, third-party is pinned, `malf lock`), so a first-party package of
+# another repository that the shared lock names is never taken for a third-party recipe to provision.
+# post: the namespaces, space-separated, or a non-zero exit naming why none could be derived.
 _malf_owned_prefixes() {
     local prefixes
+    if [[ -f "$MALF_WORKSPACE_ROOT/packages.yml" ]]; then
+        prefixes="$(python3 - "$MALF_WORKSPACE_ROOT/packages.yml" "$MALF_DIR/conan.lock" <<'PY'
+import json, sys
+import yaml
+
+declared = list((yaml.safe_load(open(sys.argv[1])) or {}).get("packages") or {})
+lock = json.load(open(sys.argv[2]))
+floating = [entry.split("/", 1)[0] for key, entries in lock.items() if key.endswith("requires")
+            and isinstance(entries, list) for entry in entries if "#" not in entry.split("%", 1)[0]]
+names = declared + floating
+unnamespaced = sorted(name for name in names if "_" not in name)
+if not declared or unnamespaced:
+    sys.exit(f"malf: {sys.argv[1]} declares no package, or a name carries no namespace: {unnamespaced}")
+print(" ".join(sorted({name.split("_", 1)[0] + "_" for name in names})))
+PY
+)" && [[ -n "$prefixes" ]] && echo "$prefixes"
+        return
+    fi
     prefixes="$(python3 - "$MALF_WORKSPACE_ROOT" <<'PY'
 import pathlib, sys
 
@@ -6596,6 +6674,195 @@ _malf_store_build_in() {   # <name> <prefix> <tree> <store> <scratch> <prefixes>
         "$name" "$MALF_PROFILE_NAME" "$MALF_DIR" "$scratch/toolchain.json" "$prefixes" "$tree" \
         "$CONAN_HOME/malf-test-results" || return 1
     echo "malf store-create: $name built and tested from its tracked tree $tree; no package of it in the cache"
+}
+
+# THE ENVIRONMENT HOME of this seat account for the pinned image (DN-142.D30 (9) R7): the conan home base
+# a compiling act in the image builds in, one per image config digest, under
+# MALF_ENVIRONMENT_HOMES (default ~/.local/state/coderoast-build/environment-homes, the base Pharos's
+# compiling acts use, so one seat builds each third-party binary of an image once).
+# post: the base's path on stdout, or a non-zero exit naming the unreadable pin.
+_malf_environment_home() {
+    local image
+    image="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["image"])' "$MALF_DIR/config/build-environment.json")" \
+        && [[ "$image" =~ ^sha256:[0-9a-f]{64}$ ]] \
+        || { echo "malf: $MALF_DIR/config/build-environment.json names no config digest as \`image\`" >&2; return 1; }
+    echo "${MALF_ENVIRONMENT_HOMES:-$HOME/.local/state/coderoast-build/environment-homes}/${image#sha256:}"
+}
+
+# THE SOURCE VERDICT RUNS IN THE BUILD ENVIRONMENT (DN-142.D31 (1), slice S3): `malf source-verdict` on the
+# host provisions what the container cannot fetch, then re-runs itself as ONE container of the pinned image.
+# Its workspace is the repository alone (MALF_WORKSPACE_ROOT=<repository>, DN-142.D31 (5)); its conan home
+# the image's own (_malf_environment_home), its third-party recipes restored from MALF_ENVIRONMENT_RECIPES
+# (default the B2 walk's home, `cut-verify`), which is first made a conan home when it is none and then
+# provisioned from its remotes (package_twin.py provision), with conan's source download cache; the lock is
+# strict. The container sees, each at its own path: the repository and its git directory, malf and its git
+# directory, the store, /tmp, the image's home, the recipe home (read-only) and the source cache.
+# post: the container's exit, or 2 refused before it ran.
+_malf_source_verdict_in_environment() {   # <repository> <profile>
+    local repo="$1" profile="$2" store home recipes prefixes directory
+    store="$(_malf_store_root source-verdict)" || return 2
+    home="$(_malf_environment_home)" || return 2
+    recipes="${MALF_ENVIRONMENT_RECIPES:-${MALF_CUT_VERIFY_CONAN_HOME:-$MALF_CONAN_HOME_BASE/cut-verify}}"
+    [[ "$recipes" != *" "* ]] \
+        || { echo "malf source-verdict: MALF_ENVIRONMENT_RECIPES names one recipe home here, not '$recipes'" >&2; return 2; }
+    mkdir -p "$store" "$home" "$recipes" "$MALF_CONAN_SOURCES_CACHE"
+    if _malf_conan_home_fresh "$recipes"; then
+        ( export CONAN_HOME="$recipes"; _malf_sync_conan_conf && conan profile list > /dev/null ) \
+            || { echo "malf source-verdict: $recipes could not be made a conan home to provision the recipes into" >&2; return 2; }
+    fi
+    prefixes="$(MALF_WORKSPACE_ROOT="$repo" _malf_owned_prefixes)" \
+        || { echo "malf source-verdict: the owned package namespaces of $repo could not be derived" >&2; return 2; }
+    python3 "$MALF_DIR/package_twin.py" provision "$MALF_DIR/conan.lock" "$prefixes" "$recipes" "$MALF_CONAN_SOURCES_CACHE" \
+        || { echo "malf source-verdict: REFUSED before the act — $recipes or $MALF_CONAN_SOURCES_CACHE lacks what malf/conan.lock pins (above)" >&2; return 2; }
+    local -a args=(--mount "$repo" --mount "$MALF_DIR" --mount "$store" --mount /tmp --mount "$home"
+                   --mount "$MALF_CONAN_SOURCES_CACHE" --read-only-mount "$recipes")
+    for directory in "$repo" "$MALF_DIR"; do
+        directory="$(git -C "$directory" rev-parse --path-format=absolute --git-common-dir)" \
+            || { echo "malf source-verdict: $directory is not in a git checkout" >&2; return 2; }
+        [[ "$directory" == "$repo"/* || "$directory" == "$MALF_DIR"/* ]] || args+=(--mount "$directory")
+    done
+    export MALF_WORKSPACE_ROOT="$repo" CONAN_HOME="$home" MALF_ENVIRONMENT_RECIPES="$recipes" MALF_LOCKFILE_STRICT=1 \
+           MALF_STORE_DIR="$store"
+    args+=(--env MALF_WORKSPACE_ROOT --env CONAN_HOME --env MALF_ENVIRONMENT_RECIPES --env MALF_LOCKFILE_STRICT
+           --env MALF_STORE_DIR --env MALF_CONAN_SOURCES_CACHE)
+    local name
+    for name in MALF_STORE_PARAMETERS MALF_STORE_REJUDGE; do
+        [[ -z "${!name:-}" ]] || args+=(--env "$name")
+    done
+    (cd "$repo" && python3 "$MALF_DIR/build_environment.py" run "${args[@]}" -- "$MALF_DIR/malf" source-verdict --profile "$profile" "$repo")
+}
+
+# malf source-verdict [--profile <clang profile>] <repository> — DN-142.D31 (1), slice S3: the dev leg of a
+# candidate, inside the build environment. Every package of the repository (`malf_graph.py steps` at the
+# repository: its own packages.yml, never the superproject) is tested at the dev profile (default
+# MALF_DEFAULT_PROFILE, clang-21/libc++; a non-clang profile is refused) by `malf test --only <package>`, each
+# package its own act in its Landlock domain (_malf_confined; a package declaring `unconfined:` runs with
+# none and its record is never served), in dependency order, and each leaves ONE `source-verdict` record in
+# the store (artefact_store.py `source-verdict`), its key computed BEFORE the act (`source-key`): the export
+# digest of every first-party node of the package's graph, each third-party node's `ref#rrev`, the rendered
+# dev profile, the selection, malf's tree with the act's parameter document, the image. The keys are
+# resolved in a scratch home holding the repository's exports and the lock's third-party recipes, no binary.
+# A package whose key holds a passing source verdict from a counted domain is SERVED, its tests not run; the
+# rest run; MALF_STORE_REJUDGE=1 runs every one and compares it. An untracked file in the repository is
+# refused before any act: the editable build would read bytes its key's exports never name.
+# THE BUILD TREE STAYS for the postflight: each package's `<package>/build-<key>.environment-<12 hex>/` and
+# the repository's merged `compile_commands.json`, as `malf test` leaves them; a served package leaves no
+# new tree, so a postflight that needs every tree runs under MALF_STORE_REJUDGE=1.
+# Exit 0 every package served or tested green and recorded; 1 a package red, unrecorded or differing at an
+# equal key; 2 refused before any act.
+cmd_source_verdict() {
+    local repo="" profile="$MALF_DEFAULT_PROFILE"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --profile) shift; [[ $# -gt 0 ]] || { echo "malf source-verdict: --profile needs a name" >&2; return 2; }
+                       profile="$1" ;;
+            -*) _malf_refuse_option source-verdict "$1" ;;
+            *) [[ -z "$repo" ]] || { echo "malf source-verdict: one repository, not '$repo' and '$1'" >&2; return 2; }
+               repo="$1" ;;
+        esac
+        shift
+    done
+    [[ -n "$repo" ]] || { _malf_usage_of source-verdict >&2; return 2; }
+    repo="$(realpath "$repo")" || return 2
+    [[ -f "$repo/packages.yml" ]] \
+        || { echo "malf source-verdict: $repo holds no packages.yml, so it is no repository of packages" >&2; return 2; }
+    [[ "$profile" == *clang* ]] \
+        || { echo "malf source-verdict: REFUSED — '$profile' is no clang profile: the source verdict is the dev leg's, tested on clang (DN-142.D31 (1))" >&2; return 2; }
+    if [[ -z "${MALF_SYSTEM:-}" ]]; then
+        _malf_source_verdict_in_environment "$repo" "$profile"
+        return
+    fi
+    [[ "$MALF_WORKSPACE_ROOT" == "$repo" ]] \
+        || { echo "malf source-verdict: REFUSED — the dev leg's workspace is its repository ($repo), not $MALF_WORKSPACE_ROOT (DN-142.D31 (5))" >&2; return 2; }
+    local untracked
+    untracked="$(git -C "$repo" ls-files --others --exclude-standard)" \
+        || { echo "malf source-verdict: git cannot list $repo" >&2; return 2; }
+    if [[ -n "$untracked" ]]; then
+        echo "malf source-verdict: REFUSED — $repo holds $(wc -l <<< "$untracked") untracked file(s), which the editable build could read and no export names: $(head -5 <<< "$untracked" | paste -sd' ')" >&2
+        return 2
+    fi
+    _malf_apply_profile "$profile"
+    _malf_store_parameters "$MALF_PROFILE_NAME" malf source-verdict || return 2
+    local store scratch steps prefixes
+    store="$(_malf_store_root source-verdict)" || return 2
+    scratch="$(mktemp -d /tmp/malf-source-verdict.XXXXXX)"
+    export PYTHONPYCACHEPREFIX="$scratch/pycache"
+    steps="$(python3 "$MALF_DIR/malf_graph.py" steps "$repo")" && [[ -n "$steps" ]] \
+        || { echo "malf source-verdict: malf's walk of $repo found no package, or refused it (above)" >&2; return 2; }
+    prefixes="$(_malf_owned_prefixes)" \
+        || { echo "malf source-verdict: the owned package namespaces of $repo could not be derived" >&2; return 2; }
+    _malf_ship_lock_args || return 2
+    # THE KEYS FIRST, in a home of their own: the repository's exports and the lock's third-party recipes.
+    local keys name ref path deps reference key rc=0
+    keys="$(_malf_step_home "$scratch" keys)" || return 2
+    local -a recipe_sources=()
+    read -r -a recipe_sources <<< "$MALF_ENVIRONMENT_RECIPES"
+    python3 "$MALF_DIR/package_twin.py" seed-recipes "$MALF_DIR/conan.lock" "$prefixes" "$keys" "${recipe_sources[@]}" \
+        > "$scratch/keys.log" 2>&1 \
+        || { echo "malf source-verdict: the key home's recipes could not be restored ($scratch/keys.log)" >&2; return 2; }
+    local -a names=() paths=()
+    while IFS=$'\t' read -r ref path deps; do
+        [[ -n "$ref" ]] || continue
+        names+=("${ref%%/*}"); paths+=("$path")
+        CONAN_HOME="$keys" conan export "$path" --format=json 2>> "$scratch/keys.log" \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["reference"])' > "$scratch/${ref%%/*}.reference" \
+            || { echo "malf source-verdict: conan export $path failed ($scratch/keys.log)" >&2; return 2; }
+    done <<< "$steps"
+    local index served=0 executed=0
+    local -a failed=()
+    # The denied ground is the repository's parent (its siblings, on the desk; on a runner, the checkout's
+    # directory), never the repository itself, which the act is granted (DN-142.D29 (5)).
+    _MALF_DOMAIN=(--workspace "$(dirname "$repo")" --store "$store" --scratch "$scratch" --conan-home "$HOME/.conan2")
+    for index in "${!names[@]}"; do
+        name="${names[$index]}"; path="${paths[$index]}"; reference="$(cat "$scratch/$name.reference")"
+        if ! (cd "$path" && CONAN_HOME="$keys" conan graph info . --profile:host="$keys/profiles/${MALF_PROFILE##*/}" \
+                --profile:build="$keys/profiles/${MALF_BUILD_PROFILE##*/}" -s build_type="$MALF_CONFIG" \
+                "${_MALF_SHIP_LOCK[@]}" --no-remote --format=json) > "$scratch/$name.graph.json" 2>> "$scratch/keys.log" \
+           || ! key="$(CONAN_HOME="$keys" python3 "$MALF_DIR/artefact_store.py" source-key "$keys" "$scratch/$name.graph.json" \
+                   "$name" "$MALF_PROFILE_NAME" "$MALF_DIR" "$prefixes" "$reference" "$scratch/$name.source-key.json")"; then
+            echo "malf source-verdict: the key of $name could not be computed before its tests (above, or $scratch/keys.log)" >&2
+            _malf_quote_log "$scratch/keys.log" "$name (its key before the tests)"
+            failed+=("$name"); continue
+        fi
+        echo "--- source-verdict: $name key before the tests $key ---"
+        rc=0
+        python3 "$MALF_DIR/artefact_store.py" source-serve "$store" "$scratch/$name.source-key.json" || rc=$?
+        if [[ $rc -eq 0 ]]; then
+            served=$((served + 1)); continue
+        fi
+        [[ $rc -eq 3 ]] || { failed+=("$name"); continue; }
+        executed=$((executed + 1))
+        if ! _MALF_STEP_UNCONFINED="$(python3 "$MALF_DIR/artefact_store.py" unconfined "$path" "$name")"; then
+            echo "malf source-verdict: the \`unconfined:\` declaration of $name could not be read from its packages.yml at HEAD (DN-142.D29)" >&2
+            failed+=("$name"); continue
+        fi
+        [[ -z "$_MALF_STEP_UNCONFINED" ]] || echo "--- source-verdict: $name runs UNCONFINED (its packages.yml: $_MALF_STEP_UNCONFINED) ---"
+        # THE RESULT IS THIS ACT'S OR NONE: a JUnit file an earlier run left would be judged as this one's.
+        local junit; junit="$(_malf_build_dir "$path")/malf-test.junit.xml"
+        rm -f "$junit"
+        rc=0
+        # The act's home takes its recipes from the key home, which holds every lock revision and lies in
+        # the act's scratch: the walk's recipe home is ground its domain denies.
+        _malf_confined "$scratch/$name.denials" "$name" "$repo" env MALF_ENVIRONMENT_RECIPES="$keys" \
+            "$MALF_DIR/malf" test --only --profile "$MALF_PROFILE_NAME" "$path" \
+            > "$scratch/$name.log" 2>&1 || rc=$?
+        if [[ $rc -ne 0 ]]; then
+            echo "malf source-verdict: malf test $name exited $rc — $scratch/$name.log" >&2
+            _malf_quote_log "$scratch/$name.log" "$name (its tests)"
+            failed+=("$name")
+            # note: a red test run wrote its JUnit and is recorded as the fail it is; an act that died before ctest wrote none and records nothing
+            [[ -f "$junit" ]] || { echo "--- source-verdict: $name UNRECORDED — its act wrote no test result ---"; continue; }
+        fi
+        MALF_STEP_TALLY="$scratch/$name.denials" python3 "$MALF_DIR/artefact_store.py" source-verdict "$store" \
+            "$scratch/$name.source-key.json" "$junit" "$path" \
+            || { [[ $rc -ne 0 ]] || failed+=("$name"); }
+    done
+    echo "=== malf source-verdict: ${#names[@]} package(s) of $repo, $served served from the store, $executed tested, ${#failed[@]} red or unrecorded ==="
+    if [[ ${#failed[@]} -gt 0 ]]; then
+        echo "malf source-verdict: FAILED ${failed[*]} — logs in $scratch" >&2
+        return 1
+    fi
+    rm -rf "$scratch"
 }
 
 # malf inventory [dir] — the ADR-3.D9 gate, standalone. Lints the WHOLE workspace (an orphan
@@ -7159,6 +7426,7 @@ case "$COMMAND" in
     twin-verify)      cmd_twin_verify "$@" ;;
     exports-verify)   cmd_exports_verify "$@" ;;
     store-create)     cmd_store_create "$@" ;;
+    source-verdict)   cmd_source_verdict "$@" ;;
     sandbox)          cmd_sandbox "$@" ;;
     environment)      exec python3 "$MALF_DIR/build_environment.py" "$@" ;;
     relocate-verify)  cmd_relocate_verify "$@" ;;

@@ -19,16 +19,19 @@ runs the same selection through `run_test_package(self)` and writes a second res
 `<tested package id>.test_package.xml`, beside the first in the package's own directory
 (`<results>/<name>/<package id>.xml`): the step's verdict has two populations (DN-142.D13 (2)).
 
-THE TWO CONF SETS OF A `conan create` are defined here and nowhere else (DN-142.D13 (1)). The
-WRITER (the store's one writer, `malf store-create`) sets no skip conf: it
-builds and runs every test and every test_package. The CONSUMER and vendor path (a
-`--build=missing` rebuild, the vendor action, the third-party cache producer) sets
-`tools.build:skip_test=True` and `--test-folder=`: no test runs and no test_package is built, while
-the graph stays conan's default graph, test requirements expanded, so it computes the writer's
-package id. `tools.graph:skip_test` is never set on a path that resolves a first-party package: it
-prunes the test requirements, and a `test_requires` already in the graph merges into that node and
-enters the declaring package's id, so pruning it gives metalog, eidos and sift another id. Every
-caller reads its set through `create-args <writer|consumer>`.
+THE THREE CONF SETS OF A `conan create` are defined here and nowhere else (DN-142.D13 (1),
+DN-142.D31 (1)). The WRITER (step 0's `malf store-create`) sets no skip conf: it builds and runs
+every test and every test_package. The SHIP form (a candidate's `malf store-create --ship`) sets
+`tools.build:skip_test=True` and keeps the test folder: the package's own tests are neither built
+nor run (they are judged on clang, by the source verdict), and its test_package is built and run,
+because `user.malf:run_test_package` tells `run_test_package` to run in place of `skip_test`. The
+CONSUMER and vendor path (a `--build=missing` rebuild, the vendor action, the third-party cache
+producer) sets `tools.build:skip_test=True` and `--test-folder=`: no test runs and no test_package
+is built. All three keep conan's default graph, test requirements expanded, so each computes the
+writer's package id. `tools.graph:skip_test` is never set on a path that resolves a first-party
+package: it prunes the test requirements, and a `test_requires` already in the graph merges into
+that node and enters the declaring package's id, so pruning it gives metalog, eidos and sift
+another id. Every caller reads its set through `create-args <writer|ship|consumer>`.
 
 A TEST LOCATES ITS INPUTS THROUGH A COMPILE DEFINITION, never through the translation unit's own
 name (DN-142.D13 (3)). Inside a create malf's path map (`malf-path-map.cmake`, DN-142.D4 (a)) makes
@@ -110,10 +113,14 @@ PROFILE_CONF = "user.malf:profile"
 PROFILES_DIR = Path(__file__).resolve().parent / "profiles"
 # The property gtest_discover_tests sets, without which ctest reads a GTEST_SKIP as a pass.
 SKIP_PROPERTY = "SKIP_REGULAR_EXPRESSION"
-# DN-142.D13 (1): the writer's create sets no skip conf; the consumer's runs no test and builds no
-# test_package, on conan's default graph. Never `tools.graph:skip_test`.
+# DN-142.D31 (1): the conf under which a test_package runs although `tools.build:skip_test` is set.
+TEST_PACKAGE_CONF = "user.malf:run_test_package"
+# DN-142.D13 (1), DN-142.D31 (1): the writer's create sets no skip conf; the ship form builds and runs
+# no test of its own and runs its test_package; the consumer's runs no test and builds no test_package;
+# each on conan's default graph. Never `tools.graph:skip_test`.
 CREATE_ARGS: dict[str, tuple[str, ...]] = {
     "writer": (),
+    "ship": ("-c", "tools.build:skip_test=True", "-c", f"{TEST_PACKAGE_CONF}=True"),
     "consumer": ("-c", "tools.build:skip_test=True", "--test-folder="),
 }
 # DN-142.D13 (3): the directories whose C++ sources are test sources, and the three spellings of a
@@ -561,7 +568,8 @@ def run_test_package(conanfile) -> None:
     """Run a test_package's selection over its build folder; raise on any red.
 
     pre: called from a test_package recipe's `test()`
-    post: under `tools.build:skip_test` nothing ran; otherwise no test_package source spells a
+    post: under `tools.build:skip_test` without `user.malf:run_test_package` nothing ran; otherwise
+        no test_package source spells a
         translation unit's own name, and
         `<user.malf:test_results>/<tested name>/<tested package id>.test_package.xml` holds a run
         of at least one test, or the create failed
@@ -569,7 +577,8 @@ def run_test_package(conanfile) -> None:
     from conan.errors import ConanException
     from conan.tools.build import can_run
 
-    if conanfile.conf.get("tools.build:skip_test", check_type=bool):
+    if conanfile.conf.get("tools.build:skip_test", check_type=bool) \
+            and not conanfile.conf.get(TEST_PACKAGE_CONF, check_type=bool):
         conanfile.output.info("malf: tools.build:skip_test is set, so no test_package test runs")
         return
     tested = str(conanfile.tested_reference_str).split("/", 1)[0]
@@ -609,7 +618,7 @@ def _desk_args(argv: list[str]) -> int:
 
 
 def _create_args(argv: list[str]) -> int:
-    """`create-args <writer|consumer>`: the conf set of that `conan create`, one argument per line."""
+    """`create-args <writer|ship|consumer>`: the conf set of that `conan create`, one argument per line."""
     if len(argv) != 1 or argv[0] not in CREATE_ARGS:
         print(f"usage: malf_recipe_tests.py create-args <{'|'.join(sorted(CREATE_ARGS))}>",
               file=sys.stderr)
@@ -692,7 +701,7 @@ if __name__ == "__main__":
     verb = VERBS.get(sys.argv[1]) if len(sys.argv) > 1 else None
     if verb is None or (verb[0] is not None and len(sys.argv) - 2 != verb[0]):
         print("usage: malf_recipe_tests.py desk-args <out file> <build_dir> <corpus_only> <regex> "
-              "<verbose> <in_sweep>\n       malf_recipe_tests.py create-args <writer|consumer>\n"
+              "<verbose> <in_sweep>\n       malf_recipe_tests.py create-args <writer|ship|consumer>\n"
               "       malf_recipe_tests.py locators <dir>...\n"
               "       malf_recipe_tests.py judge-skips <junit> <source dir> <profile> <filtered>\n"
               "       malf_recipe_tests.py tree-source <build dir>", file=sys.stderr)
