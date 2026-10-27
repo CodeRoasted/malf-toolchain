@@ -54,7 +54,7 @@ jobs:
 
       - name: malf at this workflow's commit, as git
         id: malf
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@f0f43b73d4aa9b4604009347f797705adcf4f088
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@5ec0f68fd03242d08bf6ef1bd4bdaa87092dc9fa
         with:
           workflow: coderoast-candidate-present.yml
 
