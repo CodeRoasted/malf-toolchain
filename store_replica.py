@@ -10,20 +10,26 @@ computed here: the object against its name in the local store before the push, t
 manifest digest against the canonical manifest's own, an existing tag against the manifest this
 module would write, and a fetched layer against the digest asked for.
 
-THE PACKAGE GUARD, BEFORE AND AFTER EVERY WRITE (DN-142.D6: the writer sets and verifies
-`visibility: private`): the GitHub API must answer that the package is `private` and linked to no
-repository. A package that does not exist yet is created by a SENTINEL push first — an empty
+THE PACKAGE GUARD, BEFORE AND AFTER EVERY WRITE: the GitHub API must answer the visibility and
+the link THE ONE RULE derives (`expected_package`, DN-142.D31 (3) and the Founder's item 6). A
+repository that does not own its store is step 0's replica (DN-142.D6): `private`, linked to no
+repository. A repository that owns its store (its candidate writes `store-<repository>`) has a
+package of the repository's own visibility, LINKED to that repository: public for a public one,
+private for a private one. Pharos's A1c reads the same rule from this module, so the writer and the
+probe cannot drift. A package that does not exist yet is created by a SENTINEL push first — an empty
 artifact carrying no product byte — and is then guarded before any object reaches it, because a
 package that came up `internal` or `public` would expose every byte pushed to it. No REST endpoint
 sets a container package's visibility, so a refusal names the settings page and writes nothing
 more; setting it by hand is the remedy, and the next run verifies it.
 
-    store_replica.py push <store dir> <repository> <object digest>...
+    store_replica.py push [--own <public|private>] <store dir> <repository> <object digest>...
         the writer's act: each object of the local store, by its 64-hex name, to
         ghcr.io/coderoasted/store-<repository>, the package guarded before and after; an object
-        already replicated is verified, never rewritten. Token: the file MALF_STORE_TOKEN_FILE
-        (the writer account's classic PAT, `write:packages`), never an argument or an echo.
-    store_replica.py push-slice <repository> <step-0 record digest> <slice> <signature>
+        already replicated is verified, never rewritten. `--own` names a repository that owns its
+        store and that repository's visibility; without it the package is step 0's replica. Token:
+        the file MALF_STORE_TOKEN_FILE (the writer account's classic PAT, `write:packages`), never
+        an argument or an echo.
+    store_replica.py push-slice [--own <public|private>] <repository> <step-0 record digest> <slice> <signature>
         the writer's act: the repository's signed manifest slice for that step-0 record, under
         the tag slice-<record digest>, the package guarded the same way; never rewritten
     store_replica.py fetch <repository> <object digest> <out file>
@@ -287,42 +293,93 @@ def github_guard(api: str, org: str, token: str) -> Callable[[str], dict | None]
     return view
 
 
-def verify_private(view: Callable[[str], dict | None], org: str, package: str) -> None:
-    """Refuse unless the package exists, is private and is linked to no repository."""
-    seen = view(package)
-    settings = f"https://github.com/orgs/{org}/packages/container/{package}/settings"
+VISIBILITIES = ("public", "private")
+
+
+@dataclass(frozen=True)
+class Expected:
+    """What the package guard requires of a store package: its visibility, and the repository it is
+    linked to (`owner/name`, lower case), or None for a package linked to no repository."""
+
+    visibility: str
+    linked: str | None
+
+
+STEP0_REPLICA = Expected("private", None)
+
+
+def expected_package(owner: str, repository: str, own_visibility: str | None) -> Expected:
+    """THE ONE RULE (DN-142.D31 (3), item 6): `own_visibility` is None for a repository whose store is
+    step 0's replica (private, unlinked, DN-142.D6), else that repository's own visibility, and its
+    package then has that visibility and is linked to it."""
+    if own_visibility is None:
+        return STEP0_REPLICA
+    if own_visibility not in VISIBILITIES:
+        raise Refused(f"{owner}/{repository} is {own_visibility!r}: a repository owning its store is public "
+                      f"or private, and no rule names a package for any other visibility")
+    return Expected(own_visibility, f"{owner}/{repository}".lower())
+
+
+def package_defect(seen: dict | None, package: str, expected: Expected) -> str | None:
+    """Why the GitHub view `seen` of `package` breaks `expected`, else None."""
     if seen is None:
-        raise Refused(f"{package} does not exist after its sentinel push, so it cannot be verified")
-    if seen.get("visibility") != "private":
-        raise Refused(f"{package} is {seen.get('visibility')!r}, not 'private': set it in {settings} "
-                      f"(no API sets it); nothing more is pushed until a run verifies it")
-    if seen.get("repository"):
-        linked = seen["repository"].get("full_name", seen["repository"])
-        raise Refused(f"{package} is linked to {linked}: a linked package lets that repository's "
-                      f"workflows write it; unlink it in {settings}")
+        return f"{package} does not exist"
+    if seen.get("visibility") != expected.visibility:
+        return f"{package} is {seen.get('visibility')!r}, not {expected.visibility!r}"
+    linked = seen.get("repository")
+    linked = str(linked.get("full_name", linked) if isinstance(linked, dict) else linked or "").lower() or None
+    if linked != expected.linked:
+        if expected.linked is None:
+            return (f"{package} is linked to {linked}: a linked package lets that repository's workflows "
+                    f"write it, and step 0's replica is linked to no repository")
+        return (f"{package} is linked to {linked or 'no repository'}, not {expected.linked}: a repository "
+                f"that owns its store writes it with its own token, through that link")
+    return None
+
+
+def verify_package(view: Callable[[str], dict | None], org: str, package: str, expected: Expected) -> None:
+    """Refuse unless the package exists with the visibility and the link `expected` names."""
+    defect = package_defect(view(package), package, expected)
+    if defect is None:
+        return
+    settings = f"https://github.com/orgs/{org}/packages/container/{package}/settings"
+    if defect.endswith("does not exist"):
+        raise Refused(f"{defect} after its sentinel push, so it cannot be verified")
+    raise Refused(f"{defect}: set it in {settings} (no API sets visibility or link); nothing more is "
+                  f"pushed until a run verifies it")
+
+
+SOURCE_ANNOTATION = "org.opencontainers.image.source"
+
+
+def sentinel_manifest(expected: Expected) -> bytes:
+    """The empty artifact that creates a package; for a package linked to its repository it carries
+    the `org.opencontainers.image.source` annotation ghcr links a new package by (DN-142.D31 (3))."""
+    linked = {"annotations": {SOURCE_ANNOTATION: f"https://github.com/{expected.linked}"}} if expected.linked else {}
+    return canonical({
+        "schemaVersion": 2, "mediaType": OCI_MANIFEST, "artifactType": SENTINEL_TYPE,
+        "config": {"mediaType": OCI_EMPTY, "digest": EMPTY_DIGEST, "size": len(EMPTY_BYTES)},
+        "layers": [{"mediaType": OCI_EMPTY, "digest": EMPTY_DIGEST, "size": len(EMPTY_BYTES)}], **linked})
 
 
 def ensure_guarded(registry: Registry, view: Callable[[str], dict | None], org: str, package: str,
-                   say: Callable[[str], None]) -> None:
-    """The package exists, private and unlinked, before any product byte reaches it."""
+                   say: Callable[[str], None], expected: Expected = STEP0_REPLICA) -> None:
+    """The package exists, with the visibility and link `expected` names, before any product byte reaches it."""
     if view(package) is None:
         registry.push_blob(EMPTY_DIGEST.split(":")[1], EMPTY_BYTES)
-        sentinel = canonical({
-            "schemaVersion": 2, "mediaType": OCI_MANIFEST, "artifactType": SENTINEL_TYPE,
-            "config": {"mediaType": OCI_EMPTY, "digest": EMPTY_DIGEST, "size": len(EMPTY_BYTES)},
-            "layers": [{"mediaType": OCI_EMPTY, "digest": EMPTY_DIGEST, "size": len(EMPTY_BYTES)}]})
-        registry.put_manifest(SENTINEL_TAG, sentinel)
+        registry.put_manifest(SENTINEL_TAG, sentinel_manifest(expected))
         say(f"store_replica: created {package} with an empty sentinel; guarding it before any object")
-    verify_private(view, org, package)
+    verify_package(view, org, package, expected)
 
 
 def replicate(store: Path, registry: Registry, view: Callable[[str], dict | None], org: str,
-              package: str, digests: list[str], say: Callable[[str], None]) -> None:
+              package: str, digests: list[str], say: Callable[[str], None],
+              expected: Expected = STEP0_REPLICA) -> None:
     """Push each named object of `store`, the package guarded before the first and after the last."""
     for hex_digest in digests:
         if not DIGEST_HEX.match(hex_digest):
             raise Refused(f"{hex_digest!r} is not an object digest (64 hex)")
-    ensure_guarded(registry, view, org, package, say)
+    ensure_guarded(registry, view, org, package, say, expected)
     for hex_digest in digests:
         source = store / "objects" / hex_digest
         if not source.is_file():
@@ -331,46 +388,47 @@ def replicate(store: Path, registry: Registry, view: Callable[[str], dict | None
         if actual != hex_digest:
             raise Refused(f"the local object {source} hashes to {actual}, not its name")
         manifest = object_manifest(hex_digest, source.stat().st_size)
-        expected = "sha256:" + hashlib.sha256(manifest).hexdigest()
+        manifest_digest = "sha256:" + hashlib.sha256(manifest).hexdigest()
         held = registry.manifest_digest(object_tag(hex_digest))
         if held is not None:
-            if held != expected:
+            if held != manifest_digest:
                 raise Refused(f"{package}:{object_tag(hex_digest)} holds {held}, not the object's "
-                              f"manifest {expected}: an object's name is never rewritten")
-            say(f"store_replica: PRESENT {package} sha256:{hex_digest} (manifest {expected})")
+                              f"manifest {manifest_digest}: an object's name is never rewritten")
+            say(f"store_replica: PRESENT {package} sha256:{hex_digest} (manifest {manifest_digest})")
             continue
         registry.push_blob(EMPTY_DIGEST.split(":")[1], EMPTY_BYTES)
         registry.push_blob(hex_digest, source.read_bytes())
         registry.put_manifest(object_tag(hex_digest), manifest)
-        if registry.manifest_digest(object_tag(hex_digest)) != expected:
-            raise Refused(f"{package}:{object_tag(hex_digest)} did not read back as {expected}")
-        say(f"store_replica: PUSHED {package} sha256:{hex_digest} (manifest {expected})")
-    verify_private(view, org, package)
+        if registry.manifest_digest(object_tag(hex_digest)) != manifest_digest:
+            raise Refused(f"{package}:{object_tag(hex_digest)} did not read back as {manifest_digest}")
+        say(f"store_replica: PUSHED {package} sha256:{hex_digest} (manifest {manifest_digest})")
+    verify_package(view, org, package, expected)
 
 
 def replicate_slice(registry: Registry, view: Callable[[str], dict | None], org: str, package: str,
-                    record_hex: str, slice_bytes: bytes, signature: bytes, say: Callable[[str], None]) -> None:
+                    record_hex: str, slice_bytes: bytes, signature: bytes, say: Callable[[str], None],
+                    expected: Expected = STEP0_REPLICA) -> None:
     """Push a repository's signed slice under `slice-<step-0 record digest>`, never rewritten."""
     if not DIGEST_HEX.match(record_hex):
         raise Refused(f"{record_hex!r} is not a step-0 record digest (64 hex)")
-    ensure_guarded(registry, view, org, package, say)
+    ensure_guarded(registry, view, org, package, say, expected)
     manifest = slice_manifest(slice_bytes, signature)
-    expected = "sha256:" + hashlib.sha256(manifest).hexdigest()
+    manifest_digest = "sha256:" + hashlib.sha256(manifest).hexdigest()
     held = registry.manifest_digest(slice_tag(record_hex))
     if held is not None:
-        if held != expected:
+        if held != manifest_digest:
             raise Refused(f"{package}:{slice_tag(record_hex)} holds {held}, not this slice's manifest "
-                          f"{expected}: a record's slice is never rewritten")
+                          f"{manifest_digest}: a record's slice is never rewritten")
         say(f"store_replica: PRESENT {package} {slice_tag(record_hex)}")
     else:
         registry.push_blob(EMPTY_DIGEST.split(":")[1], EMPTY_BYTES)
         for data in (slice_bytes, signature):
             registry.push_blob(hashlib.sha256(data).hexdigest(), data)
         registry.put_manifest(slice_tag(record_hex), manifest)
-        if registry.manifest_digest(slice_tag(record_hex)) != expected:
-            raise Refused(f"{package}:{slice_tag(record_hex)} did not read back as {expected}")
-        say(f"store_replica: PUSHED {package} {slice_tag(record_hex)} (manifest {expected})")
-    verify_private(view, org, package)
+        if registry.manifest_digest(slice_tag(record_hex)) != manifest_digest:
+            raise Refused(f"{package}:{slice_tag(record_hex)} did not read back as {manifest_digest}")
+        say(f"store_replica: PUSHED {package} {slice_tag(record_hex)} (manifest {manifest_digest})")
+    verify_package(view, org, package, expected)
 
 
 # ── the selftest: an in-process registry and API, every refusal fired ──────────────────────────
@@ -551,6 +609,39 @@ def selftest() -> int:
             arm("a package linked to a repository is refused", lambda: replicate(
                 store, registry, view, ORG, "store-probe", [good], said.append), "is linked to")
 
+            for label, package_view, own, refusal in (
+                    ("a public repository's own store, public and linked to it, is accepted",
+                     {"visibility": "public", "repository": {"full_name": "CodeRoasted/coderoast-ipc"}},
+                     "public", None),
+                    ("a private repository's own store, private and linked to it, is accepted",
+                     {"visibility": "private", "repository": {"full_name": "CodeRoasted/coderoast-ipc"}},
+                     "private", None),
+                    ("RED: a public repository's own store still private (before the flip) is refused",
+                     {"visibility": "private", "repository": {"full_name": "CodeRoasted/coderoast-ipc"}},
+                     "public", "not 'public'"),
+                    ("RED: a public repository's own store linked to no repository is refused",
+                     {"visibility": "public"}, "public", "linked to no repository, not coderoasted/coderoast-ipc"),
+                    ("RED: an own store linked to ANOTHER repository is refused",
+                     {"visibility": "public", "repository": {"full_name": "CodeRoasted/insight-canon"}},
+                     "public", "not coderoasted/coderoast-ipc"),
+                    ("RED: a private repository's own store linked to no repository is refused",
+                     {"visibility": "private"}, "private", "linked to no repository"),
+                    ("RED: step 0's replica that came up public is refused",
+                     {"visibility": "public"}, None, "not 'private'")):
+                fake, registry, view, said = scene()
+                fake.package = {"name": "store-coderoast-ipc", **package_view}
+                arm(label, lambda own=own: replicate(store, registry, view, ORG, "store-coderoast-ipc", [good],
+                                                     said.append, expected_package(ORG, "coderoast-ipc", own)),
+                    refusal)
+            arm("RED: an owned store of a visibility no rule names is refused",
+                lambda: expected_package(ORG, "coderoast-ipc", "internal"), "no rule names")
+            linked_sentinel = sentinel_manifest(expected_package(ORG, "coderoast-ipc", "public"))
+            if json.loads(linked_sentinel).get("annotations") != {
+                    SOURCE_ANNOTATION: "https://github.com/coderoasted/coderoast-ipc"}:
+                failures.append(f"an owned store's sentinel carries {linked_sentinel!r}, want the source annotation")
+            if "annotations" in json.loads(sentinel_manifest(STEP0_REPLICA)):
+                failures.append("step 0's replica sentinel carries an annotation that would link it")
+
             fake, registry, view, said = scene(lie_manifest_digest=True)
             arm("a registry answering another manifest digest is refused",
                 lambda: replicate(store, registry, view, ORG, "store-probe", [good], said.append),
@@ -602,20 +693,25 @@ def main(argv: list[str]) -> int:
     try:
         if argv == ["selftest"]:
             return selftest()
-        if len(argv) >= 4 and argv[0] == "push":
+        verb, own, rest = (argv[0] if argv else ""), None, argv[1:]
+        if verb in ("push", "push-slice") and rest[:1] == ["--own"] and len(rest) >= 2:
+            own, rest = rest[1], rest[2:]
+        if verb == "push" and len(rest) >= 3:
             token = _token(TOKEN_FILE_ENV, "writer")
-            package = package_of(argv[2])
+            package = package_of(rest[1])
             registry = Registry(REGISTRY, f"{ORG}/{package}",
                                 (os.environ.get(REGISTRY_USER_ENV, REGISTRY_USER_DEFAULT), token))
-            replicate(Path(argv[1]), registry, github_guard(API, ORG, token), ORG, package, argv[3:], say)
+            replicate(Path(rest[0]), registry, github_guard(API, ORG, token), ORG, package, rest[2:], say,
+                      expected_package(ORG, rest[1], own))
             return 0
-        if len(argv) == 5 and argv[0] == "push-slice":
+        if verb == "push-slice" and len(rest) == 4:
             token = _token(TOKEN_FILE_ENV, "writer")
-            package = package_of(argv[1])
+            package = package_of(rest[0])
             registry = Registry(REGISTRY, f"{ORG}/{package}",
                                 (os.environ.get(REGISTRY_USER_ENV, REGISTRY_USER_DEFAULT), token))
-            replicate_slice(registry, github_guard(API, ORG, token), ORG, package, argv[2],
-                            Path(argv[3]).read_bytes(), Path(argv[4]).read_bytes(), say)
+            replicate_slice(registry, github_guard(API, ORG, token), ORG, package, rest[1],
+                            Path(rest[2]).read_bytes(), Path(rest[3]).read_bytes(), say,
+                            expected_package(ORG, rest[0], own))
             return 0
         if len(argv) == 4 and argv[0] == "fetch":
             if not DIGEST_HEX.match(argv[2]):

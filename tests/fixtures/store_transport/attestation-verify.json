@@ -1,0 +1,44 @@
+[
+ {
+  "fixture_provenance": "the shape `gh attestation verify --format json` prints (a list of {attestation, verificationResult}, the certificate fields sigstore-go's certificate summary names); written from that shape, not captured from a live run: no store attestation exists before slice S4's first candidate, and the desk's gh 2.45.0 has no `attestation` command. Re-record from the first live candidate.",
+  "attestation": {
+   "bundle": {
+    "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json"
+   }
+  },
+  "verificationResult": {
+   "mediaType": "application/vnd.dev.sigstore.verificationresult+json;version=0.1",
+   "signature": {
+    "certificate": {
+     "certificateIssuer": "CN=sigstore-intermediate,O=sigstore.dev",
+     "subjectAlternativeName": "https://github.com/CodeRoasted/malf-toolchain/.github/workflows/coderoast-candidate.yml@refs/heads/main",
+     "issuer": "https://token.actions.githubusercontent.com",
+     "githubWorkflowTrigger": "workflow_dispatch",
+     "githubWorkflowRef": "refs/heads/main",
+     "buildSignerURI": "https://github.com/CodeRoasted/malf-toolchain/.github/workflows/coderoast-candidate.yml@refs/heads/main",
+     "buildSignerDigest": "0000000000000000000000000000000000000000",
+     "runnerEnvironment": "github-hosted",
+     "sourceRepositoryURI": "https://github.com/CodeRoasted/coderoast-ipc",
+     "sourceRepositoryDigest": "0000000000000000000000000000000000000000",
+     "sourceRepositoryRef": "refs/heads/main",
+     "sourceRepositoryOwnerURI": "https://github.com/CodeRoasted",
+     "buildConfigURI": "https://github.com/CodeRoasted/coderoast-ipc/.github/workflows/candidate.yml@refs/heads/main",
+     "buildTrigger": "workflow_dispatch",
+     "sourceRepositoryVisibilityAtSigning": "public"
+    }
+   },
+   "statement": {
+    "_type": "https://in-toto.io/Statement/v1",
+    "subject": [
+     {
+      "name": "candidate",
+      "digest": {
+       "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+     }
+    ],
+    "predicateType": "https://slsa.dev/provenance/v1"
+   }
+  }
+ }
+]

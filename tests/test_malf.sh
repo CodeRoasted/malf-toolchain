@@ -362,8 +362,16 @@ echo
 echo "[7i] store_replica carries its own refusal proof (selftest): every guard of the ghcr read replica fires against an in-process registry and API (DN-142.D6)"
 replica_selftest_output="$(timeout 120 python3 "$MALF_ROOT/store_replica.py" selftest 2>&1)"
 replica_selftest_status=$?
-check "store_replica selftest: 12 arms, every refusal fired and the round trip byte-equal" \
-      "ok" "$([[ $replica_selftest_status -eq 0 ]] && grep -q '^store_replica selftest: 12 arm(s), 0 failure(s)$' <<< "$replica_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$replica_selftest_output")")"
+check "store_replica selftest: 20 arms, every refusal fired, the one visibility rule both ways (DN-142.D31 (3)) and the round trip byte-equal" \
+      "ok" "$([[ $replica_selftest_status -eq 0 ]] && grep -q '^store_replica selftest: 20 arm(s), 0 failure(s)$' <<< "$replica_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$replica_selftest_output")")"
+
+echo
+
+echo "[7i2] store_transport carries its own proof (selftest): a repository's own store, pushed by its candidate and restored by digest through a cache, the index trusted only through its attestation (DN-142.D31 (3), (4), slice S4)"
+transport_selftest_output="$(timeout 300 python3 "$MALF_ROOT/store_transport.py" selftest 2>&1)"
+transport_selftest_status=$?
+check "store_transport selftest: 55 arms, the candidate key, push and its ownership filter, publish-index last, the attestation verifier's eight ABSENT reds, the cache judged by digest, the mismatch tag, the one visibility rule and a user-owned fork" \
+      "ok" "$([[ $transport_selftest_status -eq 0 ]] && grep -q '^store_transport selftest: 55 arm(s), 0 failure(s)$' <<< "$transport_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$transport_selftest_output")")"
 
 echo
 
