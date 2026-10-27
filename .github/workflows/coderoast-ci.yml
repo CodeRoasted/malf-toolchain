@@ -98,7 +98,7 @@ jobs:
     runs-on: ${{ inputs.runs-on }}
     steps:
       - name: CI — checkout + toolchain + build env + cross-repo vendor + build/test
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-ci@149d341e80ed0448586ca28c4bce769708034a8f
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-ci@9530df7573ba3801454b6ddbff335cdd9d579bad
         with:
           vendor: ${{ inputs.vendor }}
           deps: ${{ inputs.deps }}
@@ -114,18 +114,18 @@ jobs:
         # The byte-compare is also what makes the coderoast:cpe-coverage ratio a control: a component
         # entering without a CPE mapping changes the ratio and reds this step.
         if: inputs.sbom-path != ''
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-sbom-check@149d341e80ed0448586ca28c4bce769708034a8f
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-sbom-check@9530df7573ba3801454b6ddbff335cdd9d579bad
         with:
           package-dir: ${{ inputs.sbom-package-dir }}
           sbom-path: ${{ inputs.sbom-path }}
 
       - name: Save the conan cache (third-party only; never on the coderoast-release group)
-        uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@149d341e80ed0448586ca28c4bce769708034a8f
+        uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@9530df7573ba3801454b6ddbff335cdd9d579bad
 
       - name: Sift dogfood (advisory; never fails the build)
         if: ${{ always() && inputs.sift-mode != 'off' }}
         continue-on-error: true    # the advisory guarantee lives here, at the job-step boundary
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-ci-sift@149d341e80ed0448586ca28c4bce769708034a8f
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-ci-sift@9530df7573ba3801454b6ddbff335cdd9d579bad
         with:
           mode: ${{ inputs.sift-mode == 'public' && 'render' || 'comment' }}
           changed-outcome: ${{ job.status }}   # the NATIVE token — the engine maps it four-class
