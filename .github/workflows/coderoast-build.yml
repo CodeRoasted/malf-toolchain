@@ -56,7 +56,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Dev build (clang-21) and its tests
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dev-build@e73787efcf75199aa6aebb38d0d6b5618d93bc4e
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dev-build@501237b31c54a1e978024ad32e238a4857a52233
         with:
           test: ${{ inputs.test }}
           siblings: ${{ inputs.siblings }}
@@ -64,11 +64,11 @@ jobs:
 
       - name: Postflight — clang-tidy over this build
         if: ${{ !cancelled() && inputs.postflight }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-postflight@e73787efcf75199aa6aebb38d0d6b5618d93bc4e
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-postflight@501237b31c54a1e978024ad32e238a4857a52233
 
       - name: Save the conan cache the dev build restored (third-party only)
-        uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@2bb2e8586f7e45e973623f2e35d60bad11f50b13
+        uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@501237b31c54a1e978024ad32e238a4857a52233
 
       - name: Clear the editable registry and the sibling workspace
         if: always()
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dev-cleanup@e73787efcf75199aa6aebb38d0d6b5618d93bc4e
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dev-cleanup@501237b31c54a1e978024ad32e238a4857a52233
