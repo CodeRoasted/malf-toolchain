@@ -157,130 +157,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  checks:
+  # The cheap checks are `coderoast-preflight.yml`, the one copy every caller reaches; this workflow
+  # adds clang-tidy beside them in the same run, which is the ruling's operative half (a `NOLINT`
+  # fix reflows its line and breaks format, so one run answers both). The two jobs do not wait for
+  # each other: a red preflight never hides the lint's verdict.
+  preflight:
+    uses: CodeRoasted/malf-toolchain/.github/workflows/coderoast-preflight.yml@7d0df03a5622d687fa2de2f114dafbddcf22e42d
+    with:
+      actionlint: ${{ inputs.actionlint }}
+      module-conformance: ${{ inputs.module-conformance }}
+      format-check: ${{ inputs.format-check }}
+      dead-symbol-check: ${{ inputs.dead-symbol-check }}
+      dead-symbol-base: ${{ inputs.dead-symbol-base }}
+      runs-on: ${{ inputs.runs-on }}
+
+  tidy:
     runs-on: ${{ inputs.runs-on }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # depth 2, not 1, and it is load-bearing for the dead-symbol gate below: that gate
-          # inspects HEAD~1..HEAD, and at depth 1 HEAD~1 does not exist. An unreachable range
-          # yields an EMPTY diff — zero candidates, zero findings, exit 0 — which reads exactly
-          # like a clean run. The gate refuses such a range rather than passing vacuously, so
-          # this is what keeps it from being permanently, silently green.
-          fetch-depth: 2
 
-      - name: Install actionlint (PINNED release asset — no remote script is executed)
-        if: ${{ inputs.actionlint }}
-        env:
-          ACTIONLINT_VERSION: '1.7.12'
-        run: |
-          # TWO defects, and the supply-chain one matters more BECAUSE of where this file sits:
-          # coderoast-lint.yml is a reusable workflow called by every C++ repo in the workspace,
-          # so this step runs in each CALLER's context, private repos included.
-          #
-          # 1. SUPPLY CHAIN. This used to be
-          #    `curl -sSfL .../actionlint/main/scripts/download-actionlint.bash | bash` — code
-          #    from a MUTABLE upstream ref, executed on the runner of every repo that calls this
-          #    workflow. `main` is not a version. Pinning the RELEASE ASSET removes the execution
-          #    surface instead of narrowing it, and adopts the shape the superproject's lint.yml
-          #    already uses, so actionlint is provisioned one way everywhere.
-          #
-          # 2. Swallowed status. Under the default `bash -e {0}` the status of `curl … | bash` is
-          #    BASH's, and bash fed an empty stdin exits 0 — measured 2026-08-22,
-          #    `curl -fsSL <404> | bash` → rc=0. A dead download reported a successful install and
-          #    the defect surfaced in the NEXT step as `./actionlint: No such file or directory`,
-          #    a true failure attributed to the wrong cause. The `--version` probe now proves the
-          #    install in the step that performs it rather than leaving the proof to a neighbour.
-          set -euo pipefail
-          curl -sSfL -o /tmp/al.tgz \
-            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          tar -xzf /tmp/al.tgz -C /tmp actionlint
-          /tmp/actionlint --version
-
-      - name: Run actionlint
-        if: ${{ inputs.actionlint }}
-        run: |
-          set -euo pipefail
-          /tmp/actionlint -color
-
-      - name: C++ modules conformance
-        if: ${{ inputs.module-conformance }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-module-conformance@2bb2e8586f7e45e973623f2e35d60bad11f50b13
-
-      # Last, because it provisions clang-21 to get a version-matched clang-format. On the
-      # self-hosted fleet that provisioning is an idempotent no-op (the toolchain persists between
-      # jobs); on a hosted runner it is a real apt install, so the two cheap checkout-only checks
-      # above report first and a repo never pays for the toolchain to learn its workflows are broken.
-      - name: C++ format conformance
-        if: ${{ inputs.format-check }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-format-check@2bb2e8586f7e45e973623f2e35d60bad11f50b13
-
-      # Cheap (no toolchain, no build — it reads text), but placed last on purpose: it is the
-      # newest gate here, and a repo should learn its workflows, modules and formatting are sound
-      # before it hears about a comment. Unlike format-check this one needs no provisioning, so
-      # ordering costs nothing either way.
-      # The base is decided HERE, in bash, and not in a `${{ }}` expression on the step below,
-      # because only bash can fetch a base the shallow checkout does not have and REFUSE when it
-      # still cannot resolve it. An expression can only choose between strings it already has.
-      - name: Resolve the dead-symbol diff base
-        id: dead-symbol-range
-        if: ${{ inputs.dead-symbol-check }}
-        env:
-          BASE: ${{ inputs.dead-symbol-base }}
-        run: |
-          set -euo pipefail
-          if [ -n "$BASE" ]; then
-            # Two-dot `a..b` on `git diff` is a TREE comparison, so the base only has to be
-            # present as an object — it does not have to be connected to HEAD. A depth-1 fetch is
-            # therefore enough, and is what keeps this cheap on the shallow checkout above.
-            if ! git rev-parse --verify --quiet "${BASE}^{commit}" >/dev/null; then
-              git fetch --no-tags --depth=1 origin "$BASE" || true
-              # `if`, never `a && b`: under `set -e` a false `&&` compound IS the step's status, so
-              # the spelling that reads as "try this" would abort the job on the very path that
-              # exists to recover. The failure would then arrive as a bare non-zero with no message.
-              if git rev-parse --verify --quiet "FETCH_HEAD^{commit}" >/dev/null; then
-                BASE=FETCH_HEAD
-              fi
-            fi
-            if ! git rev-parse --verify --quiet "${BASE}^{commit}" >/dev/null; then
-              echo "::error::dead-symbol-base '${{ inputs.dead-symbol-base }}' does not resolve in this checkout and could not be fetched. Refusing to fall back to HEAD~1: a silent fallback turns the deliberate scope you passed back into the arbitrary one."
-              exit 1
-            fi
-            echo "range=$(git rev-parse "${BASE}^{commit}")..HEAD" >> "$GITHUB_OUTPUT"
-            echo "dead-symbol range: ${{ inputs.dead-symbol-base }}..HEAD (explicit base)"
-          else
-            echo "range=HEAD~1..HEAD" >> "$GITHUB_OUTPUT"
-            if [ "${{ github.event_name }}" = "pull_request" ]; then
-              echo "dead-symbol range: HEAD~1..HEAD — on a pull_request the checkout is the MERGE commit, so HEAD~1 is the base tip and this range is exactly the PR."
-            else
-              # The scope is correct and narrower than the word "lint" suggests, so it is stated
-              # rather than left for a reader to assume. `::notice::` and not `::warning::`: this
-              # is the documented default, not a defect, and a warning on every dispatch is how a
-              # real one stops being seen.
-              echo "::notice::dead-symbol gate scope is ONE COMMIT: $(git rev-parse --short HEAD~1)..$(git rev-parse --short HEAD) on ${{ github.ref }}. No base was supplied and this event carries none, so the gate did NOT examine the branch. Pass dead-symbol-base to scope it deliberately."
-            fi
-          fi
-
-      - name: Dead symbol in comment
-        if: ${{ inputs.dead-symbol-check }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dead-symbol@2bb2e8586f7e45e973623f2e35d60bad11f50b13
-        with:
-          range: ${{ steps.dead-symbol-range.outputs.range }}
-
-      # LAST, and it runs even when a step above it FAILED — `!cancelled()`, not the default. That
-      # is the ruling's operative half: lint and format must be answered by ONE run, because a
-      # `NOLINT` inserted to satisfy lint reflows the line and breaks format. Under the default
-      # condition a red format gate would abort the job before lint ever ran, so the author would
-      # fix formatting, re-run, and only then meet the findings — two round trips, and the second
-      # fix re-breaks the first. Both verdicts, one run.
-      #
-      # It is also by far the most expensive step here (it builds; see the `lint` input), so it is
-      # placed after every cheap check: a repo learns its workflows, modules, formatting and
-      # comments are sound before it pays for a compiler.
+      # It is by far the most expensive check here (it builds; see the `lint` input).
       - name: C++ clang-tidy conformance
-        if: ${{ !cancelled() && inputs.lint }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-lint-tidy@2bb2e8586f7e45e973623f2e35d60bad11f50b13
+        if: ${{ inputs.lint }}
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-lint-tidy@7d0df03a5622d687fa2de2f114dafbddcf22e42d
         with:
           siblings: ${{ inputs.lint-siblings }}
           checkout-token: ${{ secrets.lint-checkout-token }}
