@@ -406,9 +406,12 @@ def act_access_argv(mounts: list[Path] | tuple, host_uid: int) -> list[list[str]
     runner, ipc run 40574335101: `setfacl -R /tmp` refused the act on systemd's private entries)."""
     if host_uid == ACT_UID:
         return []
-    entries = f"u:{ACT_UID}:rwX,d:u:{ACT_UID}:rwX,d:u:{host_uid}:rwX"
-    return [["find", str(mount), "-user", str(host_uid), "-exec", "setfacl", "-m", entries, "{}", "+"]
-            for mount in mounts]
+    # note: default entries exist only on a directory, so files take the access entry alone (measured, ipc run 40575288193).
+    access = f"u:{ACT_UID}:rwX"
+    defaults = f"{access},d:u:{ACT_UID}:rwX,d:u:{host_uid}:rwX"
+    return [command for mount in mounts for command in (
+        ["find", str(mount), "-user", str(host_uid), "-type", "d", "-exec", "setfacl", "-m", defaults, "{}", "+"],
+        ["find", str(mount), "-user", str(host_uid), "-type", "f", "-exec", "setfacl", "-m", access, "{}", "+"])]
 
 
 def grant_act_access(mounts: list[Path] | tuple) -> None:
@@ -1470,9 +1473,23 @@ def selftest() -> int:
         arm("RED: a host of another uid (a hosted runner's 1001) grants the act uid rwX on every writable mount, "
             "and default entries for the act and the host on what is created later",
             act_access_argv([recipes, recipes / "store"], 1001),
-            [["find", str(path), "-user", "1001", "-exec", "setfacl", "-m",
-              f"u:{ACT_UID}:rwX,d:u:{ACT_UID}:rwX,d:u:1001:rwX", "{}", "+"]
-             for path in (recipes, recipes / "store")])
+            [command for path in (recipes, recipes / "store") for command in (
+                ["find", str(path), "-user", "1001", "-type", "d", "-exec", "setfacl", "-m",
+                 f"u:{ACT_UID}:rwX,d:u:{ACT_UID}:rwX,d:u:1001:rwX", "{}", "+"],
+                ["find", str(path), "-user", "1001", "-type", "f", "-exec", "setfacl", "-m",
+                 f"u:{ACT_UID}:rwX", "{}", "+"])])
+        granted = recipes / "granted"
+        (granted / "sub").mkdir(parents=True, exist_ok=True)
+        (granted / "sub" / "file.txt").write_text("x")
+        # note: the commands are built for a foreign host uid, then pointed at this host's, so they match real entries.
+        owned = [command[:3] + [str(os.getuid())] + command[4:] for command in act_access_argv([granted], 4242)]
+        ran = [subprocess.run(command, capture_output=True, text=True, check=False) for command in owned]
+        arm("RED: the grant applies, over real files and directories the named uid owns (here this host's): "
+            "every command exits 0 and a file carries the act's access entry",
+            ([done.returncode for done in ran],
+             f"user:{ACT_UID}:rw-" in subprocess.run(["getfacl", "-n", "-p", str(granted / "sub" / "file.txt")],
+                                                       capture_output=True, text=True).stdout),
+            ([0, 0], True))
         arm("the definition in this tree installs the actionlint version its one pinning workflow pins",
             actionlint_findings(), [])
 
