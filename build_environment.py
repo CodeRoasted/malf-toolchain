@@ -395,36 +395,55 @@ def worktree_refusals(repositories: list[Path], mounts: list[Path]) -> list[str]
     return found
 
 
-def act_access_argv(mounts: list[Path] | tuple, host_uid: int) -> list[list[str]]:
-    """The `setfacl` commands that let the act's uid write every writable mount when the host's own uid is
-    another (a GitHub-hosted runner's `runner` is 1001): the act always runs as ACT_UID, so what it writes,
-    and every output that could carry an owner, is the same on every runner; the host grants the access
-    instead. Default entries give the act AND the host user every entry created later, so the host still
-    reads and removes what the act wrote. Empty when the host uid is the act's (the desk, the fleet). Only
-    what the host OWNS is granted: a mount it does not own (`/tmp`, root's and world-writable) is left as the
-    system set it, and inside an owned mount an entry another uid owns is not touched (measured on a hosted
-    runner, ipc run 40574335101: `setfacl -R /tmp` refused the act on systemd's private entries)."""
-    if host_uid == ACT_UID:
+def act_access_argv(mounts: list[Path] | tuple, host_uid: int, act_kernel_uid: int) -> list[list[str]]:
+    """The `setfacl` commands that let the act write every writable mount. The act runs as ACT_UID inside its
+    nested user namespace on every runner, so what it writes is the same everywhere; the uid the HOST KERNEL
+    sees it write as is `act_kernel_uid`, which the daemon decides (`act_kernel_uid`). When that is the host
+    user (a rootless daemon: the desk) nothing is granted. Otherwise (a rootful daemon: a GitHub-hosted runner,
+    where the act is uid 0 holding no capability, so it reads the other-bits) that uid is granted rwX, and the
+    default entries give it AND the host user every entry created later, so the host still reads and removes
+    what the act wrote. Only what the host OWNS is touched: a mount it does not own (`/tmp`, world-writable)
+    is left as the system set it, and inside an owned mount an entry another uid owns is not touched."""
+    if act_kernel_uid == host_uid:
         return []
     # note: default entries exist only on a directory, so files take the access entry alone (measured, ipc run 40575288193).
-    access = f"u:{ACT_UID}:rwX"
-    defaults = f"{access},d:u:{ACT_UID}:rwX,d:u:{host_uid}:rwX"
+    access = f"u:{act_kernel_uid}:rwX"
+    defaults = f"{access},d:u:{act_kernel_uid}:rwX,d:u:{host_uid}:rwX"
     return [command for mount in mounts for command in (
         ["find", str(mount), "-user", str(host_uid), "-type", "d", "-exec", "setfacl", "-m", defaults, "{}", "+"],
         ["find", str(mount), "-user", str(host_uid), "-type", "f", "-exec", "setfacl", "-m", access, "{}", "+"])]
 
 
-def grant_act_access(mounts: list[Path] | tuple) -> None:
-    """Runs `act_access_argv` for this host. raises Refused naming the mount whose grant failed: an act
-    that cannot write its mounts would fail mid-walk for a reason that is not the build's."""
+def act_kernel_uid(docker: str, host_uid: int) -> int:
+    """The host uid the act's writes reach the kernel as: a rootless daemon runs the container's root as the
+    host user, so the act writes as `host_uid`; a rootful one runs it as uid 0, which the act's nested user
+    namespace strips of every capability (measured, ipc run 40576349392: Permission denied on a directory a
+    uid-1000 ACL granted). raises Refused on a rootful daemon remapping user namespaces, whose act uid this
+    module cannot name."""
+    done = _docker(docker, "info", "--format", "{{json .SecurityOptions}}")
+    if done.returncode != 0:
+        raise Refused(f"`docker info` failed, so the act's uid cannot be known: {done.stderr.strip()}")
+    options = {str(option).split(",", 1)[0] for option in json.loads(done.stdout or "[]")}
+    if "name=rootless" in options:
+        return host_uid
+    if "name=userns" in options:
+        raise Refused("the daemon remaps user namespaces (userns-remap): the uid the act writes as is a subordinate "
+                      "uid this module does not derive, so no grant can be made; run a rootless or a plain rootful daemon")
+    return 0
+
+
+def grant_act_access(mounts: list[Path] | tuple, docker: str = "docker") -> None:
+    """Runs `act_access_argv` for this host and daemon. raises Refused naming the mount whose grant failed: an
+    act that cannot write its mounts would fail mid-walk for a reason that is not the build's."""
     host_uid = os.getuid()
     # note: a mount that does not exist is left to run_argv, whose refusal names it.
     owned = [mount for mount in mounts if mount.is_dir() and mount.stat().st_uid == host_uid]
-    for command in act_access_argv(owned, host_uid):
+    act_uid = act_kernel_uid(docker, host_uid)
+    for command in act_access_argv(owned, host_uid, act_uid):
         done = subprocess.run(command, capture_output=True, text=True, check=False)
         if done.returncode != 0:
-            raise Refused(f"`{' '.join(command)}` failed, so the act (uid {ACT_UID}) could not write that mount: "
-                          f"{done.stderr.strip()}")
+            raise Refused(f"`{' '.join(command)}` failed, so the act (host uid {act_uid}) could not write that "
+                          f"mount: {done.stderr.strip()}")
 
 
 def run(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], docker: str = "docker", read_only: list[Path] | tuple = (), host_pids: bool = False,
@@ -439,7 +458,7 @@ def run(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], docker:
         raise Refused("an act that runs git worktree commands sees every location the entries name, at the "
                       "host's path, or it can drop a sibling's live candidate (DN-142.D30 (9) R9): " + "; ".join(stray))
     load(pin, docker)
-    grant_act_access(mounts)
+    grant_act_access(mounts, docker)
 
     def started(command: list[str]) -> int:
         if attest is not None:
@@ -1468,27 +1487,27 @@ def selftest() -> int:
         arm("RED: a definition installing no actionlint is named",
             actionlint_findings(defined, recipes),
             [f"{defined} must carry exactly one ARG ACTIONLINT_VERSION of the form X.Y.Z, and carries none"])
-        arm("a host whose uid is the act's grants nothing: the desk and the fleet run as uid 1000",
-            act_access_argv([recipes], ACT_UID), [])
-        arm("RED: a host of another uid (a hosted runner's 1001) grants the act uid rwX on every writable mount, "
-            "and default entries for the act and the host on what is created later",
-            act_access_argv([recipes, recipes / "store"], 1001),
+        arm("a rootless daemon (the act writes as the host user, the desk) grants nothing",
+            act_access_argv([recipes], 1000, 1000), [])
+        arm("RED: a rootful daemon (a hosted runner: host user 1001, the act reaching the kernel as uid 0) grants "
+            "uid 0 rwX on every writable mount, and default entries for uid 0 and the host on what is created later",
+            act_access_argv([recipes, recipes / "store"], 1001, 0),
             [command for path in (recipes, recipes / "store") for command in (
                 ["find", str(path), "-user", "1001", "-type", "d", "-exec", "setfacl", "-m",
-                 f"u:{ACT_UID}:rwX,d:u:{ACT_UID}:rwX,d:u:1001:rwX", "{}", "+"],
+                 "u:0:rwX,d:u:0:rwX,d:u:1001:rwX", "{}", "+"],
                 ["find", str(path), "-user", "1001", "-type", "f", "-exec", "setfacl", "-m",
-                 f"u:{ACT_UID}:rwX", "{}", "+"])])
+                 "u:0:rwX", "{}", "+"])])
         granted = recipes / "granted"
         (granted / "sub").mkdir(parents=True, exist_ok=True)
         (granted / "sub" / "file.txt").write_text("x")
         # note: the commands are built for a foreign host uid, then pointed at this host's, so they match real entries.
-        owned = [command[:3] + [str(os.getuid())] + command[4:] for command in act_access_argv([granted], 4242)]
+        owned = [command[:3] + [str(os.getuid())] + command[4:] for command in act_access_argv([granted], 4242, 0)]
         ran = [subprocess.run(command, capture_output=True, text=True, check=False) for command in owned]
         arm("RED: the grant applies, over real files and directories the named uid owns (here this host's): "
             "every command exits 0 and a file carries the act's access entry",
             ([done.returncode for done in ran],
-             f"user:{ACT_UID}:rw-" in subprocess.run(["getfacl", "-n", "-p", str(granted / "sub" / "file.txt")],
-                                                       capture_output=True, text=True).stdout),
+             "user:0:rw-" in subprocess.run(["getfacl", "-n", "-p", str(granted / "sub" / "file.txt")],
+                                             capture_output=True, text=True).stdout),
             ([0, 0], True))
         arm("the definition in this tree installs the actionlint version its one pinning workflow pins",
             actionlint_findings(), [])
