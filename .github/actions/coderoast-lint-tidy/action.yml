@@ -23,38 +23,12 @@ description: |
   are package_id-keyed on the compiler, so the published gcc-16 binary cache warms nothing here and
   the third-party closure is built from source.
 
-  ARMING. Three ways this gate could report green over unchecked code, all closed:
-    * NO DATABASE — `malf lint` refuses rather than running flag-less (it would emit phantom
-      clang-diagnostic-errors and could never pass).
-    * A MISMATCHED clang-tidy — if clang-tidy is not the one from clang-21's OWN install it cannot
-      read this build's BMIs, and `malf lint` responds by SKIPPING every `.cppm` and every TU that
-      imports a module, with a note on stderr and exit 0. On this codebase that is nearly the whole
-      subject, so the run would pass having inspected almost nothing. `setup-clang21-tools`'s
-      version+location assertion turns that note into a hard failure BEFORE the gate runs.
-    * AN EMPTY FILE SET — `--all-files` walks the tree, so zero files means the walk or the DB
-      filter ate everything; `malf lint` refuses to report success in that mode.
-  And a translation unit clang-tidy DIES on is reported as NOT LINTED and is fatal — a file can be
-  clean, dirty, or UNREAD, and only the first two have a vocabulary in an ordinary lint gate.
-
-  Run after `actions/checkout`. Provisions clang-21 and clang-tidy through `setup-clang21-tools`,
-  the one provisioning surface the format gate and the superproject's step 0 also use, so the
-  compiler and its tools cannot drift apart between them.
-
-  CROSS-REPO FIRST-PARTY REQUIREMENTS come from `siblings`. With it empty, the checkout IS the
-  workspace: `MALF_WORKSPACE_ROOT` points at it, which makes a repo's OWN members editables and
-  covers every intra-repo graph (insight-canon's `semantic/*` packages on `insight_canon`,
-  coderoast-ipc's members). A repo whose closure reaches ANOTHER repo names those repos, and they
-  are cloned from SOURCE beside a worktree of the caller — the desk layout, the shape
-  `insight-twin/ci.yml` runs — so the recipe graph registers them as editables. Vendoring cannot
-  substitute, by construction: `coderoast-vendor` restores the release workflow's
-  `linux-gcc16-release` binaries, and a clang-21 install does not match a gcc-16 package_id. Nor
-  does source depend on a release existing, which is the post-bump window that broke that repo's
-  vendored job.
-
-  THE SET IS A DECLARATION, AND IT IS GATED WHERE THE OTHER FROM-SOURCE SEEDS ARE:
-  `pin_coherence.py` INV-13 derives each caller's closure from the `packages.yml` graph and reds
-  a `lint-siblings` that does not cover it. A sibling left undeclared at run time is a loud
-  resolve failure (no remote carries a first-party binary), never a narrower lint.
+  IT IS NOW THREE ACTIONS IN ONE JOB, so the repositories still calling `coderoast-lint.yml` keep
+  this exact behaviour while the per-repository workflows call the parts on their own:
+  `coderoast-dev-build` (the clang-21 build, `test: false` here), `coderoast-postflight` (clang-tidy
+  over that build, which builds nothing and refuses without it; its description carries the ARMING)
+  and `coderoast-dev-cleanup` (the editable registry and the sibling workspace, always). Siblings
+  and the clang-21 provisioning are `coderoast-dev-build`'s; read its description for both.
 
 inputs:
   clang-tidy-major:
@@ -82,183 +56,20 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Provision clang-21 and the version-matched clang-tidy, asserted to be clang-21's OWN
-      # The assertion is this gate's arming (the description's second hole): a clang-tidy outside
-      # clang-21's install directory makes `malf lint` skip every module unit and pass.
-      uses: CodeRoasted/malf-toolchain/.github/actions/setup-clang21-tools@3052538f78454ec40ed3fc5fbcbb596cae14f55b
+    - name: The clang-21 build clang-tidy reads (compile commands + module BMIs)
+      uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dev-build@e73787efcf75199aa6aebb38d0d6b5618d93bc4e
+      with:
+        clang-tidy-major: ${{ inputs.clang-tidy-major }}
+        profile: ${{ inputs.profile }}
+        test: 'false'
+        siblings: ${{ inputs.siblings }}
+        checkout-token: ${{ inputs.checkout-token }}
+
+    - name: clang-tidy over that build
+      uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-postflight@e73787efcf75199aa6aebb38d0d6b5618d93bc4e
       with:
         clang-tidy-major: ${{ inputs.clang-tidy-major }}
 
-    - name: Setup build env (apt + CMake 4.3.x + Conan + dep cache + canonical profile)
-      uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-env@3052538f78454ec40ed3fc5fbcbb596cae14f55b
-      with:
-        profile: ${{ inputs.profile }}
-
-    - name: Assemble the lint workspace (the repo beside its first-party siblings, from source)
-      shell: bash
-      env:
-        SIBLINGS: ${{ inputs.siblings }}
-        LINT_SIBLING_TOKEN: ${{ inputs.checkout-token }}
-      run: |
-        set -euo pipefail
-        set -f
-        # THE WORKSPACE IS SET HERE, and without it no first-party graph resolves. malf derives
-        # MALF_WORKSPACE_ROOT from its OWN location, which under `_actions/` holds nothing but
-        # SHA-named directories, so `conan install` would demand packages published nowhere.
-        if [ -z "${SIBLINGS//[[:space:]]/}" ]; then
-          echo "LINT_WORKSPACE_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
-          echo "LINT_REPO_DIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
-          echo "no siblings declared: the checkout is the whole workspace"
-          exit 0
-        fi
-        # OUTSIDE the checkout, because `malf lint` keys its header filter and its --all-files walk
-        # on the invocation directory, and a walked TU with no compile command is fatal: siblings
-        # cloned inside the checkout would be walked as this repo's own sources.
-        ws="$RUNNER_TEMP/malf-lint-workspace"
-        self="${GITHUB_REPOSITORY#*/}"
-        rm -rf "$ws"
-        mkdir -p "$ws"
-        git -C "$GITHUB_WORKSPACE" worktree prune
-        git -C "$GITHUB_WORKSPACE" -c advice.detachedHead=false worktree add --detach "$ws/$self" HEAD
-        follow=main
-        if [ "$GITHUB_REF_TYPE" = tag ]; then
-          follow="$GITHUB_REF_NAME"
-        fi
-        # The token is read from the environment when git asks, so it never enters a config file or
-        # a remote URL. GIT_CONFIG_GLOBAL=/dev/null because the runner's global config is shared,
-        # persistent state: a credential it carried would be tried before this one, and one did break
-        # five lint jobs (`scripts/clone_repos.sh` in the superproject records it).
-        helper='!f() { test "$1" = get && test -n "${LINT_SIBLING_TOKEN:-}" && printf "username=x-access-token\npassword=%s\n" "$LINT_SIBLING_TOKEN"; }; f'
-        sibling_git() {
-          GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 \
-            git -c credential.helper= -c "credential.helper=$helper" "$@"
-        }
-        declare -A seen=()
-        for entry in $SIBLINGS; do
-          repo="${entry%%@*}"
-          ref="$follow"
-          if [[ "$entry" == *@* ]]; then
-            ref="${entry#*@}"
-          fi
-          if [[ ! "$repo" =~ ^[A-Za-z0-9._-]+$ || ! "$ref" =~ ^[A-Za-z0-9._/-]+$ || "$repo" == "$self" || -n "${seen[$repo]:-}" ]]; then
-            echo "::error::siblings entry '$entry' is malformed, names this repo, or repeats a repo."
-            exit 1
-          fi
-          seen[$repo]=1
-          url="https://github.com/CodeRoasted/$repo.git"
-          if ! sibling_git clone --depth 1 --single-branch --branch "$ref" "$url" "$ws/$repo"; then
-            # A clone failure is a UNION of causes, so the ref is probed before any cause is named.
-            rc=0
-            sibling_git ls-remote --exit-code "$url" "refs/tags/$ref" "refs/heads/$ref" >/dev/null || rc=$?
-            case "$rc" in
-              0) echo "::error::sibling $repo @ $ref EXISTS and the clone still failed; git's own error is above." ;;
-              2) echo "::error::sibling $repo has no ref '$ref'. On a tag run every sibling must carry that tag; a repo on a decoupled version line is declared as '$repo@main'." ;;
-              *)
-                if [ -z "${LINT_SIBLING_TOKEN:-}" ]; then
-                  echo "::error::sibling $repo is unreachable (git exit $rc, error above) and NO checkout token reached this step. If $repo is private: the caller must pass lint-checkout-token, and the org secret it names must be granted to ${GITHUB_REPOSITORY} — an ungranted secret arrives as an empty string."
-                else
-                  echo "::error::sibling $repo is unreachable (git exit $rc, error above) WITH a checkout token present: the token cannot read $repo, has expired, or the network failed."
-                fi
-                ;;
-            esac
-            exit 1
-          fi
-          echo "sibling $repo @ $ref = $(git -C "$ws/$repo" rev-parse HEAD)"
-        done
-        echo "LINT_WORKSPACE_ROOT=$ws" >> "$GITHUB_ENV"
-        echo "LINT_REPO_DIR=$ws/$self" >> "$GITHUB_ENV"
-
-    - name: Build the clang-21 lint database (compile commands + module BMIs)
-      shell: bash
-      env:
-        MALF: ${{ github.action_path }}/../../../malf
-        PROFILE: ${{ inputs.profile }}
-      run: |
-        set -euo pipefail
-        export MALF_WORKSPACE_ROOT="$LINT_WORKSPACE_ROOT"
-        cd "$LINT_REPO_DIR"
-        echo "::group::malf build ($PROFILE) — the lint database"
-        bash "$MALF" build --profile "$PROFILE"
-        echo "::endgroup::"
-
-    - name: clang-tidy gate (malf lint --all-files)
-      shell: bash
-      env:
-        MALF: ${{ github.action_path }}/../../../malf
-      run: |
-        set -euo pipefail
-        export MALF_WORKSPACE_ROOT="$LINT_WORKSPACE_ROOT"
-        cd "$LINT_REPO_DIR"
-        # --console, deliberately: without it `malf lint` writes findings AND the NOT LINTED block
-        # to lint_output.txt and prints only "output written to ...", so a red run would name a file
-        # nobody fetches. The whole verdict must be in the log the reader already has open.
-        #
-        # --all-files, deliberately: the default mode is `git diff --name-only HEAD`, which on a
-        # clean CI checkout is EMPTY and passes. That is the can't-FAIL vacuity — a gate that
-        # inspects nothing and reports green. --all-files walks the tree and refuses an empty set.
-        if ! bash "$MALF" lint --all-files --console; then
-          echo "::error::clang-tidy findings, or translation units clang-tidy could not check, above. A 'NOT LINTED' block means those files went through ZERO checks — that is a coverage hole, not a finding, and it is fixed by removing the construct the check dies on or by a declared, reproducer-carrying exclusion in the config, never by a per-site NOLINT. Every other finding, a warning as much as an error, is fixed at the source or, where the check is wrong for that one site, by an own-line NOLINTNEXTLINE(<check>) under a note: comment giving the why; then re-run 'malf format' (an insertion reflows its line and this job checks formatting too). READING THIS RED FROM THE CLI: 'gh run view <run> --log-failed' returns EXIT 0 AND ZERO LINES for this job and always will — it is a job from a CALLED reusable workflow, which gh's run-level log views cannot resolve out of the archive (measured on insight-canon run 33318425771: --log emitted the two repo-local jobs and not one line of this one). The verdict above is retrievable, but only by job id: gh api repos/OWNER/REPO/actions/runs/RUN/jobs --jq '.jobs[]|select(.name|test(\"checks\"))|.id' then gh api repos/OWNER/REPO/actions/jobs/JOBID/logs."
-          exit 1
-        fi
-
-    - name: Clear the editable registry — a lint database must not change what a BUILD resolves
+    - name: Clear the editable registry and the sibling workspace
       if: always()
-      shell: bash
-      run: |
-        set -euo pipefail
-        # WHY THIS STEP EXISTS — measured at the v1.10.3 cut, 2026-09-01.
-        #
-        # The two steps above deliberately point MALF_WORKSPACE_ROOT at the checkout so an
-        # intra-repo first-party graph can resolve (the rationale is in this action's own
-        # description). malf implements that by registering every repo member as a conan
-        # EDITABLE, and the registry it writes — $CONAN_HOME/editable_packages.json — lives in
-        # the CONAN_HOME that `setup-build-env` owns at <workspace>/.conan2. On the self-hosted
-        # fleet that workspace PERSISTS ACROSS JOBS, so the registry outlived this job: the
-        # repo's later BUILD job resolved its own members as `- Editable` instead of `- Cache`,
-        # an editable emits no CMake package config, and `find_package(<sibling>)` then failed
-        # at configure time in a job that had done nothing wrong.
-        #
-        # malf already declares the counter-invariant twice — `_malf_editables_clear`, and
-        # store-create's clean-export invariant (no editables, MALF_EDITABLE_BUILD_DIR unset),
-        # whose comment names this very consequence (a bogus build-tree path in
-        # CMAKE_PREFIX_PATH -> find_package fails) and that real CI runs with it unset.
-        # That assertion held until this action began writing the registry. This step makes it
-        # true again; it does not change what lint itself resolves.
-        #
-        # The measurement, same code, same repo, one cut apart:
-        #   coderoast-ipc v1.10.2 run 33255985932 -> `coderoast_ipc_core/1.10.2 - Cache`, PASS
-        #   coderoast-ipc v1.10.3 run 33558688226 -> `coderoast_ipc_core/1.10.3 - Editable`,
-        #     "CMake Error at CMakeLists.txt:15 (find_package)" for the consumer module
-        #   insight-canon v1.10.3 run 33558684800 failed identically on `insight_canon`.
-        # It surfaced at a TAG rather than at a desk because no CI fires on a `main` push for
-        # the C++ repos (ADR-2.D3) — the tag was this regression's first execution.
-        #
-        # `always()` is load-bearing: a RED lint must not leave the registry behind either, or
-        # the next job fails for a reason that has nothing to do with its own code.
-        home="${CONAN_HOME:-}"
-        if [ -z "$home" ]; then
-          echo "CONAN_HOME is unset (setup-build-env owns it) — no registry to clear."
-          exit 0
-        fi
-        if [ -f "$home/editable_packages.json" ]; then
-          rm -f "$home/editable_packages.json"
-          echo "cleared $home/editable_packages.json — lint's intra-repo editables do not outlive this job"
-        else
-          echo "no editable registry at $home — nothing to clear"
-        fi
-
-    - name: Remove the lint workspace — siblings and the caller's worktree do not outlive this job
-      if: always()
-      shell: bash
-      run: |
-        set -euo pipefail
-        # `always()` for the registry step's reason: the checkout's `.git` persists on the self-hosted
-        # fleet, and a worktree registration left behind names a directory that no longer exists.
-        ws="$RUNNER_TEMP/malf-lint-workspace"
-        if [ ! -d "$ws" ]; then
-          echo "no lint workspace was assembled — nothing to remove"
-          exit 0
-        fi
-        rm -rf "$ws"
-        git -C "$GITHUB_WORKSPACE" worktree prune
-        echo "removed $ws and pruned its worktree registration from the checkout"
+      uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dev-cleanup@e73787efcf75199aa6aebb38d0d6b5618d93bc4e

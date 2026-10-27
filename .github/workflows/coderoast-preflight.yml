@@ -1,0 +1,189 @@
+name: CodeRoast Preflight
+
+# The CHEAP half of a CodeRoast repository's checks, as a reusable workflow: actionlint over the
+# caller's workflows, the C++23 module-conformance gate over its module units, the clang-format
+# conformance gate over its C++ sources, and the dead-symbol-in-comment gate over the change. Nothing
+# here builds. clang-tidy, which needs a build, is the POSTFLIGHT (`coderoast-postflight` over the
+# dev build); a repository's CI runs both in one run, because a `NOLINT` inserted to satisfy lint
+# reflows its line and breaks format (the Founder, 2026-08-30: lint and format are answered together).
+#
+# Every toggle DEFAULTS TRUE, deliberately: a repo that says nothing is gated, and a hole is a
+# written line in the caller stating which gate is off and why.
+
+on:
+  workflow_call:
+    inputs:
+      actionlint:
+        description: 'Run actionlint over the caller repo workflows.'
+        type: boolean
+        required: false
+        default: true
+      module-conformance:
+        description: 'Run the C++23 module-conformance gate over the caller repo module units. Set false for a repo with no .cppm (e.g. the superproject, a TS repo).'
+        type: boolean
+        required: false
+        default: true
+      format-check:
+        description: |
+          Run `malf format --check` (clang-format --dry-run --Werror) over the caller repo C++ sources.
+          Set false ONLY for a repo carrying pre-existing violations, and say so in the caller with the
+          file count and the owner — an unexplained false is indistinguishable from an oversight. Also
+          false for a repo with no C++ (a TS repo), where the walk finds nothing and the gate is inert.
+        type: boolean
+        required: false
+        default: true
+      dead-symbol-check:
+        description: |
+          Fail when the change deletes the last code occurrence of an identifier a comment still
+          names in backticks (CLAUDE.md § Comments — a comment restating a symbol is a mirror with
+          no enforced edge). Diff-scoped, so it only ever considers identifiers THIS change removed;
+          a pre-existing tree is never swept. Set false only for a repo with no C++.
+        type: boolean
+        required: false
+        default: true
+      dead-symbol-base:
+        description: |
+          The commit the dead-symbol diff is taken FROM. Empty (the default) keeps `HEAD~1..HEAD`.
+
+          WHY THIS INPUT EXISTS. Diff scope is the whole reason this gate is usable at all — a
+          whole-tree sweep flagged 119 of 1289 candidates, almost all legitimate — but a diff has
+          a BASE, and `HEAD~1` is only the right base when the event supplies one. On a
+          `pull_request` it does: the checkout is the merge commit, so `HEAD~1` IS the base tip and
+          the range is exactly the PR. On a `workflow_dispatch` nothing supplies a base, so
+          `HEAD~1..HEAD` means "whatever single commit happens to be on the tip of the dispatched
+          ref" — a well-defined range, but not the one an operator dispatching a lint over a branch
+          believes they asked for. The verdict is then narrower than it reads, and a verdict read
+          wider than it is measured is the failure a green badge is made of.
+
+          So: pass a base here to scope the run deliberately (`main`, a tag, a SHA), and when you
+          do not, the job PRINTS a notice on every non-PR event naming both endpoints and saying
+          the scope is one commit. The default is unchanged, so no caller's behaviour moves; what
+          moves is that the narrow case can no longer be read as the wide one.
+
+          The checkout here is `fetch-depth: 2`, so a base outside that window is not in the clone.
+          The compute step fetches it on demand and FAILS NAMING IT if it still cannot be resolved
+          — an unresolvable base must never silently fall back to `HEAD~1`, which is the shape that
+          turns a deliberate scope into the arbitrary one it was passed to replace.
+        type: string
+        required: false
+        default: ''
+      runs-on:
+        description: 'Runner label for the checks job. Defaults to hosted ubuntu-24.04. PUBLIC callers MUST omit it — a self-hosted runner reachable from a public repo fork PR is an RCE. PRIVATE callers pass vars.CI_RUNS_ON (fallback ubuntu-24.04) to route to the self-hosted fleet.'
+        type: string
+        required: false
+        default: 'ubuntu-24.04'
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # depth 2, not 1, and it is load-bearing for the dead-symbol gate below: that gate
+          # inspects HEAD~1..HEAD, and at depth 1 HEAD~1 does not exist. An unreachable range
+          # yields an EMPTY diff — zero candidates, zero findings, exit 0 — which reads exactly
+          # like a clean run. The gate refuses such a range rather than passing vacuously, so
+          # this is what keeps it from being permanently, silently green.
+          fetch-depth: 2
+
+      - name: Install actionlint (PINNED release asset — no remote script is executed)
+        if: ${{ inputs.actionlint }}
+        env:
+          ACTIONLINT_VERSION: '1.7.12'
+        run: |
+          # TWO defects, and the supply-chain one matters more BECAUSE of where this file sits:
+          # coderoast-lint.yml is a reusable workflow called by every C++ repo in the workspace,
+          # so this step runs in each CALLER's context, private repos included.
+          #
+          # 1. SUPPLY CHAIN. This used to be
+          #    `curl -sSfL .../actionlint/main/scripts/download-actionlint.bash | bash` — code
+          #    from a MUTABLE upstream ref, executed on the runner of every repo that calls this
+          #    workflow. `main` is not a version. Pinning the RELEASE ASSET removes the execution
+          #    surface instead of narrowing it, and adopts the shape the superproject's lint.yml
+          #    already uses, so actionlint is provisioned one way everywhere.
+          #
+          # 2. Swallowed status. Under the default `bash -e {0}` the status of `curl … | bash` is
+          #    BASH's, and bash fed an empty stdin exits 0 — measured 2026-08-22,
+          #    `curl -fsSL <404> | bash` → rc=0. A dead download reported a successful install and
+          #    the defect surfaced in the NEXT step as `./actionlint: No such file or directory`,
+          #    a true failure attributed to the wrong cause. The `--version` probe now proves the
+          #    install in the step that performs it rather than leaving the proof to a neighbour.
+          set -euo pipefail
+          curl -sSfL -o /tmp/al.tgz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          tar -xzf /tmp/al.tgz -C /tmp actionlint
+          /tmp/actionlint --version
+
+      - name: Run actionlint
+        if: ${{ inputs.actionlint }}
+        run: |
+          set -euo pipefail
+          /tmp/actionlint -color
+
+      - name: C++ modules conformance
+        if: ${{ inputs.module-conformance }}
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-module-conformance@2bb2e8586f7e45e973623f2e35d60bad11f50b13
+
+      # Last, because it provisions clang-21 to get a version-matched clang-format. On the
+      # self-hosted fleet that provisioning is an idempotent no-op (the toolchain persists between
+      # jobs); on a hosted runner it is a real apt install, so the two cheap checkout-only checks
+      # above report first and a repo never pays for the toolchain to learn its workflows are broken.
+      - name: C++ format conformance
+        if: ${{ inputs.format-check }}
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-format-check@2bb2e8586f7e45e973623f2e35d60bad11f50b13
+
+      # Cheap (no toolchain, no build — it reads text), but placed last on purpose: it is the
+      # newest gate here, and a repo should learn its workflows, modules and formatting are sound
+      # before it hears about a comment. Unlike format-check this one needs no provisioning, so
+      # ordering costs nothing either way.
+      # The base is decided HERE, in bash, and not in a `${{ }}` expression on the step below,
+      # because only bash can fetch a base the shallow checkout does not have and REFUSE when it
+      # still cannot resolve it. An expression can only choose between strings it already has.
+      - name: Resolve the dead-symbol diff base
+        id: dead-symbol-range
+        if: ${{ inputs.dead-symbol-check }}
+        env:
+          BASE: ${{ inputs.dead-symbol-base }}
+        run: |
+          set -euo pipefail
+          if [ -n "$BASE" ]; then
+            # Two-dot `a..b` on `git diff` is a TREE comparison, so the base only has to be
+            # present as an object — it does not have to be connected to HEAD. A depth-1 fetch is
+            # therefore enough, and is what keeps this cheap on the shallow checkout above.
+            if ! git rev-parse --verify --quiet "${BASE}^{commit}" >/dev/null; then
+              git fetch --no-tags --depth=1 origin "$BASE" || true
+              # `if`, never `a && b`: under `set -e` a false `&&` compound IS the step's status, so
+              # the spelling that reads as "try this" would abort the job on the very path that
+              # exists to recover. The failure would then arrive as a bare non-zero with no message.
+              if git rev-parse --verify --quiet "FETCH_HEAD^{commit}" >/dev/null; then
+                BASE=FETCH_HEAD
+              fi
+            fi
+            if ! git rev-parse --verify --quiet "${BASE}^{commit}" >/dev/null; then
+              echo "::error::dead-symbol-base '${{ inputs.dead-symbol-base }}' does not resolve in this checkout and could not be fetched. Refusing to fall back to HEAD~1: a silent fallback turns the deliberate scope you passed back into the arbitrary one."
+              exit 1
+            fi
+            echo "range=$(git rev-parse "${BASE}^{commit}")..HEAD" >> "$GITHUB_OUTPUT"
+            echo "dead-symbol range: ${{ inputs.dead-symbol-base }}..HEAD (explicit base)"
+          else
+            echo "range=HEAD~1..HEAD" >> "$GITHUB_OUTPUT"
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              echo "dead-symbol range: HEAD~1..HEAD — on a pull_request the checkout is the MERGE commit, so HEAD~1 is the base tip and this range is exactly the PR."
+            else
+              # The scope is correct and narrower than the word "lint" suggests, so it is stated
+              # rather than left for a reader to assume. `::notice::` and not `::warning::`: this
+              # is the documented default, not a defect, and a warning on every dispatch is how a
+              # real one stops being seen.
+              echo "::notice::dead-symbol gate scope is ONE COMMIT: $(git rev-parse --short HEAD~1)..$(git rev-parse --short HEAD) on ${{ github.ref }}. No base was supplied and this event carries none, so the gate did NOT examine the branch. Pass dead-symbol-base to scope it deliberately."
+            fi
+          fi
+
+      - name: Dead symbol in comment
+        if: ${{ inputs.dead-symbol-check }}
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dead-symbol@2bb2e8586f7e45e973623f2e35d60bad11f50b13
+        with:
+          range: ${{ steps.dead-symbol-range.outputs.range }}

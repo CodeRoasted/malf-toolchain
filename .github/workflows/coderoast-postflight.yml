@@ -1,0 +1,31 @@
+name: CodeRoast Postflight
+
+# clang-tidy (`coderoast-postflight`) over a dev build ALREADY IN PLACE, as a reusable workflow, for
+# a dispatch on a persistent runner whose checkout still holds the build a CI run left. It builds
+# nothing: on a fresh machine there is no build, and it REFUSES (exit 2) naming the path it looked
+# for. In CI the postflight runs inside the build job instead (`coderoast-build.yml`, `postflight:
+# true`), because that job is the one that holds the build.
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: 'Runner label: a runner whose checkout holds the dev build. Defaults to hosted ubuntu-24.04, where there is none and the postflight refuses.'
+        type: string
+        required: false
+        default: 'ubuntu-24.04'
+
+permissions:
+  contents: read
+
+jobs:
+  postflight:
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - name: Checkout repository (cleaning nothing the dev build left)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          clean: false
+
+      - name: Postflight — clang-tidy over the build in place
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-postflight@e73787efcf75199aa6aebb38d0d6b5618d93bc4e
