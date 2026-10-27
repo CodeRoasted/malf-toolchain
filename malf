@@ -5870,6 +5870,8 @@ cmd_store_create() {
     local cut_home="${MALF_CUT_VERIFY_CONAN_HOME:-$MALF_CONAN_HOME_BASE/cut-verify}"
     local seed_home="${MALF_TWIN_SEED_HOME:-$cut_home}"
     local scratch; scratch="$(mktemp -d /tmp/malf-store.XXXXXX)"
+    # A red walk keeps this scratch for its reader, who may be another uid (see source-verdict's).
+    chmod 0755 "$scratch"
     export PYTHONPYCACHEPREFIX="$scratch/pycache"
     local steps unstored prefixes
     steps="$(python3 "$MALF_DIR/malf_graph.py" steps "$MALF_WORKSPACE_ROOT")" && [[ -n "$steps" ]] \
@@ -6842,6 +6844,9 @@ cmd_source_verdict() {
     local store scratch steps prefixes
     store="$(_malf_store_root source-verdict)" || return 2
     scratch="$(mktemp -d /tmp/malf-source-verdict.XXXXXX)"
+    # A red run keeps this scratch for its reader, who may be another uid: on a rootful daemon the act writes as
+    # uid 0, and mktemp's 0700 left a hosted runner's upload EACCES (ipc run 40580797104). Build logs, not secrets.
+    chmod 0755 "$scratch"
     export PYTHONPYCACHEPREFIX="$scratch/pycache"
     steps="$(python3 "$MALF_DIR/malf_graph.py" steps "$repo")" && [[ -n "$steps" ]] \
         || { echo "malf source-verdict: malf's walk of $repo found no package, or refused it (above)" >&2; return 2; }
