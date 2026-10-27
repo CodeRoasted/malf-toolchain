@@ -1,51 +1,37 @@
 name: CodeRoast Build
 
-# A CodeRoast repository's CI build, as a reusable workflow: the DEV leg (`coderoast-dev-build`, a
-# clang-21/libc++ `malf test` of every package — test on clang, ship gcc, the Founder, 2026-10-27)
-# and, when `postflight` is true, clang-tidy over that same build in the same job
-# (`coderoast-postflight`). The postflight builds nothing; it runs here because only this job holds
-# the build it reads, and a job of its own would start on an empty machine. It runs even after a
-# red test (`!cancelled()`), so a run answers both questions.
+# A CodeRoast repository's CI build, as a reusable workflow: the DEV leg INSIDE the pinned build
+# environment (`coderoast-source-verdict`: `malf source-verdict`, a clang-21/libc++ test of every
+# package of the repository's own packages.yml, one source-verdict record each; test on clang, ship
+# gcc, the Founder, 2026-10-27) and, when `postflight` is true, clang-tidy over that same build in
+# the same job (`malf source-lint`, the image's own clang-tidy over the image's trees). The postflight
+# builds nothing; it runs here because only this job holds the build it reads, and it runs even after
+# a red test (`!cancelled()`), so a run answers both questions (DN-142.D31 (1)).
 #
-# The gcc-16 ship leg is not here: it is the candidate's store step, which creates the packages a
-# release publishes without running their tests again.
+# The run's store (the source-verdict records) is uploaded as the artifact `candidate-store`, which a
+# candidate's store job (`coderoast-candidate.yml`) downloads to bind the gcc packages it creates to
+# these verdicts. The gcc-16 ship leg is not here: it is that store job.
+#
+# The walk reads the repository's own checkout and this workflow's malf, nothing else (DN-142.D31
+# (5)); a public caller names no organisation and holds no secret (P7).
 
 on:
   workflow_call:
     inputs:
       postflight:
-        description: 'Run clang-tidy (`coderoast-postflight`) over the dev build, in this job.'
+        description: 'Run clang-tidy (`malf source-lint`) over the dev build, in this job.'
         type: boolean
         required: false
         default: false
-      test:
-        description: 'Run the tests (`malf test`); false builds only.'
-        type: boolean
-        required: false
-        default: true
-      siblings:
-        description: |
-          The CodeRoasted repos this repo's first-party BUILD closure reaches (requires and
-          test_requires, from every node, minus its own packages), whitespace-separated; each is
-          cloned from source beside the checkout (see `coderoast-dev-build`). `pin_coherence.py`
-          INV-13 reds a set that does not cover the `packages.yml` closure.
-        type: string
-        required: false
-        default: ''
       runs-on:
-        description: 'Runner label. Defaults to hosted ubuntu-24.04. PUBLIC callers omit it. PRIVATE callers pass vars.CI_RUNS_ON (fallback ubuntu-24.04) to route to the self-hosted fleet.'
+        description: 'Runner label. Defaults to hosted ubuntu-24.04. PUBLIC callers omit it. PRIVATE callers pass their self-hosted label (the release runner, DN-142.D31 item 6).'
         type: string
         required: false
         default: 'ubuntu-24.04'
-    secrets:
-      checkout-token:
-        description: 'Read-only Contents token for PRIVATE siblings. Pass it by name, never `secrets: inherit`, and only from a PRIVATE caller whose siblings include a private repo.'
-        required: false
 
 permissions:
   contents: read
-  # The runner group a conan cache restore reads (`actions-cache-allowed.sh`): unread, a
-  # self-hosted job restores and saves no Actions cache.
+  # The run's referenced workflows, read by `coderoast-malf-checkout` to find this workflow's commit.
   actions: read
 
 jobs:
@@ -55,20 +41,23 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Dev build (clang-21) and its tests
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dev-build@501237b31c54a1e978024ad32e238a4857a52233
+      - name: malf at this workflow's commit, as git
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@501237b31c54a1e978024ad32e238a4857a52233
         with:
-          test: ${{ inputs.test }}
-          siblings: ${{ inputs.siblings }}
-          checkout-token: ${{ secrets.checkout-token }}
+          workflow: coderoast-build.yml
 
-      - name: Postflight — clang-tidy over this build
-        if: ${{ !cancelled() && inputs.postflight }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-postflight@501237b31c54a1e978024ad32e238a4857a52233
+      - name: The pinned build environment and the host's provisioning tools
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-environment@501237b31c54a1e978024ad32e238a4857a52233
 
-      - name: Save the conan cache the dev build restored (third-party only)
-        uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@501237b31c54a1e978024ad32e238a4857a52233
+      - name: Dev leg in the image (source verdict) and its postflight
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-source-verdict@501237b31c54a1e978024ad32e238a4857a52233
+        with:
+          postflight: ${{ inputs.postflight }}
 
-      - name: Clear the editable registry and the sibling workspace
-        if: always()
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dev-cleanup@501237b31c54a1e978024ad32e238a4857a52233
+      - name: The run's store, for the candidate's store job (a red leg stores nothing)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-store
+          path: ${{ env.CANDIDATE_STORE }}
+          if-no-files-found: error
+          retention-days: 1

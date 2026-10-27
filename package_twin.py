@@ -210,12 +210,28 @@ def fetch_recipe(home: Path, reference: str, remotes: list[str]) -> str | None:
     return None
 
 
+# The platform every keyed act runs on: the pinned build environment (config/build-environment/Dockerfile) is a
+# Linux x86_64 image, and conan's `os` and `arch` settings name it so in every profile malf ships.
+ENVIRONMENT_OS, ENVIRONMENT_ARCH = "Linux", "x86_64"
+
+
 def source_entries(conandata: dict, version: str) -> list[tuple[list[str], str]] | None:
-    """The `(urls, sha256)` downloads `conandata` declares for `version`: [] when it declares none, None when
-    its entry is keyed by platform, a shape this provisioning does not choose a member of."""
+    """The `(urls, sha256)` downloads `conandata` declares for `version`: [] when it declares none. An entry
+    keyed `{<os>: {<arch>: {url, sha256}}}` (cmake's binary tool-require) yields the build environment's
+    member, [] when it keys none for that os, since no act in the image fetches another platform's file.
+    None for any other shape (a git source, a recipe keyed by arch alone): one this provisioning does not
+    choose a member of."""
     entry = (conandata.get("sources") or {}).get(version)
     if entry is None:
         return []
+    if isinstance(entry, dict) and "url" not in entry and entry and all(
+            isinstance(arches, dict) and arches and all(isinstance(item, dict) and "url" in item and "sha256" in item
+                                                        for item in arches.values())
+            for arches in entry.values()):
+        member = (entry.get(ENVIRONMENT_OS) or {}).get(ENVIRONMENT_ARCH)
+        entry = [] if member is None else member
+        if entry == []:
+            return []
     listed = entry if isinstance(entry, list) else [entry]
     if not all(isinstance(item, dict) and "url" in item and "sha256" in item for item in listed):
         return None

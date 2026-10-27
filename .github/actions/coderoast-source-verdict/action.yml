@@ -1,0 +1,64 @@
+name: 'CodeRoast dev leg in the build environment (source verdict, then postflight)'
+description: |
+  The DEV leg of a CodeRoast C++ repository INSIDE the pinned build environment (DN-142.D31 (1), slice
+  S3/S4): `malf source-verdict <repository>` tests every package of the caller's own `packages.yml` on
+  clang-21/libc++, each package its own act, and writes one `source-verdict` record per package into a
+  store of this run (`<RUNNER_TEMP>/candidate-store`, never a cache directory). With `postflight: true`,
+  `malf source-lint <repository>` then runs the image's own clang-tidy over the trees the dev leg left in
+  the image; it builds nothing and refuses without them. Test on clang, ship gcc (the Founder,
+  2026-10-27): a candidate's store job creates the gcc packages with no test and binds them to these
+  records by equal inputs.
+
+  THE WALK IS THE REPOSITORY'S OWN (DN-142.D31 (5)): it reads the caller's checkout and the job's malf
+  checkout, nothing else; a repository whose packages require another repository's is not served by this
+  leg until its upstreams are restored from their stores.
+
+  Run after `actions/checkout`, `coderoast-malf-checkout` (MALF_CHECKOUT) and `setup-build-environment`.
+  Exports CANDIDATE_STORE (the run's store) and CANDIDATE_CONAN_HOME (the host's conan home, which only
+  provisions) to the job; both lie under RUNNER_TEMP, never in the checkout or its parent.
+
+inputs:
+  postflight:
+    description: '`true` runs clang-tidy (`malf source-lint`) over the dev leg''s trees, in this job; it runs even after a red test, so a run answers both questions.'
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Source verdict — every package tested on clang in the image, one record each
+      id: verdict
+      shell: bash
+      env:
+        POSTFLIGHT: ${{ inputs.postflight }}
+      run: |
+        set -euo pipefail
+        [ -x "${MALF_CHECKOUT:-}/malf" ] \
+          || { echo "::error::MALF_CHECKOUT='${MALF_CHECKOUT:-}' holds no malf: run coderoast-malf-checkout first"; exit 2; }
+        case "$POSTFLIGHT" in
+          true|false) ;;
+          *) echo "::error::postflight must be true or false, got '$POSTFLIGHT'"; exit 2 ;;
+        esac
+        store="$RUNNER_TEMP/candidate-store"
+        rm -rf "$store"
+        mkdir -p "$store"
+        echo "CANDIDATE_STORE=$store" >> "$GITHUB_ENV"
+        # A fresh store serves nothing, so every package builds its tree; MALF_STORE_REJUDGE makes that a
+        # stated property of the postflight's input rather than a consequence of an empty directory.
+        if [ "$POSTFLIGHT" = true ]; then
+          export MALF_STORE_REJUDGE=1
+        fi
+        echo "CANDIDATE_CONAN_HOME=$RUNNER_TEMP/candidate-conan-host" >> "$GITHUB_ENV"
+        CONAN_HOME="$RUNNER_TEMP/candidate-conan-host" MALF_STORE_DIR="$store" MALF_ENVIRONMENT_RECIPES="$RUNNER_TEMP/candidate-recipes" \
+          bash "$MALF_CHECKOUT/malf" source-verdict "$GITHUB_WORKSPACE"
+
+    - name: Postflight — clang-tidy over the dev leg's trees, in the image
+      if: ${{ !cancelled() && inputs.postflight == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! CONAN_HOME="$CANDIDATE_CONAN_HOME" MALF_STORE_DIR="$CANDIDATE_STORE" MALF_ENVIRONMENT_RECIPES="$RUNNER_TEMP/candidate-recipes" \
+            bash "$MALF_CHECKOUT/malf" source-lint "$GITHUB_WORKSPACE"; then
+          echo "::error::clang-tidy findings, or translation units clang-tidy could not check, above (or a refusal: exit 2 means no in-image dev-leg tree was there to read). A 'NOT LINTED' block means those files went through ZERO checks — a coverage hole, fixed by removing the construct the check dies on or by a declared, reproducer-carrying exclusion in the config, never by a per-site NOLINT. Every other finding is fixed at the source or, where the check is wrong for that one site, by an own-line NOLINTNEXTLINE(<check>) under a note: comment giving the why; then re-run 'malf format'."
+          exit 1
+        fi

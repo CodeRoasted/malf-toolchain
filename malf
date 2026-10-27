@@ -5141,6 +5141,10 @@ Commands:
                                    its own act, one source-verdict record each, keyed before the
                                    act; a key holding a passing verdict is served; the build
                                    trees stay for the postflight. Exit 1 a red, 2 refused
+    source-lint <repository>
+                                   a candidate's postflight in the build environment: clang-tidy
+                                   (malf lint --all-files) over the trees source-verdict left; builds
+                                   nothing and refuses (2) with no in-image database. Exit lint's
     sandbox [--read <root>]... [--write <root>]... -- <command>...
                                    run <command> under a Landlock domain (gate G4): readable only
                                    beneath each --read root, writable only beneath each --write
@@ -5691,12 +5695,31 @@ _malf_store_create_in_environment() {   # <writer|ship> <package>...
     # HOME, and each act inside gets its own (DN-142.D30 (9) R8).
     mkdir -p "$MALF_CONAN_SOURCES_CACHE"
     local -a args=(--mount "$MALF_WORKSPACE_ROOT" --mount "$store" --mount /tmp --mount "$MALF_CONAN_SOURCES_CACHE")
+    # A REPOSITORY'S OWN WORKSPACE (DN-142.D31 (5)) holds neither malf nor, for a worktree, its git directory:
+    # each is mounted at its own path, as `source-verdict` mounts them, since the key reads both by git.
+    local directory
+    for directory in "$MALF_DIR" "$MALF_WORKSPACE_ROOT"; do
+        [[ "$directory" == "$MALF_WORKSPACE_ROOT" || "$directory" == "$MALF_WORKSPACE_ROOT"/* ]] || args+=(--mount "$directory")
+        [[ -d "$directory/.git" || -f "$directory/.git" ]] || continue
+        directory="$(git -C "$directory" rev-parse --path-format=absolute --git-common-dir)" \
+            || { echo "malf store-create: $directory is not in a git checkout" >&2; return 2; }
+        [[ "$directory" == "$MALF_WORKSPACE_ROOT"/* || "$directory" == "$MALF_DIR"/* ]] || args+=(--mount "$directory")
+    done
     local cut_home="${MALF_CUT_VERIFY_CONAN_HOME:-$MALF_CONAN_HOME_BASE/cut-verify}" home recipes prefixes
     # THE CONTAINER HAS NO NETWORK, SO THE HOST PROVISIONS FIRST (package_twin.py provision): the home the
     # walk reads its recipes from (its own, or the seed a fresh one is seeded from) holds every lock
     # revision, and the download cache every source those recipes declare, each checked by its digest.
     recipes="${MALF_STORE_CONAN_HOME:-$cut_home}"
     _malf_conan_home_fresh "$recipes" && recipes="${MALF_TWIN_SEED_HOME:-$cut_home}"
+    # A COLD SEAT (a hosted runner's first candidate, DN-142.D31: a runner's disk is only a cache) holds no
+    # home to seed from: the recipe home is made a conan home here, as `source-verdict` makes its own, so
+    # the provisioning below fills it and the walk resolves its third-party graph with no network, building
+    # each third-party binary as its own recorded step (DN-142.D17).
+    if _malf_conan_home_fresh "$recipes"; then
+        mkdir -p "$recipes"
+        ( export CONAN_HOME="$recipes"; _malf_sync_conan_conf && conan profile list > /dev/null ) \
+            || { echo "malf store-create: $recipes could not be made a conan home to provision the recipes into" >&2; return 2; }
+    fi
     prefixes="$(_malf_owned_prefixes)" \
         || { echo "malf store-create: the owned package namespaces of $MALF_WORKSPACE_ROOT could not be derived" >&2; return 2; }
     python3 "$MALF_DIR/package_twin.py" provision "$MALF_DIR/conan.lock" "$prefixes" "$recipes" "$MALF_CONAN_SOURCES_CACHE" \
@@ -5745,7 +5768,7 @@ _malf_store_walk_backends() {   # <out> [<package>...]
     local -a pairs=()
     steps="$(python3 "$MALF_DIR/malf_graph.py" steps "$MALF_WORKSPACE_ROOT")" && [[ -n "$steps" ]] \
         || { echo "malf store-create: malf's walk of $MALF_WORKSPACE_ROOT found no step, or refused it (above)" >&2; return 2; }
-    unstored="$(python3 "$MALF_WORKSPACE_ROOT/scripts/version_line.py" unstored "$MALF_WORKSPACE_ROOT")" \
+    unstored="$(_malf_unstored)" \
         || { echo "malf store-create: failed to resolve the stored: false packages" >&2; return 2; }
     wanted="$(_malf_store_walk "$steps" "$unstored" "$@")" || return 2
     while IFS=$'\t' read -r name path _deps _kind; do
@@ -5851,7 +5874,7 @@ cmd_store_create() {
     local steps unstored prefixes
     steps="$(python3 "$MALF_DIR/malf_graph.py" steps "$MALF_WORKSPACE_ROOT")" && [[ -n "$steps" ]] \
         || { echo "malf store-create: malf's walk of $MALF_WORKSPACE_ROOT found no step, or refused it (above)" >&2; return 2; }
-    unstored="$(python3 "$MALF_WORKSPACE_ROOT/scripts/version_line.py" unstored "$MALF_WORKSPACE_ROOT")" \
+    unstored="$(_malf_unstored)" \
         || { echo "malf store-create: failed to resolve the stored: false packages" >&2; return 2; }
     prefixes="$(_malf_owned_prefixes)" \
         || { echo "malf store-create: the owned package namespaces of $MALF_WORKSPACE_ROOT could not be derived" >&2; return 2; }
@@ -5912,7 +5935,11 @@ cmd_store_create() {
     # THE GROUND EVERY ACT OF THE WALK IS DENIED (DN-142.D29 (5)), named once: the workspace, every conan
     # home the walk knows (its base, the walk's home, the seed home, conan's default), the store and the
     # corpus document's mounts; each act adds its own repository, home and scratch (_malf_confined).
-    _MALF_DOMAIN=(--workspace "$MALF_WORKSPACE_ROOT" --store "$store" --scratch "$scratch"
+    # A REPOSITORY's own workspace (DN-142.D31 (5)) is the act's repository itself, so the denied ground is its
+    # parent, its siblings on a desk and the checkout's directory on a runner, as `source-verdict` denies it.
+    local denied="$MALF_WORKSPACE_ROOT"
+    [[ ! -f "$MALF_WORKSPACE_ROOT/packages.yml" ]] || denied="$(dirname "$MALF_WORKSPACE_ROOT")"
+    _MALF_DOMAIN=(--workspace "$denied" --store "$store" --scratch "$scratch"
                   --conan-home "$MALF_CONAN_HOME_BASE" --conan-home "$CONAN_HOME" --conan-home "$seed_home"
                   --conan-home "$HOME/.conan2")
     [[ -z "${MALF_CORPUS_GATES:-}" ]] || _MALF_DOMAIN+=(--corpus-gates "$MALF_CORPUS_GATES")
@@ -6576,6 +6603,32 @@ PY
 )" && [[ -n "$prefixes" ]] && echo "$prefixes"
 }
 
+# THE `stored: false` PACKAGES OF THE WALK (DN-142.D14), rows `name<TAB>absolute path` sorted by name. In a
+# REPOSITORY's own workspace (a `packages.yml` at MALF_WORKSPACE_ROOT: a candidate's store walk, DN-142.D31
+# (5)) they are that repository's own declaration, so the walk reads nothing outside its checkout and malf;
+# in the superproject they are every declared repository's (`scripts/version_line.py unstored`).
+# post: the rows on stdout (none when no package declares it); a non-zero exit naming an unreadable file.
+_malf_unstored() {
+    if [[ -f "$MALF_WORKSPACE_ROOT/packages.yml" ]]; then
+        python3 - "$MALF_WORKSPACE_ROOT/packages.yml" <<'PY'
+import pathlib, sys
+import yaml
+
+declaration = pathlib.Path(sys.argv[1])
+try:
+    packages = (yaml.safe_load(declaration.read_text()) or {}).get("packages") or {}
+except yaml.YAMLError as unread:
+    sys.exit(f"malf: {declaration} unparseable: {unread}")
+for name in sorted(packages):
+    entry = packages[name] or {}
+    if entry.get("stored", True) is False:
+        print(f"{name}\t{(declaration.parent / str(entry.get('path', '.'))).resolve()}")
+PY
+        return
+    fi
+    python3 "$MALF_WORKSPACE_ROOT/scripts/version_line.py" unstored "$MALF_WORKSPACE_ROOT"
+}
+
 # The walk a store act runs: `<steps>` is malf_graph.py's `steps` rows, `<unstored>` version_line's
 # `stored: false` rows; named packages select their closure. One row per step,
 # `name<TAB>dir<TAB>deps<TAB>create|build`, in walk order.
@@ -6697,10 +6750,13 @@ _malf_environment_home() {
 # provisioned from its remotes (package_twin.py provision), with conan's source download cache; the lock is
 # strict. The container sees, each at its own path: the repository and its git directory, malf and its git
 # directory, the store, /tmp, the image's home, the recipe home (read-only) and the source cache.
+# `malf source-lint` runs in the same container shape, so the postflight reads the very home and trees the
+# dev leg wrote.
 # post: the container's exit, or 2 refused before it ran.
-_malf_source_verdict_in_environment() {   # <repository> <profile>
-    local repo="$1" profile="$2" store home recipes prefixes directory
-    store="$(_malf_store_root source-verdict)" || return 2
+_malf_source_verdict_in_environment() {   # <repository> <verb> <argv>...
+    local repo="$1" verb="$2" store home recipes prefixes directory
+    shift 2
+    store="$(_malf_store_root "$verb")" || return 2
     home="$(_malf_environment_home)" || return 2
     recipes="${MALF_ENVIRONMENT_RECIPES:-${MALF_CUT_VERIFY_CONAN_HOME:-$MALF_CONAN_HOME_BASE/cut-verify}}"
     [[ "$recipes" != *" "* ]] \
@@ -6729,7 +6785,7 @@ _malf_source_verdict_in_environment() {   # <repository> <profile>
     for name in MALF_STORE_PARAMETERS MALF_STORE_REJUDGE; do
         [[ -z "${!name:-}" ]] || args+=(--env "$name")
     done
-    (cd "$repo" && python3 "$MALF_DIR/build_environment.py" run "${args[@]}" -- "$MALF_DIR/malf" source-verdict --profile "$profile" "$repo")
+    (cd "$repo" && python3 "$MALF_DIR/build_environment.py" run "${args[@]}" -- "$MALF_DIR/malf" "$verb" "$@")
 }
 
 # malf source-verdict [--profile <clang profile>] <repository> — DN-142.D31 (1), slice S3: the dev leg of a
@@ -6769,7 +6825,7 @@ cmd_source_verdict() {
     [[ "$profile" == *clang* ]] \
         || { echo "malf source-verdict: REFUSED — '$profile' is no clang profile: the source verdict is the dev leg's, tested on clang (DN-142.D31 (1))" >&2; return 2; }
     if [[ -z "${MALF_SYSTEM:-}" ]]; then
-        _malf_source_verdict_in_environment "$repo" "$profile"
+        _malf_source_verdict_in_environment "$repo" source-verdict --profile "$profile" "$repo"
         return
     fi
     [[ "$MALF_WORKSPACE_ROOT" == "$repo" ]] \
@@ -6865,6 +6921,43 @@ cmd_source_verdict() {
     rm -rf "$scratch"
 }
 
+# malf source-lint <repository> — the candidate's POSTFLIGHT, inside the build environment (DN-142.D31 (1),
+# slice S4): `malf lint --all-files --console` over the repository, run by the image's own clang-tidy over
+# the trees `malf source-verdict` left in the image (its merged database at the repository's default-profile
+# root, `build-<key>.environment-<12 hex>/compile_commands.json`), in the same container shape, home and
+# workspace as the dev leg. It BUILDS NOTHING: with no in-image database it refuses (exit 2) before
+# clang-tidy runs, since a lint that compiled its own would be a second build of the same sources. A
+# package `source-verdict` SERVED left no new tree, so a postflight that needs every tree follows a dev
+# leg run under MALF_STORE_REJUDGE=1.
+# Exit lint's (0 clean, 1 a finding or a translation unit not linted), 2 refused before clang-tidy ran.
+cmd_source_lint() {
+    local repo=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -*) _malf_refuse_option source-lint "$1" ;;
+            *) [[ -z "$repo" ]] || { echo "malf source-lint: one repository, not '$repo' and '$1'" >&2; return 2; }
+               repo="$1" ;;
+        esac
+        shift
+    done
+    [[ -n "$repo" ]] || { _malf_usage_of source-lint >&2; return 2; }
+    repo="$(realpath "$repo")" || return 2
+    [[ -f "$repo/packages.yml" ]] \
+        || { echo "malf source-lint: $repo holds no packages.yml, so it is no repository of packages" >&2; return 2; }
+    if [[ -z "${MALF_SYSTEM:-}" ]]; then
+        _malf_source_verdict_in_environment "$repo" source-lint "$repo"
+        return
+    fi
+    [[ "$MALF_WORKSPACE_ROOT" == "$repo" ]] \
+        || { echo "malf source-lint: REFUSED — the postflight's workspace is its repository ($repo), not $MALF_WORKSPACE_ROOT (DN-142.D31 (5))" >&2; return 2; }
+    local database
+    database="$(_malf_default_build_root "$repo")/compile_commands.json"
+    [[ -f "$database" ]] \
+        || { echo "malf source-lint: REFUSED — no dev-leg build in the image at $database. The postflight builds nothing: run \`malf source-verdict $repo\` first (MALF_STORE_REJUDGE=1, so no package is served and every tree is built)" >&2; return 2; }
+    echo "--- source-lint: clang-tidy over $database ---"
+    (cd "$repo" && "$MALF_DIR/malf" lint --all-files --console)
+}
+
 # malf inventory [dir] — the ADR-3.D9 gate, standalone. Lints the WHOLE workspace (an orphan
 # anywhere is a defect, and the predicate is workspace-wide by nature), then configures and
 # builds every inventory entry of the resolved repo to a LINKED artifact in ONE canonical cell.
@@ -6909,15 +7002,9 @@ cmd_inventory() {
 # read as a clean export.
 _malf_purge_first_party() {
     local prefixes listed owned name removed=()
-    prefixes="$(python3 - "$MALF_WORKSPACE_ROOT" <<'PY'
-import pathlib, sys
-
-sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "scripts"))
-import workspace_layout
-
-print("\n".join(workspace_layout.owned_package_prefixes()))
-PY
-)" && [[ -n "$prefixes" ]] \
+    # A repository's own workspace derives them from its packages.yml, the superproject from its declaration
+    # (_malf_owned_prefixes, DN-142.D31 (5)).
+    prefixes="$(_malf_owned_prefixes | tr ' ' '\n')" && [[ -n "$prefixes" ]] \
         || { echo "malf: the owned package namespaces of $MALF_WORKSPACE_ROOT could not be derived — the purge cannot be proven" >&2; return 1; }
     listed="$(conan list '*' --format=json)" \
         || { echo "malf: 'conan list' failed in $CONAN_HOME — the purge cannot be proven" >&2; return 1; }
@@ -7427,6 +7514,7 @@ case "$COMMAND" in
     exports-verify)   cmd_exports_verify "$@" ;;
     store-create)     cmd_store_create "$@" ;;
     source-verdict)   cmd_source_verdict "$@" ;;
+    source-lint)      cmd_source_lint "$@" ;;
     sandbox)          cmd_sandbox "$@" ;;
     environment)      exec python3 "$MALF_DIR/build_environment.py" "$@" ;;
     relocate-verify)  cmd_relocate_verify "$@" ;;

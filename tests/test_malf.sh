@@ -4130,6 +4130,33 @@ Path('$sv_tmp/package').write_text(a.key_of(package))
 " > /dev/null 2>&1
       for sv_which in same other; do python3 "$MALF_ROOT/artefact_store.py" binding "$sv_tmp/b" "$(cat "$sv_tmp/package")" "$(cat "$sv_tmp/$sv_which")" > /dev/null 2>&1; printf 'rc=%s ' "$?"; done
       python3 "$MALF_ROOT/artefact_store.py" binding "$sv_tmp/b" "$(cat "$sv_tmp/package")" "$(printf '0%.0s' {1..64})" > /dev/null 2>&1; printf 'rc=%s' "$?")"
+# THE STORE JOB'S GATE (`bound`, DN-142.D31 (1), S4): one ship-form create and one PASSING source verdict per
+# released package, EQUAL-INPUTS; two verdicts at once, a failed verdict or a missing package each refuse.
+check "bound: one passing equal verdict binds (exit 0); two candidates, a failed verdict and an absent package each refuse (exit 1)" \
+      "rc=0 rc=1 2 source verdict(s) rc=1 judged fail rc=1 0 ship-form" \
+      "$(sv_py "
+from pathlib import Path
+probe = Path('$sv_tmp/probe'); probe.write_bytes(b'p')
+package = {'step': {'kind': 'conan-create', 'package': 'sv_core', 'profile': 'gcc', 'form': 'ship'}, 'definition': {'malf': 't'},
+           'sources': {'sv_core/host': 'e'}, 'third_party': {}, 'system': {'image': 'i'}}
+for name, verdict in (('pass', 'pass'), ('fail', 'fail')):
+    store = a.LocalStore(Path('$sv_tmp/bound-' + name))
+    store.commit(package, {'package': {'alias': 'x', 'content': 'c', 'entries': []}}, {'package': ('transport', lambda: probe)})
+    store.commit({'step': {'kind': a.SOURCE_VERDICT_KIND, 'package': 'sv_core', 'profile': 'clang'}, 'definition': {'malf': 't'},
+                  'sources': {'sv_core/host': 'e'}, 'third_party': [], 'system': {'image': 'i'}},
+                 {'verdict': {'verdict': verdict, 'tests': 0, 'findings': 'f'}}, {})
+" > /dev/null 2>&1
+      sv_bound() { python3 "$MALF_ROOT/artefact_store.py" bound "$@" > "$sv_tmp/bound.log" 2>&1; printf 'rc=%s' "$?"; }
+      printf '%s %s %s %s %s %s %s' "$(sv_bound "$sv_tmp/bound-pass" sv_core)" \
+          "$(sv_bound "$sv_tmp/b" sv_core)" "$(grep -o '2 source verdict(s)' "$sv_tmp/bound.log")" \
+          "$(sv_bound "$sv_tmp/bound-fail" sv_core)" "$(grep -o 'judged fail' "$sv_tmp/bound.log")" \
+          "$(sv_bound "$sv_tmp/bound-pass" sv_absent)" "$(grep -o '0 ship-form' "$sv_tmp/bound.log")")"
+check "released: the packages a checkout releases, from packages.yml at HEAD, never the disk" \
+      "sv_core|sv_core" \
+      "$(d="$sv_tmp/rel"; mkdir -p "$d" && git -C "$d" init -q && printf 'packages:\n  sv_core: {path: c, release: true}\n  sv_tests: {path: t, release: false}\n' > "$d/packages.yml" \
+         && git -C "$d" add packages.yml && git -C "$d" -c user.name=t -c user.email=t@t commit -qm r \
+         && python3 "$MALF_ROOT/artefact_store.py" released "$d")|$(printf '  sv_more: {path: m, release: true}\n' >> "$sv_tmp/rel/packages.yml" \
+         && python3 "$MALF_ROOT/artefact_store.py" released "$sv_tmp/rel")"
 # THE VERB'S REFUSALS, before any act.
 mkdir -p "$sv_tmp/repo"; git -C "$sv_tmp/repo" init -q; printf 'packages:\n  sv_core: {path: core, version: 0.1, depends: []}\n' > "$sv_tmp/repo/packages.yml"
 git -C "$sv_tmp/repo" add packages.yml && git -C "$sv_tmp/repo" -c user.name=t -c user.email=t@t commit -qm fixture
@@ -4147,6 +4174,18 @@ mkdir -p "$sv_tmp/lockdir"; mv "$sv_tmp/conan.lock" "$sv_tmp/lockdir/"
 check "a repository's workspace owns its packages' namespaces and every namespace malf's lock leaves floating, and no pinned one" \
       "other_ sv_ tool_" \
       "$(CONAN_HOME="$sv_tmp/home" MALF_WORKSPACE_ROOT="$sv_tmp/repo" bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; MALF_DIR="$2"; MALF_WORKSPACE_ROOT="$3"; _malf_owned_prefixes' _ "$MALF_BIN" "$sv_tmp/lockdir" "$sv_tmp/repo")"
+# RED FIRST (2026-10-27, the repo-local walk proved in a workspace holding only coderoast-ipc and malf): the
+# store walk read `<workspace>/scripts/version_line.py`, the superproject's, so a repository's own workspace
+# refused its walk. Its `stored: false` packages are now its own packages.yml's (DN-142.D31 (5)).
+printf 'packages:\n  sv_core: {path: core}\n  sv_twin: {path: twin, stored: false}\n' > "$sv_tmp/repo/packages.yml"
+check "a repository's own workspace takes its stored: false packages from its own packages.yml, reading no superproject" \
+      "sv_twin	$sv_tmp/repo/twin" \
+      "$(CONAN_HOME="$sv_tmp/home" bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; MALF_WORKSPACE_ROOT="$2"; _malf_unstored' _ "$MALF_BIN" "$sv_tmp/repo")"
+# THE POSTFLIGHT IN THE IMAGE (`source-lint`, S4) builds nothing: with no in-image database it refuses, exit 2.
+rm -f "$sv_tmp/repo/stray.txt"
+check "source-lint refuses a directory holding no packages.yml (exit 2), an unknown option (exit 1, as every verb), another workspace and a repository with no in-image dev-leg tree (exit 2)" \
+      "rc=2 rc=1 rc=2 1 rc=2 1" \
+      "$(bash "$MALF_BIN" source-lint "$sv_tmp" > /dev/null 2>&1; echo "rc=$?") $(bash "$MALF_BIN" source-lint --fast "$sv_tmp/repo" > /dev/null 2>&1; echo "rc=$?") $(CONAN_HOME="$sv_tmp/home" MALF_SYSTEM="$MALF_TEST_SYSTEM" MALF_WORKSPACE_ROOT="$sv_tmp" bash "$MALF_BIN" source-lint "$sv_tmp/repo" > "$sv_tmp/v.log" 2>&1; echo "rc=$?") $(grep -c "the postflight's workspace is its repository" "$sv_tmp/v.log") $(CONAN_HOME="$sv_tmp/home" MALF_SYSTEM="$MALF_TEST_SYSTEM" MALF_WORKSPACE_ROOT="$sv_tmp/repo" bash "$MALF_BIN" source-lint "$sv_tmp/repo" > "$sv_tmp/v.log" 2>&1; echo "rc=$?") $(grep -c 'no dev-leg build in the image at .*/build-clang21-libcxx-release.environment-.*/compile_commands.json' "$sv_tmp/v.log")"
 rm -rf "$sv_tmp"
 echo
 
@@ -5141,6 +5180,26 @@ check "package_twin: a differing package revision and file fail, naming both" \
       "rc=1 1 of 2|  DIFFER p2: prev, content; files: lib/b.a" \
       "rc=$tw_diff_rc $(grep -o '[0-9]* of [0-9]*' <<< "$tw_diff")|$(grep DIFFER <<< "$tw_diff")"
 rm -rf "$tw_tmp"
+
+# RED FIRST (2026-10-27, a cold seat): cmake/4.4.4's conandata keys its download by os and arch, provisioning
+# fetched none, and the dev leg's container (no network) failed building it from a cold home. The build
+# environment's member is fetched; a recipe keyed by arch alone (strawberryperl) and a git source stay unchosen.
+check "package_twin: an os/arch-keyed source yields the build environment's Linux x86_64 member, another shape none" \
+      "[(['u1', 'u2'], 'a')] [] None None [(['z'], 'e')]" \
+      "$(python3 - "$MALF_ROOT" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import package_twin as twin
+cmake = {"sources": {"4": {"Linux": {"x86_64": {"url": ["u1", "u2"], "sha256": "a"}, "armv8": {"url": "u3", "sha256": "b"}},
+                          "Macos": {"universal": {"url": "u4", "sha256": "c"}}}}}
+macos_only = {"sources": {"4": {"Macos": {"universal": {"url": "u4", "sha256": "c"}}}}}
+perl = {"sources": {"5": {"x86_64": {"url": "p", "sha256": "d"}}}}
+git = {"sources": {"cci": {"commit": "x", "url": "g"}}}
+plain = {"sources": {"1": {"url": "z", "sha256": "e"}}}
+print(twin.source_entries(cmake, "4"), twin.source_entries(macos_only, "4"), twin.source_entries(perl, "5"),
+      twin.source_entries(git, "cci"), twin.source_entries(plain, "1"))
+PY
+)"
 
 # package_relocate's scan: a producer path is a finding; the variable-anchored prefix, CMake's own
 # lone-root guard and a path inside a comment are not.

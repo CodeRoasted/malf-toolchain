@@ -39,6 +39,11 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
         DN-142.D31 (1)'s binding: EQUAL-INPUTS (exit 0) when a ship-form package record and a source
         verdict name one package over equal sources, malf tree, image and third-party `ref#rrev` set;
         UNEQUAL naming each member (exit 1); 2 when a record is absent
+    artefact_store.py released <checkout>
+        the packages <checkout> releases (`release: true` in its packages.yml at HEAD), one per line
+    artefact_store.py bound <store> <package>...
+        each package has exactly one ship-form create record and one PASSING source verdict, EQUAL-INPUTS
+        (`binding`); a line each, exit 0 all bound, 1 any not: what a candidate's store job pushes over
     artefact_store.py ship-equal <store>
         gate G-ship (DN-142.D31 (1)): each ship-form create paired with the writer-form create of equal
         inputs but the form, EQUAL when package id, revision and content digest agree; exit 0 when a
@@ -2154,6 +2159,48 @@ def binding(store: Path, package_key: str, verdict_key: str) -> int:
     return 1
 
 
+def released_packages(checkout: Path) -> list[str]:
+    """`released`: the packages the repository at `checkout` releases (`release: true` in its packages.yml at
+    HEAD, the recorded commit, never the disk), sorted: what a candidate's store job creates in the ship form."""
+    import yaml
+
+    shown = subprocess.run(["git", "-C", str(checkout), "show", "HEAD:packages.yml"], capture_output=True,
+                           text=True, check=False)
+    if shown.returncode != 0:
+        raise Refused(f"{checkout} holds no packages.yml at HEAD: {shown.stderr.strip()}")
+    packages = (yaml.safe_load(shown.stdout) or {}).get("packages") or {}
+    return sorted(name for name, entry in packages.items() if (entry or {}).get("release") is True)
+
+
+def bound(store: Path, packages: list[str]) -> int:
+    """`bound`: each named package has exactly ONE ship-form create record and ONE source verdict in `store`,
+    the verdict a pass and the two EQUAL-INPUTS (DN-142.D31 (1): a package is publishable only bound to a
+    passing clang verdict over its inputs); a line per package, exit 0 all bound, 1 any not."""
+    local = LocalStore(store)
+    records = [local.record(path.stem) for path in sorted((store / "records").glob("*.json"))]
+    failed = 0
+    for name in packages:
+        creates = [record for record in records if record["inputs"]["step"].get("kind") == "conan-create"
+                   and record["inputs"]["step"].get("form") == "ship" and record["inputs"]["step"].get("package") == name]
+        verdicts = [record for record in records if record["inputs"]["step"].get("kind") == SOURCE_VERDICT_KIND
+                    and record["inputs"]["step"].get("package") == name]
+        if len(creates) != 1 or len(verdicts) != 1:
+            print(f"artefact_store: UNBOUND {name}: {len(creates)} ship-form create record(s) and {len(verdicts)} "
+                  f"source verdict(s) in {store}, and a binding takes exactly one of each")
+            failed += 1
+            continue
+        package, verdict = creates[0], verdicts[0]
+        judged = verdict["outputs"][VERDICT_OUTPUT]["verdict"]
+        unequal = source_binding(package, verdict) + ([] if judged == "pass" else [f"the source verdict judged {judged}"])
+        if unequal:
+            print(f"artefact_store: UNBOUND {name} package {package['key']} source-verdict {verdict['key']}: "
+                  + "; ".join(unequal))
+            failed += 1
+            continue
+        print(f"artefact_store: {BINDING_EQUAL} {name} package {package['key']} source-verdict {verdict['key']} (pass)")
+    return 1 if failed else 0
+
+
 def _link_step_files(results: Path, package: str, package_id: str, files: list[Path]) -> None:
     """Link each of the step's own files at `<results>/steps/<package><suffix>`."""
     steps = results / "steps"
@@ -3964,6 +4011,15 @@ def main(argv: list[str]) -> int:
         return ship_equal(Path(argv[1]))
     if len(argv) == 4 and argv[0] == "binding":
         return binding(Path(argv[1]), argv[2], argv[3])
+    if len(argv) == 2 and argv[0] == "released":
+        try:
+            print("\n".join(released_packages(Path(argv[1]))))
+        except Refused as refused:
+            print(f"artefact_store: REFUSED {refused}", file=sys.stderr)
+            return 1
+        return 0
+    if len(argv) >= 3 and argv[0] == "bound":
+        return bound(Path(argv[1]), argv[2:])
     if len(argv) == 11 and argv[0] == "key-first":
         try:
             document = key_first_document(Path(argv[1]), Path(argv[2]), Path(argv[3]), argv[4], argv[5],

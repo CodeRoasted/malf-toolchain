@@ -1,0 +1,73 @@
+name: 'CodeRoast build environment'
+description: |
+  Makes the pinned build environment runnable on this runner: the image `config/build-environment.json`
+  pins, which every keyed act (`malf source-verdict`, `malf source-lint`, `malf store-create`) runs inside,
+  and the host tools those verbs use before their container starts. Four things, and nothing else:
+
+  * CMake and Conan from their hash locks into a job-scoped venv (`setup-build-env/tool-venv.sh`, the one
+    install path of both): on the host, conan only provisions the recipe home and the source cache the
+    container (which has no network) reads; nothing compiles outside the image;
+  * a hosted runner's AppArmor restriction on unprivileged user namespaces is lifted
+    (`setup-build-env/lift-userns-restriction.sh`): every act runs as uid 1000 in a nested user namespace;
+  * the Docker daemon's image store is the containerd store — `build_environment.py check` refuses any
+    other, because only there is an image's ID the manifest digest the pin names (DN-142.D30 (3)). A
+    GitHub-hosted Ubuntu runner ships Docker without it, so it is switched on and the daemon restarted;
+    a runner already on it (the self-hosted fleet) is left untouched;
+  * the image is loaded by `build_environment.py load`: held already, nothing is done; else the local
+    archive (`MALF_BUILD_ENVIRONMENT_DIR`, default `~/build-environment`) or, on a miss, the archive
+    downloaded from the pin's malf-toolchain Release, each checked against the pin's size and SHA-256
+    before `docker load`. A wrong archive loads nothing.
+
+  It reads malf from this action's own tree, whose bytes outside `.github/` are the job's malf checkout's
+  (`coderoast-malf-checkout` refuses otherwise), and exports MALF_BUILD_ENVIRONMENT_DIR to the job, so the
+  acts that follow read the same directory.
+
+inputs:
+  conan-version:
+    description: 'Conan version for the host provisioning (a hash lock `setup-build-env/conan-<version>.txt` must exist).'
+    required: false
+    default: '2.28.1'
+
+runs:
+  using: composite
+  steps:
+    - name: CMake and Conan from their hash locks, into a job-scoped venv (host provisioning only)
+      shell: bash
+      env:
+        CONAN_VERSION: ${{ inputs.conan-version }}
+      run: bash "$GITHUB_ACTION_PATH/../setup-build-env/tool-venv.sh" "$CONAN_VERSION"
+
+    - name: Lift a hosted runner's AppArmor restriction on unprivileged user namespaces
+      shell: bash
+      run: bash "$GITHUB_ACTION_PATH/../setup-build-env/lift-userns-restriction.sh"
+
+    - name: The containerd image store (switched on only where it is not)
+      shell: bash
+      run: |
+        set -euo pipefail
+        store=$(docker info --format '{{json .DriverStatus}}' | python3 -c 'import json,sys; print(next((v for k, v in (json.loads(sys.stdin.read() or "null") or []) if k == "driver-type"), ""))')
+        if [ "$store" = "io.containerd.snapshotter.v1" ]; then
+          echo "the daemon already runs the containerd image store"
+          exit 0
+        fi
+        config=/etc/docker/daemon.json
+        current='{}'
+        if [ -f "$config" ]; then
+          current=$(sudo cat "$config")
+        fi
+        printf '%s' "$current" | python3 -c 'import json,sys; c=json.loads(sys.stdin.read() or "{}"); c.setdefault("features", {})["containerd-snapshotter"] = True; print(json.dumps(c, indent=2))' | sudo tee "$config" >/dev/null
+        sudo systemctl restart docker
+        store=$(docker info --format '{{json .DriverStatus}}' | python3 -c 'import json,sys; print(next((v for k, v in (json.loads(sys.stdin.read() or "null") or []) if k == "driver-type"), ""))')
+        if [ "$store" != "io.containerd.snapshotter.v1" ]; then
+          echo "::error::the daemon reports image store '$store' after enabling containerd-snapshotter in $config"
+          exit 1
+        fi
+        echo "the daemon now runs the containerd image store"
+
+    - name: Load the pinned image (local archive, else its Release), judged by the pin
+      shell: bash
+      run: |
+        set -euo pipefail
+        dir="${MALF_BUILD_ENVIRONMENT_DIR:-$HOME/build-environment}"
+        echo "MALF_BUILD_ENVIRONMENT_DIR=$dir" >> "$GITHUB_ENV"
+        MALF_BUILD_ENVIRONMENT_DIR="$dir" python3 "$GITHUB_ACTION_PATH/../../../build_environment.py" load

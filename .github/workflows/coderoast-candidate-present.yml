@@ -1,0 +1,90 @@
+name: CodeRoast Candidate Present
+
+# The first job of a repository's candidate (DN-142.D31 (2)): its candidate key, the SHA-256 of
+# canonical {repository, tree, upstream}, and whether the repository's own store already holds that
+# candidate. PRESENT is the no-op: the caller then starts no other job, so a relaunch at a stored
+# commit starts no container and no compiler (P2). The test reads ghcr, never a runner's cache, so a
+# hosted runner and the release runner answer it identically (item 6).
+#
+# Trust: a PUBLIC repository's index counts only through its GitHub artifact attestation, signed by
+# malf's `coderoast-candidate.yml` at this very malf commit, from `refs/heads/main` of the repository
+# itself (DN-142.D31 (4)); a failed verification reads as ABSENT, never as a red. A PRIVATE repository
+# has no attestation (item 6), so its index is read with `--private`, judged by digest. Every
+# identity is derived from the run (`github.repository`, the malf commit the run references): no
+# organisation is named here, so a fork runs the same computation over its own store (P7).
+
+on:
+  workflow_call:
+    inputs:
+      upstream:
+        description: 'The upstream document, a JSON object {<owner>/<repository>: <candidate key>}; `{}` for a repository with no first-party upstream.'
+        type: string
+        required: false
+        default: '{}'
+      runs-on:
+        description: 'Runner label. Defaults to hosted ubuntu-24.04. PUBLIC callers omit it; PRIVATE callers pass their self-hosted label.'
+        type: string
+        required: false
+        default: 'ubuntu-24.04'
+    outputs:
+      key:
+        description: 'The candidate key.'
+        value: ${{ jobs.present.outputs.key }}
+      present:
+        description: '`true` when the store holds this candidate (the no-op), `false` otherwise.'
+        value: ${{ jobs.present.outputs.present }}
+
+permissions:
+  contents: read
+  # The run's referenced workflows, read by `coderoast-malf-checkout` to find this workflow's commit.
+  actions: read
+  # A private repository's store is read with the job's token; a public one would also read anonymously.
+  packages: read
+  attestations: read
+
+jobs:
+  present:
+    runs-on: ${{ inputs.runs-on }}
+    outputs:
+      key: ${{ steps.present.outputs.key }}
+      present: ${{ steps.present.outputs.present }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: malf at this workflow's commit, as git
+        id: malf
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@501237b31c54a1e978024ad32e238a4857a52233
+        with:
+          workflow: coderoast-candidate-present.yml
+
+      - name: The candidate key, and whether the store holds it (ghcr only)
+        id: present
+        shell: bash
+        env:
+          UPSTREAM: ${{ inputs.upstream }}
+          PRIVATE: ${{ github.event.repository.private }}
+          SIGNER_WORKFLOW: ${{ steps.malf.outputs.signer-workflow }}
+          SIGNER_DIGEST: ${{ steps.malf.outputs.commit }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$UPSTREAM" > "$RUNNER_TEMP/upstream.json"
+          key="$(python3 "$MALF_CHECKOUT/store_transport.py" candidate-key "$GITHUB_REPOSITORY" "$GITHUB_WORKSPACE" "$RUNNER_TEMP/upstream.json")"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          if [ "$PRIVATE" = true ]; then
+            trust=(--private)
+          else
+            trust=(--signer-workflow "$SIGNER_WORKFLOW" --signer-digest "$SIGNER_DIGEST")
+          fi
+          rc=0
+          python3 "$MALF_CHECKOUT/store_transport.py" candidate-present "$GITHUB_REPOSITORY" "$key" "${trust[@]}" || rc=$?
+          case "$rc" in
+            0) echo "present=true" >> "$GITHUB_OUTPUT"
+               echo "NO-OP — candidate-$key of $GITHUB_REPOSITORY is stored and verified; no other job starts" ;;
+            3) echo "present=false" >> "$GITHUB_OUTPUT"
+               echo "candidate-$key of $GITHUB_REPOSITORY is absent: the candidate runs" ;;
+            *) echo "::error::store_transport candidate-present exited $rc (above): neither PRESENT nor ABSENT was established"
+               exit "$rc" ;;
+          esac

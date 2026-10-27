@@ -1,0 +1,42 @@
+name: 'CodeRoast malf checkout (the commit of the calling malf workflow)'
+description: |
+  Makes malf-toolchain a GIT CHECKOUT, at the commit of the malf reusable workflow this job runs, beside the
+  caller's checkout (`<parent of the workspace>/malf`, the desk layout, where a repository's `.clang-tidy`
+  and `.clang-format` symlinks resolve). A candidate's keys name malf by its git tree and its index by
+  that commit, which the attestation's certificate names as its signer (DN-142.D31 (4)); the action's
+  own tree is a tarball of the actions layer and can stand for neither. `malf_checkout.py` says where
+  each commit is read and why the two are cross-checked.
+
+  Exports MALF_CHECKOUT (the checkout) to the job. Needs `actions: read` (the run's referenced workflows).
+
+inputs:
+  workflow:
+    description: 'The file name of the malf reusable workflow that calls this action (e.g. coderoast-build.yml).'
+    required: true
+
+outputs:
+  dir:
+    description: 'The checkout.'
+    value: ${{ steps.checkout.outputs.dir }}
+  commit:
+    description: 'The malf commit checked out: the reusable workflow''s own.'
+    value: ${{ steps.checkout.outputs.commit }}
+  repository:
+    description: 'malf''s <owner>/<repository>, derived from the action''s path.'
+    value: ${{ steps.checkout.outputs.repository }}
+  signer-workflow:
+    description: 'The workflow a candidate''s attestation names as its signer: <owner>/<malf>/.github/workflows/coderoast-candidate.yml.'
+    value: ${{ steps.checkout.outputs.signer-workflow }}
+
+runs:
+  using: composite
+  steps:
+    - name: malf at the calling reusable workflow's commit, as git, checked against the actions' commit
+      id: checkout
+      shell: bash
+      env:
+        WORKFLOW: ${{ inputs.workflow }}
+        GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        python3 -I "$GITHUB_ACTION_PATH/malf_checkout.py" checkout "$WORKFLOW" "$(dirname "$GITHUB_WORKSPACE")/malf"

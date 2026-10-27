@@ -1,0 +1,108 @@
+name: CodeRoast Candidate
+
+# A repository's candidate STORE job (DN-142.D31, slice S4), after its CI with the postflight: the
+# gcc-16 SHIP FORM of every package the repository releases (`malf store-create --ship`, in the image,
+# no test of the package built or run), each bound to the clang source verdict CI wrote by EQUAL
+# INPUTS (`artefact_store.py bound`), then every owned object and record pushed to the repository's own
+# `store-<repository>` on ghcr, attested, and the index published LAST, so its presence means the
+# candidate is complete (DN-142.D31 (2) step 9, (3), (4)).
+#
+# THIS FILE IS THE ATTESTATION'S SIGNER: a reader verifies `--signer-workflow
+# <owner>/<malf>/.github/workflows/coderoast-candidate.yml` at the malf commit the index names, so the
+# name of this file and the index's malf commit (this workflow's own, `coderoast-malf-checkout`) are
+# one contract with `store_transport.py`.
+#
+# It refuses unless the run is on `refs/heads/main` (DN-142.D31 (4)). A PUBLIC repository attests
+# every pushed manifest (P4); a PRIVATE one runs the same job on its own runner and attests nothing
+# (item 6: GitHub attests private repositories only on Enterprise). Every identity is derived from the
+# run: no organisation, no secret (P7).
+
+on:
+  workflow_call:
+    inputs:
+      upstream:
+        description: 'The upstream document the candidate key was computed over, a JSON object {<owner>/<repository>: <candidate key>}; `{}` for none.'
+        type: string
+        required: false
+        default: '{}'
+      runs-on:
+        description: 'Runner label. Defaults to hosted ubuntu-24.04. PUBLIC callers omit it; PRIVATE callers pass their self-hosted label (the release runner, item 6).'
+        type: string
+        required: false
+        default: 'ubuntu-24.04'
+
+permissions:
+  contents: read
+  # The run's referenced workflows (`coderoast-malf-checkout`) and the CI job's store artifact.
+  actions: read
+  # The repository's own store package, written by its own token (P4).
+  packages: write
+  # The attestation of every pushed manifest (public repositories only).
+  id-token: write
+  attestations: write
+
+jobs:
+  store:
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - name: Refuse unless main
+        if: ${{ github.ref != 'refs/heads/main' }}
+        shell: bash
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          echo "::error::a candidate stores only from refs/heads/main, and this run is on $REF (DN-142.D31 (4)): a store a non-main run wrote would be read as absent anyway"
+          exit 1
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: malf at this workflow's commit, as git
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@501237b31c54a1e978024ad32e238a4857a52233
+        with:
+          workflow: coderoast-candidate.yml
+
+      - name: The pinned build environment and the host's provisioning tools
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-environment@501237b31c54a1e978024ad32e238a4857a52233
+
+      - name: The CI job's store (its source verdicts)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: candidate-store
+          path: ${{ runner.temp }}/candidate-store
+
+      - name: The ship form of every released package, in the image, then its binding to the source verdict
+        shell: bash
+        run: |
+          set -euo pipefail
+          store="$RUNNER_TEMP/candidate-store"
+          mapfile -t released < <(python3 "$MALF_CHECKOUT/artefact_store.py" released "$GITHUB_WORKSPACE")
+          [ "${#released[@]}" -gt 0 ] \
+            || { echo "::error::$GITHUB_REPOSITORY releases no package (packages.yml at HEAD): a candidate stores what a release publishes"; exit 1; }
+          echo "released: ${released[*]}"
+          CONAN_HOME="$RUNNER_TEMP/candidate-conan-host" MALF_STORE_DIR="$store" MALF_WORKSPACE_ROOT="$GITHUB_WORKSPACE" \
+            bash "$MALF_CHECKOUT/malf" store-create --ship "${released[@]}"
+          python3 "$MALF_CHECKOUT/artefact_store.py" bound "$store" "${released[@]}"
+
+      - name: Push every owned object and record to the repository's own store
+        shell: bash
+        env:
+          UPSTREAM: ${{ inputs.upstream }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$UPSTREAM" > "$RUNNER_TEMP/upstream.json"
+          python3 "$MALF_CHECKOUT/store_transport.py" push "$GITHUB_REPOSITORY" "$GITHUB_WORKSPACE" \
+            "$RUNNER_TEMP/candidate-store" "$RUNNER_TEMP/candidate-out" --upstream "$RUNNER_TEMP/upstream.json"
+
+      - name: Attest every pushed manifest (a public repository)
+        if: ${{ !github.event.repository.private }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: ${{ runner.temp }}/candidate-out/subjects.sha256
+
+      - name: Publish the index, last
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 "$MALF_CHECKOUT/store_transport.py" publish-index "$GITHUB_REPOSITORY" "$RUNNER_TEMP/candidate-out"
