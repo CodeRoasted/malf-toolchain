@@ -6855,7 +6855,8 @@ cmd_source_verdict() {
     read -r -a recipe_sources <<< "$MALF_ENVIRONMENT_RECIPES"
     python3 "$MALF_DIR/package_twin.py" seed-recipes "$MALF_DIR/conan.lock" "$prefixes" "$keys" "${recipe_sources[@]}" \
         > "$scratch/keys.log" 2>&1 \
-        || { echo "malf source-verdict: the key home's recipes could not be restored ($scratch/keys.log)" >&2; return 2; }
+        || { echo "malf source-verdict: the key home's recipes could not be restored ($scratch/keys.log)" >&2
+             _malf_quote_log "$scratch/keys.log" "the key home's recipes (package_twin seed-recipes)"; return 2; }
     local -a names=() paths=()
     while IFS=$'\t' read -r ref path deps; do
         [[ -n "$ref" ]] || continue
@@ -6877,6 +6878,7 @@ cmd_source_verdict() {
            || ! key="$(CONAN_HOME="$keys" python3 "$MALF_DIR/artefact_store.py" source-key "$keys" "$scratch/$name.graph.json" \
                    "$name" "$MALF_PROFILE_NAME" "$MALF_DIR" "$prefixes" "$reference" "$scratch/$name.source-key.json")"; then
             echo "malf source-verdict: the key of $name could not be computed before its tests (above, or $scratch/keys.log)" >&2
+            _malf_quote_log "$scratch/keys.log" "$name (its key before its tests)"
             _malf_quote_log "$scratch/keys.log" "$name (its key before the tests)"
             failed+=("$name"); continue
         fi

@@ -446,14 +446,28 @@ def act_kernel_uid(docker: str, host_uid: int) -> int:
     return 0
 
 
-def grant_act_access(mounts: list[Path] | tuple, docker: str = "docker") -> None:
-    """Runs `act_access_argv` for this host and daemon. raises Refused naming the mount whose grant failed: an
-    act that cannot write its mounts would fail mid-walk for a reason that is not the build's."""
+def act_read_argv(mounts: list[Path] | tuple, host_uid: int, act_kernel_uid: int) -> list[list[str]]:
+    """The `setfacl` commands that let the act READ every read-only mount the host owns (a recipe home the host
+    provisioned, where conan leaves entries without world read): rX on directories and files alike, no default
+    entry, since the act creates nothing there. Empty when the act is the host user."""
+    if act_kernel_uid == host_uid:
+        return []
+    return [["find", str(mount), "-user", str(host_uid), "(", "-type", "d", "-o", "-type", "f", ")",
+             "-exec", "setfacl", "-m", f"u:{act_kernel_uid}:rX", "{}", "+"] for mount in mounts]
+
+
+def grant_act_access(mounts: list[Path] | tuple, docker: str = "docker", read_only: list[Path] | tuple = ()) -> None:
+    """Runs `act_access_argv` over the writable mounts and `act_read_argv` over the read-only ones, for this host
+    and daemon. raises Refused naming the mount whose grant failed: an act that cannot write or read its mounts
+    would fail mid-walk for a reason that is not the build's."""
     host_uid = os.getuid()
-    # note: a mount that does not exist is left to run_argv, whose refusal names it.
-    owned = [mount for mount in mounts if mount.is_dir() and mount.stat().st_uid == host_uid]
+
+    def owned(paths) -> list[Path]:
+        # note: a mount that does not exist is left to run_argv, whose refusal names it.
+        return [path for path in paths if path.is_dir() and path.stat().st_uid == host_uid]
+
     act_uid = act_kernel_uid(docker, host_uid)
-    for command in act_access_argv(owned, host_uid, act_uid):
+    for command in act_access_argv(owned(mounts), host_uid, act_uid) + act_read_argv(owned(read_only), host_uid, act_uid):
         done = subprocess.run(command, capture_output=True, text=True, check=False)
         if done.returncode != 0:
             raise Refused(f"`{' '.join(command)}` failed, so the act (host uid {act_uid}) could not write that "
@@ -472,7 +486,7 @@ def run(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], docker:
         raise Refused("an act that runs git worktree commands sees every location the entries name, at the "
                       "host's path, or it can drop a sibling's live candidate (DN-142.D30 (9) R9): " + "; ".join(stray))
     load(pin, docker)
-    grant_act_access(mounts, docker)
+    grant_act_access(mounts, docker, read_only)
 
     def started(command: list[str]) -> int:
         if attest is not None:
@@ -1501,6 +1515,11 @@ def selftest() -> int:
         arm("RED: a definition installing no actionlint is named",
             actionlint_findings(defined, recipes),
             [f"{defined} must carry exactly one ARG ACTIONLINT_VERSION of the form X.Y.Z, and carries none"])
+        arm("RED: a rootful daemon grants the act read (rX, no default) on every read-only mount the host owns",
+            act_read_argv([recipes], 1001, 0),
+            [["find", str(recipes), "-user", "1001", "(", "-type", "d", "-o", "-type", "f", ")",
+              "-exec", "setfacl", "-m", "u:0:rX", "{}", "+"]])
+        arm("a rootless daemon grants no read either", act_read_argv([recipes], 1000, 1000), [])
         arm("every writable mount, and only those, is a git safe.directory for the act, through git's environment",
             safe_directory_env([recipes, recipes / "store"]),
             ["--env", "GIT_CONFIG_COUNT=2", "--env", "GIT_CONFIG_KEY_0=safe.directory",
