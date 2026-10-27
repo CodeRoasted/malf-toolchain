@@ -400,17 +400,22 @@ def act_access_argv(mounts: list[Path] | tuple, host_uid: int) -> list[list[str]
     another (a GitHub-hosted runner's `runner` is 1001): the act always runs as ACT_UID, so what it writes,
     and every output that could carry an owner, is the same on every runner; the host grants the access
     instead. Default entries give the act AND the host user every entry created later, so the host still
-    reads and removes what the act wrote. Empty when the host uid is the act's (the desk, the fleet)."""
+    reads and removes what the act wrote. Empty when the host uid is the act's (the desk, the fleet). Only
+    what the host OWNS is granted: a mount it does not own (`/tmp`, root's and world-writable) is left as the
+    system set it, and inside an owned mount an entry another uid owns is not touched (measured on a hosted
+    runner, ipc run 40574335101: `setfacl -R /tmp` refused the act on systemd's private entries)."""
     if host_uid == ACT_UID:
         return []
     entries = f"u:{ACT_UID}:rwX,d:u:{ACT_UID}:rwX,d:u:{host_uid}:rwX"
-    return [["setfacl", "-R", "-m", entries, str(mount)] for mount in mounts]
+    return [["find", str(mount), "-user", str(host_uid), "-exec", "setfacl", "-m", entries, "{}", "+"]
+            for mount in mounts]
 
 
 def grant_act_access(mounts: list[Path] | tuple) -> None:
     """Runs `act_access_argv` for this host. raises Refused naming the mount whose grant failed: an act
     that cannot write its mounts would fail mid-walk for a reason that is not the build's."""
-    for command in act_access_argv(mounts, os.getuid()):
+    host_uid = os.getuid()
+    for command in act_access_argv([mount for mount in mounts if mount.stat().st_uid == host_uid], host_uid):
         done = subprocess.run(command, capture_output=True, text=True, check=False)
         if done.returncode != 0:
             raise Refused(f"`{' '.join(command)}` failed, so the act (uid {ACT_UID}) could not write that mount: "
@@ -1463,7 +1468,8 @@ def selftest() -> int:
         arm("RED: a host of another uid (a hosted runner's 1001) grants the act uid rwX on every writable mount, "
             "and default entries for the act and the host on what is created later",
             act_access_argv([recipes, recipes / "store"], 1001),
-            [["setfacl", "-R", "-m", f"u:{ACT_UID}:rwX,d:u:{ACT_UID}:rwX,d:u:1001:rwX", str(path)]
+            [["find", str(path), "-user", "1001", "-exec", "setfacl", "-m",
+              f"u:{ACT_UID}:rwX,d:u:{ACT_UID}:rwX,d:u:1001:rwX", "{}", "+"]
              for path in (recipes, recipes / "store")])
         arm("the definition in this tree installs the actionlint version its one pinning workflow pins",
             actionlint_findings(), [])
