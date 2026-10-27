@@ -590,7 +590,7 @@ wanted_text = subprocess.run(["systemctl", "show", "-p", "AllowedCPUs", "--value
 wanted = cpus(wanted_text)
 if not wanted:
     refuse("AllowedCPUs= is empty: the slice names no CPU")
-online = cpus(Path("/sys/devices/system/cpu/online").read_text())
+online = cpus((ROOT / "sys/devices/system/cpu/online").read_text())
 if wanted - online:
     refuse(f"AllowedCPUs={wanted_text} names CPU(s) {sorted(wanted - online)} this VM does not have online")
 configured = (group / "cpuset.cpus").read_text().strip()

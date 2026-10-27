@@ -2920,10 +2920,12 @@ echo "[7s2b] HELD is what the kernel cannot reclaim: the release seat's own memo
 # 360-minute job limit: the term then in force, memory.max - current + inactive_file, counted active
 # page cache and reclaimable slab as used, and the seat stood at its cap. Every figure
 # below is the kernel's, in bytes, read from /sys/fs/cgroup/seat_release.slice; each arm runs the
-# build's own width function on the seat's 6 CPUs (taskset), so the line printed is the line step 0
-# would print.
+# build's own width function on the seat's 6 CPUs, so the line printed is the line step 0 would print.
+# The 6 CPUs are a fake nproc on PATH, never taskset: a mask is cut to the host's online CPUs, and the
+# hosted 4-CPU runner then read 4 cores (Selftest run 40410805621, W592).
 hs_tmp="$(mktemp -d)"; hs_cg="$hs_tmp/cgroup"; hs_seat="$hs_cg/seat_release.slice"
-mkdir -p "$hs_seat/malf-release.service"
+mkdir -p "$hs_seat/malf-release.service" "$hs_tmp/bin"
+printf '#!/bin/bash\necho 6\n' > "$hs_tmp/bin/nproc"; chmod +x "$hs_tmp/bin/nproc"
 printf 'MemTotal:       24608964 kB\nMemAvailable:   19965896 kB\n' > "$hs_tmp/meminfo"
 printf '0::/seat_release.slice/malf-release.service\n' > "$hs_tmp/pcg"
 printf 'max\n' > "$hs_seat/malf-release.service/memory.max"
@@ -2937,7 +2939,7 @@ hs_stat() {   # <memory.current> <anon> <inactive_file> <active_file>: the seat'
         "slab_unreclaimable 15971472" "slab 1425488320" > "$hs_seat/memory.stat"
 }
 hs_line() {
-    env -u MALF_IS_SANITIZER taskset -c 0-5 bash -c 'MALF_SOURCE_ONLY=1 source "$1"; set +e
+    PATH="$hs_tmp/bin:$PATH" env -u MALF_IS_SANITIZER bash -c 'MALF_SOURCE_ONLY=1 source "$1"; set +e
         _malf_build_width "$2" "$3" "$4"; echo "$_MALF_BUILD_WIDTH_LINE"' _ \
         "$MALF_BIN" "$hs_tmp/meminfo" "$hs_cg" "$hs_tmp/pcg" 2>&1
 }
@@ -6940,6 +6942,10 @@ pp_run() {   # -> "rc=<n>" and the script's output on stdout
 pp_render "$pp_tmp/seat-partition.py"
 check "the rendered script carries exactly one ROOT line, so the fixture reaches every path it reads" \
       "1" "$(grep -c '^ROOT = Path("/")$' "$pp_tmp/seat-partition.py.orig")"
+# The count alone was vacuous: the CPU online file was read through its own Path("/sys/...") and the
+# arms below read the host's CPUs, red on the hosted 4-CPU runner (Selftest run 40410805621, W592).
+check "the ROOT line is the script's only Path(: no path it reads escapes the fixture" \
+      "1" "$(grep -c 'Path(' "$pp_tmp/seat-partition.py.orig")"
 pp_fixture "rw,nosuid,nodev,noexec,relatime,nsdelegate" honour
 pp_out="$(pp_run)"
 check "WSL's mount (nsdelegate, no memory_recursiveprot): the script remounts and succeeds" \
