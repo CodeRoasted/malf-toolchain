@@ -415,7 +415,9 @@ def grant_act_access(mounts: list[Path] | tuple) -> None:
     """Runs `act_access_argv` for this host. raises Refused naming the mount whose grant failed: an act
     that cannot write its mounts would fail mid-walk for a reason that is not the build's."""
     host_uid = os.getuid()
-    for command in act_access_argv([mount for mount in mounts if mount.stat().st_uid == host_uid], host_uid):
+    # note: a mount that does not exist is left to run_argv, whose refusal names it.
+    owned = [mount for mount in mounts if mount.is_dir() and mount.stat().st_uid == host_uid]
+    for command in act_access_argv(owned, host_uid):
         done = subprocess.run(command, capture_output=True, text=True, check=False)
         if done.returncode != 0:
             raise Refused(f"`{' '.join(command)}` failed, so the act (uid {ACT_UID}) could not write that mount: "
