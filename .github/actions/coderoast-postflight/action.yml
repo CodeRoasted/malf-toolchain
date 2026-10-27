@@ -1,0 +1,87 @@
+name: 'CodeRoast postflight (clang-tidy over the dev build)'
+description: |
+  `malf lint --all-files` (clang-tidy) over the caller repo's SHIPPING C++ sources, reading the build
+  `coderoast-dev-build` left in place. IT BUILDS NOTHING, and refuses (exit 2) when that build is not
+  there: clang-tidy needs a compile database AND, on this module-first codebase, the clang-21 module
+  BMIs the database's commands reference, and a lint that compiled its own would be a second build
+  of the same sources (the Founder, 2026-10-27: the lint relies on an already built dir).
+
+  THE BUILD IT READS. In the job that ran `coderoast-dev-build`, the DEV_BUILD_* variables it
+  exported name it. Anywhere else (a dispatch on a persistent runner), the checkout is the
+  workspace and the profile is the default dev leg. Either way the compile database must exist at
+  `<repo>/build-<profile without "linux-">*/compile_commands.json`, or nothing is judged.
+
+  ARMING. Three ways a clang-tidy gate could report green over unchecked code, all closed:
+    * NO DATABASE — refused here, before clang-tidy runs, and `malf lint` refuses again rather than
+      running flag-less.
+    * A MISMATCHED clang-tidy — one outside clang-21's OWN install cannot read this build's BMIs and
+      `malf lint` would SKIP every module unit with exit 0. `setup-clang21-tools`' version+location
+      assertion makes that a hard failure first.
+    * AN EMPTY FILE SET — `--all-files` walks the tree and `malf lint` refuses success over nothing.
+
+  And a translation unit clang-tidy DIES on is reported as NOT LINTED and is fatal — a file can be
+  clean, dirty, or UNREAD, and only the first two have a vocabulary in an ordinary lint gate.
+
+inputs:
+  clang-tidy-major:
+    description: 'Required clang-tidy major version; must match the build clang.'
+    required: false
+    default: '21'
+  profile:
+    description: 'The dev-leg profile whose build is read when no DEV_BUILD_PROFILE was exported in this job.'
+    required: false
+    default: 'linux-clang21-libcxx-release'
+
+runs:
+  using: composite
+  steps:
+    - name: Refuse unless a clang dev build is in place
+      shell: bash
+      env:
+        PROFILE_DEFAULT: ${{ inputs.profile }}
+      run: |
+        set -euo pipefail
+        profile="${DEV_BUILD_PROFILE:-$PROFILE_DEFAULT}"
+        repo="${DEV_BUILD_REPO_DIR:-$GITHUB_WORKSPACE}"
+        root="${DEV_BUILD_WORKSPACE_ROOT:-$GITHUB_WORKSPACE}"
+        case "$profile" in
+          linux-clang*) ;;
+          *) echo "::error::postflight refused: the dev build profile is '$profile', not a clang profile — clang-tidy reading another compiler's database emits findings that are well-formed and wrong."
+             exit 2 ;;
+        esac
+        shopt -s nullglob
+        databases=("$repo"/build-"${profile#linux-}"*/compile_commands.json)
+        if [ "${#databases[@]}" -eq 0 ]; then
+          echo "::error::postflight refused: no clang dev build at $repo/build-${profile#linux-}*/compile_commands.json. The postflight builds nothing; run it in the job that ran coderoast-dev-build (CI with postflight: true), or on a runner where that build is still in place."
+          exit 2
+        fi
+        echo "postflight reads ${databases[*]}"
+        {
+          echo "DEV_BUILD_PROFILE=$profile"
+          echo "DEV_BUILD_REPO_DIR=$repo"
+          echo "DEV_BUILD_WORKSPACE_ROOT=$root"
+        } >> "$GITHUB_ENV"
+
+    - name: Provision the version-matched clang-tidy, asserted to be clang-21's OWN
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-clang21-tools@3052538f78454ec40ed3fc5fbcbb596cae14f55b
+      with:
+        clang-tidy-major: ${{ inputs.clang-tidy-major }}
+
+    - name: clang-tidy gate (malf lint --all-files)
+      shell: bash
+      env:
+        MALF: ${{ github.action_path }}/../../../malf
+      run: |
+        set -euo pipefail
+        export MALF_WORKSPACE_ROOT="$DEV_BUILD_WORKSPACE_ROOT"
+        cd "$DEV_BUILD_REPO_DIR"
+        # --console, deliberately: without it `malf lint` writes findings AND the NOT LINTED block
+        # to lint_output.txt and prints only "output written to ...", so a red run would name a file
+        # nobody fetches. The whole verdict must be in the log the reader already has open.
+        #
+        # --all-files, deliberately: the default mode is `git diff --name-only HEAD`, which on a
+        # clean CI checkout is EMPTY and passes. --all-files walks the tree and refuses an empty set.
+        if ! bash "$MALF" lint --all-files --console; then
+          echo "::error::clang-tidy findings, or translation units clang-tidy could not check, above. A 'NOT LINTED' block means those files went through ZERO checks — that is a coverage hole, not a finding, and it is fixed by removing the construct the check dies on or by a declared, reproducer-carrying exclusion in the config, never by a per-site NOLINT. Every other finding, a warning as much as an error, is fixed at the source or, where the check is wrong for that one site, by an own-line NOLINTNEXTLINE(<check>) under a note: comment giving the why; then re-run 'malf format' (an insertion reflows its line, and the preflight checks formatting in the same run). READING THIS RED FROM THE CLI: 'gh run view <run> --log-failed' returns EXIT 0 AND ZERO LINES for a job of a CALLED reusable workflow; read it by job id: gh api repos/OWNER/REPO/actions/runs/RUN/jobs then gh api repos/OWNER/REPO/actions/jobs/JOBID/logs."
+          exit 1
+        fi

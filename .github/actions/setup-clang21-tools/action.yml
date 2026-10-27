@@ -3,7 +3,8 @@ description: |
   Provisions clang-21 (through `setup-clang21-libcxx`) and the clang tools a caller names —
   clang-tidy, clang-format, or both — and ASSERTS each one sits in clang-21's OWN install directory
   at the requested major. Provisioning only: it runs no gate. The one home of this provisioning for
-  `coderoast-lint-tidy`, `coderoast-format-check` and the superproject's step 0 (`pharos-build.yml`).
+  `coderoast-dev-build`, `coderoast-postflight`, `coderoast-format-check` and the superproject's step 0
+  (`pharos-build.yml`).
 
   WHY THE TOOLS ARE NOT IN `setup-clang21-libcxx`. `llvm.sh 21` installs clang, lldb, lld and clangd
   only; clang-tidy and clang-format ship in their own debs. That action opens with an idempotent

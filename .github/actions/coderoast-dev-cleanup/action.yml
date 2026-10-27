@@ -1,0 +1,72 @@
+name: 'CodeRoast dev cleanup'
+description: |
+  The end of every job that ran `coderoast-dev-build`: the conan editable registry the dev build
+  wrote, and the workspace it assembled beside the checkout, are removed, whatever the job's verdict.
+  On a persistent runner both would outlive the job and change what a later build resolves. Call it
+  as the job's last step, with `if: always()`.
+
+runs:
+  using: composite
+  steps:
+    - name: Clear the editable registry — a dev build must not change what a later BUILD resolves
+      if: always()
+      shell: bash
+      run: |
+        set -euo pipefail
+        # WHY THIS STEP EXISTS — measured at the v1.10.3 cut, 2026-09-01.
+        #
+        # `coderoast-dev-build` deliberately points MALF_WORKSPACE_ROOT at the checkout so an
+        # intra-repo first-party graph can resolve (the rationale is in that action's own
+        # description). malf implements that by registering every repo member as a conan
+        # EDITABLE, and the registry it writes — $CONAN_HOME/editable_packages.json — lives in
+        # the CONAN_HOME that `setup-build-env` owns at <workspace>/.conan2. On the self-hosted
+        # fleet that workspace PERSISTS ACROSS JOBS, so the registry outlived this job: the
+        # repo's later BUILD job resolved its own members as `- Editable` instead of `- Cache`,
+        # an editable emits no CMake package config, and `find_package(<sibling>)` then failed
+        # at configure time in a job that had done nothing wrong.
+        #
+        # malf already declares the counter-invariant twice — `_malf_editables_clear`, and
+        # store-create's clean-export invariant (no editables, MALF_EDITABLE_BUILD_DIR unset),
+        # whose comment names this very consequence (a bogus build-tree path in
+        # CMAKE_PREFIX_PATH -> find_package fails) and that real CI runs with it unset.
+        # That assertion held until a CI build began writing the registry (the clang-tidy lint
+        # build, first). This step makes it true again; it does not change what the dev build
+        # itself resolves.
+        #
+        # The measurement, same code, same repo, one cut apart:
+        #   coderoast-ipc v1.10.2 run 33255985932 -> `coderoast_ipc_core/1.10.2 - Cache`, PASS
+        #   coderoast-ipc v1.10.3 run 33558688226 -> `coderoast_ipc_core/1.10.3 - Editable`,
+        #     "CMake Error at CMakeLists.txt:15 (find_package)" for the consumer module
+        #   insight-canon v1.10.3 run 33558684800 failed identically on `insight_canon`.
+        # It surfaced at a TAG rather than at a desk because no CI fires on a `main` push for
+        # the C++ repos (ADR-2.D3) — the tag was this regression's first execution.
+        #
+        # `always()` is load-bearing: a RED build or lint must not leave the registry behind, or
+        # the next job fails for a reason that has nothing to do with its own code.
+        home="${CONAN_HOME:-}"
+        if [ -z "$home" ]; then
+          echo "CONAN_HOME is unset (setup-build-env owns it) — no registry to clear."
+          exit 0
+        fi
+        if [ -f "$home/editable_packages.json" ]; then
+          rm -f "$home/editable_packages.json"
+          echo "cleared $home/editable_packages.json — the dev build's editables do not outlive this job"
+        else
+          echo "no editable registry at $home — nothing to clear"
+        fi
+
+    - name: Remove the dev workspace — siblings and the caller's worktree do not outlive this job
+      if: always()
+      shell: bash
+      run: |
+        set -euo pipefail
+        # `always()` for the registry step's reason: the checkout's `.git` persists on the self-hosted
+        # fleet, and a worktree registration left behind names a directory that no longer exists.
+        ws="$RUNNER_TEMP/malf-dev-workspace"
+        if [ ! -d "$ws" ]; then
+          echo "no dev workspace was assembled — nothing to remove"
+          exit 0
+        fi
+        rm -rf "$ws"
+        git -C "$GITHUB_WORKSPACE" worktree prune
+        echo "removed $ws and pruned its worktree registration from the checkout"

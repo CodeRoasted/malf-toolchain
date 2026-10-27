@@ -13,7 +13,7 @@
 # ninja, PyYAML, the jsonschema closure); the tools the keyed acts execute (DN-142.D30 (10) R19): ripgrep,
 # openssh-client (ssh-keygen, which in the image only verifies or makes a throwaway key), valgrind and
 # shellcheck as snapshot-pinned apt packages, and actionlint at the ACTIONLINT_VERSION of
-# .github/workflows/coderoast-lint.yml (definition-check reds a drift), its release tarball checked against
+# the one workflow under .github/workflows/ that pins it (definition-check reds a drift), its release tarball checked against
 # the sha256 below, the value the release's own checksums.txt names, at
 # /opt/build-environment/actionlint/<version>/actionlint. The clang-21 legs come from apt.llvm.org at build time, which
 # no snapshot serves, so they are UNPINNED (DN-142.D30 (7) R3: the key is the image's digest, never this

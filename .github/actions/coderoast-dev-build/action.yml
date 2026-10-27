@@ -1,0 +1,162 @@
+name: 'CodeRoast dev build (clang-21)'
+description: |
+  The DEV leg of a CodeRoast C++ repository: a clang-21/libc++ `malf build` of every package in the
+  caller repo, and with `test: true` (the default) its tests too, through `malf test`. Test on clang,
+  ship gcc (the Founder, 2026-10-27): this is where a repository's tests run, and the gcc-16 ship
+  leg only creates the packages a candidate stores, without running them again.
+
+  It also LEAVES THE BUILD IN PLACE for `coderoast-postflight` (clang-tidy), which builds nothing
+  and refuses without it: clang-tidy reads clang-21's compile database and module BMIs, so the
+  database and the tests come from one build, and a lint never pays for a compile of its own.
+
+  Run after `actions/checkout`. Provisions clang-21 and clang-tidy through `setup-clang21-tools`, the
+  one provisioning surface the format gate and step 0 also use, then the build environment for the
+  clang profile.
+
+  CROSS-REPO FIRST-PARTY REQUIREMENTS come from `siblings`. With it empty, the checkout IS the
+  workspace: `MALF_WORKSPACE_ROOT` points at it, which makes a repo's own members editables and
+  covers every intra-repo graph. A repo whose closure reaches ANOTHER repo names those repos, and
+  they are cloned from SOURCE beside a worktree of the caller — the desk layout — so the recipe
+  graph registers them as editables. Vendoring cannot substitute: a released package is a gcc-16
+  binary, and a clang-21 install does not match its package_id. `pin_coherence.py` INV-13 derives
+  each caller's closure from the `packages.yml` graph and reds a set that does not cover it.
+
+  It exports DEV_BUILD_WORKSPACE_ROOT, DEV_BUILD_REPO_DIR and DEV_BUILD_PROFILE to the job, the three
+  facts the postflight reads. The caller clears the editable registry and the assembled workspace at
+  the end of the job (`coderoast-dev-cleanup`): a registry left on a persistent runner changes what a
+  later build resolves.
+
+inputs:
+  clang-tidy-major:
+    description: 'Required clang-tidy major version; must match the build clang.'
+    required: false
+    default: '21'
+  profile:
+    description: 'malf profile of the dev build. Must be a clang profile: the postflight lints this build, and `malf lint` refuses any other database.'
+    required: false
+    default: 'linux-clang21-libcxx-release'
+  test:
+    description: '`true` runs `malf test` (build + every test); `false` runs `malf build` alone.'
+    required: false
+    default: 'true'
+  siblings:
+    description: |
+      CodeRoasted repos to clone from source beside this one, whitespace-separated: the first-party
+      build closure minus the repo's own packages. Empty (the default) keeps the checkout as the
+      workspace. Each follows the run's ref — the same tag name on a tag event, `main` otherwise —
+      unless written `<repo>@<ref>`. A ref that does not resolve FAILS naming it: a fallback would
+      build against a revision nobody chose.
+    required: false
+    default: ''
+  checkout-token:
+    description: 'Read-only Contents token for PRIVATE siblings. Leave empty when every sibling is public — a public caller is never handed one.'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Provision clang-21 and the version-matched clang-tidy, asserted to be clang-21's OWN
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-clang21-tools@3052538f78454ec40ed3fc5fbcbb596cae14f55b
+      with:
+        clang-tidy-major: ${{ inputs.clang-tidy-major }}
+
+    - name: Setup build env (apt + CMake 4.3.x + Conan + dep cache + canonical profile)
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-env@3052538f78454ec40ed3fc5fbcbb596cae14f55b
+      with:
+        profile: ${{ inputs.profile }}
+
+    - name: Assemble the build workspace (the repo beside its first-party siblings, from source)
+      shell: bash
+      env:
+        SIBLINGS: ${{ inputs.siblings }}
+        SIBLING_TOKEN: ${{ inputs.checkout-token }}
+        PROFILE: ${{ inputs.profile }}
+      run: |
+        set -euo pipefail
+        set -f
+        echo "DEV_BUILD_PROFILE=$PROFILE" >> "$GITHUB_ENV"
+        # THE WORKSPACE IS SET HERE, and without it no first-party graph resolves. malf derives
+        # MALF_WORKSPACE_ROOT from its OWN location, which under `_actions/` holds nothing but
+        # SHA-named directories, so `conan install` would demand packages published nowhere.
+        if [ -z "${SIBLINGS//[[:space:]]/}" ]; then
+          echo "DEV_BUILD_WORKSPACE_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          echo "DEV_BUILD_REPO_DIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          echo "no siblings declared: the checkout is the whole workspace"
+          exit 0
+        fi
+        # OUTSIDE the checkout, because `malf lint` keys its header filter and its --all-files walk
+        # on the invocation directory, and a walked TU with no compile command is fatal: siblings
+        # cloned inside the checkout would be walked as this repo's own sources.
+        ws="$RUNNER_TEMP/malf-dev-workspace"
+        self="${GITHUB_REPOSITORY#*/}"
+        rm -rf "$ws"
+        mkdir -p "$ws"
+        git -C "$GITHUB_WORKSPACE" worktree prune
+        git -C "$GITHUB_WORKSPACE" -c advice.detachedHead=false worktree add --detach "$ws/$self" HEAD
+        follow=main
+        if [ "$GITHUB_REF_TYPE" = tag ]; then
+          follow="$GITHUB_REF_NAME"
+        fi
+        # The token is read from the environment when git asks, so it never enters a config file or
+        # a remote URL. GIT_CONFIG_GLOBAL=/dev/null because the runner's global config is shared,
+        # persistent state: a credential it carried would be tried before this one.
+        helper='!f() { test "$1" = get && test -n "${SIBLING_TOKEN:-}" && printf "username=x-access-token\npassword=%s\n" "$SIBLING_TOKEN"; }; f'
+        sibling_git() {
+          GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 \
+            git -c credential.helper= -c "credential.helper=$helper" "$@"
+        }
+        declare -A seen=()
+        for entry in $SIBLINGS; do
+          repo="${entry%%@*}"
+          ref="$follow"
+          if [[ "$entry" == *@* ]]; then
+            ref="${entry#*@}"
+          fi
+          if [[ ! "$repo" =~ ^[A-Za-z0-9._-]+$ || ! "$ref" =~ ^[A-Za-z0-9._/-]+$ || "$repo" == "$self" || -n "${seen[$repo]:-}" ]]; then
+            echo "::error::siblings entry '$entry' is malformed, names this repo, or repeats a repo."
+            exit 1
+          fi
+          seen[$repo]=1
+          url="https://github.com/CodeRoasted/$repo.git"
+          if ! sibling_git clone --depth 1 --single-branch --branch "$ref" "$url" "$ws/$repo"; then
+            # A clone failure is a UNION of causes, so the ref is probed before any cause is named.
+            rc=0
+            sibling_git ls-remote --exit-code "$url" "refs/tags/$ref" "refs/heads/$ref" >/dev/null || rc=$?
+            case "$rc" in
+              0) echo "::error::sibling $repo @ $ref EXISTS and the clone still failed; git's own error is above." ;;
+              2) echo "::error::sibling $repo has no ref '$ref'. On a tag run every sibling must carry that tag; a repo on a decoupled version line is declared as '$repo@main'." ;;
+              *)
+                if [ -z "${SIBLING_TOKEN:-}" ]; then
+                  echo "::error::sibling $repo is unreachable (git exit $rc, error above) and NO checkout token reached this step. If $repo is private: the caller must pass its checkout token, and the org secret it names must be granted to ${GITHUB_REPOSITORY} — an ungranted secret arrives as an empty string."
+                else
+                  echo "::error::sibling $repo is unreachable (git exit $rc, error above) WITH a checkout token present: the token cannot read $repo, has expired, or the network failed."
+                fi
+                ;;
+            esac
+            exit 1
+          fi
+          echo "sibling $repo @ $ref = $(git -C "$ws/$repo" rev-parse HEAD)"
+        done
+        echo "DEV_BUILD_WORKSPACE_ROOT=$ws" >> "$GITHUB_ENV"
+        echo "DEV_BUILD_REPO_DIR=$ws/$self" >> "$GITHUB_ENV"
+
+    - name: Build (and test) on the dev leg — the build the postflight lints
+      shell: bash
+      env:
+        MALF: ${{ github.action_path }}/../../../malf
+        TEST: ${{ inputs.test }}
+      run: |
+        set -euo pipefail
+        export MALF_WORKSPACE_ROOT="$DEV_BUILD_WORKSPACE_ROOT"
+        cd "$DEV_BUILD_REPO_DIR"
+        verb=build
+        if [ "$TEST" = true ]; then
+          verb=test
+        elif [ "$TEST" != false ]; then
+          echo "::error::test must be true or false, got '$TEST'"
+          exit 2
+        fi
+        echo "::group::malf $verb ($DEV_BUILD_PROFILE)"
+        bash "$MALF" "$verb" --profile "$DEV_BUILD_PROFILE"
+        echo "::endgroup::"
