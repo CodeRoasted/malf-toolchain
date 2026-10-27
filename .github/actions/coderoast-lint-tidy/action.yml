@@ -57,7 +57,7 @@ runs:
   using: composite
   steps:
     - name: The clang-21 build clang-tidy reads (compile commands + module BMIs)
-      uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dev-build@db3f3e93533ff39cb4290166d7bd824a10301aaa
+      uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dev-build@650b736b5430828f4492186db4637942bb6e9fb6
       with:
         clang-tidy-major: ${{ inputs.clang-tidy-major }}
         profile: ${{ inputs.profile }}
@@ -66,10 +66,10 @@ runs:
         checkout-token: ${{ inputs.checkout-token }}
 
     - name: clang-tidy over that build
-      uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-postflight@db3f3e93533ff39cb4290166d7bd824a10301aaa
+      uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-postflight@650b736b5430828f4492186db4637942bb6e9fb6
       with:
         clang-tidy-major: ${{ inputs.clang-tidy-major }}
 
     - name: Clear the editable registry and the sibling workspace
       if: always()
-      uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dev-cleanup@db3f3e93533ff39cb4290166d7bd824a10301aaa
+      uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dev-cleanup@650b736b5430828f4492186db4637942bb6e9fb6
