@@ -358,7 +358,21 @@ def run_argv(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], cw
         command += ["--volume", f"{mount}:{mount}:ro"]
     for name in names:
         command += ["--env", f"{name}={environ[name]}"]
+    command += safe_directory_env(mounts)
     return [*command, pin.id, "unshare", "--user", f"--map-user={ACT_UID}", f"--map-group={ACT_UID}", "--", *argv]
+
+
+def safe_directory_env(mounts: list[Path] | tuple) -> list[str]:
+    """The `--env` arguments declaring each writable mount, and only those, a git `safe.directory` for the act:
+    under a rootful daemon the act reaches the kernel as another uid than the checkout's owner, and git then
+    refuses the repository as of dubious ownership (measured on a hosted runner, ipc run 40577248828: `git cannot
+    list` the checkout). Declared through git's environment configuration, so no file is written and nothing
+    outside the act's own mounts is trusted."""
+    entries = [str(mount) for mount in mounts]
+    declared = ["--env", f"GIT_CONFIG_COUNT={len(entries)}"]
+    for index, entry in enumerate(entries):
+        declared += ["--env", f"GIT_CONFIG_KEY_{index}=safe.directory", "--env", f"GIT_CONFIG_VALUE_{index}={entry}"]
+    return declared
 
 
 def corpus_mounts(document: Path) -> list[Path]:
@@ -1487,6 +1501,11 @@ def selftest() -> int:
         arm("RED: a definition installing no actionlint is named",
             actionlint_findings(defined, recipes),
             [f"{defined} must carry exactly one ARG ACTIONLINT_VERSION of the form X.Y.Z, and carries none"])
+        arm("every writable mount, and only those, is a git safe.directory for the act, through git's environment",
+            safe_directory_env([recipes, recipes / "store"]),
+            ["--env", "GIT_CONFIG_COUNT=2", "--env", "GIT_CONFIG_KEY_0=safe.directory",
+             "--env", f"GIT_CONFIG_VALUE_0={recipes}", "--env", "GIT_CONFIG_KEY_1=safe.directory",
+             "--env", f"GIT_CONFIG_VALUE_1={recipes / 'store'}"])
         arm("a rootless daemon (the act writes as the host user, the desk) grants nothing",
             act_access_argv([recipes], 1000, 1000), [])
         arm("RED: a rootful daemon (a hosted runner: host user 1001, the act reaching the kernel as uid 0) grants "
