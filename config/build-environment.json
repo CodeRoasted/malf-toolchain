@@ -4,6 +4,7 @@
   "archive": {
     "name": "build-environment-a00c270e801e4af1f18ba21670f329817f0f6c0cdb5b3777ee421adccd17d8d1.tar",
     "bytes": 1741380608,
-    "sha256": "73a295d7713be4e00b930b341080d61818a554ac1ae3b6250f2c4436b3362cbc"
+    "sha256": "73a295d7713be4e00b930b341080d61818a554ac1ae3b6250f2c4436b3362cbc",
+    "release": "build-environment-a00c270e801e"
   }
 }

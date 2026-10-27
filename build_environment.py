@@ -161,6 +161,12 @@ CONTAINER_HOME = "/root"
 # image, 2026-10-18: `posix_fallocate ... No space left on device`).
 SHM = Path("/dev/shm")
 HASH_CHUNK = 1 << 20
+# Where a runner without the archive downloads it: the malf-toolchain Release named in the pin, one per image
+# (`build-environment-<the image digest's first 12 hex>`). Downloaded, then judged by the same size and SHA-256
+# the pin names as a local copy is; a download that does not match loads nothing.
+RELEASE_URL = "https://github.com/CodeRoasted/malf-toolchain/releases/download/{release}/{name}"
+RELEASE_NAME = "build-environment-{short}"
+DOWNLOAD_TIMEOUT_S = 120
 
 
 class Refused(RuntimeError):
@@ -174,17 +180,19 @@ class Pin:
     archive_name: str
     archive_bytes: int
     archive_sha256: str
+    archive_release: str = ""
 
 
 def read_pin(path: Path = PIN) -> Pin:
-    """The pin at `path`. raises Refused on a pin that is not exactly its three values, well formed."""
+    """The pin at `path`. raises Refused on a pin that is not exactly its values, well formed."""
     try:
         document = json.loads(path.read_text())
         archive = document["archive"]
-        pin = Pin(document["image"], document["id"], archive["name"], archive["bytes"], archive["sha256"])
+        pin = Pin(document["image"], document["id"], archive["name"], archive["bytes"], archive["sha256"],
+                  archive["release"])
     except (OSError, ValueError, KeyError, TypeError) as unread:
         raise Refused(f"the build-environment pin {path} cannot be read as {{image, id, archive: {{name, bytes, "
-                      f"sha256}}}}: {unread!r}") from unread
+                      f"sha256, release}}}}: {unread!r}") from unread
     wrong = [f"{name} is {value!r}" for name, value in (("image", pin.image), ("id", pin.id)) if not DIGEST.match(str(value))]
     if not HEX.match(str(pin.archive_sha256)):
         wrong.append(f"archive.sha256 is {pin.archive_sha256!r}")
@@ -192,6 +200,9 @@ def read_pin(path: Path = PIN) -> Pin:
         wrong.append(f"archive.bytes is {pin.archive_bytes!r}")
     if "/" in str(pin.archive_name) or not str(pin.archive_name).endswith(".tar"):
         wrong.append(f"archive.name is {pin.archive_name!r}, not a file name ending .tar")
+    release = RELEASE_NAME.format(short=str(pin.image).removeprefix("sha256:")[:12])
+    if pin.archive_release != release:
+        wrong.append(f"archive.release is {pin.archive_release!r}, not {release!r}, the Release of this image")
     if wrong:
         raise Refused(f"the build-environment pin {path} is malformed: {'; '.join(wrong)}")
     return pin
@@ -259,14 +270,36 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def load(pin: Pin, docker: str, directory: Path | None = None) -> str:
-    """The verified load (DN-142.D30 (3) *The load*): when the daemon lacks the pinned id, the archive is
-    checked against the pin's size and SHA-256, then loaded; then `check`. Returns what was done.
-    raises Refused naming the file and the pin; a wrong archive loads nothing."""
+def download(pin: Pin, archive: Path, fetch=None) -> None:
+    """Fetch the pin's archive from its Release into `archive`, through a temporary file renamed only once
+    complete, so an interrupted download never stands as the archive. Judged by `load` afterwards, as any
+    local copy is. raises Refused naming the URL."""
+    import urllib.request
+
+    url = RELEASE_URL.format(release=pin.archive_release, name=pin.archive_name)
+    fetch = fetch or (lambda address: urllib.request.urlopen(address, timeout=DOWNLOAD_TIMEOUT_S))
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    partial = archive.with_name(archive.name + ".partial")
+    try:
+        with fetch(url) as source, partial.open("wb") as sink:
+            shutil.copyfileobj(source, sink, HASH_CHUNK)
+    except OSError as failed:
+        partial.unlink(missing_ok=True)
+        raise Refused(f"the build-environment archive could not be downloaded from {url}: {failed!r}") from failed
+    partial.replace(archive)
+
+
+def load(pin: Pin, docker: str, directory: Path | None = None, fetch=None) -> str:
+    """The verified load (DN-142.D30 (3) *The load*): when the daemon lacks the pinned id, the archive — the
+    local copy, else downloaded from the pin's Release — is checked against the pin's size and SHA-256, then
+    loaded; then `check`. Returns what was done. raises Refused naming the file and the pin; a wrong archive
+    loads nothing."""
     if inspected(docker, pin.id) is None:
         archive = (directory or archive_directory()) / pin.archive_name
+        fetched = ""
         if not archive.is_file():
-            raise Refused(f"the build-environment archive {archive} does not exist, and the daemon holds no {pin.id}")
+            download(pin, archive, fetch)
+            fetched = f"downloaded from the {pin.archive_release} Release, "
         size = archive.stat().st_size
         if size != pin.archive_bytes:
             raise Refused(f"the build-environment archive {archive} is {size} bytes, the pin's {pin.archive_bytes}: "
@@ -279,7 +312,7 @@ def load(pin: Pin, docker: str, directory: Path | None = None) -> str:
         if done.returncode != 0:
             raise Refused(f"`docker load -i {archive}` failed: {done.stderr.strip()}")
         check(pin, docker)
-        return f"loaded {archive} as {pin.id}"
+        return f"{fetched}loaded {archive} as {pin.id}"
     check(pin, docker)
     return f"held {pin.id}"
 
@@ -1444,9 +1477,23 @@ def selftest() -> int:
             arm("RED: an archive whose SHA-256 differs from the pin is refused, naming both, and nothing is loaded",
                 (f"has SHA-256 {pin.archive_sha256}, the pin's {'0' * 64}" in said, inspected(docker, pin.id)),
                 (True, None))
-            arm("RED: an absent archive is refused, naming the file",
-                refusal(lambda: load(Pin(pin.image, pin.id, "absent.tar", 1, "0" * 64), docker, directory)).endswith(
-                    f"{directory / 'absent.tar'} does not exist, and the daemon holds no {pin.id}"), True)
+            absent = Pin(pin.image, pin.id, "absent.tar", 1, "0" * 64, "build-environment-" + "0" * 12)
+
+            def unreachable(url: str):
+                raise OSError(f"no network in a selftest: {url}")
+
+            arm("RED: an absent archive whose Release cannot be fetched is refused, naming the URL, and no partial "
+                "file stands",
+                (refusal(lambda: load(absent, docker, directory, unreachable)).startswith(
+                    "the build-environment archive could not be downloaded from https://github.com/CodeRoasted/"
+                    "malf-toolchain/releases/download/build-environment-000000000000/absent.tar"),
+                 (directory / "absent.tar").exists(), (directory / "absent.tar.partial").exists()),
+                (True, False, False))
+            arm("RED: a download of the wrong bytes is judged like any archive: refused on its size, nothing loaded",
+                (f"{directory / 'absent.tar'} is 7 bytes, the pin's 1" in refusal(
+                    lambda: load(absent, docker, directory, lambda url: io.BytesIO(b"no tar!"))),
+                 inspected(docker, pin.id)), (True, None))
+            (directory / "absent.tar").unlink(missing_ok=True)
             arm("the verified load: an absent pinned id is loaded from its archive, then checked",
                 load(pin, docker, directory), f"loaded {directory / pin.archive_name} as {pin.id}")
             arm("a second load finds the id held and checks it", load(pin, docker, directory), f"held {pin.id}")
@@ -1536,10 +1583,19 @@ def selftest() -> int:
             arm("every act container lifts the default seccomp profile and starts its argv as uid 1000 in a nested "
                 "user namespace", ("seccomp=unconfined" in started, started[started.index(pin.id) + 1:]),
                 (True, ["unshare", "--user", "--map-user=1000", "--map-group=1000", "--", "/probe"]))
+            release = "build-environment-" + pin.image.removeprefix("sha256:")[:12]
             (base / "pin.json").write_text(json.dumps({"image": pin.image, "id": "latest", "archive": {
-                "name": pin.archive_name, "bytes": pin.archive_bytes, "sha256": pin.archive_sha256}}))
+                "name": pin.archive_name, "bytes": pin.archive_bytes, "sha256": pin.archive_sha256,
+                "release": release}}))
             arm("RED: a pin naming its id by anything but a digest is refused",
                 "id is 'latest'" in refusal(lambda: read_pin(base / "pin.json")), True)
+            (base / "pin.json").write_text(json.dumps({"image": pin.image, "id": pin.id, "archive": {
+                "name": pin.archive_name, "bytes": pin.archive_bytes, "sha256": pin.archive_sha256,
+                "release": "build-environment-" + "f" * 12}}))
+            arm("RED: a pin whose Release is not the one of its image is refused, naming both",
+                f"not {release!r}, the Release of this image" in refusal(lambda: read_pin(base / "pin.json")), True)
+            arm("the live pin names the Release of its own image", read_pin().archive_release,
+                "build-environment-" + read_pin().image.removeprefix("sha256:")[:12])
         finally:
             subprocess.run([docker, "rmi", "--force", pin.id], capture_output=True, check=False)
         _backend_arms(arm, refusal, base, docker)
