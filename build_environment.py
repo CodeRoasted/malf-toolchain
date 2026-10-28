@@ -320,7 +320,7 @@ def load(pin: Pin, docker: str, directory: Path | None = None, fetch=None) -> st
 def run_argv(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], cwd: Path,
              docker: str = "docker", environ: dict | None = None,
              read_only: list[Path] | tuple = (), host_pids: bool = False, home: str = CONTAINER_HOME,
-             network: str = "none", name: str | None = None) -> list[str]:
+             network: str = "none", name: str | None = None, apparmor: bool = False) -> list[str]:
     """The `docker run` command of one act: `mounts` writable and `read_only` read-only, each at its own
     path; `host_pids` shares the host's process ids (a bench walk judging the build slot's holder);
     `network` is `none` unless the act runs beside the walk's backends, on their internal network, and
@@ -350,6 +350,9 @@ def run_argv(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], cw
                "--shm-size", str(shm.f_blocks * shm.f_frsize),
                "--security-opt", "seccomp=unconfined",
                "--env", f"HOME={home}", "--env", f"{SYSTEM_ENV}={pin.image}"]
+    # note: lifted for the reason seccomp is (namespaces): docker-default AppArmor denies mount (ipc run 40583719705).
+    if apparmor:
+        command += ["--security-opt", "apparmor=unconfined"]
     if host_pids:
         command += ["--pid", "host"]
     for mount in resolved:
@@ -456,6 +459,18 @@ def act_read_argv(mounts: list[Path] | tuple, host_uid: int, act_kernel_uid: int
              "-exec", "setfacl", "-m", f"u:{act_kernel_uid}:rX", "{}", "+"] for mount in mounts]
 
 
+def daemon_applies_apparmor(docker: str) -> bool:
+    """Whether the daemon confines containers with AppArmor (`docker-default`), which denies `mount` and so the
+    namespaces an act's own tests create (a GitHub-hosted Ubuntu runner: ipc's namespace_tests skipped, 'this host
+    refuses an unprivileged user, pid or mount namespace', run 40583719705). The Founder ruled the lift on
+    2026-10-27 (option a: lifted where the daemon applies it, as seccomp is). A daemon without it (rootless, WSL)
+    has nothing to lift. raises Refused when the daemon does not answer."""
+    done = _docker(docker, "info", "--format", "{{json .SecurityOptions}}")
+    if done.returncode != 0:
+        raise Refused(f"`docker info` failed, so the act's AppArmor confinement cannot be known: {done.stderr.strip()}")
+    return any(str(option).split(",", 1)[0] == "name=apparmor" for option in json.loads(done.stdout or "[]"))
+
+
 def grant_act_access(mounts: list[Path] | tuple, docker: str = "docker", read_only: list[Path] | tuple = ()) -> None:
     """Runs `act_access_argv` over the writable mounts and `act_read_argv` over the read-only ones, for this host
     and daemon. raises Refused naming the mount whose grant failed: an act that cannot write or read its mounts
@@ -493,13 +508,14 @@ def run(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], docker:
             attest.write_text(json.dumps({"image": pin.image, "id": pin.id}, sort_keys=True) + "\n")
         return subprocess.run(command, stdin=subprocess.DEVNULL, check=False).returncode
 
+    apparmor = daemon_applies_apparmor(docker)
     if not backends:
         return started(run_argv(pin, argv, mounts, names, Path.cwd(), docker,
-                                read_only=read_only, host_pids=host_pids, home=home))
+                                read_only=read_only, host_pids=host_pids, home=home, apparmor=apparmor))
     with BackendWalk(docker, backends) as walk:
         return started(run_argv(pin, argv, mounts, names, Path.cwd(), docker,
                                 read_only=read_only, host_pids=host_pids, home=home,
-                                network=walk.network, name=walk.act))
+                                network=walk.network, name=walk.act, apparmor=apparmor))
 
 
 # ── the walk's backends (DN-142.D30 (5) E2b, (7) R2) ───────────────────────────────────────────────
@@ -1520,6 +1536,12 @@ def selftest() -> int:
             [["find", str(recipes), "-user", "1001", "(", "-type", "d", "-o", "-type", "f", ")",
               "-exec", "setfacl", "-m", "u:0:rX", "{}", "+"]])
         arm("a rootless daemon grants no read either", act_read_argv([recipes], 1000, 1000), [])
+        pinned = Pin("sha256:" + "a" * 64, "sha256:" + "b" * 64, "x.tar", 1, "0" * 64)
+        lifted = run_argv(pinned, ["/probe"], [recipes], [], recipes, environ={}, apparmor=True)
+        arm("RED: a daemon confining with AppArmor lifts it for the act, beside seccomp; one without adds nothing",
+            ("apparmor=unconfined" in lifted and lifted[lifted.index("apparmor=unconfined") - 1] == "--security-opt",
+             "apparmor=unconfined" in run_argv(pinned, ["/probe"], [recipes], [], recipes, environ={})),
+            (True, False))
         arm("every writable mount, and only those, is a git safe.directory for the act, through git's environment",
             safe_directory_env([recipes, recipes / "store"]),
             ["--env", "GIT_CONFIG_COUNT=2", "--env", "GIT_CONFIG_KEY_0=safe.directory",
