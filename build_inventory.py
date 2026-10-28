@@ -278,7 +278,18 @@ def run_lint(workspace: Path, extra_orphan: str | None) -> int:
     return 1
 
 
+def upstream_roots() -> dict[str, Path]:
+    """The repositories a repository's own walk reads beside it, by name: MALF_UPSTREAM_ROOTS, each the
+    upstream's source at the commit its stored candidate records (DN-142.D31 (2))."""
+    return {Path(root).name: Path(root) for root in os.environ.get("MALF_UPSTREAM_ROOTS", "").split(":") if root}
+
+
 def substitute(value: str, workspace: Path, repo: Path) -> str:
+    """`${workspace}/<repository>` names that repository's upstream root when the walk reads one, so a
+    candidate's cell builds against the commit its upstream records, never a sibling beside the checkout;
+    else `${workspace}` and `${repo}` as they read."""
+    for name, root in upstream_roots().items():
+        value = value.replace(f"${{workspace}}/{name}", str(root))
     return value.replace("${workspace}", str(workspace)).replace("${repo}", str(repo))
 
 

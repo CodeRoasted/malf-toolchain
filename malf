@@ -7011,9 +7011,17 @@ cmd_source_verdict() {
         rc=0
         _malf_confined "$scratch/inventory.denials" inventory "$repo" env MALF_ENVIRONMENT_RECIPES="$keys" \
             "$MALF_DIR/malf" inventory --test --profile "$MALF_PROFILE_NAME" "$repo" > "$scratch/inventory.log" 2>&1 || rc=$?
+        local skip_needle
+        skip_needle="$(python3 -B -c 'import sys; sys.path.insert(0, sys.argv[1]); import build_inventory; print(build_inventory.WORKSPACE_GRAIN_SKIP_NEEDLE)' "$MALF_DIR")" || return 2
         if [[ $rc -ne 0 ]]; then
             echo "malf source-verdict: the inventory of $repo exited $rc — $scratch/inventory.log" >&2
             _malf_quote_log "$scratch/inventory.log" "$repo (its inventory)"
+            failed+=("inventory")
+        elif grep -qF "$skip_needle" "$scratch/inventory.log"; then
+            # A candidate claims its commit's inventory compiles, and a skipped cell is that claim unmade: the
+            # sibling its defines name must be one of the candidate's upstreams (MALF_UPSTREAM_ROOTS).
+            echo "malf source-verdict: the inventory of $repo SKIPPED a workspace-grain cell, whose sibling no upstream root names — $scratch/inventory.log" >&2
+            grep -F "$skip_needle" "$scratch/inventory.log" >&2
             failed+=("inventory")
         else
             echo "--- source-verdict: the inventory of $repo built and tested ---"

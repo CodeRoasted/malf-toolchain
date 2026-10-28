@@ -1269,6 +1269,19 @@ check "A: the skip names the missing root" \
 check "A: the skip is COUNTED, not only declared" \
       "counted" "$(grep -qF "1 workspace-grain cell(s) skipped" <<< "$solo_out" && echo counted || echo "uncounted: $solo_out")"
 
+# (A') a repository's own walk names the sibling as an UPSTREAM root (DN-142.D31 (2)): the define resolves
+# to it and the cell is no longer workspace-grain, so it builds against the commit the upstream records.
+# Measured 2026-10-28: insight-metalog's candidate skipped its det_harness, and a stale tree compiled from the
+# desk's sibling left a canon module whose sources no container mounted, which crashed clang-tidy.
+mkdir -p "$inv_tmp/up/insight-sib"
+check "A': an upstream root resolves \${workspace}/<repository> and the cell is not skipped" \
+      "$inv_tmp/up/insight-sib []" \
+      "$(MALF_UPSTREAM_ROOTS="$inv_tmp/up/insight-sib" python3 -B -c "import sys; sys.path.insert(0, '$MALF_ROOT')
+import build_inventory as bi, yaml
+from pathlib import Path
+entry = yaml.safe_load(open('$solo/packages.yml'))['inventory']['probe_cell']
+print(bi.substitute(entry['defines']['SIB_ROOT'], Path('$solo'), Path('$solo')), bi.workspace_grain_absences(entry, Path('$solo'), Path('$solo')))")"
+
 # (B) lint membership is shape-independent: the cell still counts toward non-vacuity in
 # the single-repo shape with the sibling absent — the skip lives in the BUILD arm only.
 git -C "$solo" init -q 2>/dev/null \
