@@ -60,8 +60,11 @@ def action_coordinate(action_path: str) -> tuple[str, str, str]:
     return found.group(1), found.group(2), found.group(3)
 
 
-def workflow_commit(run: dict, owner: str, repository: str, workflow: str) -> str:
-    """The ONE commit at which this run references malf's reusable workflows, `workflow` among them."""
+def workflow_commits(run: dict, owner: str, repository: str, workflow: str) -> tuple[str, list[str]]:
+    """(the one commit at which this run references `workflow`, every commit at which it references malf's
+    reusable workflows). A malf workflow calling another malf workflow pins it at the previous re-pin layer
+    (coderoast-golden-proof.yml calls coderoast-script-gate.yml), so a run may reference several commits;
+    `materialize` holds them to one malf by their bytes outside .github/."""
     prefix = f"{owner}/{repository}/.github/workflows/".lower()
     entries = [entry for entry in run.get("referenced_workflows") or []
                if str(entry.get("path", "")).lower().startswith(prefix)]
@@ -69,11 +72,13 @@ def workflow_commit(run: dict, owner: str, repository: str, workflow: str) -> st
     if workflow not in names:
         raise Refused(f"run {run.get('id')} references no {owner}/{repository}/.github/workflows/{workflow} "
                       f"(of malf's, it references {sorted(names) or 'none'})")
+    named = sorted({str(entry.get("sha", "")) for entry in entries
+                    if str(entry["path"]).split("@", 1)[0].rsplit("/", 1)[-1] == workflow})
     commits = sorted({str(entry.get("sha", "")) for entry in entries})
-    if len(commits) != 1 or not HEX40.match(commits[0]):
-        raise Refused(f"run {run.get('id')} references {owner}/{repository}'s workflows at {commits}: a candidate "
-                      f"runs ONE malf, so every malf workflow it calls is pinned at one commit")
-    return commits[0]
+    if len(named) != 1 or not all(HEX40.match(commit) for commit in commits):
+        raise Refused(f"run {run.get('id')} references {owner}/{repository}'s {workflow} at {named} and its workflows "
+                      f"at {commits}: one reusable runs at one commit, and every reference is a 40-hex commit")
+    return named[0], commits
 
 
 def _git(directory: Path, *argv: str) -> subprocess.CompletedProcess:
@@ -87,24 +92,26 @@ def _must(done: subprocess.CompletedProcess, what: str) -> str:
     return done.stdout.strip()
 
 
-def materialize(url: str, workflow_sha: str, action_sha: str, destination: Path) -> None:
+def materialize(url: str, workflow_sha: str, others: list[str], destination: Path) -> None:
     """`destination` becomes a checkout of `url` at `workflow_sha`, refused unless its bytes outside
-    `.github/` equal `action_sha`'s."""
+    `.github/` equal each of `others`' (the actions' commit, every other malf commit the run references):
+    a candidate runs ONE malf's code, whichever re-pin layer names it."""
     if destination.exists():
         shutil.rmtree(destination)
     destination.mkdir(parents=True)
     _must(_git(destination, "init", "--quiet"), "git init")
     _must(_git(destination, "remote", "add", "origin", url), "git remote add")
-    wanted = sorted({workflow_sha, action_sha})
+    wanted = sorted({workflow_sha, *others})
     _must(_git(destination, "fetch", "--quiet", "--depth", "1", "origin", *wanted), f"fetching {wanted} from {url}")
     _must(_git(destination, "-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", workflow_sha),
           f"checking out {workflow_sha}")
-    differ = _git(destination, "diff", "--name-only", action_sha, workflow_sha, "--", ".", OUTSIDE_GITHUB)
-    files = _must(differ, f"comparing {action_sha} with {workflow_sha}").splitlines()
-    if files:
-        raise Refused(f"the actions this job runs are malf {action_sha}, the reusable workflow is malf {workflow_sha}, "
-                      f"and they differ outside .github/ in {len(files)} file(s) ({', '.join(files[:5])}): the code "
-                      f"that runs would not be the code the key names; pin both at one re-pin's layers")
+    for other in sorted(set(others) - {workflow_sha}):
+        differ = _git(destination, "diff", "--name-only", other, workflow_sha, "--", ".", OUTSIDE_GITHUB)
+        files = _must(differ, f"comparing {other} with {workflow_sha}").splitlines()
+        if files:
+            raise Refused(f"this run's malf is {workflow_sha} (the reusable workflow) and also {other}, and they "
+                          f"differ outside .github/ in {len(files)} file(s) ({', '.join(files[:5])}): the code that "
+                          f"runs would not be the code the key names; pin every reference at one re-pin's layers")
     head = _must(_git(destination, "rev-parse", "HEAD"), "rev-parse HEAD")
     if head != workflow_sha:
         raise Refused(f"{destination} is at {head}, not {workflow_sha}")
@@ -112,8 +119,8 @@ def materialize(url: str, workflow_sha: str, action_sha: str, destination: Path)
 
 def checkout(run: dict, action_path: str, server: str, workflow: str, destination: Path) -> dict[str, str]:
     owner, repository, action_sha = action_coordinate(action_path)
-    workflow_sha = workflow_commit(run, owner, repository, workflow)
-    materialize(f"{server.rstrip('/')}/{owner}/{repository}.git", workflow_sha, action_sha, destination)
+    workflow_sha, referenced = workflow_commits(run, owner, repository, workflow)
+    materialize(f"{server.rstrip('/')}/{owner}/{repository}.git", workflow_sha, [action_sha, *referenced], destination)
     return {"dir": str(destination), "commit": workflow_sha, "repository": f"{owner}/{repository}",
             "signer-workflow": f"{owner}/{repository}/{SIGNER_WORKFLOW}"}
 
@@ -214,16 +221,25 @@ def selftest() -> int:
         expect("RED: a reusable whose code differs from the actions' outside .github/ is refused, naming the file",
                True, "outside .github/ in 1 file(s) (malf)" in refused(lambda: checkout(
                    run_of((f"{build}@{drifted}", drifted)), path, server, "coderoast-build.yml", root / "m2")))
-        expect("RED: malf workflows at two commits are refused",
-               True, "runs ONE malf" in refused(lambda: workflow_commit(
-                   run_of((f"{build}@a", "a" * 40), ("owner/malf-toolchain/.github/workflows/coderoast-candidate.yml@b",
-                                                       "b" * 40)), "owner", "malf-toolchain", "coderoast-build.yml")))
+        nested = "owner/malf-toolchain/.github/workflows/coderoast-script-gate.yml"
+        layered = checkout(run_of((f"{build}@{workflows}", workflows), (f"{nested}@{actions}", actions)), path, server,
+                           "coderoast-build.yml", root / "m3")
+        expect("a malf workflow calling another at the previous re-pin layer (two commits, equal outside .github/) "
+               "is one malf: the named reusable's commit is checked out", workflows, layered["commit"])
+        expect("RED: a second referenced malf commit whose code differs outside .github/ is refused, naming the file",
+               True, "outside .github/ in 1 file(s) (malf)" in refused(lambda: checkout(
+                   run_of((f"{build}@{workflows}", workflows), (f"{nested}@{drifted}", drifted)), path, server,
+                   "coderoast-build.yml", root / "m4")))
+        expect("RED: one reusable referenced at two commits is refused",
+               True, "one reusable runs at one commit" in refused(lambda: workflow_commits(
+                   run_of((f"{build}@a", "a" * 40), (f"{build}@b", "b" * 40)), "owner", "malf-toolchain",
+                   "coderoast-build.yml")))
         expect("RED: a run that does not reference the named workflow is refused",
                True, "references no owner/malf-toolchain/.github/workflows/coderoast-candidate.yml" in refused(
-                   lambda: workflow_commit(run_of((f"{build}@a", "a" * 40)), "owner", "malf-toolchain",
+                   lambda: workflow_commits(run_of((f"{build}@a", "a" * 40)), "owner", "malf-toolchain",
                                            "coderoast-candidate.yml")))
         expect("RED: another owner's workflow of the same name is not malf's",
-               True, "references no" in refused(lambda: workflow_commit(
+               True, "references no" in refused(lambda: workflow_commits(
                    run_of(("fork/malf-toolchain/.github/workflows/coderoast-build.yml@a", "a" * 40)),
                    "owner", "malf-toolchain", "coderoast-build.yml")))
         expect("RED: an action path that is no pinned remote action is refused",
