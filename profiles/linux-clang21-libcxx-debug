@@ -41,6 +41,12 @@ os=Linux
 CC=clang-21
 CXX=clang++-21
 
+[options]
+# openssl without zlib, as linux-gcc16-release builds it (its [options] holds the reason): an option is a
+# package-id input, so every leg configures openssl alike, and a dev leg tests the configuration that
+# ships (DN-142.D31 (1): a clang verdict binds a gcc package only over the same third-party graph).
+openssl/*:no_zlib=True
+
 [conf]
 # -stdlib=libc++ is implied by libcxx=libc++; explicit on compile + link for robustness.
 tools.build:cflags=["-O1", "-g", "-march=x86-64-v2", "-fno-omit-frame-pointer"]

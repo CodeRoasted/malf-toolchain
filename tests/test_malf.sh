@@ -6467,6 +6467,10 @@ check "config/writer.profile declares no section but [buildenv]: the writer laye
       "[buildenv]" "$(grep -E '^\[[a-z_]+\]' "$MALF_ROOT/config/writer.profile" | sort -u | paste -sd' ')"
 check "the option the writer used to carry lives in the shared profile every consumer resolves with" \
       "1" "$(grep -c '^openssl/\*:no_zlib=True$' "$MALF_ROOT/profiles/linux-gcc16-release")"
+# Measured 2026-10-28: coderoast-security's coderoast_auth bound UNEQUAL, its clang verdict's graph naming
+# zlib/1.3.2 through an openssl the dev profile built with zlib, and its gcc ship form's none.
+check "RED-FIRST: every Linux profile configures openssl as the ship leg does, so a clang verdict and a gcc package name one third-party graph (DN-142.D31 (1))" \
+      "" "$(for profile in "$MALF_ROOT"/profiles/linux-*; do grep -q '^openssl/\*:no_zlib=True$' "$profile" || basename "$profile"; done | paste -sd' ')"
 echo
 
 echo "[7q7i] every ship-leg act resolves against malf/conan.lock, strictly: never the home's own revision, never a requirement the lock does not name (W486 G2)"
