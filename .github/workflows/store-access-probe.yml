@@ -1,15 +1,16 @@
 name: Store access probe
 
 # THE PROOF FOR DN-142.D6's R5: a repository's GITHUB_TOKEN READS the store package it is granted,
-# is REFUSED on a store package it is not granted, and CANNOT WRITE the one it is granted. The store
+# is REFUSED on a store package it is not granted, and CANNOT WRITE the one it is granted; and, for
+# DN-142.D31's own stores, CANNOT WRITE a store package another repository owns and is linked to. The store
 # is ghcr private OCI packages `store-<repository>`, written only by the release runner account's
 # token (R1); each package grants Read to its own repository and nothing else. R4 (the writer's
 # side) was measured at the desk on 2026-10-10; this is the reader's side, which only a hosted job
 # can measure.
 #
 # THE PAIRING IS THE DESIGN. Each caller names the package it is granted and one it is not, and the
-# callers are crossed: coderoast-ipc is granted store-coderoast-ipc and refused store-insight-canon,
-# insight-canon the reverse. So every refusal is answered by another run READING the same package
+# callers are crossed: insight-canon is granted store-insight-canon and refused store-coderoast,
+# coderoast the reverse. So every refusal is answered by another run READING the same package
 # with another repository's token: a refusal cannot be a missing package, a wrong tag or a broken
 # instrument. Within one run, the granted read is the control for the refused one.
 #
@@ -18,6 +19,11 @@ name: Store access probe
 # measured blob uploads accepted for a token the manifest then refused, and a blob nothing
 # references is not an object. A manifest PUT that succeeds is a LEAK, and it leaves the tag
 # `access-probe-write-<run id>` behind as its evidence; delete it by hand.
+#
+# THE FOREIGN WRITE (optional input `foreign`): a repository owning its store (DN-142.D31 (3)) has a
+# PUBLIC package linked to it, so a read proves nothing and only a write can leak. The caller names
+# another repository's own store; the manifest PUT into it must be refused. Its control is that
+# repository's own candidate, whose token writes the same package through the same link.
 #
 # THE SEED, done once per package by the writer account before any run (the Founder's terminal,
 # never a job): a manifest tagged `access-probe` whose one layer is the 29 bytes
@@ -40,15 +46,21 @@ on:
         description: A store package the calling repository is NOT granted, granted to another one.
         type: string
         required: true
+      foreign:
+        description: A store package another repository owns and is linked to (DN-142.D31), which this repository's token must not write; empty skips the check.
+        type: string
+        required: false
+        default: ''
 
 jobs:
   probe:
     runs-on: ubuntu-24.04
     steps:
-      - name: Read the granted package, be refused on the other, fail to write the granted one
+      - name: Read the granted package, be refused on the other, fail to write the granted one and the foreign one
         env:
           GRANTED: ${{ inputs.granted }}
           UNGRANTED: ${{ inputs.ungranted }}
+          FOREIGN: ${{ inputs.foreign }}
           REGISTRY_USER: ${{ github.actor }}
           REGISTRY_PASSWORD: ${{ github.token }}
           RUN_ID: ${{ github.run_id }}
@@ -100,32 +112,42 @@ jobs:
           if read_seed "$UNGRANTED"; then verdict LEAK "${GITHUB_REPOSITORY} READ $UNGRANTED"
           else verdict pass "read of $UNGRANTED refused"; fi
 
+          write_refused() {  # <package> -> a verdict on a manifest PUT made with a packages:write token
+            local pkg="$1" bt code loc sep
+            bt="$(bearer "$pkg" pull,push)"
+            code="$(call "$bt" "$work/upload.json" -X POST -D "$work/upload.headers" \
+              "https://ghcr.io/v2/$org/$pkg/blobs/uploads/")"
+            echo "  blob upload start: HTTP $code"
+            if [[ "$code" == 202 ]]; then
+              loc="$(tr -d '\r' < "$work/upload.headers" | sed -n 's/^[Ll]ocation: //p' | head -n1)"
+              [[ "$loc" == http* ]] || loc="https://ghcr.io$loc"
+              [[ "$loc" == *\?* ]] && sep='&' || sep='?'
+              printf '{}' > "$work/empty"
+              code="$(call "$bt" "$work/blob.json" -X PUT -H 'Content-Type: application/octet-stream' \
+                --data-binary "@$work/empty" "$loc${sep}digest=$empty_digest")"
+              echo "  blob upload finish: HTTP $code (a blob nothing references is not an object)"
+            fi
+            jq -nc --arg mt "$oci_manifest" --arg d "$empty_digest" '{schemaVersion: 2, mediaType: $mt,
+              artifactType: "application/vnd.coderoast.access-probe.v1",
+              config: {mediaType: "application/vnd.oci.empty.v1+json", digest: $d, size: 2},
+              layers: [{mediaType: "application/vnd.oci.empty.v1+json", digest: $d, size: 2}]}' > "$work/put.json"
+            code="$(call "$bt" "$work/put.out" -X PUT -H "Content-Type: $oci_manifest" \
+              --data-binary "@$work/put.json" "https://ghcr.io/v2/$org/$pkg/manifests/access-probe-write-$RUN_ID")"
+            echo "  manifest PUT $pkg:access-probe-write-$RUN_ID: HTTP $code $(head -c 400 "$work/put.out")"
+            case "$code" in
+              201) verdict LEAK "${GITHUB_REPOSITORY} WROTE $pkg (tag access-probe-write-$RUN_ID)" ;;
+              401|403) verdict pass "write to $pkg refused at the manifest" ;;
+              *) verdict UNCLEAR "manifest PUT answered HTTP $code: neither a write nor an authorization refusal" ;;
+            esac
+          }
+
           echo "== 3. WRITE $GRANTED with a packages:write token: the manifest PUT must be refused"
-          bt="$(bearer "$GRANTED" pull,push)"
-          code="$(call "$bt" "$work/upload.json" -X POST -D "$work/upload.headers" \
-            "https://ghcr.io/v2/$org/$GRANTED/blobs/uploads/")"
-          echo "  blob upload start: HTTP $code"
-          if [[ "$code" == 202 ]]; then
-            loc="$(tr -d '\r' < "$work/upload.headers" | sed -n 's/^[Ll]ocation: //p' | head -n1)"
-            [[ "$loc" == http* ]] || loc="https://ghcr.io$loc"
-            [[ "$loc" == *\?* ]] && sep='&' || sep='?'
-            printf '{}' > "$work/empty"
-            code="$(call "$bt" "$work/blob.json" -X PUT -H 'Content-Type: application/octet-stream' \
-              --data-binary "@$work/empty" "$loc${sep}digest=$empty_digest")"
-            echo "  blob upload finish: HTTP $code (a blob nothing references is not an object)"
+          write_refused "$GRANTED"
+
+          if [[ -n "$FOREIGN" ]]; then
+            echo "== 4. WRITE $FOREIGN (another repository's own store, linked to it) with a packages:write token: the manifest PUT must be refused"
+            write_refused "$FOREIGN"
           fi
-          jq -nc --arg mt "$oci_manifest" --arg d "$empty_digest" '{schemaVersion: 2, mediaType: $mt,
-            artifactType: "application/vnd.coderoast.access-probe.v1",
-            config: {mediaType: "application/vnd.oci.empty.v1+json", digest: $d, size: 2},
-            layers: [{mediaType: "application/vnd.oci.empty.v1+json", digest: $d, size: 2}]}' > "$work/put.json"
-          code="$(call "$bt" "$work/put.out" -X PUT -H "Content-Type: $oci_manifest" \
-            --data-binary "@$work/put.json" "https://ghcr.io/v2/$org/$GRANTED/manifests/access-probe-write-$RUN_ID")"
-          echo "  manifest PUT $GRANTED:access-probe-write-$RUN_ID: HTTP $code $(head -c 400 "$work/put.out")"
-          case "$code" in
-            201) verdict LEAK "${GITHUB_REPOSITORY} WROTE $GRANTED (tag access-probe-write-$RUN_ID)" ;;
-            401|403) verdict pass "write to $GRANTED refused at the manifest" ;;
-            *) verdict UNCLEAR "manifest PUT answered HTTP $code: neither a write nor an authorization refusal" ;;
-          esac
 
           rm -rf "$work"
           exit "$fail"

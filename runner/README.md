@@ -486,19 +486,23 @@ runs, and each runner's `.env` carries the PATH as it was when its script last r
 ## The store access probe (`DN-142.D6`, R5)
 
 The reader's side of the artefact store's ghcr replica: a repository's `GITHUB_TOKEN` reads the
-store package it is granted, is refused on one it is not, and cannot write its own. The instrument is
-malf-toolchain's `.github/workflows/store-access-probe.yml`; three repositories call it, each a
+store package it is granted, is refused on one it is not, and cannot write its own, nor another
+repository's own store (`DN-142.D31`). The instrument is
+malf-toolchain's `.github/workflows/store-access-probe.yml`; two repositories call it, each a
 dispatch-only `store-access-probe.yml`, and the callers are crossed so every refusal is answered by
 another run reading the same package:
 
-| Caller | Granted (must read, byte-equal) | Not granted (must be refused) |
-|---|---|---|
-| `coderoast-ipc` (public) | `store-coderoast-ipc` | `store-insight-canon` |
-| `insight-canon` (public) | `store-insight-canon` | `store-coderoast-ipc` |
-| `coderoast` (private) | `store-coderoast` | `store-coderoast-ipc` |
+| Caller | Granted (must read, byte-equal) | Not granted (must be refused) | Foreign (must not write) |
+|---|---|---|---|
+| `insight-canon` (public) | `store-insight-canon` | `store-coderoast` | `store-coderoast-ipc` |
+| `coderoast` (private) | `store-coderoast` | `store-insight-canon` | — |
 
 Each run also PUTs a manifest into its granted package with a `packages: write` token; the refusal
 must come at the manifest (a blob upload may be accepted first, as R4 measured, and is no object).
+`insight-canon` then PUTs one into `store-coderoast-ipc`, coderoast-ipc's own store (public, linked to
+coderoast-ipc, written by its candidate): a public package's read proves nothing, so the write is the
+check, and coderoast-ipc's own candidate pushes are its control. That package is no longer seeded
+here; it left the replica model when coderoast-ipc began owning its store.
 
 **1. Seed each package, as the writer account** (the Founder's terminal; the token is read inside
 `ghrelease`'s process and reaches curl on stdin, never an argument vector):
@@ -525,7 +529,7 @@ auth | curl -fsS -K - -X PUT -H 'Content-Type: application/vnd.oci.image.manifes
   --data-binary "@$w/m.json" "$api/manifests/access-probe" -o /dev/null -w "$pkg:access-probe HTTP %{http_code}\n"
 SEED
 }
-seed store-coderoast-ipc; seed store-insight-canon; seed store-coderoast
+seed store-insight-canon; seed store-coderoast
 ```
 
 Each line must print `HTTP 201`; the layer's digest is `sha256:5e8e719d…f403`, which the probe
@@ -540,7 +544,6 @@ the table, role **Read**, and no other repository. The page must show no linked 
 **3. Dispatch, then read each run:**
 
 ```bash
-gh workflow run store-access-probe.yml -R CodeRoasted/coderoast-ipc
 gh workflow run store-access-probe.yml -R CodeRoasted/insight-canon
 gh workflow run store-access-probe.yml -R CodeRoasted/coderoast
 gh run list -w store-access-probe.yml -L 1 -R CodeRoasted/<repository>   # then: gh run view <id> --log
@@ -548,7 +551,8 @@ gh run list -w store-access-probe.yml -L 1 -R CodeRoasted/<repository>   # then:
 
 **Expected:** each run green, with three `pass` lines — the granted read (`HTTP 200`, 29 bytes,
 content `sha256:5e8e719d…`), the other package's read refused (`401`/`403`/`404` at the manifest),
-the write refused at the manifest (`401`/`403`). A `LEAK` line is an access-control finding against
+the write refused at the manifest (`401`/`403`), and on `insight-canon` a fourth, the foreign write
+refused the same way. A `LEAK` line is an access-control finding against
 R5: report it, do not re-run around it; a successful write leaves the tag `access-probe-write-<run
 id>`, deleted by hand. A `FAIL` on the granted read means the seed or the grant is wrong, and every
 refusal in that run is then meaningless. `UNCLEAR` is an answer the probe does not classify.
