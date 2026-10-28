@@ -28,4 +28,4 @@ jobs:
           clean: false
 
       - name: Postflight — clang-tidy over the build in place
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-postflight@d9d23f5cc2e5c0ea59ac59d7e46db3f032156c6b
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-postflight@05c56e80470eb37509765f36d40b13abc8319d39
