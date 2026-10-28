@@ -26,10 +26,14 @@ on:
         required: false
         default: '{}'
       runs-on:
-        description: 'Runner label. Defaults to hosted ubuntu-24.04. PUBLIC callers omit it; PRIVATE callers pass their self-hosted label (the release runner, item 6).'
+        description: 'Runner label. Defaults to hosted ubuntu-24.04. PUBLIC callers omit it; PRIVATE callers pass their self-hosted label.'
         type: string
         required: false
         default: 'ubuntu-24.04'
+    secrets:
+      PACKAGE_PEEK_TOKEN:
+        description: 'PRIVATE callers: a classic token holding read:packages alone, for the package guard''s metadata read (a GITHUB_TOKEN reads no link of a private package). PUBLIC callers pass nothing.'
+        required: false
 
 permissions:
   contents: read
@@ -89,6 +93,7 @@ jobs:
         env:
           UPSTREAM: ${{ inputs.upstream }}
           GITHUB_TOKEN: ${{ github.token }}
+          MALF_PACKAGE_PEEK_TOKEN: ${{ secrets.PACKAGE_PEEK_TOKEN }}
         run: |
           set -euo pipefail
           printf '%s' "$UPSTREAM" > "$RUNNER_TEMP/upstream.json"

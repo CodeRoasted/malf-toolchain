@@ -45,13 +45,17 @@ package's privacy and every read judged by digest.
     store_transport.py package-check <owner/repo>
         the push's package guard, read before anything is built and writing nothing: exit 0 when the
         package has the repository's visibility and link, or when the token sees no package (the first
-        push creates and guards it); 1 refused with the setting to change. Env: GITHUB_TOKEN.
+        push creates and guards it); 1 refused with the setting to change. Env: GITHUB_TOKEN, and
+        MALF_PACKAGE_PEEK_TOKEN for a private package (below).
     store_transport.py owns-store <checkout> <commit>
         exit 0 when the repository at <commit> carries `.github/workflows/candidate.yml` (it owns its
         store, DN-142.D31 (3)), 3 when it does not
     store_transport.py selftest
         every verb against an in-process registry, a fixture API and recorded-shape attestations; no network
 
+The package guard (push, package-check) reads the package's metadata with MALF_PACKAGE_PEEK_TOKEN when it
+is set, else GITHUB_TOKEN: a GITHUB_TOKEN's answer for a PRIVATE package carries no `repository` field, so
+a private caller passes a classic token holding read:packages alone, used for that read and nothing else.
 W is `<owner>/<malf repository>/.github/workflows/coderoast-candidate.yml`; D the malf commit. Reads use
 GITHUB_TOKEN when it is set and go anonymous otherwise (a public package). MALF_STORE_REGISTRY and
 MALF_STORE_API replace https://ghcr.io and https://api.github.com (a local registry's live proof).
@@ -92,6 +96,7 @@ INDEX_SCHEMA = "coderoast.store.candidate/1"
 CANDIDATE_WORKFLOW = ".github/workflows/candidate.yml"
 SIGNER_PATH = ".github/workflows/coderoast-candidate.yml"
 SOURCE_REF = "refs/heads/main"
+PEEK_ENV = "MALF_PACKAGE_PEEK_TOKEN"
 MISMATCH_HEX = 54
 ABSENT = 3
 THIRD_PARTY_KINDS = ("third-party-create",)
@@ -690,24 +695,27 @@ def own_expected(get: Callable[[str], "tuple[int, dict]"], owner: str, name: str
     return store_replica.expected_package(owner, name, seen["visibility"])
 
 
-def package_guard(get: Callable[[str], "tuple[int, dict]"], registry: Registry, repository: str,
-                  say: Callable[[str], None]) -> Callable[[], None]:
-    """The writer's guard for an OWN store: the package has the repository's visibility and is linked to it."""
+def package_guard(get: Callable[[str], "tuple[int, dict]"], peek: Callable[[str], "tuple[int, dict]"],
+                  registry: Registry, repository: str, say: Callable[[str], None]) -> Callable[[], None]:
+    """The writer's guard for an OWN store: the package has the repository's visibility and is linked to it.
+    `peek` reads the package's metadata: a private package's link is absent from a GITHUB_TOKEN's answer
+    (measured 2026-10-28, coderoast-security run 40687600161), so a private caller passes a read:packages token."""
     owner, name = full_name(repository)
 
     def guard() -> None:
-        store_replica.ensure_guarded(registry, package_view(get, owner), owner, package_name(name), say,
+        store_replica.ensure_guarded(registry, package_view(peek, owner), owner, package_name(name), say,
                                      own_expected(get, owner, name))
     return guard
 
 
-def package_check(get: Callable[[str], "tuple[int, dict]"], repository: str, say: Callable[[str], None]) -> None:
+def package_check(get: Callable[[str], "tuple[int, dict]"], peek: Callable[[str], "tuple[int, dict]"],
+                  repository: str, say: Callable[[str], None]) -> None:
     """The writer's guard read before the candidate builds, writing nothing: a package that exists is judged
     now, and one the token cannot see is left to the push, which creates it and guards it."""
     owner, name = full_name(repository)
     package = package_name(name)
     expected = own_expected(get, owner, name)
-    view = package_view(get, owner)
+    view = package_view(peek, owner)
     if view(package) is None:
         say(f"store_transport: UNSEEN {package} — absent, or private and not linked to {owner}/{name} so its "
             f"token cannot read it; the store job's first push creates it and guards it before any object")
@@ -856,7 +864,7 @@ def selftest() -> int:
 
             fake, registry = scene()
             out = root / "out"
-            guard = package_guard(get_from(api), registry, repository, quiet.append)
+            guard = package_guard(get_from(api), get_from(api), registry, repository, quiet.append)
             code = arm("a candidate pushes every owned record and its objects, then the index blob",
                        lambda: push(registry, guard, store, repository, checkout, {}, malf_dir, {"preflight": {}},
                                     out, quiet.append), None)
@@ -1023,33 +1031,38 @@ def selftest() -> int:
                 _fake, other = scene()
                 arm(f"RED: push refuses {label}, before any object reaches the package",
                     lambda answered=answered, other=other: push(
-                        other, package_guard(get_from(answered), other, repository, quiet.append), store, repository,
+                        other, package_guard(get_from(answered), get_from(answered), other, repository, quiet.append), store, repository,
                         checkout, {}, malf_dir, {}, root / "out6", quiet.append), said)
                 expect(f"nothing was pushed on {label}", [tag for tag in _fake.tags if tag != "store-sentinel"], [])
                 arm(f"RED: package-check refuses {label}, before anything is built",
-                    lambda answered=answered: package_check(get_from(answered), repository, quiet.append), said)
+                    lambda answered=answered: package_check(get_from(answered), get_from(answered), repository, quiet.append), said)
             arm("package-check passes a public repository's store, public and linked to it",
-                lambda: package_check(get_from(api), repository, quiet.append), None)
+                lambda: package_check(get_from(api), get_from(api), repository, quiet.append), None)
             unseen = {path: body for path, body in api.items() if "packages" not in path}
             quiet.clear()
             arm("package-check leaves a package the token cannot see to the push that creates and guards it",
-                lambda: package_check(get_from(unseen), repository, quiet.append), None)
+                lambda: package_check(get_from(unseen), get_from(unseen), repository, quiet.append), None)
             expect("package-check says it judged nothing on an unseen package",
                    [line.split(" — ")[0] for line in quiet], ["store_transport: UNSEEN store-coderoast-ipc"])
             private = {**api, "repos/coderoasted/coderoast-ipc": {"visibility": "private"},
                        "orgs/coderoasted/packages/container/store-coderoast-ipc": {
                            "visibility": "private", "repository": {"full_name": "coderoasted/coderoast-ipc"}}}
+            unlinked_view = {**private, "orgs/coderoasted/packages/container/store-coderoast-ipc": {"visibility": "private"}}
+            arm("RED: package-check refuses a private package whose link the token's answer omits, naming the peek token",
+                lambda: package_check(get_from(private), get_from(unlinked_view), repository, quiet.append), PEEK_ENV)
+            arm("package-check reads a private package's link through the peek token, the repository through the run's",
+                lambda: package_check(get_from(unlinked_view), get_from(private), repository, quiet.append), None)
             _fake, other = scene()
             (store / "records" / f"{own_package}.json").unlink()
             arm("a private repository's store, private and linked to it, takes the push (item 6)",
-                lambda: push(other, package_guard(get_from(private), other, repository, quiet.append), store, repository,
+                lambda: push(other, package_guard(get_from(private), get_from(private), other, repository, quiet.append), store, repository,
                              checkout, {}, malf_dir, {}, root / "out7", quiet.append), None)
             user = {"users/someone": {"type": "User"}, "repos/someone/coderoast-ipc": {"visibility": "public"},
                     "users/someone/packages/container/store-coderoast-ipc": {
                         "visibility": "public", "repository": {"full_name": "someone/coderoast-ipc"}}}
             _fake, forked = scene()
             arm("a fork owned by a user writes its own store, its package read under /users (P7)",
-                lambda: push(forked, package_guard(get_from(user), forked, "someone/coderoast-ipc", quiet.append),
+                lambda: push(forked, package_guard(get_from(user), get_from(user), forked, "someone/coderoast-ipc", quiet.append),
                              store, "someone/coderoast-ipc", checkout, {}, malf_dir, {}, root / "out8", quiet.append), None)
             expect("the fork's index names the fork, and its key is the fork's",
                    json.loads((root / "out8" / "index.json").read_bytes())["candidate"],
@@ -1124,10 +1137,14 @@ def main(argv: list[str]) -> int:
         return 2
     say = print
     token = os.environ.get("GITHUB_TOKEN") or None
+    peek_token = os.environ.get(PEEK_ENV) or token
     api = os.environ.get(API_ENV, store_replica.API)
 
     def get(path: str) -> tuple[int, dict]:
         return api_get(api, path, token)
+
+    def peek(path: str) -> tuple[int, dict]:
+        return api_get(api, path, peek_token)
 
     try:
         if args.verb == "candidate-key":
@@ -1136,14 +1153,14 @@ def main(argv: list[str]) -> int:
         if args.verb == "owns-store":
             return 0 if owns_store(Path(args.checkout), args.commit) else ABSENT
         if args.verb == "package-check":
-            package_check(get, args.repository, say)
+            package_check(get, peek, args.repository, say)
             return 0
         if args.verb in ("push", "publish-index") and not token:
             raise Refused("GITHUB_TOKEN is unset: a candidate writes its store with its own repository's token")
         registry = _registry(args.repository, token)
         if args.verb == "push":
             extra = json.loads(Path(args.extra).read_text(encoding="utf-8")) if args.extra else {}
-            return push(registry, package_guard(get, registry, args.repository, say), Path(args.store),
+            return push(registry, package_guard(get, peek, registry, args.repository, say), Path(args.store),
                         args.repository, Path(args.checkout), read_upstream(args.upstream),
                         Path(__file__).resolve().parent, extra, Path(args.out), say)
         if args.verb == "publish-index":

@@ -332,7 +332,9 @@ def package_defect(seen: dict | None, package: str, expected: Expected) -> str |
         if expected.linked is None:
             return (f"{package} is linked to {linked}: a linked package lets that repository's workflows "
                     f"write it, and step 0's replica is linked to no repository")
-        answered = "carries no `repository` field" if "repository" not in seen else f"names `repository` {seen['repository']!r}"
+        answered = ("carries no `repository` field, as a GITHUB_TOKEN's answer for a private package does: pass a "
+                    "read:packages token as MALF_PACKAGE_PEEK_TOKEN" if "repository" not in seen
+                    else f"names `repository` {seen['repository']!r}")
         return (f"{package} is linked to {linked or 'no repository'}, not {expected.linked} (the API's answer "
                 f"{answered}): a repository that owns its store writes it with its own token, through that link")
     return None

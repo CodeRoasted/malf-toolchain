@@ -29,6 +29,10 @@ on:
         type: string
         required: false
         default: 'ubuntu-24.04'
+    secrets:
+      PACKAGE_PEEK_TOKEN:
+        description: 'PRIVATE callers: a classic token holding read:packages alone, for the package guard''s metadata read (a GITHUB_TOKEN reads no link of a private package). PUBLIC callers pass nothing.'
+        required: false
     outputs:
       key:
         description: 'The candidate key.'
@@ -74,6 +78,7 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          MALF_PACKAGE_PEEK_TOKEN: ${{ secrets.PACKAGE_PEEK_TOKEN }}
         run: python3 "$MALF_CHECKOUT/store_transport.py" package-check "$GITHUB_REPOSITORY"
 
       - name: The candidate key, and whether the store holds it (ghcr only)
