@@ -63,7 +63,7 @@ runs:
         } >> "$GITHUB_ENV"
 
     - name: Provision the version-matched clang-tidy, asserted to be clang-21's OWN
-      uses: CodeRoasted/malf-toolchain/.github/actions/setup-clang21-tools@4aaf001de1b7fad67beca98570cb34dac5f2ec18
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-clang21-tools@85015ce280526a82611898b94e04e05c3045f33c
       with:
         clang-tidy-major: ${{ inputs.clang-tidy-major }}
 
