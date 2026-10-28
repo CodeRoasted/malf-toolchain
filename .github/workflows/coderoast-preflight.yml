@@ -126,7 +126,7 @@ jobs:
 
       - name: C++ modules conformance
         if: ${{ inputs.module-conformance }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-module-conformance@7c401d53b6451d6a8799bce5e15e1b17ffc1b7be
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-module-conformance@a1ce3b951d068633f9f117f1e8591582e701d86a
 
       # Last, because it provisions clang-21 to get a version-matched clang-format. On the
       # self-hosted fleet that provisioning is an idempotent no-op (the toolchain persists between
@@ -134,7 +134,7 @@ jobs:
       # above report first and a repo never pays for the toolchain to learn its workflows are broken.
       - name: C++ format conformance
         if: ${{ inputs.format-check }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-format-check@7c401d53b6451d6a8799bce5e15e1b17ffc1b7be
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-format-check@a1ce3b951d068633f9f117f1e8591582e701d86a
 
       # Cheap (no toolchain, no build — it reads text), but placed last on purpose: it is the
       # newest gate here, and a repo should learn its workflows, modules and formatting are sound
@@ -184,6 +184,6 @@ jobs:
 
       - name: Dead symbol in comment
         if: ${{ inputs.dead-symbol-check }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dead-symbol@7c401d53b6451d6a8799bce5e15e1b17ffc1b7be
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dead-symbol@a1ce3b951d068633f9f117f1e8591582e701d86a
         with:
           range: ${{ steps.dead-symbol-range.outputs.range }}
