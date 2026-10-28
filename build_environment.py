@@ -504,6 +504,22 @@ def grant_act_access(mounts: list[Path] | tuple, docker: str = "docker", read_on
                           f"mount: {done.stderr.strip()}")
 
 
+def reclaim_argv(pin: Pin, docker: str, mounts: list[Path] | tuple, host_uid: int, host_gid: int,
+                 act_kernel_uid: int) -> list[str]:
+    """The one short act, in the same pinned image, that gives the host user back what the act created under its
+    writable mounts, when the act wrote as another uid (a rootful daemon: uid 0). Ownership only, never a byte:
+    measured on a hosted runner (ipc run 40648292075), the store objects the act wrote were unreadable by the
+    runner user, whose artifact upload then failed EACCES, because a file's ACL mask follows its creation mode.
+    Empty when the act wrote as the host user (a rootless daemon: the desk)."""
+    if act_kernel_uid == host_uid or not mounts:
+        return []
+    command = [docker, "run", "--rm", "--network", "none", "--user", "0:0"]
+    for mount in mounts:
+        command += ["--volume", f"{mount}:{mount}"]
+    return [*command, pin.id, "find", *map(str, mounts), "-uid", str(act_kernel_uid),
+            "-exec", "chown", "-h", f"{host_uid}:{host_gid}", "{}", "+"]
+
+
 def run(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], docker: str = "docker", read_only: list[Path] | tuple = (), host_pids: bool = False,
         home: str = CONTAINER_HOME, backends: list[Backend] | tuple = (), attest: Path | None = None,
         worktree_repositories: list[Path] | tuple = (), namespaces: bool = False) -> int:
@@ -524,14 +540,28 @@ def run(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], docker:
         return subprocess.run(command, stdin=subprocess.DEVNULL, check=False).returncode
 
     apparmor, systempaths = namespaces_lifts(docker, namespaces)
-    if not backends:
-        return started(run_argv(pin, argv, mounts, names, Path.cwd(), docker,
-                                read_only=read_only, host_pids=host_pids, home=home, apparmor=apparmor,
-                                systempaths=systempaths))
-    with BackendWalk(docker, backends) as walk:
-        return started(run_argv(pin, argv, mounts, names, Path.cwd(), docker,
-                                read_only=read_only, host_pids=host_pids, home=home,
-                                network=walk.network, name=walk.act, apparmor=apparmor, systempaths=systempaths))
+    reclaim = reclaim_argv(pin, docker, [mount for mount in mounts if mount.is_dir()], os.getuid(), os.getgid(),
+                           act_kernel_uid(docker, os.getuid()))
+    code = REFUSED
+    try:
+        if not backends:
+            code = started(run_argv(pin, argv, mounts, names, Path.cwd(), docker,
+                                    read_only=read_only, host_pids=host_pids, home=home, apparmor=apparmor,
+                                    systempaths=systempaths))
+        else:
+            with BackendWalk(docker, backends) as walk:
+                code = started(run_argv(pin, argv, mounts, names, Path.cwd(), docker,
+                                        read_only=read_only, host_pids=host_pids, home=home,
+                                        network=walk.network, name=walk.act, apparmor=apparmor,
+                                        systempaths=systempaths))
+    finally:
+        if reclaim:
+            done = subprocess.run(reclaim, capture_output=True, text=True, stdin=subprocess.DEVNULL, check=False)
+            if done.returncode != 0:
+                print(f"build_environment: the act's entries could not be given back to uid {os.getuid()} "
+                      f"(`{' '.join(reclaim)}` exited {done.returncode}): {done.stderr.strip()}", file=sys.stderr)
+                code = code or REFUSED
+    return code
 
 
 # ── the walk's backends (DN-142.D30 (5) E2b, (7) R2) ───────────────────────────────────────────────
@@ -1563,6 +1593,13 @@ def selftest() -> int:
              "apparmor=unconfined" in spaced and "systempaths=unconfined" in spaced,
              "apparmor=unconfined" in plain or "systempaths=unconfined" in plain),
             (True, True, False))
+        arm("a rootless daemon (the act wrote as the host user) reclaims nothing",
+            reclaim_argv(pinned, "docker", [recipes], 1000, 1000, 1000), [])
+        arm("RED: a rootful daemon gives the host user back what the act (uid 0) created under its writable mounts, "
+            "in one networkless act of the pinned image, ownership only",
+            reclaim_argv(pinned, "docker", [recipes], 1001, 118, 0),
+            ["docker", "run", "--rm", "--network", "none", "--user", "0:0", "--volume", f"{recipes}:{recipes}",
+             pinned.id, "find", str(recipes), "-uid", "0", "-exec", "chown", "-h", "1001:118", "{}", "+"])
         arm("RED: no act is lifted unless it asks for namespaces (a package declaring `unconfined:`)",
             namespaces_lifts("docker", False), (False, False))
         arm("every writable mount, and only those, is a git safe.directory for the act, through git's environment",
