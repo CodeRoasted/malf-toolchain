@@ -4,7 +4,9 @@ name: CodeRoast Candidate Present
 # canonical {repository, tree, upstream}, and whether the repository's own store already holds that
 # candidate. PRESENT is the no-op: the caller then starts no other job, so a relaunch at a stored
 # commit starts no container and no compiler (P2). The test reads ghcr, never a runner's cache, so a
-# hosted runner and the release runner answer it identically (item 6).
+# hosted runner and the release runner answer it identically (item 6). It first reads the push's
+# package guard (visibility and link, THE ONE RULE), so a package the store job would refuse reds here,
+# in seconds, never after the build; the push still guards, since a setting can change between the two.
 #
 # Trust: a PUBLIC repository's index counts only through its GitHub artifact attestation, signed by
 # malf's `coderoast-candidate.yml` at this very malf commit, from `refs/heads/main` of the repository
@@ -57,6 +59,12 @@ jobs:
         uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@7c401d53b6451d6a8799bce5e15e1b17ffc1b7be
         with:
           workflow: coderoast-candidate-present.yml
+
+      - name: The store package's visibility and link, before anything is built
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 "$MALF_CHECKOUT/store_transport.py" package-check "$GITHUB_REPOSITORY"
 
       - name: The candidate key, and whether the store holds it (ghcr only)
         id: present

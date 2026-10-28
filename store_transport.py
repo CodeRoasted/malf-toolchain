@@ -42,6 +42,10 @@ package's privacy and every read judged by digest.
     store_transport.py verify <owner/repo> <tag> --signer-workflow W [--signer-digest D]
         the attestation of the manifest at <tag>: exit 0 VERIFIED (prints the source commit and the
         signer digest), 3 ABSENT
+    store_transport.py package-check <owner/repo>
+        the push's package guard, read before anything is built and writing nothing: exit 0 when the
+        package has the repository's visibility and link, or when the token sees no package (the first
+        push creates and guards it); 1 refused with the setting to change. Env: GITHUB_TOKEN.
     store_transport.py owns-store <checkout> <commit>
         exit 0 when the repository at <commit> carries `.github/workflows/candidate.yml` (it owns its
         store, DN-142.D31 (3)), 3 when it does not
@@ -659,14 +663,9 @@ def api_get(api: str, path: str, token: str | None) -> tuple[int, dict]:
         return answer.status, {}
 
 
-def package_guard(get: Callable[[str], "tuple[int, dict]"], registry: Registry, repository: str,
-                  say: Callable[[str], None]) -> Callable[[], None]:
-    """The writer's guard for an OWN store: the package has the repository's visibility and is linked to
-    it (store_replica.expected_package, the rule Pharos's A1c reads)."""
-    owner, name = full_name(repository)
-    package = package_name(name)
-
-    def view(_package: str) -> dict | None:
+def package_view(get: Callable[[str], "tuple[int, dict]"], owner: str) -> Callable[[str], dict | None]:
+    """The GitHub view of an `owner`'s container package, None when the token sees no such package."""
+    def view(package: str) -> dict | None:
         status, user = get(f"users/{owner}")
         if status != 200:
             raise Refused(f"the API answered HTTP {status} for the owner {owner}")
@@ -678,15 +677,43 @@ def package_guard(get: Callable[[str], "tuple[int, dict]"], registry: Registry, 
             raise Refused(f"the package API answered HTTP {status} for {package}; its visibility cannot be "
                           f"verified, so nothing is written")
         return seen
+    return view
+
+
+def own_expected(get: Callable[[str], "tuple[int, dict]"], owner: str, name: str) -> store_replica.Expected:
+    """What the repository's own store package must be (store_replica.expected_package, the rule Pharos's
+    A1c reads), from the repository's visibility as the API answers it."""
+    status, seen = get(f"repos/{owner}/{name}")
+    if status != 200 or seen.get("visibility") not in store_replica.VISIBILITIES:
+        raise Refused(f"the API answered HTTP {status} and visibility {seen.get('visibility')!r} for "
+                      f"{owner}/{name}")
+    return store_replica.expected_package(owner, name, seen["visibility"])
+
+
+def package_guard(get: Callable[[str], "tuple[int, dict]"], registry: Registry, repository: str,
+                  say: Callable[[str], None]) -> Callable[[], None]:
+    """The writer's guard for an OWN store: the package has the repository's visibility and is linked to it."""
+    owner, name = full_name(repository)
 
     def guard() -> None:
-        status, seen = get(f"repos/{owner}/{name}")
-        if status != 200 or seen.get("visibility") not in store_replica.VISIBILITIES:
-            raise Refused(f"the API answered HTTP {status} and visibility {seen.get('visibility')!r} for "
-                          f"{owner}/{name}")
-        store_replica.ensure_guarded(registry, view, owner, package, say,
-                                     store_replica.expected_package(owner, name, seen["visibility"]))
+        store_replica.ensure_guarded(registry, package_view(get, owner), owner, package_name(name), say,
+                                     own_expected(get, owner, name))
     return guard
+
+
+def package_check(get: Callable[[str], "tuple[int, dict]"], repository: str, say: Callable[[str], None]) -> None:
+    """The writer's guard read before the candidate builds, writing nothing: a package that exists is judged
+    now, and one the token cannot see is left to the push, which creates it and guards it."""
+    owner, name = full_name(repository)
+    package = package_name(name)
+    expected = own_expected(get, owner, name)
+    view = package_view(get, owner)
+    if view(package) is None:
+        say(f"store_transport: UNSEEN {package} — absent, or private and not linked to {owner}/{name} so its "
+            f"token cannot read it; the store job's first push creates it and guards it before any object")
+        return
+    store_replica.verify_package(view, owner, package, expected)
+    say(f"store_transport: GUARDED {package} — {expected.visibility}, linked to {expected.linked}")
 
 
 def live_gh(argv: list[str]) -> tuple[int, str, str]:
@@ -999,6 +1026,16 @@ def selftest() -> int:
                         other, package_guard(get_from(answered), other, repository, quiet.append), store, repository,
                         checkout, {}, malf_dir, {}, root / "out6", quiet.append), said)
                 expect(f"nothing was pushed on {label}", [tag for tag in _fake.tags if tag != "store-sentinel"], [])
+                arm(f"RED: package-check refuses {label}, before anything is built",
+                    lambda answered=answered: package_check(get_from(answered), repository, quiet.append), said)
+            arm("package-check passes a public repository's store, public and linked to it",
+                lambda: package_check(get_from(api), repository, quiet.append), None)
+            unseen = {path: body for path, body in api.items() if "packages" not in path}
+            quiet.clear()
+            arm("package-check leaves a package the token cannot see to the push that creates and guards it",
+                lambda: package_check(get_from(unseen), repository, quiet.append), None)
+            expect("package-check says it judged nothing on an unseen package",
+                   [line.split(" — ")[0] for line in quiet], ["store_transport: UNSEEN store-coderoast-ipc"])
             private = {**api, "repos/coderoasted/coderoast-ipc": {"visibility": "private"},
                        "orgs/coderoasted/packages/container/store-coderoast-ipc": {
                            "visibility": "private", "repository": {"full_name": "coderoasted/coderoast-ipc"}}}
@@ -1067,6 +1104,8 @@ def main(argv: list[str]) -> int:
     verb.add_argument("--upstream"), verb.add_argument("--extra")
     verb = verbs.add_parser("publish-index")
     verb.add_argument("repository"), verb.add_argument("out")
+    verb = verbs.add_parser("package-check")
+    verb.add_argument("repository")
     verb = verbs.add_parser("owns-store")
     verb.add_argument("checkout"), verb.add_argument("commit")
     for name, positional in (("candidate-present", ("repository", "key")),
@@ -1096,6 +1135,9 @@ def main(argv: list[str]) -> int:
             return 0
         if args.verb == "owns-store":
             return 0 if owns_store(Path(args.checkout), args.commit) else ABSENT
+        if args.verb == "package-check":
+            package_check(get, args.repository, say)
+            return 0
         if args.verb in ("push", "publish-index") and not token:
             raise Refused("GITHUB_TOKEN is unset: a candidate writes its store with its own repository's token")
         registry = _registry(args.repository, token)
