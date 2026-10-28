@@ -28,6 +28,11 @@ on:
         type: string
         required: false
         default: '{}'
+      sources:
+        description: 'The source-only upstreams, a JSON object {<owner>/<repository>: <commit>} (repositories whose recipes are required and which ship no package); `{}` for none.'
+        type: string
+        required: false
+        default: '{}'
       runs-on:
         description: 'Runner label. Defaults to hosted ubuntu-24.04. PUBLIC callers omit it. PRIVATE callers pass their self-hosted label.'
         type: string
@@ -70,6 +75,20 @@ jobs:
             --sources "$RUNNER_TEMP/upstream" --signer-workflow "$SIGNER_WORKFLOW"
           roots="$(python3 -c 'import json, sys; print(":".join(entry["root"] for entry in json.load(open(sys.argv[1])).values()))' "$RUNNER_TEMP/upstream-out.json")"
           echo "MALF_UPSTREAM_ROOTS=$roots" >> "$GITHUB_ENV"
+
+      - name: The source-only upstreams, cloned at the commits the candidate names
+        if: ${{ inputs.sources != '{}' }}
+        shell: bash
+        env:
+          SOURCES: ${{ inputs.sources }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$SOURCES" > "$RUNNER_TEMP/sources.json"
+          python3 "$MALF_CHECKOUT/store_transport.py" sources "$RUNNER_TEMP/sources.json" "$RUNNER_TEMP/sources-out.json" \
+            "$RUNNER_TEMP/sources"
+          roots="$(python3 -c 'import json, sys; print(":".join(entry["root"] for entry in json.load(open(sys.argv[1])).values()))' "$RUNNER_TEMP/sources-out.json")"
+          echo "MALF_UPSTREAM_ROOTS=${MALF_UPSTREAM_ROOTS:+$MALF_UPSTREAM_ROOTS:}$roots" >> "$GITHUB_ENV"
 
       - name: Dev leg in the image (source verdict) and its postflight
         uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-source-verdict@d9d23f5cc2e5c0ea59ac59d7e46db3f032156c6b

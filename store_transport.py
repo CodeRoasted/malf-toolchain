@@ -42,6 +42,11 @@ package's privacy and every read judged by digest.
     store_transport.py verify <owner/repo> <tag> --signer-workflow W [--signer-digest D]
         the attestation of the manifest at <tag>: exit 0 VERIFIED (prints the source commit and the
         signer digest), 3 ABSENT
+    store_transport.py sources <sources.json> <out.json> <into>
+        every SOURCE-ONLY upstream ({owner/repo: commit}, a repository whose recipes are required and which
+        ships no package) cloned at its commit into <into>/<repo>; <out.json> holds {owner/repo: {commit,
+        tree, root}}. The commit is the trust: git addresses the tree by it. candidate-key and push take the
+        same document as --sources, a key member only when non-empty.
     store_transport.py upstream <upstream.json> <out.json> [--sources DIR] [--store DIR] [--signer-workflow W]
         every upstream candidate the document names, read through its own store's trust (a public one's
         attestation, W; a private one's privacy and GITHUB_TOKEN): <out.json> holds {owner/repo: {key,
@@ -169,7 +174,11 @@ def one_layer_manifest(artifact: str, media: str, data: bytes) -> bytes:
 # ── the candidate key (DN-142.D31 (2)) ─────────────────────────────────────────────────────────────
 
 
-def candidate_document(repository: str, tree: str, upstream: dict[str, str]) -> dict:
+def candidate_document(repository: str, tree: str, upstream: dict[str, str],
+                       sources: dict[str, str] | None = None) -> dict:
+    """{repository, tree, upstream[, sources]}: `sources` names the SOURCE-ONLY upstreams by commit (a repository
+    whose recipes this one's packages require and which ships no package, e.g. coderoast-hub's logcraft_dsl;
+    the Founder, 2026-10-28), a member only when non-empty, so a candidate naming none keeps its key."""
     owner, name = full_name(repository)
     if not (HEX40.match(tree) or HEX64.match(tree)):
         raise Refused(f"{tree!r} is not a git tree id")
@@ -179,11 +188,20 @@ def candidate_document(repository: str, tree: str, upstream: dict[str, str]) -> 
         if not isinstance(key, str) or not HEX64.match(key):
             raise Refused(f"upstream {upstream_repository}: {key!r} is not a candidate key (64 hex)")
         members[f"{upstream_owner}/{upstream_name}"] = key
-    return {"repository": f"{owner}/{name}", "tree": tree, "upstream": members}
+    document = {"repository": f"{owner}/{name}", "tree": tree, "upstream": members}
+    if sources:
+        commits = {}
+        for source_repository, commit in sources.items():
+            source_owner, source_name = full_name(source_repository)
+            if not isinstance(commit, str) or not HEX40.match(commit):
+                raise Refused(f"source {source_repository}: {commit!r} is not a commit (40 hex)")
+            commits[f"{source_owner}/{source_name}"] = commit
+        document["sources"] = commits
+    return document
 
 
-def candidate_key(repository: str, tree: str, upstream: dict[str, str]) -> str:
-    return sha256(canonical(candidate_document(repository, tree, upstream)))
+def candidate_key(repository: str, tree: str, upstream: dict[str, str], sources: dict[str, str] | None = None) -> str:
+    return sha256(canonical(candidate_document(repository, tree, upstream, sources)))
 
 
 def _git(checkout: Path, *argv: str) -> str:
@@ -435,7 +453,7 @@ def index_defects(index: dict, repository: str, key: str) -> list[str]:
     if index.get("candidate") != key:
         defects.append(f"it names candidate {index.get('candidate')!r}, read at {key}")
     try:
-        derived = candidate_key(repository, str(index.get("tree")), index.get("upstream") or {})
+        derived = candidate_key(repository, str(index.get("tree")), index.get("upstream") or {}, index.get("sources") or {})
         if derived != key:
             defects.append(f"its repository, tree and upstream hash to {derived}, not {key}")
     except Refused as refused:
@@ -601,12 +619,13 @@ def push_record(registry: Registry, store: Path, path: Path, pushed: Pushed, say
 
 
 def push(registry: Registry, guard: Callable[[], None], store: Path, repository: str, checkout: Path,
-         upstream: dict[str, str], malf_dir: Path, extra: dict, out: Path, say: Callable[[str], None]) -> int:
+         upstream: dict[str, str], malf_dir: Path, extra: dict, out: Path, say: Callable[[str], None],
+         sources: dict[str, str] | None = None) -> int:
     """Every owned record of `store` and its objects, then the index's blob; the index and the subjects
     to attest written to `out`. 1 when a record at an existing key differs (nothing indexed)."""
     owner, name = full_name(repository)
     commit, tree = checkout_identity(checkout)
-    key = candidate_key(repository, tree, upstream)
+    key = candidate_key(repository, tree, upstream, sources)
     malf_commit, malf_tree = _git(malf_dir, "rev-parse", "HEAD"), artefact_store.worktree_tree_id(malf_dir)
     if malf_tree != _git(malf_dir, "rev-parse", "HEAD^{tree}"):
         raise Refused(f"malf at {malf_dir} differs from its commit {malf_commit}: an index names the commit "
@@ -625,8 +644,9 @@ def push(registry: Registry, guard: Callable[[], None], store: Path, repository:
         for line in pushed.mismatches:
             say(f"store_transport: MISMATCH {line}")
         return 1
+    document = candidate_document(repository, tree, upstream, sources)
     index = {"schema": INDEX_SCHEMA, "repository": f"{owner}/{name}", "commit": commit, "tree": tree,
-             "candidate": key, "upstream": candidate_document(repository, tree, upstream)["upstream"],
+             "candidate": key, "upstream": document["upstream"], **({"sources": document["sources"]} if sources else {}),
              "malf": {"commit": malf_commit, "tree": malf_tree},
              "image": json.loads(ENVIRONMENT_PIN.read_text(encoding="utf-8"))["image"],
              "records": sorted(pushed.entries, key=lambda entry: entry["key"]), "extra": extra}
@@ -889,6 +909,12 @@ def selftest() -> int:
                    candidate_key("coderoasted/CODEROAST-IPC", tree, {}), key)
             expect("an upstream candidate key changes the key",
                    candidate_key(repository, tree, {"CodeRoasted/coderoast-ipc": "a" * 64}) != key, True)
+            expect("a candidate naming no source-only upstream keeps its key (the member is absent, not empty)",
+                   candidate_key(repository, tree, {}, {}), key)
+            expect("a source-only upstream's commit changes the key",
+                   candidate_key(repository, tree, {}, {"CodeRoasted/coderoast-hub": "b" * 40}) != key, True)
+            arm("RED: a source-only upstream named by no commit is refused",
+                lambda: candidate_key(repository, tree, {}, {"o/r": "a" * 64}), "not a commit")
             arm("RED: an upstream member that is not a candidate key is refused",
                 lambda: candidate_key(repository, tree, {"o/r": "short"}), "not a candidate key")
             arm("RED: a repository that is not owner/name is refused",
@@ -1187,6 +1213,23 @@ def _verifier(args: argparse.Namespace, get: Callable[[str], "tuple[int, dict]"]
     return Verifier(f"{owner}/{name}", args.signer_workflow, args.signer_digest, live_gh, live_tree_of(get))
 
 
+def sources_verb(args: argparse.Namespace, token: str | None, say: Callable[[str], None]) -> int:
+    """`sources`: every source-only upstream of the document cloned at its commit into <into>/<repo>; <out>
+    holds {owner/repo: {commit, tree, root}}. A commit names its tree, so git's own addressing is the trust."""
+    server = os.environ.get("GITHUB_SERVER_URL", "https://github.com").rstrip("/")
+    clone = live_clone(server, token)
+    resolved: dict[str, dict] = {}
+    for repository, commit in sorted(read_upstream(args.sources).items()):
+        full = "/".join(full_name(repository)).lower()
+        if not isinstance(commit, str) or not HEX40.match(commit):
+            raise Refused(f"source {repository}: {commit!r} is not a commit (40 hex)")
+        root = Path(args.into) / full_name(repository)[1]
+        resolved[full] = {"commit": commit, "tree": clone(full, commit, root), "root": str(root)}
+        say(f"store_transport: SOURCE {full} at commit {commit}")
+    Path(args.out).write_text(json.dumps(resolved, sort_keys=True, indent=1) + "\n", encoding="utf-8")
+    return 0
+
+
 def upstream_verb(args: argparse.Namespace, get: Callable[[str], "tuple[int, dict]"], token: str | None,
                   say: Callable[[str], None]) -> int:
     """`upstream`: every upstream candidate of the document, through its own store's trust (a public one's
@@ -1225,12 +1268,15 @@ def main(argv: list[str]) -> int:
     verbs = parser.add_subparsers(dest="verb", required=True)
     verb = verbs.add_parser("candidate-key")
     verb.add_argument("repository"), verb.add_argument("checkout"), verb.add_argument("upstream", nargs="?")
+    verb.add_argument("--sources")
     verb = verbs.add_parser("push")
     for name in ("repository", "checkout", "store", "out"):
         verb.add_argument(name)
-    verb.add_argument("--upstream"), verb.add_argument("--extra")
+    verb.add_argument("--upstream"), verb.add_argument("--extra"), verb.add_argument("--sources")
     verb = verbs.add_parser("publish-index")
     verb.add_argument("repository"), verb.add_argument("out")
+    verb = verbs.add_parser("sources")
+    verb.add_argument("sources"), verb.add_argument("out"), verb.add_argument("into")
     verb = verbs.add_parser("upstream")
     verb.add_argument("upstream"), verb.add_argument("out")
     verb.add_argument("--sources"), verb.add_argument("--store"), verb.add_argument("--signer-workflow")
@@ -1265,12 +1311,15 @@ def main(argv: list[str]) -> int:
 
     try:
         if args.verb == "candidate-key":
-            print(candidate_key(args.repository, checkout_identity(Path(args.checkout))[1], read_upstream(args.upstream)))
+            print(candidate_key(args.repository, checkout_identity(Path(args.checkout))[1], read_upstream(args.upstream),
+                                read_upstream(args.sources)))
             return 0
         if args.verb == "owns-store":
             return 0 if owns_store(Path(args.checkout), args.commit) else ABSENT
         if args.verb == "upstream":
             return upstream_verb(args, get, token, say)
+        if args.verb == "sources":
+            return sources_verb(args, token, say)
         if args.verb == "package-check":
             package_check(get, peek, args.repository, say)
             return 0
@@ -1281,7 +1330,7 @@ def main(argv: list[str]) -> int:
             extra = json.loads(Path(args.extra).read_text(encoding="utf-8")) if args.extra else {}
             return push(registry, package_guard(get, peek, registry, args.repository, say), Path(args.store),
                         args.repository, Path(args.checkout), read_upstream(args.upstream),
-                        Path(__file__).resolve().parent, extra, Path(args.out), say)
+                        Path(__file__).resolve().parent, extra, Path(args.out), say, read_upstream(args.sources))
         if args.verb == "publish-index":
             return publish_index(registry, Path(args.out), say)
         owner, name = full_name(args.repository)

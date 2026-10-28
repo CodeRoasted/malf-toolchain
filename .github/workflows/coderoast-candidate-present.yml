@@ -27,6 +27,11 @@ on:
         type: string
         required: false
         default: '{}'
+      sources:
+        description: 'The source-only upstreams, a JSON object {<owner>/<repository>: <commit>} (repositories whose recipes are required and which ship no package); `{}` for none.'
+        type: string
+        required: false
+        default: '{}'
       runs-on:
         description: 'Runner label. Defaults to hosted ubuntu-24.04. PUBLIC callers omit it; PRIVATE callers pass their self-hosted label.'
         type: string
@@ -118,6 +123,7 @@ jobs:
         shell: bash
         env:
           UPSTREAM: ${{ inputs.upstream }}
+          SOURCES: ${{ inputs.sources }}
           PRIVATE: ${{ github.event.repository.private }}
           SIGNER_WORKFLOW: ${{ steps.malf.outputs.signer-workflow }}
           SIGNER_DIGEST: ${{ steps.malf.outputs.commit }}
@@ -126,7 +132,9 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s' "$UPSTREAM" > "$RUNNER_TEMP/upstream.json"
-          key="$(python3 "$MALF_CHECKOUT/store_transport.py" candidate-key "$GITHUB_REPOSITORY" "$GITHUB_WORKSPACE" "$RUNNER_TEMP/upstream.json")"
+          printf '%s' "$SOURCES" > "$RUNNER_TEMP/sources.json"
+          key="$(python3 "$MALF_CHECKOUT/store_transport.py" candidate-key "$GITHUB_REPOSITORY" "$GITHUB_WORKSPACE" "$RUNNER_TEMP/upstream.json" \
+            --sources "$RUNNER_TEMP/sources.json")"
           echo "key=$key" >> "$GITHUB_OUTPUT"
           if [ "$PRIVATE" = true ]; then
             trust=(--private)
