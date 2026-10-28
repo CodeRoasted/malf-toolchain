@@ -5153,8 +5153,9 @@ Commands:
                                    beneath each --read root, writable only beneath each --write
                                    root, every other path EACCES; exit the command's, 2 refused
                                    (no Landlock, an absent root) with nothing run
-    inventory [subdir] [--profile <name>]
-                                   the build-inventory gate (ADR-3.D10) over the repo that owns subdir
+    inventory [subdir] [--profile <name>] [--test]
+                                   the build-inventory gate (ADR-3.D10) over the repo that owns subdir;
+                                   --test also runs the tests each cell registers (ADR-3.D9)
     lock    [--update]             regenerate malf/conan.lock by accumulating EVERY workspace
                                    root, under the desk profile and every profile of
                                    malf/profiles/, into one lockfile (one file serves all
@@ -7001,6 +7002,23 @@ cmd_source_verdict() {
             "$scratch/$name.source-key.json" "$junit" "$path" \
             || { [[ $rc -ne 0 ]] || failed+=("$name"); }
     done
+    # THE INVENTORY (ADR-3.D9): the CMake projects no package build configures, compiled and their tests
+    # run once the packages are built, in an act of the same shape. `malf test --only` never runs them, so a
+    # dev leg without this reports green over a harness that does not compile (measured 2026-10-28:
+    # insight-metalog's candidate, scripts/determinism_fixture.cpp in no compile database).
+    if [[ "${MALF_SOURCE_VERDICT_SET:-confined}" == confined ]] \
+            && python3 -c 'import sys, yaml; sys.exit(0 if (yaml.safe_load(open(sys.argv[1])) or {}).get("inventory") else 1)' "$repo/packages.yml"; then
+        rc=0
+        _malf_confined "$scratch/inventory.denials" inventory "$repo" env MALF_ENVIRONMENT_RECIPES="$keys" \
+            "$MALF_DIR/malf" inventory --test --profile "$MALF_PROFILE_NAME" "$repo" > "$scratch/inventory.log" 2>&1 || rc=$?
+        if [[ $rc -ne 0 ]]; then
+            echo "malf source-verdict: the inventory of $repo exited $rc — $scratch/inventory.log" >&2
+            _malf_quote_log "$scratch/inventory.log" "$repo (its inventory)"
+            failed+=("inventory")
+        else
+            echo "--- source-verdict: the inventory of $repo built and tested ---"
+        fi
+    fi
     echo "=== malf source-verdict: ${#names[@]} package(s) of $repo, $served served from the store, $executed tested, ${#failed[@]} red or unrecorded ==="
     if [[ ${#failed[@]} -gt 0 ]]; then
         echo "malf source-verdict: FAILED ${failed[*]} — logs in $scratch" >&2
@@ -7059,7 +7077,7 @@ cmd_source_lint() {
 # sweeps retired an inert -ffp-contract axis and halved. A number in a second file is a number that
 # drifts, and this sentence needs the boundary, not the arithmetic.
 cmd_inventory() {
-    local subdir=""
+    local subdir="" verb=build
     # The SAME flag grammar as build/test — not a subset. A verb that silently ignored
     # `--profile` would run the wrong leg and report success for it, which is the species of
     # false claim this whole file exists to remove.
@@ -7071,6 +7089,7 @@ cmd_inventory() {
         case "$1" in
             --profile) shift; _malf_apply_profile "$1" ;;
             --asan)    _malf_apply_profile "$MALF_ASAN_PROFILE" ;;
+            --test)    verb=test ;;
             -*) _malf_refuse_option inventory "$1" ;;
             *) subdir="$1" ;;
         esac
@@ -7078,7 +7097,7 @@ cmd_inventory() {
     done
     local root; root="$(_malf_resolve_dir "$subdir")" || exit 1
     _malf_use_keyed_cache
-    MALF_SWEEP="" MALF_SKIP_INVENTORY="" _malf_run_inventory build "$root"
+    MALF_SWEEP="" MALF_SKIP_INVENTORY="" _malf_run_inventory "$verb" "$root"
 }
 
 # Every first-party package in the current CONAN_HOME, removed; says which. FIRST-PARTY IS THE OWNED
