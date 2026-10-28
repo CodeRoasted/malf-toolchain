@@ -7,6 +7,9 @@ name: CodeRoast Candidate Present
 # hosted runner and the release runner answer it identically (item 6). It first reads the push's
 # package guard (visibility and link, THE ONE RULE), so a package the store job would refuse reds here,
 # in seconds, never after the build; the push still guards, since a setting can change between the two.
+# Then every upstream candidate the upstream document names must be stored and verified in its own store
+# (DN-142.D31 (2)): a dependent candidate never starts over an absent upstream, and its golden reads the
+# commit each one records.
 # Before both, it refuses a run off `refs/heads/main`, the store job's own refusal read first for the same reason.
 #
 # Trust: a PUBLIC repository's index counts only through its GitHub artifact attestation, signed by
@@ -40,6 +43,9 @@ on:
       present:
         description: '`true` when the store holds this candidate (the no-op), `false` otherwise.'
         value: ${{ jobs.present.outputs.present }}
+      upstream-commits:
+        description: 'The commit each upstream candidate records, a JSON object {<repository name>: <commit>}; `{}` for none.'
+        value: ${{ jobs.present.outputs.upstream-commits }}
 
 permissions:
   contents: read
@@ -55,6 +61,7 @@ jobs:
     outputs:
       key: ${{ steps.present.outputs.key }}
       present: ${{ steps.present.outputs.present }}
+      upstream-commits: ${{ steps.upstream.outputs.commits }}
     steps:
       - name: Refuse unless main
         if: ${{ github.ref != 'refs/heads/main' }}
@@ -80,6 +87,31 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           MALF_PACKAGE_PEEK_TOKEN: ${{ secrets.PACKAGE_PEEK_TOKEN }}
         run: python3 "$MALF_CHECKOUT/store_transport.py" package-check "$GITHUB_REPOSITORY"
+
+      - name: Every upstream candidate stored and verified in its own store, and the commit it records
+        id: upstream
+        shell: bash
+        env:
+          UPSTREAM: ${{ inputs.upstream }}
+          SIGNER_WORKFLOW: ${{ steps.malf.outputs.signer-workflow }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$UPSTREAM" > "$RUNNER_TEMP/upstream.json"
+          python3 "$MALF_CHECKOUT/store_transport.py" upstream "$RUNNER_TEMP/upstream.json" "$RUNNER_TEMP/upstream-out.json" \
+            --signer-workflow "$SIGNER_WORKFLOW"
+          commits="$(python3 - "$RUNNER_TEMP/upstream-out.json" <<'PY'
+          import json, sys
+          resolved = json.load(open(sys.argv[1]))
+          names = [repository.split("/", 1)[1] for repository in resolved]
+          if len(set(names)) != len(names):
+              sys.exit(f"two upstreams share a repository name ({sorted(names)}): the commits output is keyed by name")
+          print(json.dumps({repository.split("/", 1)[1]: entry["commit"] for repository, entry in resolved.items()},
+                           sort_keys=True, separators=(",", ":")))
+          PY
+          )"
+          echo "commits=$commits" >> "$GITHUB_OUTPUT"
 
       - name: The candidate key, and whether the store holds it (ghcr only)
         id: present

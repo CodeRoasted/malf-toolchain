@@ -381,8 +381,8 @@ echo
 echo "[7i2] store_transport carries its own proof (selftest): a repository's own store, pushed by its candidate and restored by digest through a cache, the index trusted only through its attestation (DN-142.D31 (3), (4), slice S4)"
 transport_selftest_output="$(timeout 300 python3 "$MALF_ROOT/store_transport.py" selftest 2>&1)"
 transport_selftest_status=$?
-check "store_transport selftest: 63 arms, the candidate key, push and its ownership filter, publish-index last, the attestation verifier's eight ABSENT reds, the cache judged by digest, the mismatch tag, the one visibility rule and package-check's early read of it, a private package's link read through the peek token, and a user-owned fork" \
-      "ok" "$([[ $transport_selftest_status -eq 0 ]] && grep -q '^store_transport selftest: 63 arm(s), 0 failure(s)$' <<< "$transport_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$transport_selftest_output")")"
+check "store_transport selftest: 68 arms, the candidate key, push and its ownership filter, publish-index last, the attestation verifier's eight ABSENT reds, the cache judged by digest, the mismatch tag, the one visibility rule and package-check's early read of it, a private package's link read through the peek token, a dependent candidate's upstreams read and checked, and a user-owned fork" \
+      "ok" "$([[ $transport_selftest_status -eq 0 ]] && grep -q '^store_transport selftest: 68 arm(s), 0 failure(s)$' <<< "$transport_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$transport_selftest_output")")"
 
 echo
 
@@ -4098,6 +4098,28 @@ check "the explicit re-judge (MALF_STORE_REJUDGE=1) runs a served source verdict
 check "a package that registered no test leaves no JUnit and is judged over none, a pass of 0 tests" \
       "rc=0 0 pass" \
       "$(sv_record "$sv_tmp/s5" "$sv_tmp/absent.xml" 'counted 0') $(python3 -c "import json, glob; o = json.load(open(glob.glob('$sv_tmp/s5/records/*.json')[0]))['outputs']['verdict']; print(o['tests'], o['verdict'])")"
+# A ship-form create runs test_package alone (tools.build:skip_test): an in-package skip declaration is no
+# row of its run, and its staleness is the source verdict's to judge, which runs every in-package test.
+# Measured 2026-10-28 on insight-metalog's ship form: both test_package tests passed and the verdict was a
+# fail, 'stale: MetalogJsonEgressWalk.TheUnwalkedWriterSpellsANonFiniteNumberNull is declared'.
+sv_ship_stale() {   # <writer|ship> -> the verdict of a test_package-only run with one in-package skip declared
+    MALF_STEP_FORM="$1" sv_py "
+import glob, json, tempfile
+from pathlib import Path
+root = Path(tempfile.mkdtemp())
+(root / 'results' / 'sv_core').mkdir(parents=True)
+(root / 'results' / 'sv_core' / 'pid.test_package.xml').write_text(
+    '<testsuite name=\"x\" tests=\"1\"><testcase name=\"Runs\" classname=\"Pkg\" status=\"run\"/></testsuite>')
+declared = [{'test': 'Core.SkipsHere', 'outcome': 'skipped', 'profiles': ['linux-gcc16-release'], 'condition': 'c',
+             'why': 'w', 'refs': []}]
+a.verdict_record(root / 'store', 'k' * 64, 'sv_core', 'pid', 'linux-gcc16-release', Path('$MALF_ROOT'),
+                 root / 'results', {}, a.step_form() != 'ship', declared)
+print(json.load(open(glob.glob(str(root / 'store' / 'records' / '*.json'))[0]))['outputs']['verdict']['verdict'])" 2>&1 | tail -1
+}
+check "RED-FIRST: a ship-form create's test_package verdict judges no in-package skip declaration stale (its run skipped them by design)" \
+      "pass" "$(sv_ship_stale ship)"
+check "RED: a writer-form create, which runs the in-package tests, still reds a declared skip no row of its run names" \
+      "fail" "$(sv_ship_stale writer)"
 # THE BINDING (DN-142.D31 (1)): a ship-form package record and a source verdict are bound by EQUAL inputs.
 sv_bind() {   # <python edits to `package` / `verdict` before the binding> -> what source_binding names
     sv_py "
@@ -6396,7 +6418,7 @@ import artefact_store as store
 out = []
 for name, declared in (("a", []), ("b", [{"test": "Suite.Skips", "outcome": "skipped", "profiles": ["linux-gcc16-release"], "condition": "c", "why": "w", "refs": []}])):
     root = Path(sys.argv[2]) / name
-    store.verdict_record(root, "k" + name, "sk_pkg", "da39a3ee5e6b4b0d3255bfef95601890afd80709", "linux-gcc16-release", Path(sys.argv[1]), Path(sys.argv[3]), {}, declared)
+    store.verdict_record(root, "k" + name, "sk_pkg", "da39a3ee5e6b4b0d3255bfef95601890afd80709", "linux-gcc16-release", Path(sys.argv[1]), Path(sys.argv[3]), {}, True, declared)
     verdict = json.loads(next((root / "records").glob("*.json")).read_text())["outputs"]["verdict"]
     out += [verdict["verdict"], str(verdict["excused"])]
 print("RESULT " + " ".join(out))' "$MALF_ROOT" "$sk_tmp/stores" "$sk_tmp/res" 2>/dev/null | sed -n 's/^RESULT //p')"

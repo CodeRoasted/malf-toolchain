@@ -1716,6 +1716,28 @@ def restore(store: Path, home: Path, document: dict, ledger: Path, subject: str,
     return 0
 
 
+def upstream_document(store: Path, profile: str, packages: list[str]) -> dict:
+    """`upstream-document`: the restore document of a repository's UPSTREAM first-party packages (DN-142.D31
+    (2)), read from the ship-form create records an upstream candidate's restore put in `store`: each named
+    package's one recorded content at `profile` and its configuration. A package no such record names is no
+    member (an upstream's unreleased package, which no downstream graph may need, or it refuses there).
+    raises Refused naming a package recorded at two contents: one version, one binary."""
+    contents: dict[str, set[tuple[str, str]]] = {}
+    for record in (json.loads(path.read_text()) for path in sorted((store / "records").glob("*.json"))):
+        step, output = record["inputs"]["step"], record.get("outputs", {}).get("package") or {}
+        if step.get("kind") != "conan-create" or step.get("form") != "ship" or step.get("profile") != profile \
+                or step.get("package") not in packages or TRANSPORT_FIELD not in output:
+            continue
+        contents.setdefault(step["package"], set()).add((output["content"], output["alias"].rsplit("#", 1)[0]))
+    doubled = sorted(name for name, held in contents.items() if len(held) != 1)
+    if doubled:
+        raise Refused(f"the upstream package(s) {', '.join(doubled)} are recorded at more than one content at "
+                      f"{profile}: an upstream restores one binary per version")
+    return {"step": {"profile": profile},
+            "upstream": {f"{name}/host": next(iter(held))[0] for name, held in sorted(contents.items())},
+            CONFIGURATIONS_FIELD: {f"{name}/host": next(iter(held))[1] for name, held in sorted(contents.items())}}
+
+
 def restore_document(store: Path, home: Path, graph_json: Path, prefixes: tuple[str, ...],
                      profile: str, mode: str, building: set[str]) -> dict:
     """`restore-document`: the graph's restore list, a key-first document's `upstream` and
@@ -1843,7 +1865,8 @@ def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile:
     declared = _helper().read_declarations(_cache_path(home, recipe, "export_source"))
     keys = {PACKAGE_OUTPUT: key_of(document)}
     judged = max(stored, verdict_record(store, key_of(document), package, package_id, profile,
-                                        malf_dir, results, {package: content}, declared, keys))
+                                        malf_dir, results, {package: content}, step_form() != "ship",
+                                        declared, keys))
     if corpus_gates is not None:
         judged = max(judged, corpus_record(store, key_of(document), package, package_id, profile,
                                            malf_dir, results, {package: content}, corpus_gates, keys))
@@ -1934,7 +1957,7 @@ def build_step(store: Path, home: Path, graph_json: Path, package: str, profile:
     keys: dict = {}
     judged = verdict_record(store, key_of(document), package, package_ids[0] if package_ids else "-",
                             profile, malf_dir, results,
-                            {name.split("/")[0]: digest for name, digest in upstream.items()},
+                            {name.split("/")[0]: digest for name, digest in upstream.items()}, True,
                             _helper().read_declarations(source), keys)
     return judged or outcome_record(store, key_of(document), package, profile, None, keys,
                                     packaged=False, tested=True)
@@ -1990,12 +2013,14 @@ def selection_member(malf_dir: Path) -> dict[str, object]:
 
 
 def verdict_record(store: Path, build_key: str, package: str, package_id: str, profile: str,
-                   malf_dir: Path, results: Path, judged: dict[str, str],
+                   malf_dir: Path, results: Path, judged: dict[str, str], in_package_ran: bool,
                    declarations: list | None = None, keys: dict | None = None) -> int:
     """Store or compare one step's test verdict (DN-142.D5 (3)); a step with no result file ran no
     test and has no verdict to keep (exit 0, saying so). The step's own files are linked at
     `<results>/steps/<package>.xml` and `.test_package.xml`, where a reader of the run finds the
-    population the step's binary ran, whatever variants of it the walk's later creates built."""
+    population the step's binary ran, whatever variants of it the walk's later creates built.
+    `in_package_ran` is false for a ship-form create, which skips the in-package tests by design: its run
+    judges no declared skip stale, and the source verdict, which runs them all, does."""
     rows, files = junit_results(results, package, package_id)
     _link_step_files(results, package, package_id,
                      files + [path for path in (results / package / f"{package_id}{LISTED_SUFFIX}",)
@@ -2005,7 +2030,7 @@ def verdict_record(store: Path, build_key: str, package: str, package_id: str, p
         return 0
     undeclared, excused, defects = _helper().skip_findings(
         [row for row in rows if row[0] != "corpus-listed"], declarations or [], profile,
-        unfiltered=True)
+        unfiltered=in_package_ran)
     verdict = "fail" if any(row[2] == "failed" for row in rows) or undeclared or defects else "pass"
     if excused:
         print(f"artefact_store: EXCUSED {package} {len(excused)} declared skip(s): "
@@ -3859,7 +3884,7 @@ def selftest() -> int:
         ykeys: dict = {}
         try:
             with contextlib.redirect_stdout(io.StringIO()):
-                written = (verdict_record(ystore, unheld, "ex_low", "pid", profile, malf_dir, yresults, {}, [], ykeys),
+                written = (verdict_record(ystore, unheld, "ex_low", "pid", profile, malf_dir, yresults, {}, True, [], ykeys),
                            outcome_record(ystore, unheld, "ex_low", profile, None, ykeys,
                                           packaged=False, tested=True))
         finally:
@@ -4034,6 +4059,16 @@ def main(argv: list[str]) -> int:
         document = restore_document(Path(argv[1]), Path(argv[2]), Path(argv[3]), tuple(argv[4].split()),
                                     argv[5], argv[7], set(argv[8:]))
         Path(argv[6]).write_text(json.dumps(document, sort_keys=True))
+        return 0
+    if len(argv) >= 4 and argv[0] == "upstream-document":
+        try:
+            document = upstream_document(Path(argv[1]), argv[2], argv[4:])
+        except Refused as refused:
+            print(f"artefact_store: REFUSED {refused}", file=sys.stderr)
+            return 1
+        Path(argv[3]).write_text(json.dumps(document, sort_keys=True))
+        print(f"artefact_store: UPSTREAM {len(document['upstream'])} package(s) recorded at {argv[2]}: "
+              + ", ".join(sorted(document["upstream"])))
         return 0
     if len(argv) in (6, 8) and argv[0] == "restore":
         return restore(Path(argv[1]), Path(argv[2]), json.loads(Path(argv[3]).read_text()), Path(argv[4]),

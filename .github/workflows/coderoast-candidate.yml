@@ -62,6 +62,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: malf at this workflow's commit, as git
+        id: malf
         uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@0d971ad69eaeefa1666c41fe2f1dc1c02cde3b16
         with:
           workflow: coderoast-candidate.yml
@@ -74,6 +75,23 @@ jobs:
         with:
           name: candidate-store
           path: ${{ runner.temp }}/candidate-store
+
+      - name: The upstream candidates, read through their own stores, their sources at the commits they record
+        if: ${{ inputs.upstream != '{}' }}
+        shell: bash
+        env:
+          UPSTREAM: ${{ inputs.upstream }}
+          SIGNER_WORKFLOW: ${{ steps.malf.outputs.signer-workflow }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$UPSTREAM" > "$RUNNER_TEMP/upstream.json"
+          python3 "$MALF_CHECKOUT/store_transport.py" upstream "$RUNNER_TEMP/upstream.json" "$RUNNER_TEMP/upstream-out.json" \
+            --sources "$RUNNER_TEMP/upstream" --signer-workflow "$SIGNER_WORKFLOW" \
+            --store "$RUNNER_TEMP/candidate-store"
+          roots="$(python3 -c 'import json, sys; print(":".join(entry["root"] for entry in json.load(open(sys.argv[1])).values()))' "$RUNNER_TEMP/upstream-out.json")"
+          echo "MALF_UPSTREAM_ROOTS=$roots" >> "$GITHUB_ENV"
 
       - name: The ship form of every released package, in the image, then its binding to the source verdict
         shell: bash

@@ -42,6 +42,12 @@ package's privacy and every read judged by digest.
     store_transport.py verify <owner/repo> <tag> --signer-workflow W [--signer-digest D]
         the attestation of the manifest at <tag>: exit 0 VERIFIED (prints the source commit and the
         signer digest), 3 ABSENT
+    store_transport.py upstream <upstream.json> <out.json> [--sources DIR] [--store DIR] [--signer-workflow W]
+        every upstream candidate the document names, read through its own store's trust (a public one's
+        attestation, W; a private one's privacy and GITHUB_TOKEN): <out.json> holds {owner/repo: {key,
+        commit, tree[, root]}}; --store restores each one's records there, --sources clones each at the
+        commit its index records into DIR/<repo>, its tree checked. Refused when an upstream's own upstream
+        is not the document's (one candidate of each repository in a graph); exit 3 when one is absent.
     store_transport.py package-check <owner/repo>
         the push's package guard, read before anything is built and writing nothing: exit 0 when the
         package has the repository's visibility and link, or when the token sees no package (the first
@@ -65,10 +71,12 @@ Exit 0 done, 1 refused (the reason on stderr), 2 a usage error, 3 absent.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -724,6 +732,63 @@ def package_check(get: Callable[[str], "tuple[int, dict]"], peek: Callable[[str]
     say(f"store_transport: GUARDED {package} — {expected.visibility}, linked to {expected.linked}")
 
 
+def resolve_upstreams(document: dict[str, str], read_index: Callable[[str, str], dict],
+                      clone: Callable[[str, str, Path], str] | None, sources: Path | None,
+                      say: Callable[[str], None]) -> dict[str, dict]:
+    """Each upstream candidate the document names, read from its own store (DN-142.D31 (2)): `{owner/repo:
+    {key, commit, tree[, root]}}`. With `sources`, each is cloned at the commit its index records into
+    `<sources>/<repo>` and its tree checked against the index. raises Refused when an upstream's own upstream
+    is absent from the document or named at another key (one graph holds one candidate of each repository),
+    or when a clone's tree is not the index's; Absent when an upstream has no candidate at its key."""
+    named = {"/".join(full_name(repository)).lower(): key for repository, key in document.items()}
+    resolved: dict[str, dict] = {}
+    for repository, key in sorted(named.items()):
+        if not HEX64.match(str(key)):
+            raise Refused(f"the upstream {repository} is named at {key!r}, not a candidate key (64 hex)")
+        index = read_index(repository, key)
+        for inner, inner_key in sorted((index.get("upstream") or {}).items()):
+            inner = "/".join(full_name(inner)).lower()
+            if named.get(inner) != inner_key:
+                raise Refused(f"the upstream {repository} candidate-{key} was built over {inner} candidate-{inner_key}, "
+                              f"and this document names {inner} at {named.get(inner) or 'no key'}: one graph holds "
+                              f"one candidate of each repository, so name {inner} at {inner_key}")
+        entry = {"key": key, "commit": index["commit"], "tree": index["tree"]}
+        if sources is not None and clone is not None:
+            root = sources / full_name(repository)[1]
+            tree = clone(repository, index["commit"], root)
+            if tree != index["tree"]:
+                raise Refused(f"{repository} at {index['commit']} cloned to tree {tree}, and its candidate-{key} "
+                              f"records tree {index['tree']}")
+            entry["root"] = str(root)
+        say(f"store_transport: UPSTREAM {repository} candidate-{key} at commit {index['commit']}")
+        resolved[repository] = entry
+    return resolved
+
+
+def live_clone(server: str, token: str | None) -> Callable[[str, str, Path], str]:
+    """`clone(repository, commit, root)`: a shallow checkout of that one commit, its tree id returned; the
+    token, for a private repository, reaches git through its environment, never an argument vector."""
+    def clone(repository: str, commit: str, root: Path) -> str:
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(parents=True)
+        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}
+        if token:
+            basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+            env.update({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": f"http.{server}/.extraheader",
+                        "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}"})
+        for argv in (["init", "--quiet"], ["remote", "add", "origin", f"{server}/{repository}.git"],
+                     ["fetch", "--quiet", "--depth", "1", "origin", commit],
+                     ["-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", commit]):
+            done = subprocess.run(["git", "-C", str(root), *argv], capture_output=True, text=True, env=env, check=False)
+            if done.returncode != 0:
+                raise Refused(f"cloning {repository} at {commit}: git {argv[0]} exited {done.returncode}: "
+                              f"{done.stderr.strip()[-400:]}")
+        return subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD^{tree}"], capture_output=True,
+                              text=True, check=True).stdout.strip()
+    return clone
+
+
 def live_gh(argv: list[str]) -> tuple[int, str, str]:
     done = subprocess.run(["gh", *argv], capture_output=True, text=True, check=False)
     return done.returncode, done.stdout, done.stderr
@@ -977,6 +1042,24 @@ def selftest() -> int:
             expect("a cache entry whose bytes are not its digest is a miss, re-fetched and judged",
                    (reader.fetched, (root / "restored3" / "objects" / transport).read_bytes() == (store / "objects" / transport).read_bytes()),
                    ([transport], True))
+            # -- a dependent candidate's upstreams (DN-142.D31 (2)): read through their own stores, one each.
+            def read_ipc(repository: str, wanted: str) -> dict:
+                return trusted_index(Reader(registry, root / "cache5", quiet.append), repository, wanted, verifier())
+            resolved = arm("upstream: the document's candidate is read through its store, its commit and tree named",
+                           lambda: resolve_upstreams({"CodeRoasted/coderoast-ipc": key}, read_ipc,
+                                                     lambda repository, at, into: tree, root / "up", quiet.append), None)
+            expect("upstream: the commit and the cloned root are the index's",
+                   (resolved or {}).get("coderoasted/coderoast-ipc", {}).get("commit"), commit)
+            arm("RED: an upstream cloned to another tree than its index records is refused",
+                lambda: resolve_upstreams({"CodeRoasted/coderoast-ipc": key}, read_ipc,
+                                          lambda repository, at, into: "f" * 40, root / "up2", quiet.append), "records tree")
+            arm("RED: an upstream built over another candidate of a shared upstream is refused (one candidate per repository)",
+                lambda: resolve_upstreams({"CodeRoasted/coderoast-ipc": key},
+                                          lambda repository, wanted: {**read_ipc(repository, wanted),
+                                                                      "upstream": {"CodeRoasted/insight-canon": "a" * 64}},
+                                          None, None, quiet.append), "one graph holds")
+            arm("RED: an upstream named at no candidate key is refused",
+                lambda: resolve_upstreams({"x/y": "short"}, read_ipc, None, None, quiet.append), "not a candidate key")
             arm("RED: a record whose inputs do not hash to the key it is read at is refused",
                 lambda: judged_record(canonical({"key": own_package, "inputs": {"step": {"kind": "forged"}},
                                                  "outputs": {}}), own_package), "inputs hash to")
@@ -1104,6 +1187,37 @@ def _verifier(args: argparse.Namespace, get: Callable[[str], "tuple[int, dict]"]
     return Verifier(f"{owner}/{name}", args.signer_workflow, args.signer_digest, live_gh, live_tree_of(get))
 
 
+def upstream_verb(args: argparse.Namespace, get: Callable[[str], "tuple[int, dict]"], token: str | None,
+                  say: Callable[[str], None]) -> int:
+    """`upstream`: every upstream candidate of the document, through its own store's trust (a public one's
+    attestation, a private one's privacy and the run's token), written to <out> as `{owner/repo: {key, commit,
+    tree[, root]}}`; with --store its records restored there, with --sources its source cloned there."""
+    cache = Path(tempfile.mkdtemp(prefix="store_transport."))
+
+    def private(repository: str) -> bool:
+        status, seen = get(f"repos/{repository}")
+        if status != 200 or seen.get("visibility") not in store_replica.VISIBILITIES:
+            raise Refused(f"the API answered HTTP {status} and visibility {seen.get('visibility')!r} for the upstream "
+                          f"{repository}")
+        return seen["visibility"] == "private"
+
+    def read_index(repository: str, key: str) -> dict:
+        hidden = private(repository)
+        if not hidden and not args.signer_workflow:
+            raise Refused(f"the public upstream {repository} is read through its attestations: name --signer-workflow")
+        verifier = None if hidden else Verifier(repository, args.signer_workflow, None, live_gh, live_tree_of(get))
+        reader = Reader(_registry(repository, token), cache, say)
+        if args.store:
+            return restore(reader, Path(args.store), repository, key, verifier, say)
+        return trusted_index(reader, repository, key, verifier)
+
+    server = os.environ.get("GITHUB_SERVER_URL", "https://github.com").rstrip("/")
+    resolved = resolve_upstreams(read_upstream(args.upstream), read_index, live_clone(server, token),
+                                 Path(args.sources) if args.sources else None, say)
+    Path(args.out).write_text(json.dumps(resolved, sort_keys=True, indent=1) + "\n", encoding="utf-8")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     if argv == ["selftest"]:
         return selftest()
@@ -1117,6 +1231,9 @@ def main(argv: list[str]) -> int:
     verb.add_argument("--upstream"), verb.add_argument("--extra")
     verb = verbs.add_parser("publish-index")
     verb.add_argument("repository"), verb.add_argument("out")
+    verb = verbs.add_parser("upstream")
+    verb.add_argument("upstream"), verb.add_argument("out")
+    verb.add_argument("--sources"), verb.add_argument("--store"), verb.add_argument("--signer-workflow")
     verb = verbs.add_parser("package-check")
     verb.add_argument("repository")
     verb = verbs.add_parser("owns-store")
@@ -1152,6 +1269,8 @@ def main(argv: list[str]) -> int:
             return 0
         if args.verb == "owns-store":
             return 0 if owns_store(Path(args.checkout), args.commit) else ABSENT
+        if args.verb == "upstream":
+            return upstream_verb(args, get, token, say)
         if args.verb == "package-check":
             package_check(get, peek, args.repository, say)
             return 0

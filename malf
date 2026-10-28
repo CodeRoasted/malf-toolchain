@@ -5748,6 +5748,13 @@ _malf_store_create_in_environment() {   # <writer|ship> <package>...
     export MALF_STORE_DIR="$store" MALF_WORKSPACE_ROOT CONAN_HOME="$MALF_CONAN_HOME_BASE" MALF_BUILD_SLOT_DIR
     args+=(--env MALF_STORE_DIR --env MALF_WORKSPACE_ROOT --env CONAN_HOME --env MALF_BUILD_SLOT_DIR
            --env MALF_CONAN_SOURCES_CACHE)
+    local upstream_root
+    local -a upstream_roots=()
+    IFS=: read -r -a upstream_roots <<< "${MALF_UPSTREAM_ROOTS:-}"
+    for upstream_root in "${upstream_roots[@]}"; do
+        [[ -z "$upstream_root" ]] || args+=(--read-only-mount "$upstream_root")
+    done
+    [[ -z "${MALF_UPSTREAM_ROOTS:-}" ]] || args+=(--env MALF_UPSTREAM_ROOTS)
     # THE WALK'S BACKENDS (DN-142.D30 (5) E2b): the union of what its steps declare under `backends:` at
     # HEAD, started by the launcher on the walk's internal network; none keeps `--network none`.
     local declared rc=0
@@ -5920,6 +5927,13 @@ cmd_store_create() {
     local compiler
     compiler="$(sed -n 's/^CXX=//p' "$MALF_PROFILE")"
     [[ -x "$compiler" ]] || { echo "malf store-create: the profile $MALF_PROFILE_NAME names no executable CXX" >&2; return 2; }
+    _malf_export_upstreams "$CONAN_HOME" "$scratch/upstreams.log" || return 2
+    if [[ ${#_MALF_UPSTREAM_PACKAGES[@]} -gt 0 ]]; then
+        # An upstream's packages are restored from its candidate's records, never built (DN-142.D31 (2)).
+        python3 "$MALF_DIR/artefact_store.py" upstream-document "$store" "$MALF_PROFILE_NAME" "$scratch/upstream.json" \
+            "${_MALF_UPSTREAM_PACKAGES[@]}" || return 2
+        _malf_store_restore "$store" "$CONAN_HOME" "$scratch/upstream.json" "$scratch" "upstream:recorded" || return 2
+    fi
     echo "=== malf store-create: $(wc -l <<< "$wanted") step(s), $form form, home $CONAN_HOME, store $store ==="
     python3 "$MALF_DIR/artefact_store.py" toolchain "$(dirname "$(dirname "$compiler")")" "$scratch/toolchain.json" || return 2
     _malf_writer_create_args || return 2
@@ -6579,6 +6593,34 @@ _malf_store_third_party_in() {   # <name> <path> <prefixes> <store> <scratch> <g
 # revision: first-party editables float, third-party is pinned, `malf lock`), so a first-party package of
 # another repository that the shared lock names is never taken for a third-party recipe to provision.
 # post: the namespaces, space-separated, or a non-zero exit naming why none could be derived.
+# THE UPSTREAMS OF A REPOSITORY'S OWN WALK (DN-142.D31 (2), (5)): MALF_UPSTREAM_ROOTS names, colon-separated,
+# the source roots of the repositories this one's packages require, each checked out at the commit its stored
+# candidate records. Every package such a root declares is exported into <home>, so a graph resolves it: the
+# dev leg builds it from those sources, the ship form restores it from that candidate's own record and never
+# builds it. The same commit is what makes the two legs name the same sources, which the binding checks.
+# post: 0 when every upstream package is exported (or none is named), _MALF_UPSTREAM_PACKAGES naming them;
+#       else non-zero naming the failure.
+_malf_export_upstreams() {   # <conan home> <log>
+    local home="$1" log="$2" root steps ref path _deps
+    local -a roots=()
+    _MALF_UPSTREAM_PACKAGES=()
+    IFS=: read -r -a roots <<< "${MALF_UPSTREAM_ROOTS:-}"
+    for root in "${roots[@]}"; do
+        [[ -n "$root" ]] || continue
+        [[ -f "$root/packages.yml" ]] \
+            || { echo "malf: the upstream root $root holds no packages.yml (MALF_UPSTREAM_ROOTS)" >&2; return 1; }
+        steps="$(python3 "$MALF_DIR/malf_graph.py" steps "$root")" && [[ -n "$steps" ]] \
+            || { echo "malf: malf's walk of the upstream root $root found no package, or refused it (above)" >&2; return 1; }
+        while IFS=$'\t' read -r ref path _deps; do
+            [[ -n "$ref" ]] || continue
+            CONAN_HOME="$home" conan export "$path" >> "$log" 2>&1 \
+                || { echo "malf: conan export of the upstream $ref ($path) failed ($log)" >&2; return 1; }
+            _MALF_UPSTREAM_PACKAGES+=("${ref%%/*}")
+            echo "malf: exported the upstream $ref from $path"
+        done <<< "$steps"
+    done
+}
+
 _malf_owned_prefixes() {
     local prefixes
     if [[ -f "$MALF_WORKSPACE_ROOT/packages.yml" ]]; then
@@ -6790,6 +6832,13 @@ _malf_source_verdict_in_environment() {   # [--namespaces] <repository> <verb> <
            MALF_STORE_DIR="$store"
     args+=(--env MALF_WORKSPACE_ROOT --env CONAN_HOME --env MALF_ENVIRONMENT_RECIPES --env MALF_LOCKFILE_STRICT
            --env MALF_STORE_DIR --env MALF_CONAN_SOURCES_CACHE)
+    local upstream_root
+    local -a upstream_roots=()
+    IFS=: read -r -a upstream_roots <<< "${MALF_UPSTREAM_ROOTS:-}"
+    for upstream_root in "${upstream_roots[@]}"; do
+        [[ -z "$upstream_root" ]] || args+=(--read-only-mount "$upstream_root")
+    done
+    [[ -z "${MALF_UPSTREAM_ROOTS:-}" ]] || args+=(--env MALF_UPSTREAM_ROOTS)
     local name
     for name in MALF_STORE_PARAMETERS MALF_STORE_REJUDGE MALF_SOURCE_VERDICT_SET; do
         [[ -z "${!name:-}" ]] || args+=(--env "$name")
@@ -6886,8 +6935,19 @@ cmd_source_verdict() {
             | python3 -c 'import json, sys; print(json.load(sys.stdin)["reference"])' > "$scratch/${ref%%/*}.reference" \
             || { echo "malf source-verdict: conan export $path failed ($scratch/keys.log)" >&2; return 2; }
     done <<< "$steps"
-    local index served=0 executed=0
+    _malf_export_upstreams "$keys" "$scratch/keys.log" || return 2
+    local index served=0 executed=0 cache
     local -a failed=()
+    # THE ACTS RESOLVE NO EDITABLE THIS WALK DID NOT REGISTER: their home outlives the run (one per image, on a
+    # desk and on a self-hosted runner), and a registration another walk left there resolves an upstream from
+    # a path the act cannot read instead of from its export (measured 2026-10-28: insight-metalog's dev leg
+    # resolved insight_canon/1.10.9 at the desk workspace). `malf test` registers the repository's own.
+    # The upstreams are exported into each of them too: the act builds them from their recipes, which a home
+    # seeded with the lock's third-party recipes alone does not hold.
+    while IFS= read -r cache; do
+        CONAN_HOME="$cache" _malf_editables_clear
+        _malf_export_upstreams "$cache" "$scratch/keys.log" > /dev/null || return 2
+    done < <(_malf_conan_homes)
     # The denied ground is the repository's parent (its siblings, on the desk; on a runner, the checkout's
     # directory), never the repository itself, which the act is granted (DN-142.D29 (5)).
     _MALF_DOMAIN=(--workspace "$(dirname "$repo")" --store "$store" --scratch "$scratch" --conan-home "$HOME/.conan2")

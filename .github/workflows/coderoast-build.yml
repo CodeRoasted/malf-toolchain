@@ -23,8 +23,13 @@ on:
         type: boolean
         required: false
         default: false
+      upstream:
+        description: 'The upstream document, a JSON object {<owner>/<repository>: <candidate key>}; `{}` for a repository with no first-party upstream.'
+        type: string
+        required: false
+        default: '{}'
       runs-on:
-        description: 'Runner label. Defaults to hosted ubuntu-24.04. PUBLIC callers omit it. PRIVATE callers pass their self-hosted label (the release runner, DN-142.D31 item 6).'
+        description: 'Runner label. Defaults to hosted ubuntu-24.04. PUBLIC callers omit it. PRIVATE callers pass their self-hosted label.'
         type: string
         required: false
         default: 'ubuntu-24.04'
@@ -42,12 +47,29 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: malf at this workflow's commit, as git
+        id: malf
         uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@0d971ad69eaeefa1666c41fe2f1dc1c02cde3b16
         with:
           workflow: coderoast-build.yml
 
       - name: The pinned build environment and the host's provisioning tools
         uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-environment@0d971ad69eaeefa1666c41fe2f1dc1c02cde3b16
+
+      - name: The upstream candidates, read through their own stores, their sources at the commits they record
+        if: ${{ inputs.upstream != '{}' }}
+        shell: bash
+        env:
+          UPSTREAM: ${{ inputs.upstream }}
+          SIGNER_WORKFLOW: ${{ steps.malf.outputs.signer-workflow }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$UPSTREAM" > "$RUNNER_TEMP/upstream.json"
+          python3 "$MALF_CHECKOUT/store_transport.py" upstream "$RUNNER_TEMP/upstream.json" "$RUNNER_TEMP/upstream-out.json" \
+            --sources "$RUNNER_TEMP/upstream" --signer-workflow "$SIGNER_WORKFLOW"
+          roots="$(python3 -c 'import json, sys; print(":".join(entry["root"] for entry in json.load(open(sys.argv[1])).values()))' "$RUNNER_TEMP/upstream-out.json")"
+          echo "MALF_UPSTREAM_ROOTS=$roots" >> "$GITHUB_ENV"
 
       - name: Dev leg in the image (source verdict) and its postflight
         uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-source-verdict@0d971ad69eaeefa1666c41fe2f1dc1c02cde3b16
