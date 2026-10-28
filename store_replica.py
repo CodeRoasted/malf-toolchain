@@ -332,8 +332,9 @@ def package_defect(seen: dict | None, package: str, expected: Expected) -> str |
         if expected.linked is None:
             return (f"{package} is linked to {linked}: a linked package lets that repository's workflows "
                     f"write it, and step 0's replica is linked to no repository")
-        return (f"{package} is linked to {linked or 'no repository'}, not {expected.linked}: a repository "
-                f"that owns its store writes it with its own token, through that link")
+        answered = "carries no `repository` field" if "repository" not in seen else f"names `repository` {seen['repository']!r}"
+        return (f"{package} is linked to {linked or 'no repository'}, not {expected.linked} (the API's answer "
+                f"{answered}): a repository that owns its store writes it with its own token, through that link")
     return None
 
 
