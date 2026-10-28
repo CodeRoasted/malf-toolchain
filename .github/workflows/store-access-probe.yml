@@ -9,8 +9,9 @@ name: Store access probe
 # can measure.
 #
 # THE PAIRING IS THE DESIGN. Each caller names the package it is granted and one it is not, and the
-# callers are crossed: insight-canon is granted store-insight-canon and refused store-coderoast,
-# coderoast the reverse. So every refusal is answered by another run READING the same package
+# callers are crossed: insight-canon is granted store-insight-canon and refused store-coderoast, which
+# coderoast reads; coderoast is refused store-coderoast-security, which coderoast-security's own candidate
+# reads (a private own store, DN-142.D31). So every refusal is answered by another run READING the same package
 # with another repository's token: a refusal cannot be a missing package, a wrong tag or a broken
 # instrument. Within one run, the granted read is the control for the refused one.
 #
@@ -108,9 +109,17 @@ jobs:
           if read_seed "$GRANTED"; then verdict pass "granted read of $GRANTED"
           else verdict FAIL "granted read of $GRANTED — no refusal below means anything until this reads"; fi
 
-          echo "== 2. READ $UNGRANTED (not granted to ${GITHUB_REPOSITORY}): must be refused"
-          if read_seed "$UNGRANTED"; then verdict LEAK "${GITHUB_REPOSITORY} READ $UNGRANTED"
-          else verdict pass "read of $UNGRANTED refused"; fi
+          echo "== 2. READ $UNGRANTED (not granted to ${GITHUB_REPOSITORY}): must be refused, 401 or 403 at the manifest"
+          # The token endpoint answers 200 whatever the grant, so the manifest GET is the verdict; a 404 means
+          # the token REACHED the package and found no seed tag, which is access, never a refusal.
+          code="$(call "$(bearer "$UNGRANTED" pull)" "$work/refused.json" -H "Accept: $oci_manifest" \
+            "https://ghcr.io/v2/$org/$UNGRANTED/manifests/access-probe")"
+          echo "  manifest GET $UNGRANTED:access-probe: HTTP $code $(head -c 200 "$work/refused.json")"
+          case "$code" in
+            401|403) verdict pass "read of $UNGRANTED refused" ;;
+            200|404) verdict LEAK "${GITHUB_REPOSITORY} REACHED $UNGRANTED (HTTP $code)" ;;
+            *) verdict UNCLEAR "manifest GET answered HTTP $code: neither a read nor an authorization refusal" ;;
+          esac
 
           write_refused() {  # <package> -> a verdict on a manifest PUT made with a packages:write token
             local pkg="$1" bt code loc sep

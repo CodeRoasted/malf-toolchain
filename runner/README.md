@@ -495,7 +495,7 @@ another run reading the same package:
 | Caller | Granted (must read, byte-equal) | Not granted (must be refused) | Foreign (must not write) |
 |---|---|---|---|
 | `insight-canon` (public) | `store-insight-canon` | `store-coderoast` | `store-coderoast-ipc` |
-| `coderoast` (private) | `store-coderoast` | `store-insight-canon` | — |
+| `coderoast` (private) | `store-coderoast` | `store-coderoast-security` | — |
 
 Each run also PUTs a manifest into its granted package with a `packages: write` token; the refusal
 must come at the manifest (a blob upload may be accepted first, as R4 measured, and is no object).
@@ -550,7 +550,8 @@ gh run list -w store-access-probe.yml -L 1 -R CodeRoasted/<repository>   # then:
 ```
 
 **Expected:** each run green, with three `pass` lines — the granted read (`HTTP 200`, 29 bytes,
-content `sha256:5e8e719d…`), the other package's read refused (`401`/`403`/`404` at the manifest),
+content `sha256:5e8e719d…`), the other package's read refused (`401`/`403` at the manifest; a `404` is
+the token REACHING it, a `LEAK`),
 the write refused at the manifest (`401`/`403`), and on `insight-canon` a fourth, the foreign write
 refused the same way. A `LEAK` line is an access-control finding against
 R5: report it, do not re-run around it; a successful write leaves the tag `access-probe-write-<run
