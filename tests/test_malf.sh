@@ -217,6 +217,17 @@ check "a reader holding the old global.conf still reads it whole" "stale conf" "
 exec 9<&-
 check "no staging file is left behind" "" \
       "$(find "$ri_tmp" -name '*.malf-staged.*' -printf '%P\n')"
+# Measured 2026-10-28 on malf-runner: a source whose ACL names another account, installed inside a user
+# namespace mapping only the caller (a self-hosted runner joins its dockerd's), failed EINVAL under
+# `cp --preserve=mode`. The install carries the mode bits, never the ACL.
+printf 'acl source\n' > "$ri_tmp/acl-src"; chmod 0640 "$ri_tmp/acl-src"
+if setfacl -m "u:$(id -u nobody):r" "$ri_tmp/acl-src" 2>/dev/null && unshare -U --map-current-user true 2>/dev/null; then
+    check "RED-FIRST: a source carrying another account's ACL installs inside a user namespace that cannot map it, mode bits kept, no ACL copied" \
+          "rc=0 640 0" \
+          "$(unshare -U --map-current-user bash -c "source <(sed -n '/^_malf_install_file() {/,/^}/p' '$MALF_ROOT/malf'); _malf_install_file '$ri_tmp/acl-src' '$ri_tmp/acl-dst'"; echo -n "rc=$? "; stat -c %a "$ri_tmp/acl-dst" | tr '\n' ' '; getfacl -cp "$ri_tmp/acl-dst" 2>/dev/null | grep -c '^user:[^:]')"
+else
+    check "the ACL-in-a-user-namespace arm needs setfacl and unprivileged user namespaces on this host" "present" "absent"
+fi
 rm -rf "$ri_tmp"
 
 echo "[4] build key — which build-<key>/ tree a build writes"

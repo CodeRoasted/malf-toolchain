@@ -315,10 +315,13 @@ MALF_CONAN_HOME_BASE="$CONAN_HOME"
 # `malf format --check` runs (one per format-armed repository, the commit gate's `cpp_format`
 # sweep), and one read the profile mid-copy, found no build_type and exited 1. A staging file in
 # the destination's own directory, renamed over it, is never seen half-written (tests [3b]).
+# MODE BITS ONLY, never `cp --preserve=mode`, which also copies the source's ACL: a self-hosted runner
+# runs in its dockerd's user namespace, where an ACL naming another account is unmappable and the copy
+# fails EINVAL (measured 2026-10-28, malf-runner, coderoast-security run 40690088576).
 _malf_install_file() {
     local src="$1" dst="$2" staged
     staged="$(mktemp "$dst.malf-staged.XXXXXX")" || return 1
-    if cp -f --preserve=mode "$src" "$staged" && mv -f "$staged" "$dst"; then
+    if cp -f "$src" "$staged" && chmod --reference="$src" "$staged" && mv -f "$staged" "$dst"; then
         return 0
     fi
     rm -f "$staged"
@@ -6439,7 +6442,9 @@ _malf_store_test_folder() {   # <recipe path> <copy>
         return 1
     fi
     rm -rf "$copy" && mkdir -p "$copy" \
-        && (cd "$path" && git ls-files -z -- test_package | xargs -0 cp --parents -P --preserve=mode -t "$copy") \
+        && (cd "$path" && git ls-files -z -- test_package | xargs -0 cp --parents -P -t "$copy") \
+        && (cd "$path" && git ls-files -z -- test_package | while IFS= read -r -d '' file; do
+                [[ -L "$file" ]] || chmod --reference="$file" "$copy/$file" || exit 1; done) \
         && (cd "$path/test_package" && git ls-files -z) > "$copy/tracked" \
         || { echo "malf store-create: the tracked test folder of $path could not be copied to $copy" >&2; return 1; }
     _MALF_TEST_FOLDER="$copy/test_package"
