@@ -58,12 +58,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: malf at this workflow's commit, as git
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@8d0b640ad45820ad556937313011c48a5f553fc9
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@ed97053271987df7a48694fb34cc449a08b74593
         with:
           workflow: coderoast-candidate.yml
 
       - name: The pinned build environment and the host's provisioning tools
-        uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-environment@8d0b640ad45820ad556937313011c48a5f553fc9
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-environment@ed97053271987df7a48694fb34cc449a08b74593
 
       - name: The CI job's store (its source verdicts)
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
