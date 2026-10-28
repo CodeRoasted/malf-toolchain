@@ -6755,7 +6755,9 @@ _malf_environment_home() {
 # `malf source-lint` runs in the same container shape, so the postflight reads the very home and trees the
 # dev leg wrote.
 # post: the container's exit, or 2 refused before it ran.
-_malf_source_verdict_in_environment() {   # <repository> <verb> <argv>...
+_malf_source_verdict_in_environment() {   # [--namespaces] <repository> <verb> <argv>...
+    local -a namespaces=()
+    [[ "${1:-}" != --namespaces ]] || { namespaces=(--namespaces); shift; }
     local repo="$1" verb="$2" store home recipes prefixes directory
     shift 2
     store="$(_malf_store_root "$verb")" || return 2
@@ -6784,10 +6786,10 @@ _malf_source_verdict_in_environment() {   # <repository> <verb> <argv>...
     args+=(--env MALF_WORKSPACE_ROOT --env CONAN_HOME --env MALF_ENVIRONMENT_RECIPES --env MALF_LOCKFILE_STRICT
            --env MALF_STORE_DIR --env MALF_CONAN_SOURCES_CACHE)
     local name
-    for name in MALF_STORE_PARAMETERS MALF_STORE_REJUDGE; do
+    for name in MALF_STORE_PARAMETERS MALF_STORE_REJUDGE MALF_SOURCE_VERDICT_SET; do
         [[ -z "${!name:-}" ]] || args+=(--env "$name")
     done
-    (cd "$repo" && python3 "$MALF_DIR/build_environment.py" run "${args[@]}" -- "$MALF_DIR/malf" "$verb" "$@")
+    (cd "$repo" && python3 "$MALF_DIR/build_environment.py" run "${namespaces[@]}" "${args[@]}" -- "$MALF_DIR/malf" "$verb" "$@")
 }
 
 # malf source-verdict [--profile <clang profile>] <repository> — DN-142.D31 (1), slice S3: the dev leg of a
@@ -6827,8 +6829,17 @@ cmd_source_verdict() {
     [[ "$profile" == *clang* ]] \
         || { echo "malf source-verdict: REFUSED — '$profile' is no clang profile: the source verdict is the dev leg's, tested on clang (DN-142.D31 (1))" >&2; return 2; }
     if [[ -z "${MALF_SYSTEM:-}" ]]; then
-        _malf_source_verdict_in_environment "$repo" source-verdict --profile "$profile" "$repo"
-        return
+        # Two containers: the confined packages under the full confinement, then, only when the repository declares
+        # one, the `unconfined:` packages in a container that lifts what their namespaces need (the Founder,
+        # 2026-10-27, option b). Either red is the verb's red.
+        local rc=0 unconfined_rc=0
+        ( export MALF_SOURCE_VERDICT_SET=confined
+          _malf_source_verdict_in_environment "$repo" source-verdict --profile "$profile" "$repo" ) || rc=$?
+        if python3 -c 'import sys, yaml; packages = (yaml.safe_load(open(sys.argv[1])) or {}).get("packages") or {}; sys.exit(0 if any((package or {}).get("unconfined") for package in packages.values()) else 1)' "$repo/packages.yml"; then
+            ( export MALF_SOURCE_VERDICT_SET=unconfined
+              _malf_source_verdict_in_environment --namespaces "$repo" source-verdict --profile "$profile" "$repo" ) || unconfined_rc=$?
+        fi
+        return $(( rc > unconfined_rc ? rc : unconfined_rc ))
     fi
     [[ "$MALF_WORKSPACE_ROOT" == "$repo" ]] \
         || { echo "malf source-verdict: REFUSED — the dev leg's workspace is its repository ($repo), not $MALF_WORKSPACE_ROOT (DN-142.D31 (5))" >&2; return 2; }
@@ -6877,6 +6888,16 @@ cmd_source_verdict() {
     _MALF_DOMAIN=(--workspace "$(dirname "$repo")" --store "$store" --scratch "$scratch" --conan-home "$HOME/.conan2")
     for index in "${!names[@]}"; do
         name="${names[$index]}"; path="${paths[$index]}"; reference="$(cat "$scratch/$name.reference")"
+        if ! _MALF_STEP_UNCONFINED="$(python3 "$MALF_DIR/artefact_store.py" unconfined "$path" "$name")"; then
+            echo "malf source-verdict: the \`unconfined:\` declaration of $name could not be read from its packages.yml at HEAD (DN-142.D29)" >&2
+            failed+=("$name"); continue
+        fi
+        # THE TWO SETS RUN IN TWO CONTAINERS: a package declaring `unconfined:` creates namespaces, and only its
+        # container lifts the confinements that forbid them (build_environment.py run --namespaces).
+        case "${MALF_SOURCE_VERDICT_SET:-}" in
+            confined) [[ -z "$_MALF_STEP_UNCONFINED" ]] || continue ;;
+            unconfined) [[ -n "$_MALF_STEP_UNCONFINED" ]] || continue ;;
+        esac
         if ! (cd "$path" && CONAN_HOME="$keys" conan graph info . --profile:host="$keys/profiles/${MALF_PROFILE##*/}" \
                 --profile:build="$keys/profiles/${MALF_BUILD_PROFILE##*/}" -s build_type="$MALF_CONFIG" \
                 "${_MALF_SHIP_LOCK[@]}" --no-remote --format=json) > "$scratch/$name.graph.json" 2>> "$scratch/keys.log" \
@@ -6884,7 +6905,6 @@ cmd_source_verdict() {
                    "$name" "$MALF_PROFILE_NAME" "$MALF_DIR" "$prefixes" "$reference" "$scratch/$name.source-key.json")"; then
             echo "malf source-verdict: the key of $name could not be computed before its tests (above, or $scratch/keys.log)" >&2
             _malf_quote_log "$scratch/keys.log" "$name (its key before its tests)"
-            _malf_quote_log "$scratch/keys.log" "$name (its key before the tests)"
             failed+=("$name"); continue
         fi
         echo "--- source-verdict: $name key before the tests $key ---"
@@ -6895,10 +6915,6 @@ cmd_source_verdict() {
         fi
         [[ $rc -eq 3 ]] || { failed+=("$name"); continue; }
         executed=$((executed + 1))
-        if ! _MALF_STEP_UNCONFINED="$(python3 "$MALF_DIR/artefact_store.py" unconfined "$path" "$name")"; then
-            echo "malf source-verdict: the \`unconfined:\` declaration of $name could not be read from its packages.yml at HEAD (DN-142.D29)" >&2
-            failed+=("$name"); continue
-        fi
         [[ -z "$_MALF_STEP_UNCONFINED" ]] || echo "--- source-verdict: $name runs UNCONFINED (its packages.yml: $_MALF_STEP_UNCONFINED) ---"
         # THE RESULT IS THIS ACT'S OR NONE: a JUnit file an earlier run left would be judged as this one's.
         local junit; junit="$(_malf_build_dir "$path")/malf-test.junit.xml"

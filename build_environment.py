@@ -320,7 +320,8 @@ def load(pin: Pin, docker: str, directory: Path | None = None, fetch=None) -> st
 def run_argv(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], cwd: Path,
              docker: str = "docker", environ: dict | None = None,
              read_only: list[Path] | tuple = (), host_pids: bool = False, home: str = CONTAINER_HOME,
-             network: str = "none", name: str | None = None, apparmor: bool = False) -> list[str]:
+             network: str = "none", name: str | None = None, apparmor: bool = False,
+             systempaths: bool = False) -> list[str]:
     """The `docker run` command of one act: `mounts` writable and `read_only` read-only, each at its own
     path; `host_pids` shares the host's process ids (a bench walk judging the build slot's holder);
     `network` is `none` unless the act runs beside the walk's backends, on their internal network, and
@@ -350,9 +351,11 @@ def run_argv(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], cw
                "--shm-size", str(shm.f_blocks * shm.f_frsize),
                "--security-opt", "seccomp=unconfined",
                "--env", f"HOME={home}", "--env", f"{SYSTEM_ENV}={pin.image}"]
-    # note: lifted for the reason seccomp is (namespaces): docker-default AppArmor denies mount (ipc run 40583719705).
+    # note: both only for an act whose tests create namespaces (`namespaces_lifts`), never for an ordinary package.
     if apparmor:
         command += ["--security-opt", "apparmor=unconfined"]
+    if systempaths:
+        command += ["--security-opt", "systempaths=unconfined"]
     if host_pids:
         command += ["--pid", "host"]
     for mount in resolved:
@@ -462,13 +465,25 @@ def act_read_argv(mounts: list[Path] | tuple, host_uid: int, act_kernel_uid: int
 def daemon_applies_apparmor(docker: str) -> bool:
     """Whether the daemon confines containers with AppArmor (`docker-default`), which denies `mount` and so the
     namespaces an act's own tests create (a GitHub-hosted Ubuntu runner: ipc's namespace_tests skipped, 'this host
-    refuses an unprivileged user, pid or mount namespace', run 40583719705). The Founder ruled the lift on
-    2026-10-27 (option a: lifted where the daemon applies it, as seccomp is). A daemon without it (rootless, WSL)
+    refuses an unprivileged user, pid or mount namespace', run 40583719705). A daemon without it (rootless, WSL)
     has nothing to lift. raises Refused when the daemon does not answer."""
     done = _docker(docker, "info", "--format", "{{json .SecurityOptions}}")
     if done.returncode != 0:
         raise Refused(f"`docker info` failed, so the act's AppArmor confinement cannot be known: {done.stderr.strip()}")
     return any(str(option).split(",", 1)[0] == "name=apparmor" for option in json.loads(done.stdout or "[]"))
+
+
+def namespaces_lifts(docker: str, namespaces: bool) -> tuple[bool, bool]:
+    """(apparmor, systempaths): the two confinements lifted for an act whose tests create a user, pid and mount
+    namespace and mount a private /proc in it — a package declaring `unconfined:` — and for no other act (the
+    Founder, 2026-10-27, option b: narrowed to those packages, each in a container of its own). docker-default
+    AppArmor denies mount where the daemon applies it (`daemon_applies_apparmor`), and the daemon's masked /proc
+    paths make the kernel refuse a new proc mount: measured on a GitHub-hosted runner, ipc run 40645178880,
+    '[private namespace] no private /proc: Operation not permitted'. The act keeps --network none and no
+    capability in its nested user namespace."""
+    if not namespaces:
+        return False, False
+    return daemon_applies_apparmor(docker), True
 
 
 def grant_act_access(mounts: list[Path] | tuple, docker: str = "docker", read_only: list[Path] | tuple = ()) -> None:
@@ -491,7 +506,7 @@ def grant_act_access(mounts: list[Path] | tuple, docker: str = "docker", read_on
 
 def run(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], docker: str = "docker", read_only: list[Path] | tuple = (), host_pids: bool = False,
         home: str = CONTAINER_HOME, backends: list[Backend] | tuple = (), attest: Path | None = None,
-        worktree_repositories: list[Path] | tuple = ()) -> int:
+        worktree_repositories: list[Path] | tuple = (), namespaces: bool = False) -> int:
     """The act in the environment; with `backends`, beside them on the walk's internal network, every
     backend and the network removed on every exit path. A repository of `worktree_repositories` holding
     an entry outside the mounts refuses the act first; `attest` receives the pin's two digests once the
@@ -508,14 +523,15 @@ def run(pin: Pin, argv: list[str], mounts: list[Path], names: list[str], docker:
             attest.write_text(json.dumps({"image": pin.image, "id": pin.id}, sort_keys=True) + "\n")
         return subprocess.run(command, stdin=subprocess.DEVNULL, check=False).returncode
 
-    apparmor = daemon_applies_apparmor(docker)
+    apparmor, systempaths = namespaces_lifts(docker, namespaces)
     if not backends:
         return started(run_argv(pin, argv, mounts, names, Path.cwd(), docker,
-                                read_only=read_only, host_pids=host_pids, home=home, apparmor=apparmor))
+                                read_only=read_only, host_pids=host_pids, home=home, apparmor=apparmor,
+                                systempaths=systempaths))
     with BackendWalk(docker, backends) as walk:
         return started(run_argv(pin, argv, mounts, names, Path.cwd(), docker,
                                 read_only=read_only, host_pids=host_pids, home=home,
-                                network=walk.network, name=walk.act, apparmor=apparmor))
+                                network=walk.network, name=walk.act, apparmor=apparmor, systempaths=systempaths))
 
 
 # ── the walk's backends (DN-142.D30 (5) E2b, (7) R2) ───────────────────────────────────────────────
@@ -1538,10 +1554,17 @@ def selftest() -> int:
         arm("a rootless daemon grants no read either", act_read_argv([recipes], 1000, 1000), [])
         pinned = Pin("sha256:" + "a" * 64, "sha256:" + "b" * 64, "x.tar", 1, "0" * 64)
         lifted = run_argv(pinned, ["/probe"], [recipes], [], recipes, environ={}, apparmor=True)
-        arm("RED: a daemon confining with AppArmor lifts it for the act, beside seccomp; one without adds nothing",
-            ("apparmor=unconfined" in lifted and lifted[lifted.index("apparmor=unconfined") - 1] == "--security-opt",
-             "apparmor=unconfined" in run_argv(pinned, ["/probe"], [recipes], [], recipes, environ={})),
-            (True, False))
+        plain = run_argv(pinned, ["/probe"], [recipes], [], recipes, environ={})
+        spaced = run_argv(pinned, ["/probe"], [recipes], [], recipes, environ={}, apparmor=True, systempaths=True)
+        arm("RED: an act that creates namespaces lifts AppArmor and the masked /proc paths, each as a --security-opt; "
+            "an ordinary act lifts neither",
+            (all(spaced[spaced.index(option) - 1] == "--security-opt"
+                 for option in ("apparmor=unconfined", "systempaths=unconfined") if option in spaced),
+             "apparmor=unconfined" in spaced and "systempaths=unconfined" in spaced,
+             "apparmor=unconfined" in plain or "systempaths=unconfined" in plain),
+            (True, True, False))
+        arm("RED: no act is lifted unless it asks for namespaces (a package declaring `unconfined:`)",
+            namespaces_lifts("docker", False), (False, False))
         arm("every writable mount, and only those, is a git safe.directory for the act, through git's environment",
             safe_directory_env([recipes, recipes / "store"]),
             ["--env", "GIT_CONFIG_COUNT=2", "--env", "GIT_CONFIG_KEY_0=safe.directory",
@@ -1755,6 +1778,8 @@ def main(argv: list[str]) -> int:
         options.add_argument("--backends", type=Path)
         options.add_argument("--attest", type=Path)
         options.add_argument("--worktree-repository", action="append", default=[], type=Path)
+        # note: only for a package declaring `unconfined:`, whose tests create namespaces (`namespaces_lifts`).
+        options.add_argument("--namespaces", action="store_true")
         given = options.parse_args(argv[1:split])
         if not argv[split + 1:]:
             print("build_environment.py run: the command after -- is empty", file=sys.stderr)
@@ -1764,7 +1789,7 @@ def main(argv: list[str]) -> int:
             return run(read_pin(), argv[split + 1:], given.mount, given.env, docker,
                        read_only, given.host_pids, given.home,
                        read_backends(given.backends) if given.backends else (), given.attest,
-                       given.worktree_repository)
+                       given.worktree_repository, given.namespaces)
         except Refused as refused:
             print(f"build_environment: REFUSED — {refused}; the act did not run (DN-142.D30, OPS-1.S27)", file=sys.stderr)
             return REFUSED
