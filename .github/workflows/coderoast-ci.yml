@@ -1,11 +1,10 @@
 name: CodeRoast CI
 
-# The shared CI job for every CodeRoast C++ repo, as a reusable workflow. It wraps the two composite
-# building blocks — `coderoast-ci` (checkout + toolchain + build env + cross-repo vendor loop + the
-# per-module build/test/create loop) and `coderoast-ci-sift` (the standard, advisory Sift dogfood) —
-# and owns the job-level shell (runs-on) so callers keep only the trigger, permissions, and their two
-# data manifests. A caller becomes ~4 lines: permissions + `uses:` + `with: {vendor, modules}` +
-# `secrets: inherit`.
+# The shared CI job for every CodeRoast C++ repo, as a reusable workflow. It wraps the composite
+# building block — `coderoast-ci` (checkout + toolchain + build env + cross-repo vendor loop + the
+# per-module build/test/create loop) — and owns the job-level shell (runs-on) so callers keep only the
+# trigger, permissions, and their two data manifests. A caller becomes ~4 lines: permissions + `uses:` +
+# `with: {vendor, modules}` + `secrets: inherit`.
 #
 # Every C++ repository's CI build job is this workflow, coderoast-server's and insight-eidos's included
 # (ROADMAP N357). Their two mid-job steps are slots of it rather than reasons to copy it: `hub-scenarios`
@@ -13,10 +12,6 @@ name: CodeRoast CI
 # build the modules that test_require it (the server's `server`, eidos's `insight-e2e`), and
 # `sbom-path` byte-compares a committed linked-closure SBOM against the resolved graph once every
 # module has built (the server's `server/sbom.cdx.json`, eidos's `sift/sbom.cdx.json`; ADR-4.D5, ADR-4.D6).
-
-# Sift dogfood is the standard `sift-action@v1` integration only — the internal courtesy `--explain`
-# endpoint is intentionally NOT wired here (retired from in-CI dogfood; the composite still supports it
-# opt-in if ever re-armed).
 
 on:
   workflow_call:
@@ -40,29 +35,6 @@ on:
         type: string
         required: false
         default: ''
-      sift-mode:
-        description: |
-          private (diff + post the comment in CI; for PRIVATE/no-fork repos) | public (diff + render the
-          `sift-comment` artifact for the coderoast-sift-post workflow to post — fork-safe, for PUBLIC
-          repos) | off (no Sift). Public repos also add a thin sift-post.yml that calls coderoast-sift-post.
-        type: string
-        required: false
-        default: 'private'
-      sift-job:
-        description: 'Sift baseline lineage name for this job (folds into sift-baseline-main-<job> / sift-baseline-<job>-pr-<n>).'
-        type: string
-        required: false
-        default: 'build'
-      sift-baseline:
-        description: 'Override the Sift vs-main baseline SOURCE (sift-action grammar). Empty = the named main baseline artifact — you stay King of the baseline.'
-        type: string
-        required: false
-        default: ''
-      sift-pr-vs-previous:
-        description: 'PRs: also diff against the PR''s own previous run (tagged comment, quiet unless significant). true|false.'
-        type: string
-        required: false
-        default: 'true'
       hub-scenarios:
         description: 'Export the public coderoast-hub''s insight_scenarios recipe, at hub main, after `modules` and before `late-modules`. No tag runs this workflow: the hub commit a release records is the one step 0''s candidate holds.'
         type: boolean
@@ -122,13 +94,3 @@ jobs:
       - name: Save the conan cache (third-party only; never on the coderoast-release group)
         uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@eb2dbecb9a75f1dbd352cbbc1dad3ee6da3a794a
 
-      - name: Sift dogfood (advisory; never fails the build)
-        if: ${{ always() && inputs.sift-mode != 'off' }}
-        continue-on-error: true    # the advisory guarantee lives here, at the job-step boundary
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-ci-sift@eb2dbecb9a75f1dbd352cbbc1dad3ee6da3a794a
-        with:
-          mode: ${{ inputs.sift-mode == 'public' && 'render' || 'comment' }}
-          changed-outcome: ${{ job.status }}   # the NATIVE token — the engine maps it four-class
-          job: ${{ inputs.sift-job }}
-          baseline: ${{ inputs.sift-baseline }}
-          pr-vs-previous: ${{ inputs.sift-pr-vs-previous }}

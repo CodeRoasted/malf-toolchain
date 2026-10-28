@@ -9,9 +9,7 @@ description: |
   fetch script); the per-module build logic is shared from the sibling `conan-module` action.
 
   Use it as the FIRST (usually only) build step in the job. `runs-on` and `permissions` stay in the
-  caller — they are job-level keys a composite action cannot hold. Follow this step with a
-  `coderoast-ci-sift` step for the advisory Sift dogfood (kept separate so the caller can set
-  `continue-on-error` on it — the advisory guarantee cannot be enforced from inside a composite).
+  caller — they are job-level keys a composite action cannot hold.
 
 inputs:
   vendor:
