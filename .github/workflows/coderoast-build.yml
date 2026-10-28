@@ -42,15 +42,15 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: malf at this workflow's commit, as git
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@771fe61ea1c5eb06338e2e2ac98af43e48d15f8c
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@7c401d53b6451d6a8799bce5e15e1b17ffc1b7be
         with:
           workflow: coderoast-build.yml
 
       - name: The pinned build environment and the host's provisioning tools
-        uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-environment@771fe61ea1c5eb06338e2e2ac98af43e48d15f8c
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-environment@7c401d53b6451d6a8799bce5e15e1b17ffc1b7be
 
       - name: Dev leg in the image (source verdict) and its postflight
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-source-verdict@771fe61ea1c5eb06338e2e2ac98af43e48d15f8c
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-source-verdict@7c401d53b6451d6a8799bce5e15e1b17ffc1b7be
         with:
           postflight: ${{ inputs.postflight }}
 
