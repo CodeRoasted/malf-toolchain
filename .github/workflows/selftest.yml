@@ -89,3 +89,16 @@ jobs:
       - name: store_publish selftest (a release job's fetch, verify and stage, against an in-process registry)
         # Its own step until tests/test_malf.sh carries it beside store_replica's and store_manifest's.
         run: timeout 120 python3 store_publish.py selftest
+
+  sift:
+    needs: selftest
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read   # the selftest job's log and the baseline artifact
+    steps:
+      - name: Sift — the selftest log against the last green run
+        uses: CodeRoasted/sift-action@02066069ff16d9b8ce2487b19a3686a3acdf24d7 # v2.0.0
+        with:
+          target-job: selftest
