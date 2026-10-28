@@ -7,6 +7,7 @@ name: CodeRoast Candidate Present
 # hosted runner and the release runner answer it identically (item 6). It first reads the push's
 # package guard (visibility and link, THE ONE RULE), so a package the store job would refuse reds here,
 # in seconds, never after the build; the push still guards, since a setting can change between the two.
+# Before both, it refuses a run off `refs/heads/main`, the store job's own refusal read first for the same reason.
 #
 # Trust: a PUBLIC repository's index counts only through its GitHub artifact attestation, signed by
 # malf's `coderoast-candidate.yml` at this very malf commit, from `refs/heads/main` of the repository
@@ -51,6 +52,15 @@ jobs:
       key: ${{ steps.present.outputs.key }}
       present: ${{ steps.present.outputs.present }}
     steps:
+      - name: Refuse unless main
+        if: ${{ github.ref != 'refs/heads/main' }}
+        shell: bash
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          echo "::error::a candidate stores only from refs/heads/main, and this run is on $REF (DN-142.D31 (4)): a store a non-main run wrote would be read as absent anyway"
+          exit 1
+
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
