@@ -9,9 +9,10 @@ name: Store access probe
 # can measure.
 #
 # THE PAIRING IS THE DESIGN. Each caller names the package it is granted and one it is not, and the
-# callers are crossed: insight-canon is granted store-insight-canon and refused store-coderoast, which
-# coderoast reads; coderoast is refused store-coderoast-security, which coderoast-security's own candidate
-# reads (a private own store, DN-142.D31). So every refusal is answered by another run READING the same package
+# caller's refused package is one another run reads: coderoast is granted store-coderoast (step 0's
+# replica) and refused store-coderoast-security, which coderoast-security's own candidate reads (a private
+# own store, DN-142.D31). A repository that owns its store leaves the probe (its token writes that store by
+# design). So every refusal is answered by another run READING the same package
 # with another repository's token: a refusal cannot be a missing package, a wrong tag or a broken
 # instrument. Within one run, the granted read is the control for the refused one.
 #
