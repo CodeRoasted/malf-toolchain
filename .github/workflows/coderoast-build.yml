@@ -62,7 +62,11 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: source-verdict-logs
-          path: /tmp/malf-source-verdict.*/*.log
+          # ctest's own LastTest.log holds each test's output (a skip's errno, a failure's stderr), which
+          # malf's log does not carry (ipc run 40644020936: the namespace probe's errno was in neither).
+          path: |
+            /tmp/malf-source-verdict.*/*.log
+            ${{ github.workspace }}/**/build-*/Testing/Temporary/LastTest*.log
           if-no-files-found: warn
           retention-days: 7
 
