@@ -1087,6 +1087,12 @@ def selftest() -> int:
                                                              root / "up3", quiet.append, lambda repository: True), None)
             expect("upstream: a private upstream's entry names no cloned root",
                    "root" in (private_resolved or {}).get("coderoasted/coderoast-ipc", {"root": 1}), False)
+            expect("upstream: a repository this token cannot see (404) is private, a visible one by its visibility",
+                   [upstream_is_private(lambda path: (404, {}), "o/hidden"),
+                    upstream_is_private(lambda path: (200, {"visibility": "public"}), "o/open"),
+                    upstream_is_private(lambda path: (200, {"visibility": "private"}), "o/closed")], [True, False, True])
+            arm("RED: any other API answer about an upstream is refused, never guessed",
+                lambda: upstream_is_private(lambda path: (500, {}), "o/x"), "HTTP 500")
             arm("RED: an upstream cloned to another tree than its index records is refused",
                 lambda: resolve_upstreams({"CodeRoasted/coderoast-ipc": key}, read_ipc,
                                           lambda repository, at, into: "f" * 40, root / "up2", quiet.append), "records tree")
@@ -1256,6 +1262,20 @@ def sources_verb(args: argparse.Namespace, token: str | None, say: Callable[[str
     return 0
 
 
+def upstream_is_private(get: Callable[[str], "tuple[int, dict]"], repository: str) -> bool:
+    """Whether an upstream is private, from this job's token: a public repository is visible to every token, and
+    another repository's GITHUB_TOKEN gets 404 for a private one (measured 2026-10-29, insight-eidos's candidate
+    over logcraft), so an unseen repository is private. One that does not exist is no trusted upstream either:
+    its store read is then absent or refused, never trusted."""
+    status, seen = get(f"repos/{repository}")
+    if status == 404:
+        return True
+    if status != 200 or seen.get("visibility") not in store_replica.VISIBILITIES:
+        raise Refused(f"the API answered HTTP {status} and visibility {seen.get('visibility')!r} for the upstream "
+                      f"{repository}")
+    return seen["visibility"] == "private"
+
+
 def upstream_verb(args: argparse.Namespace, get: Callable[[str], "tuple[int, dict]"], token: str | None,
                   say: Callable[[str], None]) -> int:
     """`upstream`: every upstream candidate of the document, through its own store's trust (a public one's
@@ -1264,11 +1284,7 @@ def upstream_verb(args: argparse.Namespace, get: Callable[[str], "tuple[int, dic
     cache = Path(tempfile.mkdtemp(prefix="store_transport."))
 
     def private(repository: str) -> bool:
-        status, seen = get(f"repos/{repository}")
-        if status != 200 or seen.get("visibility") not in store_replica.VISIBILITIES:
-            raise Refused(f"the API answered HTTP {status} and visibility {seen.get('visibility')!r} for the upstream "
-                          f"{repository}")
-        return seen["visibility"] == "private"
+        return upstream_is_private(get, repository)
 
     def read_index(repository: str, key: str) -> dict:
         hidden = private(repository)
