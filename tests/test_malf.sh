@@ -3563,6 +3563,26 @@ check "the walk keeps malf's order, marks the stored: false step build and every
 check "named packages select their closure in walk order; a name that is no step refuses, naming it" \
       "$(printf 'a_core\t/w/a\t\tcreate|b_lib\t/w/b\ta_core\tcreate|d_app\t/w/d\tb_lib\tcreate')|malf store-create: no step of malf's walk is named zz_none" \
       "$(sf_walk d_app)|$(sf_walk zz_none)"
+# A SOURCE-ONLY upstream's packages are steps of the ship walk (DN-142.D31 (2)): malf_graph walks several roots
+# as ONE graph, so a repository's step test-requiring a source root's package carries that edge; MALF_UPSTREAM_SOURCES
+# names those roots, each one of MALF_UPSTREAM_ROOTS, and a reference two roots declare refuses.
+sf_src="$(mktemp -d)"; mkdir -p "$sf_src/hub/d" "$sf_src/repo/a" "$sf_src/twin/d"
+printf 'from conan import ConanFile\nclass H(ConanFile):\n    name = "h_data"\n    version = "1.0"\n' > "$sf_src/hub/d/conanfile.py"
+cp "$sf_src/hub/d/conanfile.py" "$sf_src/twin/d/conanfile.py"
+printf 'from conan import ConanFile\nclass R(ConanFile):\n    name = "r_app"\n    version = "1.0"\n    def build_requirements(self):\n        self.test_requires("h_data/[>=1.0 <2]")\n' > "$sf_src/repo/a/conanfile.py"
+sf_steps() {   # <MALF_UPSTREAM_SOURCES> [<package>...] -> the walk rows, `|`-joined, the fixture root spelled T
+    bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; MALF_WORKSPACE_ROOT="$2/repo"
+        MALF_UPSTREAM_ROOTS="$2/hub:$2/twin"; MALF_UPSTREAM_SOURCES="$3"; shift 3
+        steps="$(_malf_store_steps)" || { echo "rc=$?"; exit 0; }
+        _malf_store_walk "$steps" "" "$@"' _ "$MALF_BIN" "$sf_src" "$@" 2>&1 | sed "s|$sf_src|T|g" | paste -sd'|'
+}
+check "a source root's package is a step of the ship walk, before the step that test-requires it; without the root the edge is gone" \
+      "$(printf 'h_data\tT/hub/d\t\tcreate|r_app\tT/repo/a\th_data\tcreate')#$(printf 'r_app\tT/repo/a\t\tcreate')" \
+      "$(sf_steps "$sf_src/hub" r_app)#$(sf_steps "" r_app)"
+check "a source root that is no upstream root, and a reference two roots both declare, refuse" \
+      "malf store-create: the source root T/repo (MALF_UPSTREAM_SOURCES) is no upstream root (MALF_UPSTREAM_ROOTS)|rc=2#malf_graph.py steps: h_data/1.0 declared under T/twin and another root|malf store-create: malf's walk of T/repo and its source roots T/hub T/twin refused (above)|rc=2" \
+      "$(sf_steps "$sf_src/repo" r_app)#$(sf_steps "$sf_src/hub:$sf_src/twin" r_app)"
+rm -rf "$sf_src"
 check "the act never conan-creates a step it marked build: the create branch is the only create, in the step's own home, and a build step goes to the one build function" \
       "1 1 0 1" "$(grep -c 'if \[\[ "$kind" == "build" \]\]; then' "$MALF_BIN") $(awk '/^_malf_store_create_in\(\)/,/^}/' "$MALF_BIN" | grep -c '^ *if ! CONAN_HOME="$step_home" _malf_store_create_step ') $(awk '/^(cmd_store_create|_malf_store_run_step|_malf_store_create_in)\(\)/,/^}/' "$MALF_BIN" | grep -cE '^ *(if ! )?conan create ') $(awk '/^cmd_store_create\(\)/,/^}/' "$MALF_BIN" | grep -c '^ *_malf_store_run_step ')"
 
@@ -4197,12 +4217,12 @@ for name, verdict in (('pass', 'pass'), ('fail', 'fail')):
           "$(sv_bound "$sv_tmp/b" sv_core)" "$(grep -o '2 source verdict(s)' "$sv_tmp/bound.log")" \
           "$(sv_bound "$sv_tmp/bound-fail" sv_core)" "$(grep -o 'judged fail' "$sv_tmp/bound.log")" \
           "$(sv_bound "$sv_tmp/bound-pass" sv_absent)" "$(grep -o '0 ship-form' "$sv_tmp/bound.log")")"
-check "released: the packages a checkout releases, from packages.yml at HEAD, never the disk" \
-      "sv_core|sv_core" \
-      "$(d="$sv_tmp/rel"; mkdir -p "$d" && git -C "$d" init -q && printf 'packages:\n  sv_core: {path: c, release: true}\n  sv_tests: {path: t, release: false}\n' > "$d/packages.yml" \
+check "shipped: the packages a release ships, release: true and a published executable's, from packages.yml at HEAD, never the disk" \
+      "sv_core sv_image|sv_core sv_image" \
+      "$(d="$sv_tmp/rel"; mkdir -p "$d" && git -C "$d" init -q && printf 'packages:\n  sv_core: {path: c, release: true}\n  sv_tests: {path: t, release: false}\n  sv_image: {path: i, release: false, executables: {bin/sv: {published: {image: sv}}}}\n  sv_tool: {path: o, release: false, executables: {bin/tool: run-from-cache}}\n' > "$d/packages.yml" \
          && git -C "$d" add packages.yml && git -C "$d" -c user.name=t -c user.email=t@t commit -qm r \
-         && python3 "$MALF_ROOT/artefact_store.py" released "$d")|$(printf '  sv_more: {path: m, release: true}\n' >> "$sv_tmp/rel/packages.yml" \
-         && python3 "$MALF_ROOT/artefact_store.py" released "$sv_tmp/rel")"
+         && python3 "$MALF_ROOT/artefact_store.py" shipped "$d" | tr '\n' ' ' | sed 's/ $//')|$(printf '  sv_more: {path: m, release: true}\n' >> "$sv_tmp/rel/packages.yml" \
+         && python3 "$MALF_ROOT/artefact_store.py" shipped "$sv_tmp/rel" | tr '\n' ' ' | sed 's/ $//')"
 # THE VERB'S REFUSALS, before any act.
 mkdir -p "$sv_tmp/repo"; git -C "$sv_tmp/repo" init -q; printf 'packages:\n  sv_core: {path: core, version: 0.1, depends: []}\n' > "$sv_tmp/repo/packages.yml"
 git -C "$sv_tmp/repo" add packages.yml && git -C "$sv_tmp/repo" -c user.name=t -c user.email=t@t commit -qm fixture

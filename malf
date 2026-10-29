@@ -5760,6 +5760,7 @@ _malf_store_create_in_environment() {   # <writer|ship> <package>...
         [[ -z "$upstream_root" ]] || args+=(--read-only-mount "$upstream_root")
     done
     [[ -z "${MALF_UPSTREAM_ROOTS:-}" ]] || args+=(--env MALF_UPSTREAM_ROOTS)
+    [[ -z "${MALF_UPSTREAM_SOURCES:-}" ]] || args+=(--env MALF_UPSTREAM_SOURCES)
     [[ -z "${MALF_UPSTREAM_RECIPES:-}" ]] || args+=(--read-only-mount "$(dirname "$(realpath "$MALF_UPSTREAM_RECIPES")")" --env MALF_UPSTREAM_RECIPES)
     # THE WALK'S BACKENDS (DN-142.D30 (5) E2b): the union of what its steps declare under `backends:` at
     # HEAD, started by the launcher on the walk's internal network; none keeps `--network none`.
@@ -5767,32 +5768,43 @@ _malf_store_create_in_environment() {   # <writer|ship> <package>...
     declared="$(mktemp /tmp/malf-backends.XXXXXX)"
     _malf_store_walk_backends "$declared" "$@" || rc=$?
     if [[ $rc -eq 0 ]]; then
-        if [[ "$(cat "$declared")" != "[]" ]]; then
-        # note: each address `<name>:<port>` on the walk's network, so the act's `malf test` starts none of its own.
-        local variable
-        args+=(--backends "$declared")
-        while IFS= read -r variable; do
-            export "${variable%%=*}=${variable#*=}"
-            args+=(--env "${variable%%=*}")
-        done < <(python3 "$MALF_DIR/build_environment.py" backends --variables "${_MALF_WALK_BACKEND_PAIRS[@]}")
-    fi
+        [[ "$(cat "$declared")" == "[]" ]] || args+=(--backends "$declared")
         python3 "$MALF_DIR/build_environment.py" run "${args[@]}" -- "$MALF_DIR/malf" store-create "${form_args[@]}" "$@" || rc=$?
     fi
     rm -f "$declared"
     return "$rc"
 }
 
+# THE WALK'S STEPS: malf's walk of MALF_WORKSPACE_ROOT as one graph with each SOURCE-ONLY upstream root
+# MALF_UPSTREAM_SOURCES names (colon-separated, each also in MALF_UPSTREAM_ROOTS; DN-142.D31 (2)). A source-only
+# upstream ships no package, so no store holds a record to restore it from: a package of it that a step depends
+# on (coderoast_server's test_requires on coderoast-hub's insight_scenarios) is a step of this walk, created from
+# that source at the commit the candidate names, as step 0's workspace walk created it. A candidate upstream's
+# root is never walked: its packages are restored from its own records, never built.
+# post: the steps on stdout, one graph over the source roots and the workspace, so a step's edge reaches a source
+#       root's package; else non-zero naming the refusal.
+_malf_store_steps() {
+    local root
+    local -a roots=()
+    IFS=: read -r -a roots <<< "${MALF_UPSTREAM_SOURCES:-}"
+    for root in "${roots[@]}"; do
+        [[ ":${MALF_UPSTREAM_ROOTS:-}:" == *":$root:"* ]] \
+            || { echo "malf store-create: the source root $root (MALF_UPSTREAM_SOURCES) is no upstream root (MALF_UPSTREAM_ROOTS)" >&2; return 2; }
+    done
+    python3 "$MALF_DIR/malf_graph.py" steps "${roots[@]}" "$MALF_WORKSPACE_ROOT" \
+        || { echo "malf store-create: malf's walk of $MALF_WORKSPACE_ROOT${roots[*]:+ and its source roots ${roots[*]}} refused (above)" >&2; return 2; }
+}
+
 # THE BACKENDS A WALK DECLARES, computed on the host before its container starts: the walk's steps
 # (malf's own walk at the workspace root, its selection), and each one's `backends:` at HEAD.
-# post: <out> holds the JSON list `build_environment.py run --backends` reads (`[]` for none); exit 2
-#       naming the refusal (a malformed declaration, one name declared two ways).
-# post: <out> holds the walk's backends; _MALF_WALK_BACKEND_PAIRS the <path> <package> pairs they were read over.
+# post: <out> holds the JSON list `build_environment.py run --backends` reads (`[]` for none), and
+#       _MALF_WALK_BACKEND_PAIRS the <path> <package> pairs it was read over; exit 2 naming the refusal
+#       (a malformed declaration, one name declared two ways).
 _malf_store_walk_backends() {   # <out> [<package>...]
     local out="$1" steps unstored wanted name path _deps _kind
     shift
     local -a pairs=()
-    steps="$(python3 "$MALF_DIR/malf_graph.py" steps "$MALF_WORKSPACE_ROOT")" && [[ -n "$steps" ]] \
-        || { echo "malf store-create: malf's walk of $MALF_WORKSPACE_ROOT found no step, or refused it (above)" >&2; return 2; }
+    steps="$(_malf_store_steps)" || return 2
     unstored="$(_malf_unstored)" \
         || { echo "malf store-create: failed to resolve the stored: false packages" >&2; return 2; }
     wanted="$(_malf_store_walk "$steps" "$unstored" "$@")" || return 2
@@ -5900,8 +5912,7 @@ cmd_store_create() {
     chmod 0755 "$scratch"
     export PYTHONPYCACHEPREFIX="$scratch/pycache"
     local steps unstored prefixes
-    steps="$(python3 "$MALF_DIR/malf_graph.py" steps "$MALF_WORKSPACE_ROOT")" && [[ -n "$steps" ]] \
-        || { echo "malf store-create: malf's walk of $MALF_WORKSPACE_ROOT found no step, or refused it (above)" >&2; return 2; }
+    steps="$(_malf_store_steps)" || return 2
     unstored="$(_malf_unstored)" \
         || { echo "malf store-create: failed to resolve the stored: false packages" >&2; return 2; }
     prefixes="$(_malf_owned_prefixes)" \

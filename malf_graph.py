@@ -18,10 +18,11 @@ lines on stdout.
       EVERY workspace recipe, path-sorted — what `malf editables sync`
       re-registers so a coordinated version bump propagates in one pass.
 
-  steps <root_dir>
+  steps <root_dir> [<root_dir>...]
       `members`, with a third column: each member's first-party requirements among the
       members (`requires` and `test_requires`), by name, comma-separated — the step walk's
-      edges (`malf store-create`). Exit 2, printing nothing, when a member's
+      edges (`malf store-create`). Several roots are walked as ONE graph, so an edge crosses
+      roots (a repository's step test-requiring a source-only upstream's package). Exit 2, printing nothing, when a member's
       `test_package/conanfile.py` requires a constant reference its tested recipe neither
       requires nor test-requires (DN-142.D26), each breach named on stderr.
 
@@ -303,12 +304,26 @@ def test_package_breaches(recipes: dict) -> list[str]:
     return breaches
 
 
-def mode_steps(root: pathlib.Path) -> int:
-    """`members`, each row carrying a third column: the member's first-party requirements
-    (`requires` and `test_requires`) among the members, by name, comma-separated — the edges a
+def mode_steps(roots: list[pathlib.Path]) -> int:
+    """`members` of every root as one graph, each row carrying a third column: the member's first-party
+    requirements (`requires` and `test_requires`) among the members, by name, comma-separated — the edges a
     step walk needs to skip a dependent of a failed step (DN-142.D5 (4), (7)).
-    post: 0 with the rows printed; 2 with nothing printed and each test_package breach named."""
-    recipes = scan(root)
+    post: 0 with the rows printed; 2 with nothing printed and each test_package breach named, or a root
+          holding no recipe, or a reference two roots both declare."""
+    recipes: dict = {}
+    for root in roots:
+        scanned = scan(root)
+        if not scanned:
+            # A walk that finds no recipe is REFUSED, never an empty walk: under a Landlock domain a
+            # directory it may not list reads as empty, and an empty walk would build nothing and pass
+            # (DN-142.D29, found running the first confined store-create, 2026-10-17).
+            sys.stderr.write(f"malf_graph.py steps: no recipe found under {root} — refusing an empty walk\n")
+            return 2
+        doubled = sorted(set(scanned) & set(recipes))
+        if doubled:
+            sys.stderr.write(f"malf_graph.py steps: {', '.join(doubled)} declared under {root} and another root\n")
+            return 2
+        recipes.update(scanned)
     breaches = test_package_breaches(recipes)
     if breaches:
         sys.stderr.write(f"malf_graph: REFUSED {len(breaches)} test_package requirement(s) outside the tested "
@@ -334,12 +349,6 @@ def mode_steps(root: pathlib.Path) -> int:
         visiting.remove(ref)
         seen.add(ref)
 
-    if not recipes:
-        # A walk that finds no recipe is REFUSED, never an empty walk: under a Landlock domain a
-        # directory it may not list reads as empty, and an empty walk would build nothing and pass
-        # (DN-142.D29, found running the first confined store-create, 2026-10-17).
-        sys.stderr.write(f"malf_graph.py steps: no recipe found under {root} — refusing an empty walk\n")
-        return 2
     for ref in sorted(recipes, key=lambda r: recipes[r]["dir"]):
         visit(ref)
     for ref, directory, edges in order:
@@ -363,7 +372,7 @@ def main() -> int:
     elif mode == "members":
         mode_members(pathlib.Path(sys.argv[2]).resolve())
     elif mode == "steps":
-        return mode_steps(pathlib.Path(sys.argv[2]).resolve())
+        return mode_steps([pathlib.Path(root).resolve() for root in sys.argv[2:]])
     else:
         sys.stderr.write(f"malf_graph.py: unknown mode '{mode}' (deps|all|members|steps)\n")
         return 2

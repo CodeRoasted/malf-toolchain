@@ -131,19 +131,22 @@ jobs:
             "$RUNNER_TEMP/sources"
           roots="$(python3 -c 'import json, sys; print(":".join(entry["root"] for entry in json.load(open(sys.argv[1])).values()))' "$RUNNER_TEMP/sources-out.json")"
           echo "MALF_UPSTREAM_ROOTS=${MALF_UPSTREAM_ROOTS:+$MALF_UPSTREAM_ROOTS:}$roots" >> "$GITHUB_ENV"
+          # A source-only upstream ships no package to restore: the ship walk creates the ones it needs (malf's _malf_store_steps).
+          echo "MALF_UPSTREAM_SOURCES=$roots" >> "$GITHUB_ENV"
 
-      - name: The ship form of every released package, in the image, then its binding to the source verdict
+      - name: The ship form of every shipped package, in the image, then its binding to the source verdict
         shell: bash
         run: |
           set -euo pipefail
           store="$RUNNER_TEMP/candidate-store"
-          mapfile -t released < <(python3 "$MALF_CHECKOUT/artefact_store.py" released "$GITHUB_WORKSPACE")
-          [ "${#released[@]}" -gt 0 ] \
-            || { echo "::error::$GITHUB_REPOSITORY releases no package (packages.yml at HEAD): a candidate stores what a release publishes"; exit 1; }
-          echo "released: ${released[*]}"
+          # note: shipped = each `release: true` package and each package with a `published` executable (an image's binary).
+          mapfile -t shipped < <(python3 "$MALF_CHECKOUT/artefact_store.py" shipped "$GITHUB_WORKSPACE")
+          [ "${#shipped[@]}" -gt 0 ] \
+            || { echo "::error::$GITHUB_REPOSITORY ships no package (packages.yml at HEAD): a candidate stores what a release publishes"; exit 1; }
+          echo "shipped: ${shipped[*]}"
           CONAN_HOME="$RUNNER_TEMP/candidate-conan-host" MALF_STORE_DIR="$store" MALF_WORKSPACE_ROOT="$GITHUB_WORKSPACE" \
-            bash "$MALF_CHECKOUT/malf" store-create --ship "${released[@]}"
-          python3 "$MALF_CHECKOUT/artefact_store.py" bound "$store" "${released[@]}"
+            bash "$MALF_CHECKOUT/malf" store-create --ship "${shipped[@]}"
+          python3 "$MALF_CHECKOUT/artefact_store.py" bound "$store" "${shipped[@]}"
 
       # The committed SBOM is a projection of the graph this job just resolved for the ship form, so it is checked
       # here, in that job's home, before anything is stored (it moved from coderoast-ci.yml's build job).

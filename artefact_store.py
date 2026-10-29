@@ -39,8 +39,9 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
         DN-142.D31 (1)'s binding: EQUAL-INPUTS (exit 0) when a ship-form package record and a source
         verdict name one package over equal sources, malf tree, image and third-party `ref#rrev` set;
         UNEQUAL naming each member (exit 1); 2 when a record is absent
-    artefact_store.py released <checkout>
-        the packages <checkout> releases (`release: true` in its packages.yml at HEAD), one per line
+    artefact_store.py shipped <checkout>
+        the packages a release of <checkout> ships, from its packages.yml at HEAD, one per line: each
+        `release: true` package and each package with a `published` executable (an image's binary)
     artefact_store.py bound <store> <package>...
         each package has exactly one ship-form create record and one PASSING source verdict, EQUAL-INPUTS
         (`binding`); a line each, exit 0 all bound, 1 any not: what a candidate's store job pushes over
@@ -2185,9 +2186,11 @@ def binding(store: Path, package_key: str, verdict_key: str) -> int:
     return 1
 
 
-def released_packages(checkout: Path) -> list[str]:
-    """`released`: the packages the repository at `checkout` releases (`release: true` in its packages.yml at
-    HEAD, the recorded commit, never the disk), sorted: what a candidate's store job creates in the ship form."""
+def shipped_packages(checkout: Path) -> list[str]:
+    """`shipped`: the packages a release of the repository at `checkout` ships (its packages.yml at HEAD, the
+    recorded commit, never the disk), sorted: each `release: true` package, whose package is published, and each
+    package with a `published` executable (DN-142.D22), whose binary ships inside a publication site such as an
+    image while the package itself is `release: false`. What a candidate's store job creates in the ship form."""
     import yaml
 
     shown = subprocess.run(["git", "-C", str(checkout), "show", "HEAD:packages.yml"], capture_output=True,
@@ -2195,7 +2198,9 @@ def released_packages(checkout: Path) -> list[str]:
     if shown.returncode != 0:
         raise Refused(f"{checkout} holds no packages.yml at HEAD: {shown.stderr.strip()}")
     packages = (yaml.safe_load(shown.stdout) or {}).get("packages") or {}
-    return sorted(name for name, entry in packages.items() if (entry or {}).get("release") is True)
+    return sorted(name for name, entry in packages.items()
+                  if (entry or {}).get("release") is True
+                  or any(executable_class(value) == "published" for value in ((entry or {}).get("executables") or {}).values()))
 
 
 def bound(store: Path, packages: list[str]) -> int:
@@ -4037,9 +4042,9 @@ def main(argv: list[str]) -> int:
         return ship_equal(Path(argv[1]))
     if len(argv) == 4 and argv[0] == "binding":
         return binding(Path(argv[1]), argv[2], argv[3])
-    if len(argv) == 2 and argv[0] == "released":
+    if len(argv) == 2 and argv[0] == "shipped":
         try:
-            print("\n".join(released_packages(Path(argv[1]))))
+            print("\n".join(shipped_packages(Path(argv[1]))))
         except Refused as refused:
             print(f"artefact_store: REFUSED {refused}", file=sys.stderr)
             return 1
