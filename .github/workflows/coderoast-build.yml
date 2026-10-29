@@ -43,6 +43,9 @@ permissions:
   contents: read
   # The run's referenced workflows, read by `coderoast-malf-checkout` to find this workflow's commit.
   actions: read
+  # A private upstream's store is read with this job's token (DN-142.D31 (2), option C): a called workflow's
+  # declaration caps its token, so the caller's grant does not reach this job unless it is declared here.
+  packages: read
 
 jobs:
   build:
