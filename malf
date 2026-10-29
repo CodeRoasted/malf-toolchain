@@ -6599,6 +6599,25 @@ _malf_store_third_party_in() {   # <name> <path> <prefixes> <store> <scratch> <g
 # revision: first-party editables float, third-party is pinned, `malf lock`), so a first-party package of
 # another repository that the shared lock names is never taken for a third-party recipe to provision.
 # post: the namespaces, space-separated, or a non-zero exit naming why none could be derived.
+# THE REPOSITORY'S DATABASE, FOLDED ONCE AT THE END: each package's compile database, then each inventory cell's,
+# into the repository root's. Folding as each act ends is not enough where the root is itself a package
+# (insight-eidos): CMake rewrites that package's compile_commands.json, which IS the root database, whenever the
+# package reconfigures as a later act's dependency, and erases what was folded before (measured 2026-10-29,
+# insight-eidos's candidate: llm's, sift's and fuzz's 47 translation units absent from the postflight's subject).
+# post: the root database holds every package's and every inventory cell's entries, each package's own entries winning.
+_malf_merge_repository_dbs() {   # <repository> <package dir>...
+    local repo="$1" path inventory
+    shift
+    for path in "$@"; do
+        _malf_merge_compile_commands "$(_malf_build_dir "$path")" "$path" || return 1
+    done
+    local root="$repo/build-$(_malf_build_key)"
+    [[ -f "$root/compile_commands.json" ]] || return 0
+    while IFS= read -r inventory; do
+        [[ -z "$inventory" ]] || _malf_merge_db_tree "$root" "$inventory" || return 1
+    done < <(_malf_inventory_db_dirs "$repo")
+}
+
 # THE UPSTREAMS OF A REPOSITORY'S OWN WALK (DN-142.D31 (2), (5)): MALF_UPSTREAM_ROOTS names, colon-separated,
 # the source roots of the repositories this one's packages require, each checked out at the commit its stored
 # candidate records. Every package such a root declares is exported into <home>, so a graph resolves it: the
@@ -7045,6 +7064,7 @@ cmd_source_verdict() {
             echo "--- source-verdict: the inventory of $repo built and tested ---"
         fi
     fi
+    _malf_merge_repository_dbs "$repo" "${paths[@]}" > /dev/null || failed+=("compile-database")
     echo "=== malf source-verdict: ${#names[@]} package(s) of $repo, $served served from the store, $executed tested, ${#failed[@]} red or unrecorded ==="
     if [[ ${#failed[@]} -gt 0 ]]; then
         echo "malf source-verdict: FAILED ${failed[*]} — logs in $scratch" >&2

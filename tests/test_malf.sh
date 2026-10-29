@@ -5746,6 +5746,18 @@ check "RED-FIRST — an in-image merge into the repository root's database stamp
         _malf_merge_compile_commands "$2/llm/build-x" "$2/llm" >/dev/null 2>&1
         tree="$2/build-$(_malf_build_key)"; printf "%s " "$(cat "$tree/.malf-environment" 2>/dev/null || echo none)"
         _malf_build_tree_environment "$tree" 2>/dev/null; echo "rc=$?"' _ "$MALF_BIN" "$e3_tmp/rootpkg")"
+# The same shape, later: CMake rewrites the root package's own database (it IS the root database) when it
+# reconfigures, erasing what was folded before; the repository's final fold puts every package back.
+mkdir -p "$e3_tmp/rootpkg/build-clang21-libcxx-release.environment-9efc94c0ea72"
+printf '[{"file": "src/root.cpp", "directory": "/d", "command": "c++ root.cpp"}]\n' > "$e3_tmp/rootpkg/root.json"
+check "RED-FIRST — the repository's final fold restores a package's entries after the root package's tree rewrote the root database" \
+      "llm/a.cpp src/root.cpp" \
+      "$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; export MALF_SYSTEM=sha256:9efc94c0ea72cd5bf7950d0121b7747cac9ec11e1a32193e916ca06b62eb5ec5 MALF_PROFILE_NAME=linux-clang21-libcxx-release
+        _malf_build_dir() { case "$1" in */llm) echo "$1/build-x" ;; *) echo "$1/build-$(_malf_build_key)" ;; esac; }
+        root="$2/build-$(_malf_build_key)"
+        cp "$2/root.json" "$root/compile_commands.json"; printf "%s\n" "$MALF_SYSTEM" > "$root/.malf-environment"
+        _malf_merge_repository_dbs "$2" "$2/llm" "$2" >/dev/null 2>&1
+        python3 -c "import json, sys; print(*sorted(e[\"file\"] for e in json.load(open(sys.argv[1]))))" "$root/compile_commands.json"' _ "$MALF_BIN" "$e3_tmp/rootpkg")"
 # seed-recipes over a fixture source home: one third-party recipe, and the lock naming it beside a
 # revision no home holds (the MSVC leg's build tools, in the real lock).
 mkdir -p "$e3_tmp/recipe/tps"
