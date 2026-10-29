@@ -5767,7 +5767,15 @@ _malf_store_create_in_environment() {   # <writer|ship> <package>...
     declared="$(mktemp /tmp/malf-backends.XXXXXX)"
     _malf_store_walk_backends "$declared" "$@" || rc=$?
     if [[ $rc -eq 0 ]]; then
-        [[ "$(cat "$declared")" == "[]" ]] || args+=(--backends "$declared")
+        if [[ "$(cat "$declared")" != "[]" ]]; then
+        # note: each address `<name>:<port>` on the walk's network, so the act's `malf test` starts none of its own.
+        local variable
+        args+=(--backends "$declared")
+        while IFS= read -r variable; do
+            export "${variable%%=*}=${variable#*=}"
+            args+=(--env "${variable%%=*}")
+        done < <(python3 "$MALF_DIR/build_environment.py" backends --variables "${_MALF_WALK_BACKEND_PAIRS[@]}")
+    fi
         python3 "$MALF_DIR/build_environment.py" run "${args[@]}" -- "$MALF_DIR/malf" store-create "${form_args[@]}" "$@" || rc=$?
     fi
     rm -f "$declared"
@@ -5778,6 +5786,7 @@ _malf_store_create_in_environment() {   # <writer|ship> <package>...
 # (malf's own walk at the workspace root, its selection), and each one's `backends:` at HEAD.
 # post: <out> holds the JSON list `build_environment.py run --backends` reads (`[]` for none); exit 2
 #       naming the refusal (a malformed declaration, one name declared two ways).
+# post: <out> holds the walk's backends; _MALF_WALK_BACKEND_PAIRS the <path> <package> pairs they were read over.
 _malf_store_walk_backends() {   # <out> [<package>...]
     local out="$1" steps unstored wanted name path _deps _kind
     shift
@@ -5792,6 +5801,7 @@ _malf_store_walk_backends() {   # <out> [<package>...]
     done <<< "$wanted"
     python3 "$MALF_DIR/build_environment.py" backends "${pairs[@]}" > "$out" \
         || { echo "malf store-create: the walk's \`backends:\` declarations could not be read (above; DN-142.D30 (5) E2b)" >&2; return 2; }
+    _MALF_WALK_BACKEND_PAIRS=("${pairs[@]}")
 }
 
 # malf store-create [<package>...] — ROADMAP N358's ONE build act (DN-142.D5 (1), (4), (7) M2): every
@@ -6881,7 +6891,24 @@ _malf_source_verdict_in_environment() {   # [--namespaces] <repository> <verb> <
     for name in MALF_STORE_PARAMETERS MALF_STORE_REJUDGE MALF_SOURCE_VERDICT_SET; do
         [[ -z "${!name:-}" ]] || args+=(--env "$name")
     done
-    (cd "$repo" && python3 "$MALF_DIR/build_environment.py" run "${namespaces[@]}" "${args[@]}" -- "$MALF_DIR/malf" "$verb" "$@")
+    # THE REPOSITORY'S BACKENDS (DN-142.D30 (5) E2b), as store-create starts them: the union its packages declare
+    # under `backends:`, on the launcher's internal network. Without them a dev leg ran coderoast-server's infra
+    # tests against no database; a repository declaring none keeps `--network none`.
+    local declared rc=0
+    declared="$(mktemp /tmp/malf-backends.XXXXXX)"
+    MALF_WORKSPACE_ROOT="$repo" _malf_store_walk_backends "$declared" || { rm -f "$declared"; return 2; }
+    if [[ "$(cat "$declared")" != "[]" ]]; then
+        # note: each address `<name>:<port>` on the walk's network, so the act's `malf test` starts none of its own.
+        local variable
+        args+=(--backends "$declared")
+        while IFS= read -r variable; do
+            export "${variable%%=*}=${variable#*=}"
+            args+=(--env "${variable%%=*}")
+        done < <(python3 "$MALF_DIR/build_environment.py" backends --variables "${_MALF_WALK_BACKEND_PAIRS[@]}")
+    fi
+    (cd "$repo" && python3 "$MALF_DIR/build_environment.py" run "${namespaces[@]}" "${args[@]}" -- "$MALF_DIR/malf" "$verb" "$@") || rc=$?
+    rm -f "$declared"
+    return "$rc"
 }
 
 # malf source-verdict [--profile <clang profile>] <repository> — DN-142.D31 (1), slice S3: the dev leg of a

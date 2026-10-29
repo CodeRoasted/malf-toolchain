@@ -82,7 +82,8 @@ every privileged syscall by the kernel.
         <argv> on the host beside the backends the package at that directory declares in its working-tree
         packages.yml, published on 127.0.0.1 at ports the daemon allocates, each address in its
         CODEROAST_BACKEND_<NAME>; bare when it declares none (the desk's `malf test` and CI's
-        conan_module.sh, test phase and create alike); exit the command's, 2 refused
+        conan_module.sh, test phase and create alike), or when each variable already holds its
+        walk-network address <name>:<port> (an act beside a walk's backends); exit the command's, 2 refused
     build_environment.py selftest
         every refusal and the container's isolation, over a throwaway image built here (FROM scratch, no
         network), never the real archive; the definition check's refusals over recipes written here
@@ -847,10 +848,17 @@ class BackendWalk:
         self.signals = {}
 
 
+def beside_walk(backends: list[Backend], environment: dict[str, str]) -> bool:
+    """Every backend is already reached at its walk-network address `<name>:<port>`, which a published
+    address (127.0.0.1:<port>) never equals: the caller is an act a launcher started beside them."""
+    return all(environment.get(backend.variable) == f"{backend.name}:{backend.port}" for backend in backends)
+
+
 def with_backends(docker: str, backends: list[Backend], argv: list[str]) -> int:
     """`argv` run on the host beside the backends published on 127.0.0.1, each address in its
-    CODEROAST_BACKEND_<NAME> (the same start, barrier and teardown as a walk's); bare when there are none."""
-    if not backends:
+    CODEROAST_BACKEND_<NAME> (the same start, barrier and teardown as a walk's); bare when there are none,
+    or when an act already reaches every one on its walk's network (`malf source-verdict`'s `malf test`)."""
+    if not backends or beside_walk(backends, dict(os.environ)):
         return subprocess.run(argv, check=False).returncode
     with BackendWalk(docker, backends, publish=True) as walk:
         return subprocess.run(argv, env={**os.environ, **walk.addresses}, check=False).returncode
@@ -1335,6 +1343,14 @@ def _backend_arms(arm, refusal, base: Path, docker: str) -> None:
             refusal(lambda: parse_backends([{"name": "redis", "image": "redis:7", "port": 6379, "health": "true"}],
                                            "packages.yml")).endswith("image 'redis:7' is not pinned by digest "
                                                                      "(<ref>@sha256:<64 hex>)"), True)
+        os.environ[probe.variable] = "probe:7000"
+        try:
+            beside = with_backends("/nonexistent/docker", [probe], ["true"])
+        finally:
+            del os.environ[probe.variable]
+        arm("an act beside a walk's backends runs with-backends bare, reaching no daemon; a published or missing "
+            "address is not a walk's",
+            (beside, beside_walk([probe], {probe.variable: "127.0.0.1:7000"}), beside_walk([probe], {})), (0, False, False))
         arm("RED: two steps declaring one backend name differently are refused, naming both",
             refusal(lambda: walk_backends([("one", [probe]), ("two", [Backend("probe", reference, 7001, "true", (), ())])]))
             .endswith("one and two declare the backend 'probe' differently"), True)
