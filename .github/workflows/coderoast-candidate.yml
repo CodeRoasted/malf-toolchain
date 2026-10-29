@@ -30,6 +30,16 @@ on:
         type: string
         required: false
         default: '{}'
+      sbom-package-dir:
+        description: 'The package whose resolved graph `sbom-path` must match (the repository''s shipped binary). Empty: no SBOM check.'
+        type: string
+        required: false
+        default: ''
+      sbom-path:
+        description: 'The committed CycloneDX SBOM byte-compared against `sbom-package-dir`''s resolved ship graph (ADR-4.D5, ADR-4.D6). Fix a red with `malf sbom`.'
+        type: string
+        required: false
+        default: ''
       runs-on:
         description: 'Runner label. Defaults to hosted ubuntu-24.04. PUBLIC callers omit it; PRIVATE callers pass their self-hosted label.'
         type: string
@@ -98,8 +108,15 @@ jobs:
           python3 "$MALF_CHECKOUT/store_transport.py" upstream "$RUNNER_TEMP/upstream.json" "$RUNNER_TEMP/upstream-out.json" \
             --sources "$RUNNER_TEMP/upstream" --signer-workflow "$SIGNER_WORKFLOW" \
             --store "$RUNNER_TEMP/candidate-store"
-          roots="$(python3 -c 'import json, sys; print(":".join(entry["root"] for entry in json.load(open(sys.argv[1])).values()))' "$RUNNER_TEMP/upstream-out.json")"
+          roots="$(python3 -c 'import json, sys; print(":".join(entry["root"] for entry in json.load(open(sys.argv[1])).values() if "root" in entry))' "$RUNNER_TEMP/upstream-out.json")"
           echo "MALF_UPSTREAM_ROOTS=$roots" >> "$GITHUB_ENV"
+          # A private upstream is never cloned: its recipes come through its records' transports (option C).
+          mkdir -p "$RUNNER_TEMP/upstream-recipes"
+          python3 -c 'import json, sys; json.dump({name: path for entry in json.load(open(sys.argv[1])).values() for name, path in (entry.get("recipes") or {}).items()}, open(sys.argv[2], "w"))' \
+            "$RUNNER_TEMP/upstream-out.json" "$RUNNER_TEMP/upstream-recipes/recipes.json"
+          if [ "$(cat "$RUNNER_TEMP/upstream-recipes/recipes.json")" != "{}" ]; then
+            echo "MALF_UPSTREAM_RECIPES=$RUNNER_TEMP/upstream-recipes/recipes.json" >> "$GITHUB_ENV"
+          fi
 
       - name: The source-only upstreams, cloned at the commits the candidate names
         if: ${{ inputs.sources != '{}' }}
@@ -127,6 +144,17 @@ jobs:
           CONAN_HOME="$RUNNER_TEMP/candidate-conan-host" MALF_STORE_DIR="$store" MALF_WORKSPACE_ROOT="$GITHUB_WORKSPACE" \
             bash "$MALF_CHECKOUT/malf" store-create --ship "${released[@]}"
           python3 "$MALF_CHECKOUT/artefact_store.py" bound "$store" "${released[@]}"
+
+      # The committed SBOM is a projection of the graph this job just resolved for the ship form, so it is checked
+      # here, in that job's home, before anything is stored (it moved from coderoast-ci.yml's build job).
+      - name: The committed SBOM matches the ship form's resolved graph
+        if: ${{ inputs.sbom-path != '' }}
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-sbom-check@8e24cbfacfced832671bef80177a06cf42621886
+        env:
+          CONAN_HOME: ${{ runner.temp }}/candidate-conan-host/cut-verify
+        with:
+          package-dir: ${{ inputs.sbom-package-dir }}
+          sbom-path: ${{ inputs.sbom-path }}
 
       - name: Push every owned object and record to the repository's own store
         shell: bash

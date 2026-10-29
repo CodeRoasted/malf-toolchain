@@ -75,9 +75,16 @@ jobs:
           set -euo pipefail
           printf '%s' "$UPSTREAM" > "$RUNNER_TEMP/upstream.json"
           python3 "$MALF_CHECKOUT/store_transport.py" upstream "$RUNNER_TEMP/upstream.json" "$RUNNER_TEMP/upstream-out.json" \
-            --sources "$RUNNER_TEMP/upstream" --signer-workflow "$SIGNER_WORKFLOW"
-          roots="$(python3 -c 'import json, sys; print(":".join(entry["root"] for entry in json.load(open(sys.argv[1])).values()))' "$RUNNER_TEMP/upstream-out.json")"
+            --sources "$RUNNER_TEMP/upstream" --signer-workflow "$SIGNER_WORKFLOW" --store "$RUNNER_TEMP/upstream-recipes/store"
+          roots="$(python3 -c 'import json, sys; print(":".join(entry["root"] for entry in json.load(open(sys.argv[1])).values() if "root" in entry))' "$RUNNER_TEMP/upstream-out.json")"
           echo "MALF_UPSTREAM_ROOTS=$roots" >> "$GITHUB_ENV"
+          # A private upstream is never cloned: its recipes come through its records' transports (option C).
+          mkdir -p "$RUNNER_TEMP/upstream-recipes"
+          python3 -c 'import json, sys; json.dump({name: path for entry in json.load(open(sys.argv[1])).values() for name, path in (entry.get("recipes") or {}).items()}, open(sys.argv[2], "w"))' \
+            "$RUNNER_TEMP/upstream-out.json" "$RUNNER_TEMP/upstream-recipes/recipes.json"
+          if [ "$(cat "$RUNNER_TEMP/upstream-recipes/recipes.json")" != "{}" ]; then
+            echo "MALF_UPSTREAM_RECIPES=$RUNNER_TEMP/upstream-recipes/recipes.json" >> "$GITHUB_ENV"
+          fi
 
       - name: The source-only upstreams, cloned at the commits the candidate names
         if: ${{ inputs.sources != '{}' }}

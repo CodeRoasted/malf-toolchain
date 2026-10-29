@@ -381,8 +381,8 @@ echo
 echo "[7i2] store_transport carries its own proof (selftest): a repository's own store, pushed by its candidate and restored by digest through a cache, the index trusted only through its attestation (DN-142.D31 (3), (4), slice S4)"
 transport_selftest_output="$(timeout 300 python3 "$MALF_ROOT/store_transport.py" selftest 2>&1)"
 transport_selftest_status=$?
-check "store_transport selftest: 71 arms, the candidate key, push and its ownership filter, publish-index last, the attestation verifier's eight ABSENT reds, the cache judged by digest, the mismatch tag, the one visibility rule and package-check's early read of it, a private package's link read through the peek token, a dependent candidate's upstreams read and checked, a source-only upstream's commit in the key, and a user-owned fork" \
-      "ok" "$([[ $transport_selftest_status -eq 0 ]] && grep -q '^store_transport selftest: 71 arm(s), 0 failure(s)$' <<< "$transport_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$transport_selftest_output")")"
+check "store_transport selftest: 73 arms, the candidate key, push and its ownership filter, publish-index last, the attestation verifier's eight ABSENT reds, the cache judged by digest, the mismatch tag, the one visibility rule and package-check's early read of it, a private package's link read through the peek token, a dependent candidate's upstreams read and checked, a source-only upstream's commit in the key, a private upstream never cloned, and a user-owned fork" \
+      "ok" "$([[ $transport_selftest_status -eq 0 ]] && grep -q '^store_transport selftest: 73 arm(s), 0 failure(s)$' <<< "$transport_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$transport_selftest_output")")"
 
 echo
 
@@ -5696,6 +5696,21 @@ check "(b) the replay reds a record whose upstream no record holds any more, nam
 rm -rf "$as_tmp"
 echo
 
+echo "[7e2b] a tree's digest reads a file's mode as git does: the owner's execute bit, never a group bit an ACL raised"
+# Measured 2026-10-29: logcraft_core's export sources restored from its malf-runner transport carried 654 (the
+# runner home's ACL mask raised group execute) and the desk's export 644, so one recipe had two digests.
+td_tmp="$(mktemp -d)"
+mkdir -p "$td_tmp/a" "$td_tmp/b" && printf 'x\n' > "$td_tmp/a/f" && printf 'x\n' > "$td_tmp/b/f" && printf 'x\n' > "$td_tmp/b/run" && printf 'x\n' > "$td_tmp/a/run"
+chmod 644 "$td_tmp/a/f"; chmod 654 "$td_tmp/b/f"; chmod 744 "$td_tmp/a/run" "$td_tmp/b/run"
+check "RED-FIRST: a file whose only execute bits are group or other digests as a plain file, and an owner-executable one as executable" \
+      "equal file executable" \
+      "$(python3 -c "import sys; sys.path.insert(0, '$MALF_ROOT'); import artefact_store as a
+from pathlib import Path
+d = {n: a.tree_digest(Path('$td_tmp') / n) for n in 'ab'}
+print('equal' if d['a'][0] == d['b'][0] else 'DIFFER', *[mode for path, mode, _ in d['b'][1]])")"
+rm -rf "$td_tmp"
+echo
+
 echo "[7e3] a compiling act in the build environment builds in trees and a conan home of its own, its recipes restored and checked, never a host's (DN-142.D30 (9) R7)"
 check "outside the image a build tree is keyed by its profile alone; inside, it carries the image's config digest" \
       "gcc16-release gcc16-release.environment-9efc94c0ea72" \
@@ -5721,6 +5736,16 @@ check "RED — a tree stamped by another environment is refused, in the image an
 check "a new tree is stamped with the environment that writes it, and accepted again; a host tree is stamped host" \
       "rc=0 sha256:9efc94c0|rc=0 sha256:9efc94c0|rc=0 host" \
       "$(e3_stamp "$e3_tmp/new-tree" sha256:9efc94c0)|$(e3_stamp "$e3_tmp/new-tree" sha256:9efc94c0)|$(e3_stamp "$e3_tmp/host-tree" "")"
+# A repository whose root is itself a package (insight-eidos) has ONE tree for the root package and the merged
+# database: the merge creating it in the image must stamp it, or the root package's next act refuses it.
+mkdir -p "$e3_tmp/rootpkg/llm/build-x" && git -C "$e3_tmp/rootpkg" init -q 2>/dev/null
+printf '[{"file": "llm/a.cpp", "directory": "/d", "command": "c++ a.cpp"}]\n' > "$e3_tmp/rootpkg/llm/build-x/compile_commands.json"
+check "RED-FIRST — an in-image merge into the repository root's database stamps the tree it creates, and the root package's own act then accepts it" \
+      "sha256:9efc94c0 rc=0" \
+      "$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; export MALF_SYSTEM=sha256:9efc94c0 MALF_PROFILE_NAME=linux-clang21-libcxx-release
+        _malf_merge_compile_commands "$2/llm/build-x" "$2/llm" >/dev/null 2>&1
+        tree="$2/build-$(_malf_build_key)"; printf "%s " "$(cat "$tree/.malf-environment" 2>/dev/null || echo none)"
+        _malf_build_tree_environment "$tree" 2>/dev/null; echo "rc=$?"' _ "$MALF_BIN" "$e3_tmp/rootpkg")"
 # seed-recipes over a fixture source home: one third-party recipe, and the lock naming it beside a
 # revision no home holds (the MSVC leg's build tools, in the real lock).
 mkdir -p "$e3_tmp/recipe/tps"

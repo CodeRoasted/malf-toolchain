@@ -754,10 +754,14 @@ def package_check(get: Callable[[str], "tuple[int, dict]"], peek: Callable[[str]
 
 def resolve_upstreams(document: dict[str, str], read_index: Callable[[str, str], dict],
                       clone: Callable[[str, str, Path], str] | None, sources: Path | None,
-                      say: Callable[[str], None]) -> dict[str, dict]:
+                      say: Callable[[str], None], hidden: Callable[[str], bool] = lambda repository: False
+                      ) -> dict[str, dict]:
     """Each upstream candidate the document names, read from its own store (DN-142.D31 (2)): `{owner/repo:
     {key, commit, tree[, root]}}`. With `sources`, each is cloned at the commit its index records into
-    `<sources>/<repo>` and its tree checked against the index. raises Refused when an upstream's own upstream
+    `<sources>/<repo>` and its tree checked against the index, unless `hidden` names it private: a private
+    upstream is never cloned (another repository's token reads no private repository), and its recipes and
+    export sources arrive through its own records' transports instead (the Founder, 2026-10-28, option C).
+    raises Refused when an upstream's own upstream
     is absent from the document or named at another key (one graph holds one candidate of each repository),
     or when a clone's tree is not the index's; Absent when an upstream has no candidate at its key."""
     named = {"/".join(full_name(repository)).lower(): key for repository, key in document.items()}
@@ -773,7 +777,7 @@ def resolve_upstreams(document: dict[str, str], read_index: Callable[[str, str],
                               f"and this document names {inner} at {named.get(inner) or 'no key'}: one graph holds "
                               f"one candidate of each repository, so name {inner} at {inner_key}")
         entry = {"key": key, "commit": index["commit"], "tree": index["tree"]}
-        if sources is not None and clone is not None:
+        if sources is not None and clone is not None and not hidden(repository):
             root = sources / full_name(repository)[1]
             tree = clone(repository, index["commit"], root)
             if tree != index["tree"]:
@@ -1076,6 +1080,13 @@ def selftest() -> int:
                                                      lambda repository, at, into: tree, root / "up", quiet.append), None)
             expect("upstream: the commit and the cloned root are the index's",
                    (resolved or {}).get("coderoasted/coderoast-ipc", {}).get("commit"), commit)
+            def no_clone(repository: str, at: str, into: Path) -> str:
+                raise Refused(f"cloned the private upstream {repository}")
+            private_resolved = arm("upstream: a PRIVATE upstream is never cloned (its recipes come through its transports)",
+                                   lambda: resolve_upstreams({"CodeRoasted/coderoast-ipc": key}, read_ipc, no_clone,
+                                                             root / "up3", quiet.append, lambda repository: True), None)
+            expect("upstream: a private upstream's entry names no cloned root",
+                   "root" in (private_resolved or {}).get("coderoasted/coderoast-ipc", {"root": 1}), False)
             arm("RED: an upstream cloned to another tree than its index records is refused",
                 lambda: resolve_upstreams({"CodeRoasted/coderoast-ipc": key}, read_ipc,
                                           lambda repository, at, into: "f" * 40, root / "up2", quiet.append), "records tree")
@@ -1213,6 +1224,21 @@ def _verifier(args: argparse.Namespace, get: Callable[[str], "tuple[int, dict]"]
     return Verifier(f"{owner}/{name}", args.signer_workflow, args.signer_digest, live_gh, live_tree_of(get))
 
 
+def upstream_recipes(store: Path, index: dict) -> dict[str, str]:
+    """{package: transport path} of an upstream candidate's ship-form creates, read from `store`, where its
+    records were restored: each transport carries the package's recipe export and export sources."""
+    recipes: dict[str, str] = {}
+    for entry in index["records"]:
+        record = json.loads((store / "records" / f"{entry['key']}.json").read_text(encoding="utf-8"))
+        step, output = record["inputs"]["step"], (record.get("outputs") or {}).get("package") or {}
+        if step.get("kind") == "conan-create" and step.get("form") == "ship" and output.get(artefact_store.TRANSPORT_FIELD):
+            recipes[step["package"]] = str(store / "objects" / output[artefact_store.TRANSPORT_FIELD])
+    if not recipes:
+        raise Refused(f"candidate-{index.get('candidate')} of {index.get('repository')} names no ship-form create "
+                      f"with a transport: a private upstream's recipes have nowhere else to come from")
+    return recipes
+
+
 def sources_verb(args: argparse.Namespace, token: str | None, say: Callable[[str], None]) -> int:
     """`sources`: every source-only upstream of the document cloned at its commit into <into>/<repo>; <out>
     holds {owner/repo: {commit, tree, root}}. A commit names its tree, so git's own addressing is the trust."""
@@ -1255,8 +1281,21 @@ def upstream_verb(args: argparse.Namespace, get: Callable[[str], "tuple[int, dic
         return trusted_index(reader, repository, key, verifier)
 
     server = os.environ.get("GITHUB_SERVER_URL", "https://github.com").rstrip("/")
+    seen: dict[str, bool] = {}
+
+    def hidden(repository: str) -> bool:
+        if repository not in seen:
+            seen[repository] = private(repository)
+        return seen[repository]
+
     resolved = resolve_upstreams(read_upstream(args.upstream), read_index, live_clone(server, token),
-                                 Path(args.sources) if args.sources else None, say)
+                                 Path(args.sources) if args.sources else None, say, hidden)
+    for repository, entry in resolved.items():
+        if hidden(repository):
+            if not args.store:
+                raise Refused(f"the private upstream {repository} reaches its recipes through its records' transports, "
+                              f"so its records are restored: name --store")
+            entry["recipes"] = upstream_recipes(Path(args.store), read_index(repository, entry["key"]))
     Path(args.out).write_text(json.dumps(resolved, sort_keys=True, indent=1) + "\n", encoding="utf-8")
     return 0
 

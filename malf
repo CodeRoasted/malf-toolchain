@@ -1887,6 +1887,10 @@ _malf_merge_compile_commands() {
     # Building the repo root itself: cmake already wrote the root DB in place.
     [[ "$(realpath -m "$pkg_db")" == "$(realpath -m "$root_db")" ]] && return 0
     [[ -f "$pkg_db" ]] || return 0
+    # The root database's directory is a build tree like any other: where the repository root is itself a package
+    # (insight-eidos), it IS that package's tree, and one created here unstamped is refused by the package's next act
+    # in the build environment (measured 2026-10-29: insight-eidos's dev leg, after insight_llm's act).
+    mkdir -p "$(dirname "$root_db")" && _malf_build_tree_environment "$(dirname "$root_db")" || return 1
     python3 - "$pkg_db" "$root_db" <<'PY'
 import json, sys
 from pathlib import Path
@@ -5756,6 +5760,7 @@ _malf_store_create_in_environment() {   # <writer|ship> <package>...
         [[ -z "$upstream_root" ]] || args+=(--read-only-mount "$upstream_root")
     done
     [[ -z "${MALF_UPSTREAM_ROOTS:-}" ]] || args+=(--env MALF_UPSTREAM_ROOTS)
+    [[ -z "${MALF_UPSTREAM_RECIPES:-}" ]] || args+=(--read-only-mount "$(dirname "$(realpath "$MALF_UPSTREAM_RECIPES")")" --env MALF_UPSTREAM_RECIPES)
     # THE WALK'S BACKENDS (DN-142.D30 (5) E2b): the union of what its steps declare under `backends:` at
     # HEAD, started by the launcher on the walk's internal network; none keeps `--network none`.
     local declared rc=0
@@ -6620,6 +6625,18 @@ _malf_export_upstreams() {   # <conan home> <log>
             echo "malf: exported the upstream $ref from $path"
         done <<< "$steps"
     done
+    # A PRIVATE upstream has no source root (another repository's token reads no private repository): its recipes
+    # and export sources come from its own records' transports, MALF_UPSTREAM_RECIPES naming {package: transport}
+    # (the Founder, 2026-10-28, option C).
+    [[ -n "${MALF_UPSTREAM_RECIPES:-}" ]] || return 0
+    local name archive
+    while IFS=$'\t' read -r name archive; do
+        [[ -n "$name" ]] || continue
+        CONAN_HOME="$home" conan cache restore "$archive" >> "$log" 2>&1 \
+            || { echo "malf: restoring the upstream recipe of $name from $archive failed ($log)" >&2; return 1; }
+        _MALF_UPSTREAM_PACKAGES+=("$name")
+        echo "malf: restored the upstream recipe of $name from its transport"
+    done < <(python3 -c 'import json, sys; [print(f"{name}\t{path}") for name, path in sorted(json.load(open(sys.argv[1])).items())]' "$MALF_UPSTREAM_RECIPES") || return 1
 }
 
 _malf_owned_prefixes() {
@@ -6840,6 +6857,7 @@ _malf_source_verdict_in_environment() {   # [--namespaces] <repository> <verb> <
         [[ -z "$upstream_root" ]] || args+=(--read-only-mount "$upstream_root")
     done
     [[ -z "${MALF_UPSTREAM_ROOTS:-}" ]] || args+=(--env MALF_UPSTREAM_ROOTS)
+    [[ -z "${MALF_UPSTREAM_RECIPES:-}" ]] || args+=(--read-only-mount "$(dirname "$(realpath "$MALF_UPSTREAM_RECIPES")")" --env MALF_UPSTREAM_RECIPES)
     local name
     for name in MALF_STORE_PARAMETERS MALF_STORE_REJUDGE MALF_SOURCE_VERDICT_SET; do
         [[ -z "${!name:-}" ]] || args+=(--env "$name")

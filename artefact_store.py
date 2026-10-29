@@ -338,8 +338,9 @@ def file_sha256(path: Path) -> str:
 def tree_entries(folder: Path, exclude_root_manifest: bool = True) -> list[list[str]]:
     """The sorted `[relative path, mode, SHA-256]` of every file and symlink under `folder`.
 
-    post: mode is `file`, `executable` (any execute bit) or `symlink` (its SHA-256 is that of the
-    link's target text, never of what it points at); a directory contributes only its contents.
+    post: mode is `file`, `executable` (the OWNER's execute bit, the one git records) or `symlink` (its SHA-256
+    is that of the link's target text, never of what it points at); a directory contributes only its contents.
+    note: a group or other execute bit is no member: a POSIX ACL raises the group bits through its mask, so on a runner whose home carries an ACL (malf-runner's grants the desk account r-x) every copied file read as executable, and one recipe exported there and on the desk had two digests (measured 2026-10-29, logcraft_core, 183 of 233 export sources at 654)
     """
     entries = []
     for root, dirs, files in os.walk(folder):
@@ -355,7 +356,7 @@ def tree_entries(folder: Path, exclude_root_manifest: bool = True) -> list[list[
                 entries.append([relative, "symlink",
                                 hashlib.sha256(os.readlink(path).encode()).hexdigest()])
             elif stat.S_ISREG(info.st_mode):
-                mode = "executable" if info.st_mode & 0o111 else "file"
+                mode = "executable" if info.st_mode & stat.S_IXUSR else "file"
                 entries.append([relative, mode, file_sha256(path)])
             else:
                 raise KeyError_(f"{path}: neither a regular file nor a symlink")
