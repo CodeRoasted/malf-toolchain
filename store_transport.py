@@ -1307,7 +1307,8 @@ def upstream_verb(args: argparse.Namespace, get: Callable[[str], "tuple[int, dic
     resolved = resolve_upstreams(read_upstream(args.upstream), read_index, live_clone(server, token),
                                  Path(args.sources) if args.sources else None, say, hidden)
     for repository, entry in resolved.items():
-        if hidden(repository):
+        # note: only a job that builds (--sources) needs a private upstream's recipes; a verification (present) needs none
+        if hidden(repository) and args.sources:
             if not args.store:
                 raise Refused(f"the private upstream {repository} reaches its recipes through its records' transports, "
                               f"so its records are restored: name --store")
