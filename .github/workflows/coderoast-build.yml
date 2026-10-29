@@ -57,6 +57,9 @@ jobs:
         with:
           workflow: coderoast-build.yml
 
+      - name: The pinned gh the attestation reads run through
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-gh@05c56e80470eb37509765f36d40b13abc8319d39
+
       - name: The pinned build environment and the host's provisioning tools
         uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-environment@05c56e80470eb37509765f36d40b13abc8319d39
 

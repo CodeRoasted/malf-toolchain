@@ -1,0 +1,31 @@
+name: 'CodeRoast gh (pinned)'
+description: |
+  The GitHub CLI a candidate verifies attestations with (`gh attestation verify`, through store_transport.py),
+  at ONE pinned release, checked against its SHA-256 before anything runs it, and put first on the job's PATH.
+  A runner's own gh is never relied on: malf-runner's predates `gh attestation` (measured 2026-10-29, logcraft
+  candidate run 40828461500, an upstream read as ABSENT), and a hosted image's gh moves with the image, so the
+  verifier would otherwise be whatever the machine carries. The SHA-256 of each asset was read from two
+  producers that agree: the release's own checksum file and the bytes hashed at the desk (2026-10-29).
+
+runs:
+  using: composite
+  steps:
+    - name: gh, checked against its pinned SHA-256, first on PATH
+      shell: bash
+      run: |
+        set -euo pipefail
+        version=2.102.0
+        case "$(uname -m)" in
+          x86_64)  arch=amd64; sha256=bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386 ;;
+          aarch64) arch=arm64; sha256=7862c86c72f43df3a2d93ddde6f473285b4e2af61b494849846827e513ef6484 ;;
+          *) echo "::error::setup-gh: no pinned gh asset for machine $(uname -m)"; exit 1 ;;
+        esac
+        asset="gh_${version}_linux_${arch}.tar.gz"
+        dir="$RUNNER_TEMP/gh-$version"
+        rm -rf "$dir" && mkdir -p "$dir"
+        curl -fsSL -o "$dir/$asset" "https://github.com/cli/cli/releases/download/v${version}/${asset}"
+        printf '%s  %s\n' "$sha256" "$dir/$asset" | sha256sum --check --quiet - \
+          || { echo "::error::setup-gh: $asset does not hash to its pinned SHA-256: nothing of it runs"; exit 1; }
+        tar -xzf "$dir/$asset" -C "$dir"
+        echo "$dir/gh_${version}_linux_${arch}/bin" >> "$GITHUB_PATH"
+        "$dir/gh_${version}_linux_${arch}/bin/gh" --version | head -1
