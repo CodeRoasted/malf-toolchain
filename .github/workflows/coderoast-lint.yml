@@ -162,7 +162,7 @@ jobs:
   # fix reflows its line and breaks format, so one run answers both). The two jobs do not wait for
   # each other: a red preflight never hides the lint's verdict.
   preflight:
-    uses: CodeRoasted/malf-toolchain/.github/workflows/coderoast-preflight.yml@c5eea4821d482319a031cbaef04c7a1af40af19e
+    uses: CodeRoasted/malf-toolchain/.github/workflows/coderoast-preflight.yml@2a5fe79cb59da39ede9601c700c7ff4c22336f0f
     with:
       actionlint: ${{ inputs.actionlint }}
       module-conformance: ${{ inputs.module-conformance }}
@@ -180,7 +180,7 @@ jobs:
       # It is by far the most expensive check here (it builds; see the `lint` input).
       - name: C++ clang-tidy conformance
         if: ${{ inputs.lint }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-lint-tidy@c5eea4821d482319a031cbaef04c7a1af40af19e
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-lint-tidy@2a5fe79cb59da39ede9601c700c7ff4c22336f0f
         with:
           siblings: ${{ inputs.lint-siblings }}
           checkout-token: ${{ secrets.lint-checkout-token }}
@@ -209,4 +209,4 @@ jobs:
 
       - name: Save the conan cache clang-tidy's build env restored (third-party only)
         if: ${{ inputs.lint }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@c5eea4821d482319a031cbaef04c7a1af40af19e
+        uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@2a5fe79cb59da39ede9601c700c7ff4c22336f0f
