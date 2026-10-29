@@ -70,7 +70,7 @@ jobs:
     runs-on: ${{ inputs.runs-on }}
     steps:
       - name: CI — checkout + toolchain + build env + cross-repo vendor + build/test
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-ci@bfab79de096b2ef48045e44d3eb5d174da57a9e6
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-ci@d2ddccb14a68051ff889c8168b684b6040d010a0
         with:
           vendor: ${{ inputs.vendor }}
           deps: ${{ inputs.deps }}
@@ -86,11 +86,11 @@ jobs:
         # The byte-compare is also what makes the coderoast:cpe-coverage ratio a control: a component
         # entering without a CPE mapping changes the ratio and reds this step.
         if: inputs.sbom-path != ''
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-sbom-check@bfab79de096b2ef48045e44d3eb5d174da57a9e6
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-sbom-check@d2ddccb14a68051ff889c8168b684b6040d010a0
         with:
           package-dir: ${{ inputs.sbom-package-dir }}
           sbom-path: ${{ inputs.sbom-path }}
 
       - name: Save the conan cache (third-party only; never on the coderoast-release group)
-        uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@bfab79de096b2ef48045e44d3eb5d174da57a9e6
+        uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@d2ddccb14a68051ff889c8168b684b6040d010a0
 
