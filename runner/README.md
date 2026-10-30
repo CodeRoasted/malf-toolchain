@@ -65,7 +65,7 @@ kernel-enforced remainder and is configured nowhere. The runner and its docker u
 installer rewriting the unit), so a partition that did not take keeps the seat offline and its jobs
 queued, never running unpartitioned. The sizes are the seat table in `runner-instances.sh`, ruled by
 the Founder (desk first): of the VM's 16 vCPUs and 23.47 GiB, desk 0–7, ci 8–9 (`MemoryMax` and
-`MemoryLow` 5 GiB), release 10–15 (`MemoryMax` and `MemoryMin` 10 GiB, `MemorySwapMax=0`).
+`MemoryLow` 7 GiB since 2026-10-30, raised from 5 GiB, where malf's width was `-j1` for every compile and lint), release 10–15 (`MemoryMax` and `MemoryMin` 10 GiB, `MemorySwapMax=0`).
 
 A slice's `MemoryMin`/`MemoryLow` protects nothing by itself: a page is charged to the LEAF cgroup
 that faulted it in (the runner's service, its docker unit, a transient unit), each with `memory.min`

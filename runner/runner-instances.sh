@@ -47,8 +47,8 @@ INSTANCES=(ci release)
 #   SEAT_SWAP_MAX  MemorySwapMax=; 0 on release, so an overshoot is an OOM kill inside the seat, a
 #                  loud red and never a slow thrash; empty leaves the seat's swap unbounded
 # THE SIZES ARE THE FOUNDER'S RULING (RUL-3, 2026-10-14: the desk gets the larger share, a slower
-# step 0 is accepted). Of 16 vCPUs and 23.47 GiB: desk 0-7 (8 vCPUs, the remainder, about 8.5 GiB
-# guaranteed), ci 8-9, release 10-15. A change to .wslconfig `processors` or `memory` changes this
+# step 0 is accepted; the ci seat raised to 7 GiB on 2026-10-30). Of 16 vCPUs and 23.47 GiB: desk 0-7
+# (8 vCPUs, the remainder, about 6.5 GiB guaranteed), ci 8-9, release 10-15. A change to .wslconfig `processors` or `memory` changes this
 # table in the same act: a cpuset naming a CPU the VM no longer has is refused by the partition unit,
 # and the seat stays offline.
 # The release cap holds only once malf derives its width from the seat (DN-119.D9 (1), build row
@@ -76,9 +76,9 @@ instance_select() {
             # that open). Re-rendering it therefore reproduces it byte for byte.
             PROTECT_HOME=false
             SEAT_CPUS="8-9"
-            SEAT_MEM_MAX="5G"
+            SEAT_MEM_MAX="7G"
             SEAT_MEM_MIN=""
-            SEAT_MEM_LOW="5G"
+            SEAT_MEM_LOW="7G"
             SEAT_SWAP_MAX=""
             ;;
         release)
