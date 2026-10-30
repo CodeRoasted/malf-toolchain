@@ -57,12 +57,12 @@ runs:
   using: composite
   steps:
     - name: Provision clang-21 and the version-matched clang-tidy, asserted to be clang-21's OWN
-      uses: CodeRoasted/malf-toolchain/.github/actions/setup-clang21-tools@db4773b0f268d7e86991889757348abf43d7b76d
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-clang21-tools@773317d5c31b8a18c283e1a9d7ddf628f992584a
       with:
         clang-tidy-major: ${{ inputs.clang-tidy-major }}
 
     - name: Setup build env (apt + CMake 4.3.x + Conan + dep cache + canonical profile)
-      uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-env@db4773b0f268d7e86991889757348abf43d7b76d
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-env@773317d5c31b8a18c283e1a9d7ddf628f992584a
       with:
         profile: ${{ inputs.profile }}
 
