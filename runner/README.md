@@ -49,8 +49,9 @@ interop, with a rootless Docker of its own (never the `docker` group); each Wind
 as its service's virtual account `NT SERVICE\<service>`, not the Founder. The proof is the
 superproject's `runner-isolation-probe.yml`, one `workflow_dispatch` run after the scripts, one leg
 per runner: it tries every door from inside a job and passes only if each is refused and every
-control works.
-The probe runs in a FRESH workspace, so it cannot see what earlier jobs left: the Windows script
+control works. That probe workflow was retired on 2026-10-30 with the superproject's other probes
+(`DN-142.D33`); its recorded runs below stay as the evidence of that date.
+The probe ran in a FRESH workspace, so it cannot see what earlier jobs left: the Windows script
 also re-owns and resets the runner's job workspace (`_work`), and the parts of it that need no
 elevation are proven on the Windows host by `pwsh -File malf\runner\isolate-runner-windows.selftest.ps1`.
 
@@ -405,8 +406,7 @@ Unset reads as `hosted`. Under `self-hosted`, a leg at a release coordinate (the
 pre-tag reading of step 0's record) runs on the Windows release runner, `coderoast-release-windows`,
 and every other run (the weekly schedule, a plain dispatch) on this runner, whose label `malf-windows`
 the leg's expression names; `WINDOWS_RUNNER` is the Windows legs' ONE org variable (the superproject's
-`workflow_source` refuses a runner reading a second, ROADMAP N394), and the superproject's
-`runner-isolation-probe.yml` names both labels directly.
+`workflow_source` refuses a runner reading a second, ROADMAP N394).
 The legs: insight-eidos's `golden.yaml` `proof-msvc` and `sift-windows.yml` `build`. The
 superproject's `workflow_source` check module reds on a private repository's Windows leg that
 hard-codes a hosted image. canon + metalog (and sift-action) Windows legs stay on hosted runners
@@ -482,81 +482,6 @@ labels, so no `actionlint.yaml` names it.
 **What the proof cannot see:** who the group admits (read it back with the three commands above),
 and a directory ADDED to the machine PATH later: the probe tries the PATH as it is on the day it
 runs, and each runner's `.env` carries the PATH as it was when its script last ran.
-
-## The store access probe (`DN-142.D6`, R5)
-
-The reader's side of the artefact store's ghcr replica: a repository's `GITHUB_TOKEN` reads the
-store package it is granted, is refused on one it is not, and cannot write its own, nor another
-repository's own store (`DN-142.D31`). The instrument is
-malf-toolchain's `.github/workflows/store-access-probe.yml`; the superproject calls it, a
-dispatch-only `store-access-probe.yml`, and the callers are crossed so every refusal is answered by
-another run reading the same package:
-
-| Caller | Granted (must read, byte-equal) | Not granted (must be refused) | Foreign (must not write) |
-|---|---|---|---|
-| `coderoast` (private) | `store-coderoast` | `store-coderoast-security` | `store-coderoast-ipc` |
-
-Each run also PUTs a manifest into its granted package with a `packages: write` token; the refusal
-must come at the manifest (a blob upload may be accepted first, as R4 measured, and is no object).
-It then PUTs one into `store-coderoast-ipc`, coderoast-ipc's own store (public, linked to
-coderoast-ipc, written by its candidate): a public package's read proves nothing, so the write is the
-check, and coderoast-ipc's own candidate pushes are its control. That package is no longer seeded
-here; it left the replica model when coderoast-ipc began owning its store, and every repository that
-owns its store (coderoast-ipc, coderoast-security, insight-canon) leaves the probe the same way: its
-token writes that store by design.
-
-**1. Seed each package, as the writer account** (the Founder's terminal; the token is read inside
-`ghrelease`'s process and reaches curl on stdin, never an argument vector):
-
-```bash
-seed() { sudo -u ghrelease -H bash -s -- "$1" <<'SEED'
-set -euo pipefail
-pkg=$1; api=https://ghcr.io/v2/coderoasted/$pkg; w=$(mktemp -d); trap 'rm -rf "$w"' EXIT
-printf 'coderoast store access probe\n' > "$w/layer"; printf '{}' > "$w/config"
-printf 'user = "coderoast-dev:%s"\n' "$(cat ~/.config/coderoast/STORE_WRITER_TOKEN)" \
-  | curl -fsS -K - -o "$w/t.json" "https://ghcr.io/token?service=ghcr.io&scope=repository:coderoasted/$pkg:pull,push"
-auth() { printf 'header = "Authorization: Bearer %s"\n' "$(jq -r .token "$w/t.json")"; }
-put_blob() { local d loc s; d=sha256:$(sha256sum "$1" | cut -d' ' -f1)
-  loc=$(auth | curl -fsS -K - -X POST -o /dev/null -D - "$api/blobs/uploads/" | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')
-  [[ $loc == http* ]] || loc=https://ghcr.io$loc; [[ $loc == *\?* ]] && s='&' || s='?'
-  auth | curl -fsS -K - -X PUT -H 'Content-Type: application/octet-stream' --data-binary "@$1" "$loc${s}digest=$d" -o /dev/null
-  echo "$d"; }
-l=$(put_blob "$w/layer"); c=$(put_blob "$w/config")
-jq -nc --arg l "$l" --arg c "$c" '{schemaVersion:2, mediaType:"application/vnd.oci.image.manifest.v1+json",
-  artifactType:"application/vnd.coderoast.access-probe.v1",
-  config:{mediaType:"application/vnd.oci.empty.v1+json",digest:$c,size:2},
-  layers:[{mediaType:"application/octet-stream",digest:$l,size:29}]}' > "$w/m.json"
-auth | curl -fsS -K - -X PUT -H 'Content-Type: application/vnd.oci.image.manifest.v1+json' \
-  --data-binary "@$w/m.json" "$api/manifests/access-probe" -o /dev/null -w "$pkg:access-probe HTTP %{http_code}\n"
-SEED
-}
-seed store-coderoast
-```
-
-Each line must print `HTTP 201`; the layer's digest is `sha256:5e8e719d…f403`, which the probe
-checks byte-for-byte. The push mechanics were exercised against a local `registry:2` on
-2026-10-10 (manifest 201, layer read back at that digest); against ghcr they are first run here.
-
-**2. In each package's settings** (`https://github.com/orgs/CodeRoasted/packages/container/<package>/settings`):
-*Danger Zone → Change visibility → Private* (a new package came up `internal` in R4, readable by
-every organisation member); *Manage Actions access → Add repository →* the package's own caller from
-the table, role **Read**, and no other repository. The page must show no linked repository.
-
-**3. Dispatch, then read each run:**
-
-```bash
-gh workflow run store-access-probe.yml -R CodeRoasted/coderoast
-gh run list -w store-access-probe.yml -L 1 -R CodeRoasted/<repository>   # then: gh run view <id> --log
-```
-
-**Expected:** each run green, with three `pass` lines — the granted read (`HTTP 200`, 29 bytes,
-content `sha256:5e8e719d…`), the other package's read refused (`401`/`403` at the manifest; a `404` is
-the token REACHING it, a `LEAK`),
-the write refused at the manifest (`401`/`403`), and a fourth, the foreign write refused the same
-way. A `LEAK` line is an access-control finding against
-R5: report it, do not re-run around it; a successful write leaves the tag `access-probe-write-<run
-id>`, deleted by hand. A `FAIL` on the granted read means the seed or the grant is wrong, and every
-refusal in that run is then meaningless. `UNCLEAR` is an answer the probe does not classify.
 
 ## Notes
 

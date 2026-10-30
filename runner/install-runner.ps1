@@ -27,7 +27,7 @@
 # the service onto its virtual account; do not call it for that instance by hand.
 #
 # The switched Windows legs name this runner's label (malf-windows) for their non-release runs, and
-# runner-isolation-probe.yml names it too; the org variable WINDOWS_RUNNER is the switch, and the
+# the org variable WINDOWS_RUNNER is the switch, and the
 # Windows legs' one variable:
 #     gh variable set WINDOWS_RUNNER --org CodeRoasted --body self-hosted --visibility private
 

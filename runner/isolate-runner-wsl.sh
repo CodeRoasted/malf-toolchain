@@ -35,8 +35,7 @@
 #   5. /opt/gcc-16.2: 139 world-writable directories in the ship compiler, so a job could plant a
 #      binary the DESK then executes — a door back INTO the desk account, not out of it.
 # A dedicated account closes 1; the rest need the systemd sandbox (2, 3), rootless Docker (4) and
-# a permission repair (5). The probe workflow (.github/workflows/runner-isolation-probe.yml in the
-# superproject) tries every door from inside a job and passes only if each one is refused.
+# a permission repair (5).
 #
 # WHAT THE RELEASE INSTANCE ADDS (DN-119.D8): a job of the ci runner must not write anything the
 # release runner executes, links or takes a verdict from. The account is that boundary — its home is

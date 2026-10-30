@@ -473,7 +473,5 @@ if ("$($owner.Domain)\$($owner.User)" -ne $Virtual) { Refuse "Runner.Listener ru
 @"
 
 [isolate] DONE - $($inst.RunnerName) listens as $Virtual ($listening).
-  The probe, one leg on each runner:
-    gh workflow run runner-isolation-probe.yml -R CodeRoasted/coderoast
   Undo: pwsh -ExecutionPolicy Bypass -File malf\runner\isolate-runner-windows-rollback.ps1 -Instance $($inst.Name) -Apply
 "@ | Write-Host
