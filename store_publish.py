@@ -47,9 +47,9 @@ Nothing reaches the output directory or the registry unverified, and nothing her
         a CUT TOOL (DN-142.D33, option (i)): the `run-from-cache` entry of the package's ship-form create in the
         candidate, read through the same trusted reader, extracted to <out file> by its digest and made executable,
         so the cut runs the bytes the candidate bound to its source verdict and builds nothing. A repository
-        GITHUB_TOKEN cannot see is read as private (an upstream's rule), a visible public one through
-        --signer-workflow. Token: GITHUB_TOKEN when the store is private (a read:packages token reaches another
-        repository's private store)
+        GITHUB_TOKEN reads as private, or cannot see, is read through its privacy (an upstream's rule), a public
+        one through --signer-workflow. Token: GITHUB_TOKEN, the cut's PACKAGE_PEEK_TOKEN (it reads the
+        repositories' visibility and their private stores)
     store_publish.py check-release <out dir> <release.json>
         the reading after the publish (DN-142.D24 (3)): the Release's asset names, from
         `gh release view --json assets`, equal the staged files, both ways
@@ -458,9 +458,9 @@ def cut_tool(candidate: Candidate, package: str, entry: str, target: Path) -> di
 def cut_tool_trust(get: Get, repository: str, attested: "store_transport.Verifier | None"
                    ) -> "store_transport.Verifier | None":
     """The trust a cut tool's store is read under: an upstream's (`store_transport.upstream_is_private`). The
-    cut reads every repository's candidate with one read:packages token, which sees no private repository, so
-    a repository the token cannot see is private and its store is read through its privacy, and a visible one
-    through its attestations (`attested`, which a public store must have)."""
+    cut reads every repository's candidate with one token, PACKAGE_PEEK_TOKEN, which sees the private
+    repositories: a repository it reads as private, or cannot see at all, has its store read through its
+    privacy, and a public one through its attestations (`attested`, which a public store must have)."""
     if store_transport.upstream_is_private(get, repository):
         return None
     if attested is None:
@@ -1216,7 +1216,7 @@ def candidate_arms(arm: Callable, failures: list[str], root: Path, servers: list
         failures.append(f"CUT TOOL: extracted {tool_found} and bytes that are not the candidate's, or not executable")
     arm("RED: a published executable is no cut tool, so the cut never runs it from the candidate",
         lambda: cut_tool(candidate, "tools", "bin/tool", root / "cut-tool" / "tool"), "not `run-from-cache`")
-    arm("CUT TOOL: a repository the cut's read:packages token cannot see (404) is read through its privacy",
+    arm("CUT TOOL: a repository the cut's token reads as private, or cannot see (404), is read through its privacy",
         lambda: [cut_tool_trust(lambda path: (404, {}), "o/hidden", None),
                  cut_tool_trust(lambda path: (200, {"visibility": "private"}), "o/closed", None)], None)
     arm("RED: a visible public repository's cut tool is read only through its attestations",
