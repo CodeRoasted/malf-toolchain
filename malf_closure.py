@@ -304,6 +304,16 @@ REFUSED_BUILD = 2
 COUNTED, UNCOUNTED, UNCONFINED = "counted", "uncounted", "unconfined"
 # The directory a tool that ignores TMPDIR writes into (DN-142.D30 (9) R8).
 SYSTEM_TMP = Path("/tmp")
+# THE SYSCALLS THE TRACER RECORDS (night lane 2026-10-30-candidate-perf, lever L6; the Founder, 2026-10-30): exactly
+# those a Landlock domain can refuse (its file-system rights: execute, write, read, read-dir, remove, make-*, refer,
+# truncate), never the stat family, which Landlock does not restrict and which made most of `trace=%file`'s volume:
+# in coderoast-server's ship form the tracer took 31-38 % of a CPU beside a compiler at 29-43 %. A permission refusal
+# of a stat is therefore no longer counted; every refusal the domain can make still is. `?` admits a call the
+# architecture lacks (open, mkdir... on aarch64).
+TRACED_SYSCALLS = ",".join((
+    "?open", "openat", "?openat2", "?creat", "execve", "execveat", "?mkdir", "mkdirat", "?mknod", "mknodat",
+    "?unlink", "unlinkat", "?rmdir", "?rename", "renameat", "?renameat2", "?link", "linkat", "?symlink", "symlinkat",
+    "truncate", "ftruncate"))
 # A Landlock denial as the tracer prints it: the failed call's path, and EACCES.
 TRACED_CALL = re.compile(r"^\d+ +\w+\((?P<args>.*)\) += -1 EACCES")
 TRACED_FD = re.compile(r"^(?:-?\d+|AT_FDCWD)<(?P<base>[^>]*)>")
@@ -554,7 +564,7 @@ def _confined(domain: Domain, tally: Path, command: list[str], tracer: str | Non
                                    "granted": [str(path) for path in domain.granted], "argv": argv}))
         counter = shlex.join([sys.executable, "-I", str(Path(__file__).resolve()), COUNT_VERB, str(job),
                               str(verdict)])
-        ran = subprocess.run([tracer, "-f", "-qq", "--seccomp-bpf", "-y", "-e", "trace=%file,execve",
+        ran = subprocess.run([tracer, "-f", "-qq", "--seccomp-bpf", "-y", "-e", f"trace={TRACED_SYSCALLS}",
                               "-e", "status=failed", "-s", "4096", "-o", f"|{counter}", *sandbox],
                              env=environment, check=False)
         try:
@@ -742,6 +752,13 @@ def selftest() -> int:
         arm("RED: an act reading a file of a conan home other than its own is refused, each path named",
             (code, counted, str(shared_home / "package.txt") in said, str(user_home / "package.txt") in said),
             (DENIED, [COUNTED, "2"], True, True))
+        planted = sibling / "planted-tool"
+        planted.write_text("#!/bin/sh\nexit 0\n")
+        planted.chmod(0o755)
+        code, counted, said = act(f"{planted} >/dev/null 2>&1")
+        arm("RED: an act executing a program of the denied ground is denied, counted and REFUSED: the narrowed trace "
+            "records the execve a reads-only domain refuses, not only the opens (L6)",
+            (code, counted, str(planted) in said), (DENIED, [COUNTED, "1"], True))
         probe = ("import sys\ntry:\n    open(sys.argv[1]).read()\nexcept OSError:\n    pass\n")
         with contextlib.redirect_stderr(io.StringIO()) as said:
             code = confine(domain, scratch, tally, [sys.executable, "-I", "-c", probe, str(sibling / "secret.txt")], tracer=tracer)
@@ -850,7 +867,7 @@ def selftest() -> int:
             f'7 openat(3<{sibling}>, "relative.txt", O_RDONLY) = -1 EACCES (Permission denied)\n'
             f'7 openat(AT_FDCWD</>, "{malf / "unreached.py"}", O_RDONLY) = -1 EACCES (Permission denied)\n'
             f'7 openat(AT_FDCWD</>, "{sibling / "absent.txt"}", O_RDONLY) = -1 ENOENT (No such file or directory)\n'
-            f'7 newfstatat(AT_FDCWD</>, "{fresh}", 0x7ffc, 0) = -1 EACCES (Permission denied)\n'
+            f'7 openat(AT_FDCWD</>, "{fresh}", O_RDONLY) = -1 EACCES (Permission denied)\n'
             f'7 +++ a record\r8 openat(AT_FDCWD</>, "{store / "records" / "k.json"}", O_RDONLY) = -1 EACCES (Permission denied)\n'
             f'7 chdir() = -1 EACCES (Permission denied)\n')
         with traced.open(errors="replace") as lines:
