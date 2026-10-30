@@ -5136,6 +5136,11 @@ Commands:
                                    a candidate's postflight in the build environment: clang-tidy
                                    (malf lint --all-files) over the trees source-verdict left; builds
                                    nothing and refuses (2) with no in-image database. Exit lint's
+    source-act --profile <profile> [--restore-upstreams] <repository> -- <command>...
+                                   one command of a candidate's sanitizer gate in the build
+                                   environment (DN-142.D33), the repository's upstreams exported
+                                   into <profile>'s home (built from source there), or also their
+                                   stored ship packages restored; exit the command's, 2 refused
     sandbox [--read <root>]... [--write <root>]... -- <command>...
                                    run <command> under a Landlock domain (gate G4): readable only
                                    beneath each --read root, writable only beneath each --write
@@ -6896,9 +6901,10 @@ _malf_source_verdict_in_environment() {   # [--namespaces] <repository> <verb> <
     # under `backends:`, on the launcher's internal network. Without them a dev leg ran coderoast-server's infra
     # tests against no database; a repository declaring none keeps `--network none`. The postflight runs no test,
     # so `source-lint` starts none: coderoast-server's clickhouse held 915 MiB of the seat its lint's width reads.
+    # A `source-act` (a sanitizer gate's command) starts none either: no sanitizer gate's subject declares one.
     local declared rc=0
     declared="$(mktemp /tmp/malf-backends.XXXXXX)"
-    if [[ "$verb" == source-lint ]]; then
+    if [[ "$verb" != source-verdict ]]; then
         echo "[]" > "$declared"
     else
         MALF_WORKSPACE_ROOT="$repo" _malf_store_walk_backends "$declared" || { rm -f "$declared"; return 2; }
@@ -7141,6 +7147,73 @@ cmd_source_lint() {
         || { echo "malf source-lint: REFUSED — no dev-leg build in the image at $database. The postflight builds nothing: run \`malf source-verdict $repo\` first (MALF_STORE_REJUDGE=1, so no package is served and every tree is built)" >&2; return 2; }
     echo "--- source-lint: clang-tidy over $database ---"
     (cd "$repo" && "$MALF_DIR/malf" lint --all-files --console)
+}
+
+# malf source-act --profile <profile> [--restore-upstreams] <repository> -- <command>... — ONE command of a
+# candidate's sanitizer gate inside the build environment (DN-142.D33, the cut tools' input roots and the sanitizer
+# gates): the dev leg's container shape (_malf_source_verdict_in_environment: the repository its workspace, the
+# image's home, the recipe home read-only, the upstream roots and recipes MALF_UPSTREAM_ROOTS/MALF_UPSTREAM_RECIPES
+# name), with every upstream package EXPORTED into <profile>'s home, so the command builds the upstreams FROM SOURCE
+# at that profile, as the dev leg does for its own; no store holds an ASan binary. With --restore-upstreams the
+# upstreams' ship-form packages at <profile> are also RESTORED into that home from the upstream candidates' records
+# MALF_STORE_DIR holds (`store_transport.py upstream --store`), so a gcc command links the bytes those candidates
+# stored instead of compiling them again. Editable registrations another walk left in that home are cleared first.
+# The command runs from the repository, after the line `--- source-act: <profile>, running <command> ---`, and its
+# environment carries no profile of this verb's: a malf it starts applies its own. sanitizer_verdict.py drives it.
+# Exit the command's; 2 refused before the command ran (its line absent).
+cmd_source_act() {
+    local repo="" profile="" restore=false
+    local -a command=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --profile) shift; [[ $# -gt 0 ]] || { echo "malf source-act: --profile needs a name" >&2; return 2; }
+                       profile="$1" ;;
+            --restore-upstreams) restore=true ;;
+            --) shift; command=("$@"); break ;;
+            -*) _malf_refuse_option source-act "$1" ;;
+            *) [[ -z "$repo" ]] || { echo "malf source-act: one repository, not '$repo' and '$1'" >&2; return 2; }
+               repo="$1" ;;
+        esac
+        shift
+    done
+    [[ -n "$repo" && -n "$profile" && ${#command[@]} -gt 0 ]] || { _malf_usage_of source-act >&2; return 2; }
+    repo="$(realpath "$repo")" || return 2
+    [[ -f "$repo/packages.yml" ]] \
+        || { echo "malf source-act: $repo holds no packages.yml, so it is no repository of packages" >&2; return 2; }
+    [[ -f "$MALF_DIR/profiles/$profile" ]] \
+        || { echo "malf source-act: REFUSED — '$profile' is no profile of $MALF_DIR/profiles" >&2; return 2; }
+    if [[ -z "${MALF_SYSTEM:-}" ]]; then
+        local -a flags=(--profile "$profile")
+        ! $restore || flags+=(--restore-upstreams)
+        _malf_source_verdict_in_environment "$repo" source-act "${flags[@]}" "$repo" -- "${command[@]}"
+        return
+    fi
+    [[ "$MALF_WORKSPACE_ROOT" == "$repo" ]] \
+        || { echo "malf source-act: REFUSED — the act's workspace is its repository ($repo), not $MALF_WORKSPACE_ROOT (DN-142.D31 (5))" >&2; return 2; }
+    local scratch
+    scratch="$(mktemp -d /tmp/malf-source-act.XXXXXX)"
+    chmod 0755 "$scratch"
+    # note: the profile is applied in this subshell alone, so the command's environment names none of this verb's
+    if ! ( _malf_apply_profile "$profile"
+           _malf_use_keyed_cache
+           _malf_editables_clear
+           _malf_export_upstreams "$CONAN_HOME" "$scratch/upstreams.log" >&2 || exit 1
+           if $restore; then
+               [[ ${#_MALF_UPSTREAM_PACKAGES[@]} -gt 0 ]] \
+                   || { echo "malf source-act: --restore-upstreams, and MALF_UPSTREAM_ROOTS and MALF_UPSTREAM_RECIPES name no upstream package" >&2; exit 1; }
+               python3 "$MALF_DIR/artefact_store.py" upstream-document "$MALF_STORE_DIR" "$MALF_PROFILE_NAME" \
+                   "$scratch/upstream.json" "${_MALF_UPSTREAM_PACKAGES[@]}" || exit 1
+               _malf_store_restore "$MALF_STORE_DIR" "$CONAN_HOME" "$scratch/upstream.json" "$scratch" "upstream:recorded" || exit 1
+           fi ); then
+        echo "malf source-act: REFUSED before the command — the upstreams of $repo could not be exported$($restore && echo " or restored") into the $profile home (above, or $scratch/upstreams.log)" >&2
+        _malf_quote_log "$scratch/upstreams.log" "the upstreams of $repo"
+        return 2
+    fi
+    echo "--- source-act: $profile, running ${command[*]} ---"
+    local rc=0
+    (cd "$repo" && "${command[@]}") || rc=$?
+    rm -rf "$scratch"
+    return "$rc"
 }
 
 # malf inventory [dir] — the ADR-3.D9 gate, standalone. Lints the WHOLE workspace (an orphan
@@ -7701,6 +7774,7 @@ case "$COMMAND" in
     store-create)     cmd_store_create "$@" ;;
     source-verdict)   cmd_source_verdict "$@" ;;
     source-lint)      cmd_source_lint "$@" ;;
+    source-act)       cmd_source_act "$@" ;;
     sandbox)          cmd_sandbox "$@" ;;
     environment)      exec python3 "$MALF_DIR/build_environment.py" "$@" ;;
     relocate-verify)  cmd_relocate_verify "$@" ;;

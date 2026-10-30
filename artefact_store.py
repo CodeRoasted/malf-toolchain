@@ -157,10 +157,12 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
         object; keyed on the blob ids, stored when the key is new, matched when it is not; exit 1
         refusing a member that is no blob there, or a package declaring no tracked object
     artefact_store.py ingest-rows <repository dir> <commit>
-        each `ingest:` row of packages.yml at <commit>, `<workflow>\t<artifact>\t<member>\t<class>` per line
+        each `ingest:` and `candidate_verdicts:` row of packages.yml at <commit>,
+        `<workflow>\t<artifact>\t<member>\t<class>` per line
     artefact_store.py candidate-ingest <store> <repository dir> <commit> <workflow file> <artifact dir> <run id> <attempt> <GitHub artifact digest>
         a CANDIDATE's ingestion (DN-142.D33 (3)): the row's member, read from the artifact a job of this candidate's
-        own run uploaded, stored as an object and the record `<repository>/ingest.<stem>`; prints its key
+        own run uploaded, stored as an object and the record `<repository>/ingest.<stem>`; prints its key. A
+        `candidate_verdicts:` row's member is a sanitizer gate's verdict document, refused unless its `verdict` is `pass`
     artefact_store.py tracked-packages <repository dir> <commit>
         each package declaring a `tracked/<member>` object in packages.yml at <commit>, one per line,
         sorted: the packages a candidate's store job runs `tracked-step` for (DN-142.D33 (3))
@@ -3145,11 +3147,21 @@ def ingest(store: Path, step0_run: str, reading: dict, body: bytes, malf_dir: Pa
 
 
 CANDIDATE_INGEST_KEYS = {"artifact", "commits", "after", "published"}
+# THE CANDIDATE'S OWN VERDICTS (DN-142.D33, the sanitizer gates): a gate a job of the candidate runs over the
+# repository's sources (canon core's ASan suite, insight-eidos's fuzz ASan replay and valgrind replay) leaves one
+# verdict document, declared under `candidate_verdicts:` as `{artifact, object}` and ingested exactly as an `ingest:`
+# row's member is. It is a block of its own because every `ingest:` row is also step 0's hosted reading, dispatched at
+# the cut with `record-commits` (DN-142.D25 (3)), and a candidate's verdict is read from its own run alone; it is
+# never published. The document is JSON whose `verdict` is `pass`: the job's exit and the document are two producers
+# of one verdict, so a document saying otherwise is refused even when its job exited 0.
+CANDIDATE_VERDICTS = "candidate_verdicts"
+CANDIDATE_VERDICT_KEYS = {"artifact", "object"}
+CANDIDATE_VERDICT_PASS = "pass"
 
 
-def ingest_rows(repository: Path, commit: str) -> list[tuple[str, str, str, str]]:
-    """Every `ingest:` row packages.yml declares at `commit`, as (workflow file, artifact, member, class),
-    sorted: the hosted outputs a candidate's store job ingests from its own run (DN-142.D33 (3))."""
+def _declared_rows(repository: Path, commit: str) -> list[tuple[str, str, str, str, bool]]:
+    """Every `ingest:` and `candidate_verdicts:` row packages.yml declares at `commit`, as (workflow file, artifact,
+    member, class, is a verdict), sorted; refused on a row off its shape or a workflow both blocks declare."""
     import yaml
 
     document = yaml.safe_load(_git_bytes(repository, ["show", f"{commit}:packages.yml"])) or {}
@@ -3160,8 +3172,38 @@ def ingest_rows(repository: Path, commit: str) -> list[tuple[str, str, str, str]
                 or set(row) - CANDIDATE_INGEST_KEYS - set(INGEST_CLASSES):
             raise Refused(f"packages.yml ingest {workflow}: an ingest row is {{artifact, executable | object, commits, "
                           f"after, published}}, its member under exactly one class, not {row!r}")
-        rows.append((str(workflow), row["artifact"], str(row[classes[0]]), classes[0]))
-    return rows
+        rows.append((str(workflow), row["artifact"], str(row[classes[0]]), classes[0], False))
+    for workflow, row in sorted((document.get(CANDIDATE_VERDICTS) or {}).items()):
+        if not isinstance(row, dict) or set(row) != CANDIDATE_VERDICT_KEYS \
+                or not all(isinstance(row[key], str) for key in CANDIDATE_VERDICT_KEYS):
+            raise Refused(f"packages.yml {CANDIDATE_VERDICTS} {workflow}: a verdict row is {{artifact, object}}, never "
+                          f"published, not {row!r}")
+        if str(workflow) in {declared[0] for declared in rows}:
+            raise Refused(f"packages.yml declares {workflow} under both `ingest:` and `{CANDIDATE_VERDICTS}:`: one "
+                          f"workflow is a hosted reading or a candidate verdict, not both")
+        rows.append((str(workflow), row["artifact"], row["object"], "object", True))
+    return sorted(rows)
+
+
+def ingest_rows(repository: Path, commit: str) -> list[tuple[str, str, str, str]]:
+    """Every `ingest:` and `candidate_verdicts:` row packages.yml declares at `commit`, as (workflow file, artifact,
+    member, class), sorted: the hosted outputs and verdicts a candidate's store job ingests from its own run
+    (DN-142.D33 (3))."""
+    return [row[:4] for row in _declared_rows(repository, commit)]
+
+
+def verdict_defect(body: bytes) -> str | None:
+    """Why `body` is not a candidate verdict document whose `verdict` is `pass`, else None."""
+    try:
+        verdict = json.loads(body)
+    except ValueError as broken:
+        return f"it is not JSON ({broken})"
+    if not isinstance(verdict, dict) or not isinstance(verdict.get("gate"), str):
+        return "it is not a JSON object naming its `gate`"
+    if verdict.get("verdict") != CANDIDATE_VERDICT_PASS:
+        return (f"its verdict is {verdict.get('verdict')!r}, not {CANDIDATE_VERDICT_PASS!r}: a candidate stores only a "
+                f"gate that passed")
+    return None
 
 
 def candidate_ingest(store: Path, repository: Path, commit: str, workflow: str, artifact_dir: Path,
@@ -3174,12 +3216,13 @@ def candidate_ingest(store: Path, repository: Path, commit: str, workflow: str, 
     `{ingest: {objects: {<member>: <sha256>}, class, producers: {github_artifact_digest, writer_recomputed}}}`.
     Refused, storing nothing, on a row packages.yml does not declare, a member the artifact lacks, a declared
     class the bytes contradict (DN-142.D25 (4) A), an executable not in the published form (DN-142.D22 (4)), a
+    `candidate_verdicts:` member whose verdict is not `pass` (CANDIDATE_VERDICTS), a
     digest GitHub did not answer, or other outputs at the same key. post: the record key."""
     matched = WORKFLOW_PATH.match(f".github/workflows/{workflow}")
-    rows = {row[0]: row for row in ingest_rows(repository, commit)}
+    rows = {row[0]: row for row in _declared_rows(repository, commit)}
     if matched is None or workflow not in rows:
-        raise Refused(f"packages.yml at {commit} declares no `ingest:` row for {workflow}")
-    _workflow, artefact, member, klass = rows[workflow]
+        raise Refused(f"packages.yml at {commit} declares no `ingest:` or `{CANDIDATE_VERDICTS}:` row for {workflow}")
+    _workflow, artefact, member, klass, is_verdict = rows[workflow]
     if member_defect(member) or not GITHUB_DIGEST.match(github_digest):
         raise Refused(f"ingest {workflow}: the member {member!r} or GitHub's artifact digest {github_digest!r} is off "
                       f"its shape")
@@ -3195,6 +3238,8 @@ def candidate_ingest(store: Path, repository: Path, commit: str, workflow: str, 
                          else "neither a PE executable nor a linked ELF file")
                       + ": a row's kind follows its bytes (DN-142.D25 (4) A)")
     defects = ingested_defects(body) if klass == "executable" else []
+    if is_verdict and (defect := verdict_defect(body)) is not None:
+        defects.append(defect)
     if defects:
         raise Refused(f"ingest {workflow}: {member}: " + "; ".join(defects))
     name = repository.resolve().name
@@ -3631,9 +3676,11 @@ def selftest() -> int:
             "packages:\n  core: {release: true, version: 1.0.0}\ningest:\n"
             "  golden.yaml: {artifact: determinism-golden, object: determinism-golden.txt, commits: [canon],\n"
             "                published: {assets: [{name: canon.golden.txt}]}}\n"
-            "  windows.yml: {artifact: win, executable: win.exe, commits: [canon]}\n")
+            "  windows.yml: {artifact: win, executable: win.exe, commits: [canon]}\n"
+            "candidate_verdicts:\n  asan-suite.yml: {artifact: asan-verdict, object: asan-suite.verdict.json}\n")
         (crepo / ".github" / "workflows" / "golden.yaml").write_text("on: workflow_call\n")
         (crepo / ".github" / "workflows" / "windows.yml").write_text("on: workflow_call\n")
+        (crepo / ".github" / "workflows" / "asan-suite.yml").write_text("on: workflow_call\n")
         subprocess.run(["git", "init", "-q", str(crepo)], check=True)
         subprocess.run([*cgit, "add", "-A"], check=True)
         subprocess.run([*cgit, "commit", "-qm", "one"], check=True)
@@ -3645,8 +3692,10 @@ def selftest() -> int:
         zipped = "sha256:" + "a" * 64
         rows, _out = arm("CANDIDATE INGEST: packages.yml's ingest rows, each with its artifact, member and class",
                          lambda: ingest_rows(crepo, ccommit), None)
-        expect("the ingest rows", rows, [("golden.yaml", "determinism-golden", "determinism-golden.txt", "object"),
-                                         ("windows.yml", "win", "win.exe", "executable")])
+        expect("the ingest rows, the candidate's verdict rows among them", rows,
+               [("asan-suite.yml", "asan-verdict", "asan-suite.verdict.json", "object"),
+                ("golden.yaml", "determinism-golden", "determinism-golden.txt", "object"),
+                ("windows.yml", "win", "win.exe", "executable")])
         ckey, _out = arm("CANDIDATE INGEST: the golden a job of the candidate's own run uploaded is stored as the record "
                          "`<repository>/ingest.golden`",
                          lambda: candidate_ingest(cstore, crepo, ccommit, "golden.yaml", artifact,
@@ -3661,7 +3710,7 @@ def selftest() -> int:
                     {"determinism-golden.txt": hashlib.sha256(b"agreed golden digest\n").hexdigest()}))
         arm("RED: a workflow packages.yml declares no ingest row for is refused",
             lambda: candidate_ingest(cstore, crepo, ccommit, "ci.yml", artifact, {"id": 41, "attempt": 1}, zipped),
-            "declares no `ingest:` row for ci.yml")
+            "declares no `ingest:` or `candidate_verdicts:` row for ci.yml")
         arm("RED: an artifact missing the declared member is refused",
             lambda: candidate_ingest(cstore, crepo, ccommit, "windows.yml", artifact, {"id": 41, "attempt": 1}, zipped),
             "holds no win.exe")
@@ -3676,6 +3725,36 @@ def selftest() -> int:
         arm("RED: a GitHub artifact digest off its shape is refused",
             lambda: candidate_ingest(cstore, crepo, ccommit, "golden.yaml", artifact, {"id": 42, "attempt": 1}, "zip"),
             "is off its shape")
+        verdicts = root / "verdict-artifact"
+        verdicts.mkdir()
+        verdict_file = verdicts / "asan-suite.verdict.json"
+        verdict_file.write_text(json.dumps({"gate": "asan-suite", "verdict": "pass", "counts": {"tests": 861}}))
+        vkey, _out = arm("CANDIDATE VERDICT: a passing sanitizer verdict of the candidate's own run is stored as the "
+                         "record `<repository>/ingest.asan-suite`, an unpublished object",
+                         lambda: candidate_ingest(cstore, crepo, ccommit, "asan-suite.yml", verdicts,
+                                                  {"id": 41, "attempt": 1}, zipped), None)
+        if vkey:
+            vrecord = json.loads((cstore / "records" / f"{vkey}.json").read_text())
+            expect("the verdict's step and its class",
+                   (vrecord["inputs"]["step"]["workflow"], vrecord["outputs"][INGEST_OUTPUT]["class"]),
+                   (".github/workflows/asan-suite.yml", "object"))
+        verdict_file.write_text(json.dumps({"gate": "asan-suite", "verdict": "fail"}))
+        arm("RED: a verdict document that is not a pass is refused, whatever its job's exit (two producers)",
+            lambda: candidate_ingest(cstore, crepo, ccommit, "asan-suite.yml", verdicts, {"id": 43, "attempt": 1},
+                                     zipped), "its verdict is 'fail', not 'pass'")
+        verdict_file.write_text("PASS\n")
+        arm("RED: a verdict member that is not a JSON object is refused",
+            lambda: candidate_ingest(cstore, crepo, ccommit, "asan-suite.yml", verdicts, {"id": 44, "attempt": 1},
+                                     zipped), "it is not JSON")
+        for shape, needle in (("  asan-suite.yml: {artifact: v, object: v.json, published: {assets: []}}\n",
+                               "a verdict row is {artifact, object}, never published"),
+                              ("  golden.yaml: {artifact: v, object: v.json}\n",
+                               "under both `ingest:` and `candidate_verdicts:`")):
+            text = (crepo / "packages.yml").read_text().split("candidate_verdicts:\n")[0]
+            (crepo / "packages.yml").write_text(text + "candidate_verdicts:\n" + shape)
+            subprocess.run([*cgit, "commit", "-qam", "shape"], check=True)
+            shaped = _run(["git", "-C", str(crepo), "rev-parse", "HEAD"]).strip()
+            arm(f"RED: {needle} is refused", lambda: ingest_rows(crepo, shaped), needle)
 
         bstore, results, build_key = Path(scratch) / "store", Path(scratch) / "results", "b" * 64
         named = Path(scratch) / "bench.json"

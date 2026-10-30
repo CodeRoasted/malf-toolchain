@@ -378,6 +378,13 @@ check "determinism_lint selftest: 167 arms, the clock and std <random> registers
 
 echo
 
+echo "[7c3] sanitizer_verdict carries its own proof (selftest): every verdict of a candidate's three sanitizer gates over a scripted act runner (DN-142.D33)"
+sanitizer_selftest_output="$(timeout 120 python3 "$MALF_ROOT/sanitizer_verdict.py" selftest 2>&1)"
+sanitizer_selftest_status=$?
+check "sanitizer_verdict selftest: 28 arms, the ASan suite red on its exit and unjudged over zero tests or a refused act, the fuzz replay's bound (124, 137), its unexecuted exits, its population (the last count wins, under the seeds or zero is unjudged) and the seed a red names, the valgrind driver's exit contract and its input count, zero seeds running no act, and the document written whole" \
+      "ok" "$([[ $sanitizer_selftest_status -eq 0 ]] && grep -q '^sanitizer_verdict selftest: 28 arm(s), 0 failure(s)$' <<< "$sanitizer_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$sanitizer_selftest_output")")"
+echo
+
 echo "[7i] store_replica carries its own refusal proof (selftest): every guard of the ghcr read replica fires against an in-process registry and API (DN-142.D6)"
 replica_selftest_output="$(timeout 120 python3 "$MALF_ROOT/store_replica.py" selftest 2>&1)"
 replica_selftest_status=$?
@@ -444,8 +451,8 @@ echo
 echo "[7j0] artefact_store's object producers carry their own refusal proof (selftest): the objects convention resolves step -> record -> output -> member, the tracked step is keyed on blob ids at a commit, and the ingestion write refuses a printed digest that is not the bytes, a record without its seat or dated exception, a PE carrying a symbol table or a CodeView entry, and records a divergence at an equal inputs_key, never a red (DN-142.D20 (2), DN-142.D25)"
 objects_selftest_output="$(timeout 120 python3 "$MALF_ROOT/artefact_store.py" selftest 2>&1)"
 objects_selftest_status=$?
-check "artefact_store selftest: 53 arms, every refusal fired, the system member refused outside the build environment, the ingestion record and its class, the tracked record, a candidate's ingestion of its own run's artifact, the divergence event, the bench verdict, the test_package member, the restore and the reuse decision intact" \
-      "ok" "$([[ $objects_selftest_status -eq 0 ]] && grep -q '^artefact_store selftest: 53 arm(s), 0 failure(s)$' <<< "$objects_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$objects_selftest_output")")"
+check "artefact_store selftest: 58 arms, every refusal fired, the system member refused outside the build environment, the ingestion record and its class, the tracked record, a candidate's ingestion of its own run's artifact, a candidate verdict stored only when it passed and only from a candidate_verdicts row of its shape, the divergence event, the bench verdict, the test_package member, the restore and the reuse decision intact" \
+      "ok" "$([[ $objects_selftest_status -eq 0 ]] && grep -q '^artefact_store selftest: 58 arm(s), 0 failure(s)$' <<< "$objects_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$objects_selftest_output")")"
 
 echo
 
@@ -4290,6 +4297,11 @@ rm -f "$sv_tmp/repo/stray.txt"
 check "source-lint refuses a directory holding no packages.yml (exit 2), an unknown option (exit 1, as every verb), another workspace and a repository with no in-image dev-leg tree (exit 2)" \
       "rc=2 rc=1 rc=2 1 rc=2 1" \
       "$(bash "$MALF_BIN" source-lint "$sv_tmp" > /dev/null 2>&1; echo "rc=$?") $(bash "$MALF_BIN" source-lint --fast "$sv_tmp/repo" > /dev/null 2>&1; echo "rc=$?") $(CONAN_HOME="$sv_tmp/home" MALF_SYSTEM="$MALF_TEST_SYSTEM" MALF_WORKSPACE_ROOT="$sv_tmp" bash "$MALF_BIN" source-lint "$sv_tmp/repo" > "$sv_tmp/v.log" 2>&1; echo "rc=$?") $(grep -c "the postflight's workspace is its repository" "$sv_tmp/v.log") $(CONAN_HOME="$sv_tmp/home" MALF_SYSTEM="$MALF_TEST_SYSTEM" MALF_WORKSPACE_ROOT="$sv_tmp/repo" bash "$MALF_BIN" source-lint "$sv_tmp/repo" > "$sv_tmp/v.log" 2>&1; echo "rc=$?") $(grep -c 'no dev-leg build in the image at .*/build-clang21-libcxx-release.environment-.*/compile_commands.json' "$sv_tmp/v.log")"
+# A SANITIZER GATE'S ACT (`source-act`, DN-142.D33) refuses before any container: no packages.yml, a profile malf does
+# not hold, no command, an unknown option; inside the environment, another workspace.
+check "source-act refuses a directory holding no packages.yml, an unknown profile and a missing command (exit 2), an unknown option (exit 1), and inside the environment another workspace (exit 2)" \
+      "rc=2 rc=2 1 rc=2 rc=1 rc=2 1" \
+      "$(bash "$MALF_BIN" source-act --profile linux-clang21-asan "$sv_tmp" -- true > /dev/null 2>&1; echo "rc=$?") $(bash "$MALF_BIN" source-act --profile no-such-profile "$sv_tmp/repo" -- true > "$sv_tmp/v.log" 2>&1; echo "rc=$?") $(grep -c "'no-such-profile' is no profile" "$sv_tmp/v.log") $(bash "$MALF_BIN" source-act --profile linux-clang21-asan "$sv_tmp/repo" > /dev/null 2>&1; echo "rc=$?") $(bash "$MALF_BIN" source-act --fast --profile linux-clang21-asan "$sv_tmp/repo" -- true > /dev/null 2>&1; echo "rc=$?") $(CONAN_HOME="$sv_tmp/home" MALF_SYSTEM="$MALF_TEST_SYSTEM" MALF_WORKSPACE_ROOT="$sv_tmp" bash "$MALF_BIN" source-act --profile linux-clang21-asan "$sv_tmp/repo" -- true > "$sv_tmp/v.log" 2>&1; echo "rc=$?") $(grep -c "the act's workspace is its repository" "$sv_tmp/v.log")"
 rm -rf "$sv_tmp"
 echo
 

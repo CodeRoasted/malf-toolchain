@@ -46,8 +46,10 @@ Nothing reaches the output directory or the registry unverified, and nothing her
     store_publish.py cut-tool <owner/repository> <candidate key> <package> <entry> <out file> (--signer-workflow W --signer-digest D | --private)
         a CUT TOOL (DN-142.D33, option (i)): the `run-from-cache` entry of the package's ship-form create in the
         candidate, read through the same trusted reader, extracted to <out file> by its digest and made executable,
-        so the cut runs the bytes the candidate bound to its source verdict and builds nothing. Token: GITHUB_TOKEN
-        when the store is private (a read:packages token reaches another repository's private store)
+        so the cut runs the bytes the candidate bound to its source verdict and builds nothing. A repository
+        GITHUB_TOKEN cannot see is read as private (an upstream's rule), a visible public one through
+        --signer-workflow. Token: GITHUB_TOKEN when the store is private (a read:packages token reaches another
+        repository's private store)
     store_publish.py check-release <out dir> <release.json>
         the reading after the publish (DN-142.D24 (3)): the Release's asset names, from
         `gh release view --json assets`, equal the staged files, both ways
@@ -451,6 +453,20 @@ def cut_tool(candidate: Candidate, package: str, entry: str, target: Path) -> di
         raise Refused(str(refused)) from refused
     target.chmod(0o755)
     return {"package": package, "entry": entry, "digest": held[entry], "record": record["key"]}
+
+
+def cut_tool_trust(get: Get, repository: str, attested: "store_transport.Verifier | None"
+                   ) -> "store_transport.Verifier | None":
+    """The trust a cut tool's store is read under: an upstream's (`store_transport.upstream_is_private`). The
+    cut reads every repository's candidate with one read:packages token, which sees no private repository, so
+    a repository the token cannot see is private and its store is read through its privacy, and a visible one
+    through its attestations (`attested`, which a public store must have)."""
+    if store_transport.upstream_is_private(get, repository):
+        return None
+    if attested is None:
+        raise Refused(f"{repository} is public, and a public store is read only through its attestations: name "
+                      f"--signer-workflow")
+    return attested
 
 
 def judged_by(candidate: Candidate, package: str, verdict: str, digest: str) -> str:
@@ -1200,6 +1216,12 @@ def candidate_arms(arm: Callable, failures: list[str], root: Path, servers: list
         failures.append(f"CUT TOOL: extracted {tool_found} and bytes that are not the candidate's, or not executable")
     arm("RED: a published executable is no cut tool, so the cut never runs it from the candidate",
         lambda: cut_tool(candidate, "tools", "bin/tool", root / "cut-tool" / "tool"), "not `run-from-cache`")
+    arm("CUT TOOL: a repository the cut's read:packages token cannot see (404) is read through its privacy",
+        lambda: [cut_tool_trust(lambda path: (404, {}), "o/hidden", None),
+                 cut_tool_trust(lambda path: (200, {"visibility": "private"}), "o/closed", None)], None)
+    arm("RED: a visible public repository's cut tool is read only through its attestations",
+        lambda: cut_tool_trust(lambda path: (200, {"visibility": "public"}), "o/open", None),
+        "read only through its attestations")
     arm("RED: a package the candidate holds no ship-form create of hands out no cut tool",
         lambda: cut_tool(candidate, "absent", "bin/proof", root / "cut-tool" / "absent"),
         "0 ship-form create record(s) of absent")
@@ -1678,8 +1700,10 @@ def main(argv: list[str]) -> int:
             rehearse(registry, argv[1], argv[2], Path(argv[3]), argv[4], Path(argv[5]), live_gh(forge), print)
             return 0
         if argv[:1] == ["cut-tool"]:
-            args, _get, verifier = _trusted(argv[1:], ("repository", "key", "package", "entry", "out"))
+            args, get, verifier = _trusted(argv[1:], ("repository", "key", "package", "entry", "out"))
             repository = "/".join(store_transport.full_name(args.repository))
+            if not args.private:
+                verifier = cut_tool_trust(get, repository, verifier)
             with tempfile.TemporaryDirectory(prefix="store_publish.") as scratch:
                 reader = store_transport.Reader(store_transport._registry(repository, os.environ.get("GITHUB_TOKEN") or None),
                                                 Path(scratch) / ".cache", print)

@@ -1,0 +1,168 @@
+name: CodeRoast Sanitizer Gate
+
+# One sanitizer gate of a repository's candidate (DN-142.D33, the cut tools' input roots and the sanitizer gates),
+# judging the repository's own sources inside the pinned build environment: `sanitizer_verdict.py <gate>`, each act
+# through `malf source-act` (the dev leg's container shape, the upstreams exported into the act's profile home, so an
+# ASan act compiles them from source at that profile; no store holds an ASan binary).
+#
+#   asan-suite       `malf test <package> --asan` under the sanitizer environment; red on an exit other than 0 and on
+#                    zero tests counted from ctest's summary (insight-canon's core).
+#   fuzz-replay      `malf build <package> --asan`, then `timeout --kill-after=10 120 <binary> <corpus>`; red on a
+#                    sanitizer abort or a timeout, and on a closing replay count under the committed seeds.
+#   valgrind-replay  the repository's valgrind driver at the ship profile, the upstream candidates' stored gcc
+#                    packages restored into its home (`source-act --restore-upstreams`), never compiled again.
+#
+# The verdict document `<gate>.verdict.json` is uploaded as `artifact`, red or green; the candidate's store job
+# ingests it through the repository's packages.yml `candidate_verdicts:` row (artefact_store.py `candidate-ingest`,
+# refused unless its verdict is `pass`), and it `needs:` this job, so a red gate leaves the candidate without an index.
+# Every identity is derived from the run: a public caller names no organisation and holds no secret (P7).
+
+on:
+  workflow_call:
+    inputs:
+      gate:
+        description: 'The gate: asan-suite, fuzz-replay or valgrind-replay.'
+        type: string
+        required: true
+      artifact:
+        description: 'The artifact the verdict document is uploaded as; the packages.yml `candidate_verdicts:` row of the caller''s workflow names it.'
+        type: string
+        required: true
+      package:
+        description: 'asan-suite and fuzz-replay: the package directory the gate builds, relative to the repository.'
+        type: string
+        required: false
+        default: ''
+      binary:
+        description: 'fuzz-replay: the replay binary the package builds.'
+        type: string
+        required: false
+        default: ''
+      corpus:
+        description: 'fuzz-replay and valgrind-replay: the committed seed corpus, relative to the repository.'
+        type: string
+        required: false
+        default: ''
+      driver:
+        description: 'valgrind-replay: the repository''s valgrind driver, relative to the repository.'
+        type: string
+        required: false
+        default: ''
+      upstream:
+        description: 'The upstream document, a JSON object {<owner>/<repository>: <candidate key>}; `{}` for none.'
+        type: string
+        required: false
+        default: '{}'
+      sources:
+        description: 'The source-only upstreams, a JSON object {<owner>/<repository>: <commit>}; `{}` for none.'
+        type: string
+        required: false
+        default: '{}'
+      runs-on:
+        description: 'Runner label. Defaults to hosted ubuntu-24.04. PUBLIC callers omit it; PRIVATE callers pass their self-hosted label.'
+        type: string
+        required: false
+        default: 'ubuntu-24.04'
+
+permissions:
+  contents: read
+  # The run's referenced workflows, read by `coderoast-malf-checkout` to find this workflow's commit.
+  actions: read
+  # A private upstream's store is read with this job's token (DN-142.D31 (2), option C).
+  packages: read
+
+jobs:
+  gate:
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: malf at this workflow's commit, as git
+        id: malf
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@079c5cbd2941221e43483cad5317bf9fe3e70498
+        with:
+          workflow: coderoast-sanitizer.yml
+
+      - name: The pinned gh the attestation reads run through
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-gh@079c5cbd2941221e43483cad5317bf9fe3e70498
+
+      - name: The pinned build environment and the host's provisioning tools
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-environment@079c5cbd2941221e43483cad5317bf9fe3e70498
+
+      - name: The upstream candidates, read through their own stores, their sources at the commits they record
+        if: ${{ inputs.upstream != '{}' }}
+        shell: bash
+        env:
+          UPSTREAM: ${{ inputs.upstream }}
+          SIGNER_WORKFLOW: ${{ steps.malf.outputs.signer-workflow }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          # note: the runner's read cache outlives the job; every hit is re-hashed (store_transport.py, L4)
+          MALF_TRANSPORT_CACHE: ${{ runner.tool_cache }}/coderoast-transport
+        run: |
+          set -euo pipefail
+          # note: the upstreams' records land in the gate's store, which valgrind-replay restores their gcc packages from
+          printf '%s' "$UPSTREAM" > "$RUNNER_TEMP/upstream.json"
+          python3 "$MALF_CHECKOUT/store_transport.py" upstream "$RUNNER_TEMP/upstream.json" "$RUNNER_TEMP/upstream-out.json" \
+            --sources "$RUNNER_TEMP/upstream" --signer-workflow "$SIGNER_WORKFLOW" --store "$RUNNER_TEMP/sanitizer-store"
+          roots="$(python3 -c 'import json, sys; print(":".join(entry["root"] for entry in json.load(open(sys.argv[1])).values() if "root" in entry))' "$RUNNER_TEMP/upstream-out.json")"
+          echo "MALF_UPSTREAM_ROOTS=$roots" >> "$GITHUB_ENV"
+          # A private upstream is never cloned: its recipes come through its records' transports (option C).
+          mkdir -p "$RUNNER_TEMP/upstream-recipes"
+          python3 -c 'import json, sys; json.dump({name: path for entry in json.load(open(sys.argv[1])).values() for name, path in (entry.get("recipes") or {}).items()}, open(sys.argv[2], "w"))' \
+            "$RUNNER_TEMP/upstream-out.json" "$RUNNER_TEMP/upstream-recipes/recipes.json"
+          if [ "$(cat "$RUNNER_TEMP/upstream-recipes/recipes.json")" != "{}" ]; then
+            echo "MALF_UPSTREAM_RECIPES=$RUNNER_TEMP/upstream-recipes/recipes.json" >> "$GITHUB_ENV"
+          fi
+
+      - name: The source-only upstreams, cloned at the commits the candidate names
+        if: ${{ inputs.sources != '{}' }}
+        shell: bash
+        env:
+          SOURCES: ${{ inputs.sources }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$SOURCES" > "$RUNNER_TEMP/sources.json"
+          python3 "$MALF_CHECKOUT/store_transport.py" sources "$RUNNER_TEMP/sources.json" "$RUNNER_TEMP/sources-out.json" \
+            "$RUNNER_TEMP/sources"
+          roots="$(python3 -c 'import json, sys; print(":".join(entry["root"] for entry in json.load(open(sys.argv[1])).values()))' "$RUNNER_TEMP/sources-out.json")"
+          echo "MALF_UPSTREAM_ROOTS=${MALF_UPSTREAM_ROOTS:+$MALF_UPSTREAM_ROOTS:}$roots" >> "$GITHUB_ENV"
+
+      - name: The gate, in the image, and its verdict document
+        shell: bash
+        env:
+          GATE: ${{ inputs.gate }}
+          PACKAGE: ${{ inputs.package }}
+          BINARY: ${{ inputs.binary }}
+          CORPUS: ${{ inputs.corpus }}
+          DRIVER: ${{ inputs.driver }}
+        run: |
+          set -euo pipefail
+          case "$GATE" in
+            asan-suite) arguments=("$PACKAGE") ;;
+            fuzz-replay) arguments=("$PACKAGE" "$BINARY" "$CORPUS") ;;
+            valgrind-replay) arguments=("$DRIVER" "$CORPUS") ;;
+            *) echo "::error::gate must be asan-suite, fuzz-replay or valgrind-replay, got '$GATE'"; exit 2 ;;
+          esac
+          for argument in "${arguments[@]}"; do
+            [ -n "$argument" ] || { echo "::error::the gate $GATE is missing one of its inputs (package, binary, corpus, driver)"; exit 2; }
+          done
+          verdict="$RUNNER_TEMP/sanitizer-verdict/$GATE.verdict.json"
+          echo "SANITIZER_VERDICT=$verdict" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/sanitizer-store"
+          CONAN_HOME="$RUNNER_TEMP/sanitizer-conan-host" MALF_STORE_DIR="$RUNNER_TEMP/sanitizer-store" \
+            MALF_ENVIRONMENT_RECIPES="$RUNNER_TEMP/sanitizer-recipes" \
+            python3 "$MALF_CHECKOUT/sanitizer_verdict.py" "$GATE" "$GITHUB_WORKSPACE" "${arguments[@]}" "$verdict"
+
+      # A red gate's verdict names its cause for the reader; the store job never runs after a red, so only a pass is
+      # ever ingested.
+      - name: The verdict document, for the candidate's store job
+        if: ${{ !cancelled() && env.SANITIZER_VERDICT != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.artifact }}
+          path: ${{ env.SANITIZER_VERDICT }}
+          if-no-files-found: error
+          retention-days: 1
