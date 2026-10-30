@@ -15,7 +15,8 @@ byte, so the two writers share a tag); `record-<key>` one record, its file's byt
 compared outputs differ (64 hex would make a 138-character tag, and OCI caps a tag at 128).
 
 THE CHAIN OF TRUST A READER WALKS: the index's manifest is verified by its GitHub artifact attestation
-(repository, signer workflow and its digest, `refs/heads/main`), then its content against the
+(repository, signer workflow and its digest, `refs/heads/main` or a cut's `refs/tags/candidate/...` whose commit
+main holds, judged by GitHub's compare), then its content against the
 certificate (its commit, its tree, malf's commit and tree); the index pins every record by MANIFEST
 DIGEST and a record names its objects by content digest, so nothing past the index is read by tag.
 A record whose tag already holds other bytes with EQUAL compared outputs (another seat's provenance) is
@@ -111,6 +112,9 @@ INDEX_SCHEMA = "coderoast.store.candidate/1"
 CANDIDATE_WORKFLOW = ".github/workflows/candidate.yml"
 SIGNER_PATH = ".github/workflows/coderoast-candidate.yml"
 SOURCE_REF = "refs/heads/main"
+# A cut runs each candidate at its candidate tag (DN-142.D33, DN-108.D36), so a push to main during the cut changes
+# nothing it judges; such an attestation is trusted only when its commit is on main's history.
+CANDIDATE_REF_PREFIX = "refs/tags/candidate/"
 PEEK_ENV = "MALF_PACKAGE_PEEK_TOKEN"
 MISMATCH_HEX = 54
 ABSENT = 3
@@ -428,6 +432,7 @@ class Reader:
 Gh = Callable[[list[str]], "tuple[int, str, str]"]
 # A commit's tree: (owner/repo, commit) -> tree id.
 TreeOf = Callable[[str, str], str]
+OnMain = Callable[[str, str], bool]
 
 
 @dataclass(frozen=True)
@@ -439,13 +444,15 @@ class Attested:
 @dataclass
 class Verifier:
     """What a reader requires of an attestation: the store's own repository, malf's reusable
-    candidate workflow (and its commit, when the reader pins one), from `refs/heads/main`."""
+    candidate workflow (and its commit, when the reader pins one), from `refs/heads/main` or from a cut's
+    `refs/tags/candidate/...` whose commit is on main's history (`on_main`)."""
 
     repository: str
     signer_workflow: str
     signer_digest: str | None
     gh: Gh
     tree_of: TreeOf
+    on_main: OnMain
 
     def signer_repository(self) -> str:
         if not self.signer_workflow.lower().endswith("/" + SIGNER_PATH):
@@ -454,12 +461,13 @@ class Verifier:
 
     def argv(self, path: Path) -> list[str]:
         return ["attestation", "verify", str(path), "--repo", self.repository,
-                "--signer-workflow", self.signer_workflow, "--source-ref", SOURCE_REF, "--format", "json",
+                "--signer-workflow", self.signer_workflow, "--format", "json",
                 *(["--signer-digest", self.signer_digest] if self.signer_digest else [])]
 
     def attested(self, manifest: bytes) -> list[Attested]:
         """Every attestation of these manifest bytes that names this repository, this signer
-        workflow (at the pinned commit, when one is pinned) and main; raises Absent when none does."""
+        workflow (at the pinned commit, when one is pinned) and main, or a cut's candidate tag whose commit main
+        holds (the ref is judged here, not by `gh`); raises Absent when none does."""
         self.signer_repository()
         with tempfile.TemporaryDirectory(prefix="store_transport.") as scratch:
             path = Path(scratch) / "manifest.json"
@@ -481,8 +489,10 @@ class Verifier:
             subjects = {(subject.get("digest") or {}).get("sha256")
                         for subject in (verified.get("statement") or {}).get("subject") or []}
             signer = str(certificate.get("buildSignerDigest", ""))
+            ref, commit = str(certificate.get("sourceRepositoryRef", "")), str(certificate.get("sourceRepositoryDigest", ""))
             if (str(certificate.get("sourceRepositoryURI", "")).lower() == source_uri
-                    and certificate.get("sourceRepositoryRef") == SOURCE_REF
+                    and (ref == SOURCE_REF or (ref.startswith(CANDIDATE_REF_PREFIX) and HEX40.match(commit)
+                                               and self.on_main(self.repository, commit)))
                     and str(certificate.get("buildSignerURI", "")).lower().startswith(signer_uri)
                     and (self.signer_digest is None or signer == self.signer_digest)
                     and sha256(manifest) in subjects
@@ -490,6 +500,7 @@ class Verifier:
                 found.append(Attested(certificate["sourceRepositoryDigest"], signer))
         if not found:
             raise Absent(f"no attestation of sha256:{sha256(manifest)} names {self.repository} at {SOURCE_REF} "
+                         f"(or a candidate tag on it) "
                          f"signed by {self.signer_workflow}"
                          + (f" at {self.signer_digest}" if self.signer_digest else ""))
         return found
@@ -879,6 +890,15 @@ def live_tree_of(get: Callable[[str], "tuple[int, dict]"]) -> TreeOf:
     return tree_of
 
 
+def live_on_main(get: Callable[[str], "tuple[int, dict]"]) -> OnMain:
+    """Is `commit` on the repository's main history? GitHub's compare of the commit to main: `identical` or
+    `ahead` (main holds it); anything else, or an API that cannot answer, is no."""
+    def on_main(repository: str, commit: str) -> bool:
+        status, body = get(f"repos/{repository}/compare/{commit}...main")
+        return status == 200 and body.get("status") in ("identical", "ahead")
+    return on_main
+
+
 # ── the selftest: an in-process registry, a fixture API and recorded-shape attestations ────────────
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "tests" / "fixtures" / "store_transport"
@@ -1060,6 +1080,7 @@ def selftest() -> int:
                 "sourceRepositoryDigest": commit, "sourceRepositoryRef": SOURCE_REF,
                 "buildSignerURI": f"https://github.com/{signer}@refs/heads/main", "buildSignerDigest": malf_commit}
             trees = {("coderoasted/coderoast-ipc", commit): tree, ("coderoasted/malf-toolchain", malf_commit): malf_tree}
+            on_main = {("coderoasted/coderoast-ipc", commit)}
             asked: list[list[str]] = []
 
             def verifier(certificate: dict | None = None, code: int = 0, digest: str | None = None,
@@ -1070,14 +1091,27 @@ def selftest() -> int:
                     return code, _fixture_attestations(manifest_hex, **{**good_certificate, **(certificate or {})}), \
                         "" if code == 0 else "no matching attestations found"
                 return Verifier("coderoasted/coderoast-ipc", signer, digest, gh,
-                                lambda repo, sha: trees.get((repo.lower(), sha), "0" * 40))
+                                lambda repo, sha: trees.get((repo.lower(), sha), "0" * 40),
+                                lambda repo, sha: (repo.lower(), sha) in on_main)
 
             reader = Reader(registry, root / "cache", quiet.append)
             arm("candidate-present: an attested index whose content agrees with its certificate is PRESENT",
                 lambda: trusted_index(reader, "coderoasted/coderoast-ipc", key, verifier(digest=malf_commit)), None)
-            expect("the verifier asks gh for the repository, the signer workflow, main and the malf commit",
-                   asked[-1][3:], ["--repo", "coderoasted/coderoast-ipc", "--signer-workflow", signer, "--source-ref",
-                                   SOURCE_REF, "--format", "json", "--signer-digest", malf_commit])
+            expect("the verifier asks gh for the repository, the signer workflow and the malf commit; the ref it judges itself",
+                   asked[-1][3:], ["--repo", "coderoasted/coderoast-ipc", "--signer-workflow", signer,
+                                   "--format", "json", "--signer-digest", malf_commit])
+            arm("a cut's candidate tag whose commit is on main is trusted as main is (DN-142.D33)",
+                lambda: trusted_index(reader, "coderoasted/coderoast-ipc", key, verifier(
+                    {"sourceRepositoryRef": "refs/tags/candidate/9.9.9/0123456789abcdef"}, digest=malf_commit)), None)
+            on_main.clear()
+            arm("RED: a candidate tag whose commit main does not hold is no attestation",
+                lambda: trusted_index(reader, "coderoasted/coderoast-ipc", key, verifier(
+                    {"sourceRepositoryRef": "refs/tags/candidate/9.9.9/0123456789abcdef"}, digest=malf_commit)),
+                "no attestation", Absent)
+            on_main.add(("coderoasted/coderoast-ipc", commit))
+            arm("RED: another tag, even on main, is no attestation: only a cut's candidate tag stands for main",
+                lambda: trusted_index(reader, "coderoasted/coderoast-ipc", key, verifier(
+                    {"sourceRepositoryRef": "refs/tags/v9.9.9"}, digest=malf_commit)), "no attestation", Absent)
             for label, knobs, said in (
                     ("gh refusing the verification (no attestation, or a non-main run's)", {"code": 1},
                      "gh attestation verify refused"),
@@ -1300,7 +1334,8 @@ def _verifier(args: argparse.Namespace, get: Callable[[str], "tuple[int, dict]"]
         raise Refused("a public store is read through its attestations: name --signer-workflow")
     if args.signer_digest and not HEX40.match(args.signer_digest):
         raise Refused(f"--signer-digest {args.signer_digest!r} is not a commit (40 hex)")
-    return Verifier(f"{owner}/{name}", args.signer_workflow, args.signer_digest, live_gh, live_tree_of(get))
+    return Verifier(f"{owner}/{name}", args.signer_workflow, args.signer_digest, live_gh, live_tree_of(get),
+                    live_on_main(get))
 
 
 def upstream_recipes(store: Path, index: dict) -> dict[str, str]:
@@ -1363,7 +1398,8 @@ def upstream_verb(args: argparse.Namespace, get: Callable[[str], "tuple[int, dic
         hidden = private(repository)
         if not hidden and not args.signer_workflow:
             raise Refused(f"the public upstream {repository} is read through its attestations: name --signer-workflow")
-        verifier = None if hidden else Verifier(repository, args.signer_workflow, None, live_gh, live_tree_of(get))
+        verifier = None if hidden else Verifier(repository, args.signer_workflow, None, live_gh, live_tree_of(get),
+                                                live_on_main(get))
         reader = Reader(_registry(repository, token), cache, say)
         if args.store:
             return restore(reader, Path(args.store), repository, key, verifier, say)

@@ -12,7 +12,8 @@ name: CodeRoast Candidate
 # name of this file and the index's malf commit (this workflow's own, `coderoast-malf-checkout`) are
 # one contract with `store_transport.py`.
 #
-# It refuses unless the run is on `refs/heads/main` (DN-142.D31 (4)). A PUBLIC repository attests
+# It refuses unless the run is on `refs/heads/main`, or on a cut's `refs/tags/candidate/...` whose commit main holds
+# (DN-142.D31 (4), DN-142.D33: a push to main during the cut then judges nothing). A PUBLIC repository attests
 # every pushed manifest (P4); a PRIVATE one runs the same job on its own runner and attests nothing
 # (item 6: GitHub attests private repositories only on Enterprise). Every identity is derived from the
 # run: no organisation, no secret (P7).
@@ -64,14 +65,24 @@ jobs:
   store:
     runs-on: ${{ inputs.runs-on }}
     steps:
-      - name: Refuse unless main
+      - name: Refuse unless main, or a cut's candidate tag whose commit main holds
         if: ${{ github.ref != 'refs/heads/main' }}
         shell: bash
         env:
           REF: ${{ github.ref }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          echo "::error::a candidate stores only from refs/heads/main, and this run is on $REF (DN-142.D31 (4)): a store a non-main run wrote would be read as absent anyway"
-          exit 1
+          set -euo pipefail
+          # note: a cut runs each candidate at its candidate tag, so a push to main during the cut judges nothing (DN-142.D33)
+          case "$REF" in
+            refs/tags/candidate/*) ;;
+            *) echo "::error::a candidate stores only from refs/heads/main or a cut's refs/tags/candidate/..., and this run is on $REF (DN-142.D31 (4), DN-142.D33)"; exit 1 ;;
+          esac
+          status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...main" --jq .status)"
+          case "$status" in
+            identical|ahead) echo "$REF names $GITHUB_SHA, on main's history ($status)" ;;
+            *) echo "::error::$REF names $GITHUB_SHA, which main does not hold (compare: $status): a candidate is cut from main's history only"; exit 1 ;;
+          esac
 
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
