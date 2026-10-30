@@ -6884,10 +6884,15 @@ _malf_source_verdict_in_environment() {   # [--namespaces] <repository> <verb> <
     done
     # THE REPOSITORY'S BACKENDS (DN-142.D30 (5) E2b), as store-create starts them: the union its packages declare
     # under `backends:`, on the launcher's internal network. Without them a dev leg ran coderoast-server's infra
-    # tests against no database; a repository declaring none keeps `--network none`.
+    # tests against no database; a repository declaring none keeps `--network none`. The postflight runs no test,
+    # so `source-lint` starts none: coderoast-server's clickhouse held 915 MiB of the seat its lint's width reads.
     local declared rc=0
     declared="$(mktemp /tmp/malf-backends.XXXXXX)"
-    MALF_WORKSPACE_ROOT="$repo" _malf_store_walk_backends "$declared" || { rm -f "$declared"; return 2; }
+    if [[ "$verb" == source-lint ]]; then
+        echo "[]" > "$declared"
+    else
+        MALF_WORKSPACE_ROOT="$repo" _malf_store_walk_backends "$declared" || { rm -f "$declared"; return 2; }
+    fi
     if [[ "$(cat "$declared")" != "[]" ]]; then
         # note: each address `<name>:<port>` on the walk's network, so the act's `malf test` starts none of its own.
         local variable

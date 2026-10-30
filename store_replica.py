@@ -164,6 +164,10 @@ class Registry:
     def _authorization(self, challenge: str, actions: str) -> str:
         fields = dict(re.findall(r'(\w+)="([^"]*)"', challenge))
         scope = f"repository:{self.name}:{actions}"
+        realm = urllib.parse.urlsplit(fields.get("realm", ""))
+        if (realm.scheme, realm.netloc) != urllib.parse.urlsplit(self.base)[:2]:
+            # note: the credentials go to this registry's own token endpoint, never to one a challenge names elsewhere
+            raise Refused(f"the token realm {fields.get('realm', '')!r} is not on {self.base}: no credential is sent there")
         if scope not in self.tokens:
             query = urllib.parse.urlencode({"service": fields.get("service", ""), "scope": scope})
             request = urllib.request.Request(f"{fields['realm']}?{query}")
@@ -181,8 +185,12 @@ class Registry:
     def call(self, method: str, path: str, actions: str, headers: dict[str, str] | None = None,
              data: bytes | None = None, url: str | None = None) -> Response:
         target = url or f"{self.base}/v2/{self.name}/{path}"
-        auth = None
-        for _attempt in range(2):
+        # note: a token this registry already issued for the scope rides the first attempt, only to its own origin
+        scope = f"repository:{self.name}:{actions}"
+        same_origin = urllib.parse.urlsplit(target)[:2] == urllib.parse.urlsplit(self.base)[:2]
+        auth = f"Bearer {self.tokens[scope]}" if same_origin and scope in self.tokens else None
+        cached = auth is not None
+        for _attempt in range(3):
             request = urllib.request.Request(target, data=data, method=method)
             for key, value in (headers or {}).items():
                 request.add_header(key, value)
@@ -190,7 +198,10 @@ class Registry:
                 request.add_header("Authorization", auth)
             answer = _send(request)
             challenge = answer.headers.get("www-authenticate", "")
-            if answer.status == 401 and challenge.lower().startswith("bearer") and auth is None:
+            if answer.status == 401 and challenge.lower().startswith("bearer") and (auth is None or cached):
+                if cached:
+                    self.tokens.pop(scope, None)
+                    cached = False
                 auth = self._authorization(challenge, actions)
                 continue
             return answer
@@ -447,6 +458,8 @@ class Fake:
     lie_manifest_digest: bool = False
     corrupt_blobs: bool = False
     bearer: str = "fake-bearer"
+    realm: str = ""
+    challenged: int = 0
 
 
 def _fake_server(fake: Fake) -> tuple[http.server.ThreadingHTTPServer, str]:
@@ -468,9 +481,9 @@ def _fake_server(fake: Fake) -> tuple[http.server.ThreadingHTTPServer, str]:
                 return True
             if self.headers.get("Authorization") == f"Bearer {fake.bearer}":
                 return True
-            host = f"http://{self.headers['Host']}"
-            self._reply(401, b"", {"WWW-Authenticate":
-                                   f'Bearer realm="{host}/token",service="fake",scope="x"'})
+            realm = fake.realm or f"http://{self.headers['Host']}/token"
+            fake.challenged += 1
+            self._reply(401, b"", {"WWW-Authenticate": f'Bearer realm="{realm}",service="fake",scope="x"'})
             return False
 
         def _route(self) -> None:
@@ -663,6 +676,24 @@ def selftest() -> int:
             def unreachable(_package: str) -> dict | None:
                 raise Refused("the package API answered HTTP 403 for store-probe; its visibility "
                               "cannot be verified, so nothing is written")
+
+            fake, registry, _view, said = scene()
+
+            def second_call_unchallenged() -> None:
+                registry.manifest_digest(SENTINEL_TAG)
+                fake.challenged = 0
+                registry.manifest_digest(SENTINEL_TAG)
+                if fake.challenged:
+                    raise Refused(f"the second call drew {fake.challenged} challenge(s)")
+
+            arm("a token the registry issued rides the next call on its scope, which draws no challenge",
+                second_call_unchallenged, None)
+            fake.bearer = "rotated-bearer"
+            arm("a cached token the registry no longer accepts is dropped and re-fetched once",
+                lambda: registry.manifest_digest(SENTINEL_TAG), None)
+            fake, registry, _view, said = scene(realm="http://elsewhere.invalid/token")
+            arm("RED: a challenge naming a token realm off the registry's origin is refused, and no credential goes there",
+                lambda: registry.manifest_digest(SENTINEL_TAG), "no credential is sent there")
 
             _fake, registry, _view, said = scene()
             arm("an API that cannot answer refuses the write",

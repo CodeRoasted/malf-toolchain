@@ -373,8 +373,8 @@ echo
 echo "[7i] store_replica carries its own refusal proof (selftest): every guard of the ghcr read replica fires against an in-process registry and API (DN-142.D6)"
 replica_selftest_output="$(timeout 120 python3 "$MALF_ROOT/store_replica.py" selftest 2>&1)"
 replica_selftest_status=$?
-check "store_replica selftest: 20 arms, every refusal fired, the one visibility rule both ways (DN-142.D31 (3)) and the round trip byte-equal" \
-      "ok" "$([[ $replica_selftest_status -eq 0 ]] && grep -q '^store_replica selftest: 20 arm(s), 0 failure(s)$' <<< "$replica_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$replica_selftest_output")")"
+check "store_replica selftest: 23 arms, every refusal fired, the one visibility rule both ways (DN-142.D31 (3)), the round trip byte-equal, a cached token reused, and no credential sent off the registry" \
+      "ok" "$([[ $replica_selftest_status -eq 0 ]] && grep -q '^store_replica selftest: 23 arm(s), 0 failure(s)$' <<< "$replica_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$replica_selftest_output")")"
 
 echo
 
