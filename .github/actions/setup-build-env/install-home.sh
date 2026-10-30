@@ -9,8 +9,8 @@
 # each skip declaration's profile names against the `profiles/` of the home it was staged into. A
 # home holding the job's profile alone fails every create whose tests run for a package declaring a
 # skip on another registry profile — logcraft_core's `linux-clang21-asan` row, found by the W500
-# cold walk: conan_module.sh's `create=true` path and the release create both. A cache-restored home
-# may also carry stale copies; the sync overwrites any file that differs from this revision's.
+# cold walk. A cache-restored home may also carry stale copies; the sync overwrites any file that
+# differs from this revision's.
 #
 # WHY SOURCE MALF. The sync is a malf function; this tree beside the action IS malf-toolchain at the
 # revision the caller's `uses:` pins, and `MALF_SOURCE_ONLY=1` stops malf before it dispatches.

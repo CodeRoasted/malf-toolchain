@@ -10,7 +10,7 @@ description: |
   was copy-pasted across every consumer CI. Consumers add repo-specific apt via `extra-apt`.
 
   Owns `CONAN_HOME` (exported to `$GITHUB_ENV`) so consumers no longer declare it at job level;
-  later steps (conan-module, etc.) read it as `$CONAN_HOME`. It is <workspace>/.conan2, which
+  later steps read it as `$CONAN_HOME`. It is <workspace>/.conan2, which
   `actions/cache/restore` fills and `conan-cache-save` (the caller's last step) saves without its
   first-party packages, on any runner group but `coderoast-release` (`actions-cache-allowed.sh`), unless the caller asks for `persistent-conan-home`: one home
   per self-hosted runner, outside the checkout, that outlives the job (`conan-home.sh` says why and
@@ -88,8 +88,8 @@ runs:
       shell: bash
       env:
         ACTION_PATH: ${{ github.action_path }}
-      # Every test path of the job — conan_module.sh's and a workflow's own bare `conan create`
-      # alike — runs after this action, so the lift is here once (the script says why).
+      # Every test path of the job, a workflow's own bare `conan create` included, runs after this
+      # action, so the lift is here once (the script says why).
       run: bash "$ACTION_PATH/lift-userns-restriction.sh"
 
     - name: CMake 4.3.x and Conan ${{ inputs.conan-version }} from their hash locks, into a job-scoped venv
@@ -114,17 +114,12 @@ runs:
         # layout alone and is unreachable under `conan create`, which builds from sources exported
         # into the conan cache. CI is the environment that can declare, so it declares.
         #
-        # WHY HERE, when `conan_module.sh` already exports it. That script is the single source
-        # of truth for PER-MODULE build logic, and the claim written at its site — "it is the one
-        # thing every path goes through" — is false for a workflow's own bare `conan create` in a
-        # `run:` block (the superproject's `conan-cache-publish.yml`, eidos's `sift-windows.yml`),
-        # which never reaches conan_module.sh: until 2026-10-16 the release job of every consumer
-        # repository built that way with the variable unset. `setup-build-env` is the step every such
-        # path does run, before any build. Both derive the same
-        # absolute path from the same fact (this action's own location inside the pinned
-        # malf-toolchain checkout under `_actions/`), and conan_module.sh's `:-` default means the
-        # value exported here WINS rather than competing — so this is one fact with one derivation
-        # rule, not the per-caller hard-coded copy that action banner forbids.
+        # WHY HERE: a workflow's own bare `conan create` in a `run:` block (the superproject's
+        # `conan-cache-publish.yml`, eidos's `sift-windows.yml`) builds with whatever this job
+        # exports; until 2026-10-16 the release job of every consumer repository built that way with
+        # the variable unset. `setup-build-env` is the step every such path does run, before any
+        # build, and it derives the path from one fact (this action's own location inside the pinned
+        # malf-toolchain checkout under `_actions/`), never a per-caller hard-coded copy.
         #
         # The five golden determinism legs declare it a third time, at job level, and that IS a
         # deliberate duplicate: DN-17.D32 keeps those legs RAW so the byte-identity compare cannot
@@ -132,8 +127,8 @@ runs:
         #
         # `$GITHUB_ACTION_PATH` is `<runner>/work/_actions/<owner>/<repo>/<ref>/.github/actions/
         # setup-build-env`, so `../../..` is the toolchain repo root — the same arithmetic this
-        # action already uses to read `profiles/`, `global.conf` and `settings_user.yml`, and the
-        # same one conan_module.sh uses. Observed in a real run log (coderoast-web
+        # action already uses to read `profiles/`, `global.conf` and `settings_user.yml`. Observed in
+        # a real run log (coderoast-web
         # src/assets/sift-showcase/logcraft__ci-build__green-b.log:564).
         toolchain_root="$(cd -- "$ACTION_PATH/../../.." && pwd)"
         echo "MALF_TOOLCHAIN_DIR=$toolchain_root" >> "$GITHUB_ENV"

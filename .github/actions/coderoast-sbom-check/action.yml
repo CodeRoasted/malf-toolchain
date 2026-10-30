@@ -46,13 +46,13 @@ runs:
       run: |
         set -euo pipefail
         lockfile="$MALF_ROOT/conan.lock"
-        args=()
         # Resolve under the same lockfile the build used, so a drift report can never be an
-        # artefact of this step resolving a DIFFERENT graph than the one that was compiled.
-        [ -f "$lockfile" ] && args+=(--lockfile "$lockfile")
+        # artefact of this step resolving a DIFFERENT graph than the one that was compiled. The path
+        # is derived from this action's own location (ADR-3.D6), so a missing file is a hard error.
+        [ -f "$lockfile" ] || { echo "::error::coderoast-sbom-check: $lockfile is missing from the malf-toolchain checkout"; exit 1; }
         python3 "$MALF_ROOT/sbom_gen.py" \
           --root "$GITHUB_WORKSPACE/$PACKAGE_DIR" \
           --profile "$CONAN_HOME/profiles/$PROFILE_NAME" \
           --out "$GITHUB_WORKSPACE/$SBOM_PATH" \
-          "${args[@]}" \
+          --lockfile "$lockfile" \
           --check

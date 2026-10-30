@@ -6,8 +6,8 @@ description: |
   libc++-21), Ninja, CMake 4.3.x and Conan from their hash locks into a job-scoped venv, the restore
   of a keyed conan cache, and the leg's conan profiles staged from a malf-toolchain checkout.
 
-  RAW, NOT THE CI COMPOSITE. A determinism leg must not inherit the CI wiring's assumptions
-  (`coderoast-ci` exports the lockfile and the build env), or it could no longer tell "the build is
+  RAW, NOT A CI COMPOSITE. A determinism leg must not inherit a CI wiring's assumptions (an
+  exported lockfile, a staged build env), or it could no longer tell "the build is
   deterministic" from "the wiring made it look so" — so this brick provisions tools and stages
   profiles and nothing else. The caller still declares MALF_TOOLCHAIN_DIR itself.
 

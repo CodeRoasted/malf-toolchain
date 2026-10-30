@@ -14,7 +14,6 @@
 #   malf run     <exe-name>
 #   malf editables [list|sync]
 #   malf slot    [status|acquire|release]
-#   malf conan-jobs <what>
 #
 # Verb semantics:
 #   `build` compiles EVERYTHING — package + tests + benches (one compile
@@ -1148,7 +1147,7 @@ _malf_ship_lock_args() {
 # recipe's build() runs its tests (malf_recipe_tests.py run_tests), which judge each skip at
 # `user.malf:profile` and raise without it (DN-142.D23). So the install names the act's profile,
 # the one a writer create names: measured at insight-metalog's v1.10.7 Release (run 38861801791),
-# where `malf build` inside measure-benchmark built the vendored insight_canon from source and
+# where `malf build` inside the release's benchmark step built the vendored insight_canon from source and
 # died "user.malf:profile names no profile". A `user.*` conf is never a package-id input.
 # A COMPILING ACT IN THE BUILD ENVIRONMENT RESOLVES WITH NO REMOTE (DN-142.D30 (9) R7): its home holds
 # every recipe it may use (_malf_seed_environment_home), its container has no network, and a binary
@@ -1718,21 +1717,6 @@ _malf_conan_jobs() {   # <what>
     echo "$1: ${_MALF_BUILD_WIDTH_LINE#malf build: }" >&2
 }
 
-# THE SAME WIDTH FOR A CONAN ACT malf DOES NOT RUN ITSELF: the CI composites call conan directly
-# (`conan-module`'s conan_module.sh, `coderoast-vendor`'s ci_build_conan_package.sh), and before this
-# verb they handed conan no `tools.build:jobs`, so a 2-CPU, 5 GiB ci seat compiled 16 wide. They read
-# the width here, so it has one derivation. The job count on stdout, its derivation on stderr.
-cmd_conan_jobs() {   # <what>
-    [[ "${1:-}" == -* ]] && _malf_refuse_option conan-jobs "$1"
-    if [[ $# -ne 1 || -z "$1" ]]; then
-        echo "malf conan-jobs: one argument, the name of the conan act the width is for" >&2
-        _malf_usage_of conan-jobs >&2
-        exit 1
-    fi
-    _malf_conan_jobs "$1"
-    echo "$_MALF_CONAN_JOBS"
-}
-
 # Run a command and record, in <peak file>, the largest max RSS (KiB) any process of its tree
 # reached — the figure a cap is checked against. Returns the command's exit code. Where the
 # interpreter has no `resource` module (Windows), the command runs unmeasured and the file stays
@@ -2052,8 +2036,8 @@ _malf_test_run() {                  # <build_dir> <verbose> <regex> <corpus_only
     source="$(python3 "$MALF_DIR/malf_recipe_tests.py" tree-source "$build_dir")" || source=""
     # THE PACKAGE'S DECLARED BACKENDS (DN-142.D30 (5) E2b) come up for the run through the same launcher code
     # a walk uses, published on the host's 127.0.0.1, each address in its CODEROAST_BACKEND_<NAME>: the test
-    # fixture has ONE path, the variable, on the desk and in the image.
-    # note: CI's conan_module.sh runs its ctest and its create through the same verb, so the two seats start one set.
+    # fixture has ONE path, the variable, on the desk and in the image (where the launcher already started them:
+    # `with-backends` then runs bare).
     local -a beside=()
     [[ -z "$source" ]] || beside=(python3 "$MALF_DIR/build_environment.py" with-backends "$source" --)
     "${beside[@]}" ctest "${ctest_args[@]}" --output-junit "$junit" < /dev/null || status=$?
@@ -5213,10 +5197,6 @@ Commands:
                                    fails if a committed SBOM has drifted from the graph.
     run     <exe-name> [args...]
     bin-dir [subdir] [--asan|--profile <name>]   print the PROFILE-keyed build dir for a target
-    conan-jobs <what>              print the job count a conan act takes (tools.build:jobs), the
-                                   width malf's own conan acts take, derived from this seat's
-                                   cores and memory; its derivation goes to stderr under <what>.
-                                   For the CI scripts that call conan directly.
 
 Verbs (one compile surface):
     `build` compiles EVERYTHING — the package + its tests + its benches.
@@ -5939,8 +5919,8 @@ cmd_store_create() {
     _malf_apply_profile "$MALF_PROFILE_NAME"
     # CLEAN-EXPORT invariant: no editables, and MALF_EDITABLE_BUILD_DIR unset. Recipes add the
     # editable build tree to their cmake builddirs when it is set; a create has no such tree, so the
-    # bogus path lands in CMAKE_PREFIX_PATH and find_package fails. Real CI (conan-module,
-    # release-publish) runs with it unset; _malf_apply_profile exported it just above.
+    # bogus path lands in CMAKE_PREFIX_PATH and find_package fails. _malf_apply_profile exported it
+    # just above.
     rm -f "$CONAN_HOME/editable_packages.json"
     unset MALF_EDITABLE_BUILD_DIR
     _malf_purge_first_party || return 2
@@ -7714,7 +7694,6 @@ case "$COMMAND" in
     sbom)             cmd_sbom "$@" ;;
     run)              cmd_run "$@" ;;
     bin-dir)          cmd_bin_dir "$@" ;;
-    conan-jobs)       cmd_conan_jobs "$@" ;;
     help|-h|--help)   cmd_help ;;
     *)
         echo "malf: unknown command '$COMMAND'" >&2

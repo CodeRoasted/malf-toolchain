@@ -81,9 +81,9 @@ every privileged syscall by the kernel.
     build_environment.py with-backends <package dir> -- <argv>...
         <argv> on the host beside the backends the package at that directory declares in its working-tree
         packages.yml, published on 127.0.0.1 at ports the daemon allocates, each address in its
-        CODEROAST_BACKEND_<NAME>; bare when it declares none (the desk's `malf test` and CI's
-        conan_module.sh, test phase and create alike), or when each variable already holds its
-        walk-network address <name>:<port> (an act beside a walk's backends); exit the command's, 2 refused
+        CODEROAST_BACKEND_<NAME>; bare when it declares none (`malf test`), or when each variable
+        already holds its walk-network address <name>:<port> (an act beside a walk's backends);
+        exit the command's, 2 refused
     build_environment.py selftest
         every refusal and the container's isolation, over a throwaway image built here (FROM scratch, no
         network), never the real archive; the definition check's refusals over recipes written here
@@ -96,8 +96,7 @@ removes the backends and the network on every exit path (a dead launcher's lefto
 pid, are reaped by the next); a walk with no declaring step keeps `--network none`. A declaring step's act
 reaches each backend as CODEROAST_BACKEND_<NAME>=<name>:<port>, keyed in its parameter document, the
 declaration itself in its key's `step` member. No container the launcher starts holds a Docker socket.
-The desk's `malf test` and CI's conan_module.sh start the same backends through the same code, published
-on 127.0.0.1.
+The desk's `malf test` starts the same backends through the same code, published on 127.0.0.1.
 
 GIT MIRRORS. The walk has no network, and conan's source download cache serves only a downloaded file, so a
 recipe whose source() fetches with git (ConanCenter's gnu-config) is served from a bare mirror built into the
@@ -671,7 +670,7 @@ def declared_backends(package_dir: Path, package: str, at_head: bool = True) -> 
 
 def backends_at(directory: Path) -> list[Backend]:
     """The backends the package at `directory` declares in its repository's working-tree packages.yml
-    (`with-backends`, the desk's `malf test` and CI's conan_module.sh): the package whose `path:` is `directory`
+    (`with-backends`, the desk's `malf test`): the package whose `path:` is `directory`
     relative to the repository; [] for a directory no package names."""
     import yaml
 
@@ -1325,7 +1324,7 @@ def _backend_arms(arm, refusal, base: Path, docker: str) -> None:
                                          "health": "/probe connect 127.0.0.1 7000",
                                          "command": ["/probe", "serve", "7000"]}]}}}))
         arm("with-backends over a declaring package hands the command each backend published on 127.0.0.1, by "
-            "its variable (the desk's malf test and CI's conan_module.sh)",
+            "its variable (the desk's malf test)",
             main(["with-backends", str(declaring / "pkg"), "--", str(script)]), 0)
         streamed, captured = base / "probe.tar", base / "probe.json"
         with tarfile.open(streamed, "w") as bundle:

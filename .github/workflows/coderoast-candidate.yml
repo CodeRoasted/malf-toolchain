@@ -149,7 +149,7 @@ jobs:
           python3 "$MALF_CHECKOUT/artefact_store.py" bound "$store" "${shipped[@]}"
 
       # The committed SBOM is a projection of the graph this job just resolved for the ship form, so it is checked
-      # here, in that job's home, before anything is stored (it moved from coderoast-ci.yml's build job).
+      # here, in that job's home, before anything is stored.
       - name: The committed SBOM matches the ship form's resolved graph
         if: ${{ inputs.sbom-path != '' }}
         uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-sbom-check@7c1c91dde4da5c64a0d01143d8c81f97c743258f

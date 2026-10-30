@@ -98,7 +98,7 @@ CORPUS_LABEL = "corpus"
 CORPUS_GATES_CONF = "user.malf:corpus_gates"
 BENCH_CONF = "user.malf:bench"
 BENCH_WATCHDOG_CONF = "user.malf:bench_watchdog"
-# note: the measurement the release's measure-benchmark action took, moved into the create unchanged
+# note: the measurement the release's benchmark step took, moved into the create unchanged
 BENCH_REPETITIONS = 5
 BENCH_TIMEOUT_SECONDS = 1200
 # note: the depth `malf bench` searches a build tree for its executables, `find -maxdepth 3`

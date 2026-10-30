@@ -3421,8 +3421,6 @@ check "the writer conf set is empty, and an unknown set is a usage error (exit 2
       "$(out="$(python3 "$MALF_ROOT/malf_recipe_tests.py" create-args writer)"; echo "rc=$? ${#out}") $(python3 "$MALF_ROOT/malf_recipe_tests.py" create-args vendor 2>/dev/null; echo "rc=$?")"
 check "no tracked malf file sets tools.graph:skip_test" \
       "0" "$(git -C "$MALF_ROOT" grep -cE 'tools\.graph:skip_test=' -- . ':!tests/test_malf.sh' | awk -F: '{n += $2} END {print n + 0}')"
-check "the vendor create reads the consumer set from the helper and spells no skip conf or test folder of its own" \
-      "1 0" "$(grep -c 'malf_recipe_tests.py" create-args consumer' "$MALF_ROOT/.github/actions/coderoast-vendor/ci_build_conan_package.sh") $(grep -vE '^\s*#' "$MALF_ROOT/.github/actions/coderoast-vendor/ci_build_conan_package.sh" | grep -cE 'skip_test|--test-folder')"
 
 # The writers read their set from the helper, never spell it: a copy of malf beside a helper whose
 # writer set is mutated hands the mutated set to its caller, and both writers splice what it read.
@@ -3604,32 +3602,19 @@ check "a bench walk refuses a MALF_BENCH naming no file, a slot nobody holds, an
 check "a bench walk that holds the slot hands every create the bench document and the deadlock watchdog" \
       "1 1" "$(awk '/^_malf_store_bench_args\(\)/,/^}/' "$MALF_BIN" | grep -c 'user.malf:bench=\$MALF_BENCH') $(awk '/^_malf_store_bench_args\(\)/,/^}/' "$MALF_BIN" | grep -c 'user.malf:bench_watchdog=\$MALF_DIR/.github/actions/measure-benchmark/bench_watchdog.sh')"
 
-# The CI module script bypasses malf and reads the one selection too (DN-142.D5 (5)): it asks the
-# helper's desk-args for its ctest argv and spells no label of its own.
-cm_script="$MALF_ROOT/.github/actions/conan-module/conan_module.sh"
-check "conan_module.sh reads its ctest selection from the helper and spells no ctest label of its own" \
-      "1 0" "$(grep -c 'malf_recipe_tests.py" desk-args' "$cm_script") $(grep -vE '^\s*#' "$cm_script" | grep -cE '(-L|-LE) corpus')"
-check "conan_module.sh's ctest writes its JUnit and judges its skips at the step's own profile, against the module's declarations (DN-142.D23)" \
-      "1 1" "$(grep -cE '^\s*ctest "\$\{ctest_args\[@\]\}" --output-junit "\$junit" < /dev/null$' "$cm_script") $(grep -cE '^\s*python3 "\$TOOLCHAIN_ROOT/malf_recipe_tests.py" judge-skips "\$junit" "\$PWD/\$MODULE" "\$PROFILE_NAME" false$' "$cm_script")"
-# THE CI PATH STARTS A MODULE'S DECLARED BACKENDS AS THE DESK DOES (DN-142.D30 (5) E2b): both the test
-# phase's ctest and the create (whose build() runs the same selection) run through the launcher's one
-# verb, which reads the module's `backends:` and runs its command bare when there is none. Before it,
-# CI ran ctest bare and coderoast-server's infra suites failed on an unset CODEROAST_BACKEND_<NAME>
-# (server CI run 39697469236: 16 of 30 infra/clickhouse tests).
-check "conan_module.sh runs its ctest and its conan create through the launcher's with-backends over the module, and malf test its ctest over the tree's source" \
-      "ctest:1 create:1 desk:1" "$(python3 - "$cm_script" "$MALF_BIN" <<'PYC'
+# THE DESK STARTS A PACKAGE'S DECLARED BACKENDS (DN-142.D30 (5) E2b): `malf test` runs its ctest through the
+# launcher's one verb over the tree's source, which reads the package's `backends:` and runs bare when there is
+# none, or when the act already reaches each one on its walk's network. Before it, ctest ran bare and
+# coderoast-server's infra suites failed on an unset CODEROAST_BACKEND_<NAME> (server CI run 39697469236).
+check "malf test runs its ctest through the launcher's with-backends over the tree's source" \
+      "desk:1" "$(python3 - "$MALF_BIN" <<'PYC'
 import re, sys
 from pathlib import Path
-lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
-wrapper = re.compile(r'^\s*python3 "\$TOOLCHAIN_ROOT/build_environment\.py" with-backends "\$MODULE" -- \\$')
-def wrapped(body):
-    return sum(1 for index, line in enumerate(lines)
-               if index and re.match(body, line) and wrapper.match(lines[index - 1]))
-desk = sum(1 for line in Path(sys.argv[2]).read_text(encoding="utf-8").splitlines()
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+desk = sum(1 for line in text.splitlines()
            if re.match(r'^\s*"\$\{beside\[@\]\}" ctest "\$\{ctest_args\[@\]\}" --output-junit "\$junit" < /dev/null', line))
-desk_verb = Path(sys.argv[2]).read_text(encoding="utf-8").count(
-    'beside=(python3 "$MALF_DIR/build_environment.py" with-backends "$source" --)')
-print(f"ctest:{wrapped(r'^\s*ctest ')} create:{wrapped(r'^\s*conan create ')} desk:{min(desk, desk_verb)}")
+desk_verb = text.count('beside=(python3 "$MALF_DIR/build_environment.py" with-backends "$source" --)')
+print(f"desk:{min(desk, desk_verb)}")
 PYC
 )"
 wb_tmp="$(mktemp -d)"
@@ -5148,52 +5133,6 @@ check "every restore drops the first-party packages it brought, and the save dro
 rm -rf "$ac_tmp"
 echo
 
-echo "[7q7c] the vendor fetch restores the recipe revision the tag carries, never a cached package by version alone (ROADMAP N367)"
-
-# Stubs: `gh release download` copies a prepared tarball; `conan` keeps the cached recipe
-# revisions of the one ref in a state file (one per line), logging every call.
-vf_tmp="$(realpath "$(mktemp -d)")"
-mkdir -p "$vf_tmp/bin" "$vf_tmp/one" "$vf_tmp/two"
-printf '{"pkg/1.0": {"revisions": {"tagrev": {}}}}' > "$vf_tmp/one/pkglist.json"
-printf '{"pkg/1.0": {"revisions": {"tagrev": {}, "otherrev": {}}}}' > "$vf_tmp/two/pkglist.json"
-tar -czf "$vf_tmp/one.tgz" -C "$vf_tmp/one" pkglist.json
-tar -czf "$vf_tmp/two.tgz" -C "$vf_tmp/two" pkglist.json
-cat > "$vf_tmp/bin/gh" <<'STUB'
-#!/usr/bin/env bash
-echo "gh $*" >> "$VF_LOG"
-while [ "$#" -gt 0 ]; do [ "$1" = --dir ] && cp "$VF_TARBALL" "$2/pkg-1.0.tgz"; shift; done
-STUB
-cat > "$vf_tmp/bin/conan" <<'STUB'
-#!/usr/bin/env bash
-echo "conan $*" >> "$VF_LOG"
-case "$1 $2" in
-  "list pkg/1.0#*")
-    python3 -I -c 'import json,sys; r=[l for l in open(sys.argv[1]).read().split() if l]; print(json.dumps({"Local Cache": {"pkg/1.0": {"revisions": {x: {} for x in r}}} if r else {}}))' "$VF_STATE" ;;
-  "list pkg/1.0") [ -s "$VF_STATE" ] && printf 'Local Cache\n  pkg/1.0\n' ;;
-  "remove pkg/1.0#"*) rev="${2#pkg/1.0#}"; grep -vx "$rev" "$VF_STATE" > "$VF_STATE.new" || true; mv "$VF_STATE.new" "$VF_STATE" ;;
-  "cache restore") [ -n "${VF_RESTORE_NOOP:-}" ] || { grep -qx tagrev "$VF_STATE" || echo tagrev >> "$VF_STATE"; } ;;
-esac
-STUB
-chmod +x "$vf_tmp/bin/gh" "$vf_tmp/bin/conan"
-vf_run() {  # <cached revisions, space-separated> <tarball> [restore-noop]
-    : > "$vf_tmp/state"; : > "$vf_tmp/log"
-    for rev in $1; do echo "$rev" >> "$vf_tmp/state"; done
-    VF_LOG="$vf_tmp/log" VF_STATE="$vf_tmp/state" VF_TARBALL="$vf_tmp/$2" VF_RESTORE_NOOP="${3:-}" \
-        PATH="$vf_tmp/bin:$PATH" bash "$MALF_ROOT/.github/actions/coderoast-vendor/ci_fetch_conan_package.sh" \
-        pkg 1.0 Owner/repo > /dev/null 2>&1
-    echo "rc=$? cache=$(tr '\n' ' ' < "$vf_tmp/state" | sed 's/ $//') removed=$(grep -c '^conan remove' "$vf_tmp/log") downloads=$(grep -c '^gh release download' "$vf_tmp/log")"
-}
-check "a cached revision other than the tag's is removed and the tag's restored — the version alone is never trusted" \
-      "rc=0 cache=tagrev removed=1 downloads=1" "$(vf_run staleold one.tgz)"
-check "the tag's revision already cached is still checked against a download, and nothing is removed" \
-      "rc=0 cache=tagrev removed=0 downloads=1" "$(vf_run tagrev one.tgz)"
-check "an empty cache downloads and restores the tag's revision" \
-      "rc=0 cache=tagrev removed=0 downloads=1" "$(vf_run '' one.tgz)"
-check "a tarball carrying two recipe revisions of the ref is refused before the cache is touched" \
-      "rc=1 cache=staleold removed=0 downloads=1" "$(vf_run staleold two.tgz)"
-check "a restore that does not leave exactly the tag's revision fails the fetch" \
-      "rc=1 cache= removed=1 downloads=1" "$(vf_run staleold one.tgz noop)"
-rm -rf "$vf_tmp"
 echo
 
 echo "[7q7d] released packages are relocatable and path-independent: the path-map fragment, the twin compare, the relocation scan (ROADMAP N366)"
@@ -6346,37 +6285,6 @@ check "the width the create was handed is bounded by the affinity: at most 2 on 
 rm -rf "$tt_tmp"
 echo
 
-echo "[7q7w] the CI composites' conan acts take the build's width too: conan_module.sh's install, build and create, and the vendor row's create, each handed what malf derives on the seat, never conan's os.cpu_count()"
-cw_tmp="$(realpath "$(mktemp -d)")"
-mkdir -p "$cw_tmp/bin" "$cw_tmp/ws/cw_mod" "$cw_tmp/home/profiles" "$cw_tmp/src/Owner/cw_repo/pkg"
-printf '[settings]\nos=Linux\n' > "$cw_tmp/home/profiles/cw_profile"
-for tool in conan cmake ctest; do
-    printf '#!/usr/bin/env bash\n{ printf "%s"; printf " %%s" "$@"; echo; } >> "%s/acts"\n' "$tool" "$cw_tmp" > "$cw_tmp/bin/$tool"
-done
-printf '#!/usr/bin/env bash\nexit 0\n' > "$cw_tmp/bin/gdb"
-chmod +x "$cw_tmp/bin/"*
-ln -s "$(command -v python3)" "$cw_tmp/bin/python"
-(cd "$cw_tmp/src/Owner/cw_repo" && git init -q && printf 'packages:\n  cw_pkg:\n    path: pkg\n    version: 1.2.3\n' > packages.yml \
-    && git add packages.yml && git -c user.email=t@t -c user.name=t commit -qm one)
-cw_width="$(taskset -c 0-1 bash -c 'MALF_SOURCE_ONLY=1 source "$1" > /dev/null 2>&1; set +e; _malf_build_width; echo "$_MALF_BUILD_JOBS"' _ "$MALF_BIN")"
-(cd "$cw_tmp/ws" && PATH="$cw_tmp/bin:$PATH" CONAN_HOME="$cw_tmp/home" GITHUB_WORKSPACE="$cw_tmp/ws" \
-    taskset -c 0-1 bash "$MALF_ROOT/.github/actions/conan-module/conan_module.sh" cw_mod true true cw_profile > "$cw_tmp/module.out" 2>&1)
-(PATH="$cw_tmp/bin:$PATH" CONAN_HOME="$cw_tmp/home" GH_TOKEN=unused PROFILE_NAME=cw_profile MALF_TOOLCHAIN_DIR="$MALF_ROOT" \
-    DEPS_SRC_ROOT="$cw_tmp/src" taskset -c 0-1 bash "$MALF_ROOT/.github/actions/coderoast-vendor/ci_build_conan_package.sh" \
-    cw_pkg 1.2.3 Owner/cw_repo > "$cw_tmp/vendor.out" 2>&1)
-cw_act() {   # <act prefix> — the act's width flag as the stub recorded it, or "none"
-    local line
-    line="$(grep -m1 "^$1" "$cw_tmp/acts")" || { echo "never ran"; return; }
-    grep -oE '(tools\.build:jobs=|--parallel )[0-9]+' <<< "$line" | paste -sd' ' | grep . || echo none
-}
-check "RED — conan_module.sh's conan install, cmake --build and conan create, and the vendor row's conan create, are each handed the seat's width ($cw_width on 2 CPUs)" \
-      "tools.build:jobs=$cw_width|--parallel $cw_width|tools.build:jobs=$cw_width|tools.build:jobs=$cw_width" \
-      "$(cw_act "conan install")|$(cw_act "cmake --build")|$(cw_act "conan create cw_mod")|$(cw_act "conan create $cw_tmp/src")"
-check "each script prints the width's derivation under its act's name, from malf's one derivation" \
-      "2 1" "$(grep -cE '^conan_module: (conan install|conan create) cw_mod: -j[0-9]+ = ' "$cw_tmp/module.out") $(grep -cE '^ci_build_conan_package: conan create cw_pkg/1.2.3: -j[0-9]+ = ' "$cw_tmp/vendor.out")"
-check "neither script derives a width of its own: no nproc, no MemAvailable, no cpu_count" \
-      "0" "$(grep -vE '^\s*#' "$MALF_ROOT/.github/actions/conan-module/conan_module.sh" "$MALF_ROOT/.github/actions/coderoast-vendor/ci_build_conan_package.sh" | grep -cE 'nproc|MemAvailable|cpu_count')"
-rm -rf "$cw_tmp"
 echo
 
 echo "[7q7s] gate G4's harness: a command under \`malf sandbox\` reads only beneath its declared roots, and a create whose build() opens an undeclared file reds with EACCES naming it (DN-142.D19 (5))"

@@ -6,11 +6,10 @@
 # and the tests RUN, rather than being declared away. A self-hosted runner (no sudo,
 # NoNewPrivileges) is left exactly as it is; a skip there stays the package's to declare.
 #
-# WHY IN setup-build-env AND NOT IN conan_module.sh, where it first landed (malf 146c811): every
-# job that runs a package's tests passes through this action, and conan_module.sh is only ONE of
-# those paths. A workflow's own bare `conan create` in a `run:` block (the superproject's
-# `conan-cache-publish.yml`) runs test_package and the declared-skip judgment without reaching
-# conan_module.sh, so the lift would never run there: the retired tag-time release build did exactly
+# WHY IN setup-build-env, not in a per-module script, where it first landed (malf 146c811): every
+# job that runs a package's tests passes through this action. A workflow's own bare `conan create`
+# in a `run:` block (the superproject's `conan-cache-publish.yml`) runs test_package and the
+# declared-skip judgment through no other shared step: the retired tag-time release build did exactly
 # that, and coderoast-ipc's v1.10.7 Release (run 38738860055, job `release / publish`) refused the
 # same four skips its CI job in that very run had lifted and run. MALF_TOOLCHAIN_DIR moved here for
 # the identical reason (this action's own step says so).

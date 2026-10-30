@@ -103,9 +103,8 @@ Composite actions consumed cross-repo by `uses:` — true single source, no per-
 | `setup-clang21-libcxx` | Provision clang-21 + libc++ and the `import std` / modules bridge — the dev compiler and the cross-stdlib determinism leg (the gates run gcc-16.2 ≡ clang-21/libc++). |
 | `setup-msvc1452` | On a Windows runner: install MSVC 14.52 from the VS Insiders Preview component, activate exactly toolset 14.52 (build >= the 14.52.36418 fix floor, any other toolset refused), activate the dev env (`cl.exe`/`link.exe` + INCLUDE/LIB), and export `MSVC1452_INSTALL` (the `windows-msvc-release` profile points Conan's `vcvars` at it). The Windows + cross-OS leg. |
 | `setup-build-env` | The shared Linux C++ build env as one step: apt base + pinned CMake 4.3.x + Conan (no autodetect) + the conan dep-binary cache + the canonical `linux-gcc16-release` profile (fetched from `profiles/` here — no per-repo vendored copy). Owns `CONAN_HOME`. Run after `setup-gcc`; pass repo-specific apt via `extra-apt`. |
-| `conan-module` | Test / create one Conan module (gated by `test`/`create` inputs from `dorny/paths-filter`), with a gdb crash-diagnose fallback for `-march` SIGILLs. Reconciled from the three drifted per-repo copies. |
 
-A consumer build job is then: `checkout` → `setup-gcc` → `setup-build-env` → `conan-module` (×N).
+A repository's CI calls the reusable workflows instead of composing these: `coderoast-build.yml` (the clang-21 dev leg in the pinned build environment, `malf source-verdict`, and its postflight), `coderoast-candidate.yml` (the gcc-16 ship form bound to those verdicts, pushed to the repository's own store), `coderoast-preflight.yml` and `coderoast-postflight.yml`.
 
 ## malf — the build driver
 

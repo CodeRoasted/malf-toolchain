@@ -44,7 +44,7 @@ runs:
     - name: Format gate (self-test, then the repo)
       shell: bash
       env:
-        # Same derivation conan_module.sh uses: <toolchain>/.github/actions/<this>/action.yml -> <toolchain>.
+        # <toolchain>/.github/actions/<this>/action.yml -> <toolchain>.
         # Deriving it from the action's own location is what makes it unbypassable and keeps the
         # toolchain layout encoded in exactly one place per script.
         MALF: ${{ github.action_path }}/../../../malf
