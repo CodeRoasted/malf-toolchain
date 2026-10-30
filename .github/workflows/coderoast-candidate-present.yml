@@ -104,6 +104,8 @@ jobs:
           SIGNER_WORKFLOW: ${{ steps.malf.outputs.signer-workflow }}
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
+          # note: the runner's read cache outlives the job; every hit is re-hashed (store_transport.py, L4)
+          MALF_TRANSPORT_CACHE: ${{ runner.tool_cache }}/coderoast-transport
         run: |
           set -euo pipefail
           printf '%s' "$UPSTREAM" > "$RUNNER_TEMP/upstream.json"
@@ -132,6 +134,8 @@ jobs:
           SIGNER_DIGEST: ${{ steps.malf.outputs.commit }}
           GITHUB_TOKEN: ${{ github.token }}
           GH_TOKEN: ${{ github.token }}
+          # note: the runner's read cache outlives the job; every hit is re-hashed (store_transport.py, L4)
+          MALF_TRANSPORT_CACHE: ${{ runner.tool_cache }}/coderoast-transport
         run: |
           set -euo pipefail
           printf '%s' "$UPSTREAM" > "$RUNNER_TEMP/upstream.json"

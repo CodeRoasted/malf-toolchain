@@ -70,6 +70,8 @@ a private caller passes a classic token holding read:packages alone, used for th
 W is `<owner>/<malf repository>/.github/workflows/coderoast-candidate.yml`; D the malf commit. Reads use
 GITHUB_TOKEN when it is set and go anonymous otherwise (a public package). MALF_STORE_REGISTRY and
 MALF_STORE_API replace https://ghcr.io and https://api.github.com (a local registry's live proof).
+MALF_TRANSPORT_CACHE names a read cache that outlives the job (every hit re-hashed), bounded after each read verb to
+MALF_TRANSPORT_CACHE_MAX_MB (default 8192) by least-recent read; unset, every read verb uses a fresh scratch.
 Exit 0 done, 1 refused (the reason on stderr), 2 a usage error, 3 absent.
 """
 
@@ -299,6 +301,51 @@ def judged_record(data: bytes, key: str) -> dict:
 # ── the content-addressed cache and the registry reads ─────────────────────────────────────────────
 
 
+# THE RUNNER'S TRANSPORT CACHE (night lane 2026-10-30-candidate-perf, lever L4): MALF_TRANSPORT_CACHE names a
+# directory that outlives the job (CI: the runner's tool cache), so a blob a previous job fetched is read from disk.
+# It is safe to share across the jobs of one runner account only because every read re-hashes the entry (`Reader`):
+# a planted or stale entry is a miss, never a byte. Unset, each verb reads through a fresh scratch directory.
+TRANSPORT_CACHE_ENV = "MALF_TRANSPORT_CACHE"
+TRANSPORT_CACHE_MAX_ENV = "MALF_TRANSPORT_CACHE_MAX_MB"
+TRANSPORT_CACHE_MAX_MB = 8192
+
+
+def transport_cache() -> Path:
+    """The read cache: MALF_TRANSPORT_CACHE when set (created), else a fresh scratch directory."""
+    named = os.environ.get(TRANSPORT_CACHE_ENV, "")
+    if not named:
+        return Path(tempfile.mkdtemp(prefix="store_transport."))
+    cache = Path(named)
+    cache.mkdir(parents=True, exist_ok=True)
+    return cache
+
+
+def prune_cache(cache: Path, cap_bytes: int, say: Callable[[str], None]) -> None:
+    """Bound the cache to `cap_bytes`: the least recently read entries go first (a hit refreshes its mtime)."""
+    entries = sorted(((entry.stat().st_mtime, entry.stat().st_size, entry)
+                      for entry in (cache / "blobs" / "sha256").glob("*") if entry.is_file()),
+                     key=lambda row: row[0])
+    total = sum(size for _mtime, size, _entry in entries)
+    evicted = 0
+    for _mtime, size, entry in entries:
+        if total <= cap_bytes:
+            break
+        entry.unlink(missing_ok=True)
+        total -= size
+        evicted += 1
+    if evicted:
+        say(f"store_transport: CACHE-PRUNED {evicted} entr{'y' if evicted == 1 else 'ies'}, "
+            f"{total >> 20} MiB kept under the {cap_bytes >> 20} MiB cap")
+
+
+def prune_named_cache(say: Callable[[str], None]) -> None:
+    """After a read verb: bound MALF_TRANSPORT_CACHE when it is set (a scratch cache dies with the job)."""
+    named = os.environ.get(TRANSPORT_CACHE_ENV, "")
+    if named:
+        cap = int(os.environ.get(TRANSPORT_CACHE_MAX_ENV, "") or TRANSPORT_CACHE_MAX_MB) << 20
+        prune_cache(Path(named), cap, say)
+
+
 @dataclass
 class Reader:
     """Reads by digest, through a runner-local cache: a hit is re-judged by its digest, so a stale or
@@ -310,15 +357,20 @@ class Reader:
     fetched: list[str] = field(default_factory=list)
 
     def _cached(self, hex_digest: str) -> bytes | None:
+        if not HEX64.match(hex_digest):
+            raise Refused(f"{hex_digest!r} is no sha256 digest, so it names no cache entry")
         path = self.cache / "blobs" / "sha256" / hex_digest
         if path.is_file():
             data = path.read_bytes()
             if sha256(data) == hex_digest:
+                os.utime(path)
                 return data
             self.say(f"store_transport: CACHE-MISS {hex_digest}: the cached bytes hash to {sha256(data)}")
         return None
 
     def _keep(self, hex_digest: str, data: bytes) -> None:
+        if not HEX64.match(hex_digest):
+            raise Refused(f"{hex_digest!r} is no sha256 digest, so it names no cache entry")
         folder = self.cache / "blobs" / "sha256"
         folder.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(dir=folder, delete=False) as handle:
@@ -1072,6 +1124,27 @@ def selftest() -> int:
             expect("a cache entry whose bytes are not its digest is a miss, re-fetched and judged",
                    (reader.fetched, (root / "restored3" / "objects" / transport).read_bytes() == (store / "objects" / transport).read_bytes()),
                    ([transport], True))
+            # -- the runner's transport cache (L4): MALF_TRANSPORT_CACHE outlives a verb, every hit re-hashed, bounded.
+            os.environ[TRANSPORT_CACHE_ENV] = str(root / "runner-cache")
+            try:
+                first = Reader(registry, transport_cache(), quiet.append)
+                first.blob(transport)
+                second = Reader(registry, transport_cache(), quiet.append)
+                second.blob(transport)
+                expect("MALF_TRANSPORT_CACHE outlives a verb: a second reader on it reads the blob from disk",
+                       (first.fetched, second.fetched), ([transport], []))
+            finally:
+                del os.environ[TRANSPORT_CACHE_ENV]
+            arm("RED: a name that is no sha256 digest names no cache entry, so no path is built from it",
+                lambda: Reader(registry, root / "cache6", quiet.append).blob("../../escape"), "is no sha256 digest")
+            bounded = root / "bounded" / "blobs" / "sha256"
+            bounded.mkdir(parents=True)
+            for age, name in enumerate(("a" * 64, "b" * 64, "c" * 64)):
+                (bounded / name).write_bytes(b"x" * 1024)
+                os.utime(bounded / name, (1_000_000 + age, 1_000_000 + age))
+            prune_cache(root / "bounded", 2048, quiet.append)
+            expect("the cache is bounded: the least recently read entries go first, down to the cap",
+                   sorted(entry.name[0] for entry in bounded.iterdir()), ["b", "c"])
             # -- a dependent candidate's upstreams (DN-142.D31 (2)): read through their own stores, one each.
             def read_ipc(repository: str, wanted: str) -> dict:
                 return trusted_index(Reader(registry, root / "cache5", quiet.append), repository, wanted, verifier())
@@ -1281,7 +1354,7 @@ def upstream_verb(args: argparse.Namespace, get: Callable[[str], "tuple[int, dic
     """`upstream`: every upstream candidate of the document, through its own store's trust (a public one's
     attestation, a private one's privacy and the run's token), written to <out> as `{owner/repo: {key, commit,
     tree[, root]}}`; with --store its records restored there, with --sources its source cloned there."""
-    cache = Path(tempfile.mkdtemp(prefix="store_transport."))
+    cache = transport_cache()
 
     def private(repository: str) -> bool:
         return upstream_is_private(get, repository)
@@ -1314,6 +1387,7 @@ def upstream_verb(args: argparse.Namespace, get: Callable[[str], "tuple[int, dic
                               f"so its records are restored: name --store")
             entry["recipes"] = upstream_recipes(Path(args.store), read_index(repository, entry["key"]))
     Path(args.out).write_text(json.dumps(resolved, sort_keys=True, indent=1) + "\n", encoding="utf-8")
+    prune_named_cache(say)
     return 0
 
 
@@ -1393,7 +1467,7 @@ def main(argv: list[str]) -> int:
         if args.verb == "verify":
             if args.private:
                 raise Refused("a private store carries no attestation to verify (item 6)")
-            reader = Reader(registry, Path(tempfile.mkdtemp(prefix="store_transport.")), say)
+            reader = Reader(registry, transport_cache(), say)
             facts = _verifier(args, get).attested(reader.manifest(reader.tagged(args.tag)))
             for fact in facts:
                 say(f"store_transport: VERIFIED {owner}/{name}:{args.tag} source {fact.source_commit} "
@@ -1403,9 +1477,10 @@ def main(argv: list[str]) -> int:
         if args.verb == "candidate-present":
             if not HEX64.match(args.key):
                 raise Refused(f"{args.key!r} is not a candidate key (64 hex)")
-            reader = Reader(registry, Path(tempfile.mkdtemp(prefix="store_transport.")), say)
+            reader = Reader(registry, transport_cache(), say)
             trusted_index(reader, f"{owner}/{name}", args.key, verifier)
             say(f"store_transport: PRESENT candidate-{args.key} of {owner}/{name}")
+            prune_named_cache(say)
             return 0
         if not HEX64.match(args.key):
             raise Refused(f"{args.key!r} is not a key (64 hex)")
