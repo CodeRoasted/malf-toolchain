@@ -43,6 +43,11 @@ Nothing reaches the output directory or the registry unverified, and nothing her
         from the candidate; <out dir>/release/ (this Release's files) and <out dir>/destinations/<destination>/ with
         <out dir>/destinations/destinations.tsv (`<destination> <tag>` per line). Token: GITHUB_TOKEN (the
         repository's own: its store package and its API)
+    store_publish.py cut-tool <owner/repository> <candidate key> <package> <entry> <out file> (--signer-workflow W --signer-digest D | --private)
+        a CUT TOOL (DN-142.D33, option (i)): the `run-from-cache` entry of the package's ship-form create in the
+        candidate, read through the same trusted reader, extracted to <out file> by its digest and made executable,
+        so the cut runs the bytes the candidate bound to its source verdict and builds nothing. Token: GITHUB_TOKEN
+        when the store is private (a read:packages token reaches another repository's private store)
     store_publish.py check-release <out dir> <release.json>
         the reading after the publish (DN-142.D24 (3)): the Release's asset names, from
         `gh release view --json assets`, equal the staged files, both ways
@@ -350,6 +355,11 @@ def release_rows(declared: dict, owner: str, version: str) -> tuple[list[dict], 
     for package, row in sorted((declared.get("packages") or {}).items()):
         row = row or {}
         at = f"{PACKAGES_FILE} {package}"
+        # note: a cut tool is stored with the candidate and never released (DN-142.D33), so a row it would derive is refused
+        defects = artefact_store.cut_tool_defects(package, row)
+        if defects:
+            findings += [f"{PACKAGES_FILE} {defect}" for defect in defects]
+            continue
         if row.get("release") not in (True, False):
             findings.append(f"{at}: release is {row.get('release')!r}, not true or false")
             continue
@@ -417,6 +427,30 @@ def ship_create(candidate: Candidate, package: str) -> dict:
     if not path.is_file() or store_manifest.sha256_file(path) != transport:
         raise Refused(f"{package}: the transport {transport} its create names is not whole in the restored store")
     return record
+
+
+def cut_tool(candidate: Candidate, package: str, entry: str, target: Path) -> dict:
+    """A CUT TOOL's executable (DN-142.D33, option (i)): the entry `entry` of `package`'s ONE ship-form create in
+    the candidate, extracted to `target` by its digest and made executable; {package, entry, digest, record}.
+    The create must class the entry `run-from-cache`: a cut tool runs from where the cut put it, with the
+    profile's runpath, and is never in the published form. Nothing is built: the bytes are the ones the
+    candidate bound to its source verdict."""
+    record = ship_create(candidate, package)
+    declared = record["inputs"]["step"].get("executables") or {}
+    if declared.get(entry) != RUN_FROM_CACHE:
+        raise Refused(f"{package}'s ship-form create classes {entry} {declared.get(entry)!r}, not `{RUN_FROM_CACHE}`: a "
+                      f"cut tool is an executable the cut runs from its restored bytes (DN-142.D22, DN-142.D33)")
+    output = record["outputs"]["package"]
+    held = {path: digest for path, _mode, digest in output.get("entries") or []}
+    if entry not in held:
+        raise Refused(f"{package} holds no entry {entry}")
+    try:
+        store_manifest.extract(candidate.store / "objects" / output[artefact_store.TRANSPORT_FIELD], entry,
+                               held[entry], target)
+    except store_manifest.Refused as refused:
+        raise Refused(str(refused)) from refused
+    target.chmod(0o755)
+    return {"package": package, "entry": entry, "digest": held[entry], "record": record["key"]}
 
 
 def judged_by(candidate: Candidate, package: str, verdict: str, digest: str) -> str:
@@ -996,6 +1030,11 @@ packages:
     release: false
     executables:
       bin/server: {published: {image: srv-image}}
+  proof:
+    release: false
+    cut_tool: {why: the cut's render runs it}
+    executables:
+      bin/proof: run-from-cache
 ingest:
   golden.yaml:
     artifact: determinism-golden
@@ -1049,6 +1088,13 @@ def _candidate_scene(root: Path, packages: str = CANDIDATE_PACKAGES, perf_verdic
                                                     "profile": "linux-gcc16-release"}},
                                    {"package": {"content": "c" * 64, "entries": listed, "transport": transport,
                                                 "build_ids": build_ids}})
+    proof = b"\x7fELF proof bytes"
+    keys["proof"] = put_record(store, {"step": {"kind": "conan-create", "package": "proof", "form": "ship",
+                                                "profile": "linux-gcc16-release",
+                                                "executables": {"bin/proof": RUN_FROM_CACHE}}},
+                               {"package": {"content": "d" * 64, "transport": put_object(store, _transport({"bin/proof": proof})),
+                                            "entries": [["bin/proof", "executable", hashlib.sha256(proof).hexdigest()]],
+                                            "build_ids": {}}})
     sbom = put_object(store, b'{"bom": 1}\n')
     keys["tracked"] = put_record(store, {"step": {"kind": "tracked", "repository": "pub-repo", "package": "tools"}},
                                  {"tracked": {"objects": {"sbom.json": sbom}}})
@@ -1082,7 +1128,7 @@ def _candidate_scene(root: Path, packages: str = CANDIDATE_PACKAGES, perf_verdic
     measured = Measured(index["candidate"], {"lib_a": {"record": "9" * 64, "verdict": "pass", "files": {
         "lib_a_bench.json": hashlib.sha256(b'{"benchmarks": [1]}\n').hexdigest()}}}, bench)
     return {"server": server_handle, "registry": registry, "fake": fake, "key": index["candidate"], "pushed": pushed,
-            "answers": answers, "tool": tool, "server_bytes": server, "keys": keys, "sbom": sbom, "perf": perf,
+            "answers": answers, "tool": tool, "proof": proof, "server_bytes": server, "keys": keys, "sbom": sbom, "perf": perf,
             "measured": measured}
 
 
@@ -1144,6 +1190,25 @@ def candidate_arms(arm: Callable, failures: list[str], root: Path, servers: list
             listed = {"assets": [{"name": name} for name in want_own]}
             arm("CANDIDATE: the Release read after the publish equals the staged files",
                 lambda: check_release(out / "release", listed), None)
+    extracted = root / "cut-tool" / "proof"
+    extracted.parent.mkdir()
+    tool_found = arm("CUT TOOL: a cut tool's run-from-cache entry is extracted from the candidate by its digest, "
+                     "executable, and derives no Release row",
+                     lambda: cut_tool(candidate, "proof", "bin/proof", extracted), None)
+    if tool_found is not None and (extracted.read_bytes() != scene["proof"] or not os.access(extracted, os.X_OK)
+                                   or tool_found["record"] != scene["keys"]["proof"]):
+        failures.append(f"CUT TOOL: extracted {tool_found} and bytes that are not the candidate's, or not executable")
+    arm("RED: a published executable is no cut tool, so the cut never runs it from the candidate",
+        lambda: cut_tool(candidate, "tools", "bin/tool", root / "cut-tool" / "tool"), "not `run-from-cache`")
+    arm("RED: a package the candidate holds no ship-form create of hands out no cut tool",
+        lambda: cut_tool(candidate, "absent", "bin/proof", root / "cut-tool" / "absent"),
+        "0 ship-form create record(s) of absent")
+    released_tool = json.loads(json.dumps(declared))
+    released_tool["packages"]["proof"]["release"] = True
+    released_tool["packages"]["proof"]["version"] = "9.9.9"
+    arm("RED: a cut tool declared `release: true` derives no row: a cut tool is never released",
+        lambda: stage(candidate, released_tool, "9.9.9", "v9.9.9", root / "released-tool", quiet, measured),
+        "proof: a cut tool is never released")
     arm("RED: a tag that is not v<version> stages nothing",
         lambda: stage(candidate, declared, "9.9.9", "v9.9.8", root / "wrong-tag", quiet, measured),
         "is not the release tag v9.9.9")
@@ -1611,6 +1676,17 @@ def main(argv: list[str]) -> int:
                                               (os.environ.get(store_replica.REGISTRY_USER_ENV,
                                                               store_replica.REGISTRY_USER_DEFAULT), writer))
             rehearse(registry, argv[1], argv[2], Path(argv[3]), argv[4], Path(argv[5]), live_gh(forge), print)
+            return 0
+        if argv[:1] == ["cut-tool"]:
+            args, _get, verifier = _trusted(argv[1:], ("repository", "key", "package", "entry", "out"))
+            repository = "/".join(store_transport.full_name(args.repository))
+            with tempfile.TemporaryDirectory(prefix="store_publish.") as scratch:
+                reader = store_transport.Reader(store_transport._registry(repository, os.environ.get("GITHUB_TOKEN") or None),
+                                                Path(scratch) / ".cache", print)
+                candidate = read_candidate(reader, Path(scratch), repository, args.key, verifier, print)
+                found = cut_tool(candidate, args.package, args.entry, Path(args.out))
+            print(f"store_publish: CUT-TOOL {repository} candidate-{args.key} {found['package']} {found['entry']} "
+                  f"sha256 {found['digest']} record {found['record']} -> {args.out}")
             return 0
         if argv[:1] in (["stage"], ["image"], ["deployment"]):
             if not os.environ.get("GITHUB_TOKEN"):

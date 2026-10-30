@@ -1,0 +1,48 @@
+name: 'CodeRoast determinism gates'
+description: |
+  The two determinism gates over the calling repository's deterministic-content core: the clock
+  (no hidden wall-clock read, the determinism bible §7) and std <random> (no std distribution or
+  stateful std engine, §5 M7/M9). The core is what the repository declares in the `determinism:`
+  block of its own packages.yml; determinism_lint.py's docstring is the authority on that block,
+  on both registers and on every refusal.
+
+  Ships a SELF-TEST that runs BEFORE the repository is judged, as coderoast-dead-symbol and
+  coderoast-format-check do: every control, every refusal and every finding is driven over fixture
+  checkouts, so a gate that can no longer fail stops here rather than printing a green.
+
+  Three outcomes per gate, and only one of them is a PASS: PASS (exit 0), a finding (exit 1), a
+  REFUSAL (exit 2: the gate could not see its subject). A repository declaring no
+  deterministic-content core (`not_a_subject:`), or exempt from one gate, prints NOT A SUBJECT
+  with its reason and exits 0 — said as such, never as a PASS. A repository whose packages.yml
+  carries no `determinism:` block REFUSES.
+
+  Both gates always run, so one red never hides the other's verdict.
+
+runs:
+  using: composite
+  steps:
+    - name: Determinism gates (self-test, then the repository)
+      shell: bash
+      env:
+        # The same derivation the other composites use: <toolchain>/.github/actions/<this>/action.yml
+        # -> <toolchain>.
+        LINT: ${{ github.action_path }}/../../../determinism_lint.py
+      run: |
+        set -euo pipefail
+
+        echo "::group::determinism gates self-test"
+        python3 "$LINT" selftest
+        echo "::endgroup::"
+
+        status=0
+        for gate in wallclock random; do
+          # `|| rc=$?`, never a bare call: under `set -e` the first red would end the step before the
+          # second gate ran, and its verdict would be missing rather than reported.
+          rc=0
+          python3 "$LINT" "$gate" --repo "$GITHUB_WORKSPACE" || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::the ${gate} determinism gate exited ${rc} (1 = a finding, 2 = it could not judge) — its report above names each site and what to do."
+            status=1
+          fi
+        done
+        exit "$status"

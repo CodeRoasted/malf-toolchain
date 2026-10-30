@@ -370,6 +370,14 @@ check "sbom_gen --selftest" \
 
 echo
 
+echo "[7c2] determinism_lint carries its own proof (selftest): both determinism gates' controls, every refusal, the packages.yml declaration and the budget, over fixture checkouts (DN-142.D33)"
+determinism_selftest_output="$(timeout 120 python3 "$MALF_ROOT/determinism_lint.py" selftest 2>&1)"
+determinism_selftest_status=$?
+check "determinism_lint selftest: 167 arms, the clock and std <random> registers and their 13 opt-out boundary cases each, the declared scope (roots, exemption, out-of-scope rows, NOT A SUBJECT), the per-repository budget against the contract caps, every refusal, and the tracked floor" \
+      "ok" "$([[ $determinism_selftest_status -eq 0 ]] && grep -q '^determinism_lint selftest: 167/167 arms green, 0 failure(s)$' <<< "$determinism_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$determinism_selftest_output")")"
+
+echo
+
 echo "[7i] store_replica carries its own refusal proof (selftest): every guard of the ghcr read replica fires against an in-process registry and API (DN-142.D6)"
 replica_selftest_output="$(timeout 120 python3 "$MALF_ROOT/store_replica.py" selftest 2>&1)"
 replica_selftest_status=$?
@@ -4240,6 +4248,19 @@ check "shipped: the packages a release ships, release: true and a published exec
          && git -C "$d" add packages.yml && git -C "$d" -c user.name=t -c user.email=t@t commit -qm r \
          && python3 "$MALF_ROOT/artefact_store.py" shipped "$d" | tr '\n' ' ' | sed 's/ $//')|$(printf '  sv_more: {path: m, release: true}\n' >> "$sv_tmp/rel/packages.yml" \
          && python3 "$MALF_ROOT/artefact_store.py" shipped "$sv_tmp/rel" | tr '\n' ' ' | sed 's/ $//')"
+# THE CUT'S TOOLS (DN-142.D33, option (i)): declared `cut_tool: {why}` beside `release:`, stored with the candidate and
+# never released, so a cut tool that ships, publishes or carries no why is refused before anything is created.
+check "cut-tools and stored: a cut tool joins what the candidate stores and never what ships; a released or why-less cut tool is refused (exit 1)" \
+      "sv_proof|sv_core sv_proof|sv_core|rc=1 1|rc=1 1" \
+      "$(d="$sv_tmp/cut"; mkdir -p "$d" && git -C "$d" init -q && printf 'packages:\n  sv_core: {path: c, release: true}\n  sv_proof: {path: p, release: false, cut_tool: {why: the render}, executables: {bin/p: run-from-cache}}\n' > "$d/packages.yml" \
+         && git -C "$d" add packages.yml && git -C "$d" -c user.name=t -c user.email=t@t commit -qm r \
+         && printf '%s|%s|%s|%s|%s' "$(python3 "$MALF_ROOT/artefact_store.py" cut-tools "$d")" \
+              "$(python3 "$MALF_ROOT/artefact_store.py" stored "$d" | tr '\n' ' ' | sed 's/ $//')" \
+              "$(python3 "$MALF_ROOT/artefact_store.py" shipped "$d")" \
+              "$(printf 'packages:\n  sv_proof: {path: p, release: true, cut_tool: {why: the render}}\n' > "$d/packages.yml" && git -C "$d" -c user.name=t -c user.email=t@t commit -qam r2 \
+                 && python3 "$MALF_ROOT/artefact_store.py" stored "$d" > "$sv_tmp/cut.log" 2>&1; printf 'rc=%s %s' "$?" "$(grep -c 'a cut tool is never released' "$sv_tmp/cut.log")")" \
+              "$(printf 'packages:\n  sv_proof: {path: p, release: false, cut_tool: {}}\n' > "$d/packages.yml" && git -C "$d" -c user.name=t -c user.email=t@t commit -qam r3 \
+                 && python3 "$MALF_ROOT/artefact_store.py" cut-tools "$d" > "$sv_tmp/cut.log" 2>&1; printf 'rc=%s %s' "$?" "$(grep -c 'holding exactly a non-empty' "$sv_tmp/cut.log")")")"
 # THE VERB'S REFUSALS, before any act.
 mkdir -p "$sv_tmp/repo"; git -C "$sv_tmp/repo" init -q; printf 'packages:\n  sv_core: {path: core, version: 0.1, depends: []}\n' > "$sv_tmp/repo/packages.yml"
 git -C "$sv_tmp/repo" add packages.yml && git -C "$sv_tmp/repo" -c user.name=t -c user.email=t@t commit -qm fixture

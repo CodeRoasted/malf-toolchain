@@ -52,6 +52,14 @@ on:
         type: boolean
         required: false
         default: true
+      determinism-check:
+        description: |
+          Run the two determinism gates over the deterministic-content core the caller's packages.yml
+          declares (`determinism:` block; coderoast-preflight.yml's input of the same name). Set false
+          only for a repository with no packages.yml (a TS repo).
+        type: boolean
+        required: false
+        default: true
       dead-symbol-check:
         description: |
           Fail when the change deletes the last code occurrence of an identifier a comment still
@@ -167,6 +175,7 @@ jobs:
       actionlint: ${{ inputs.actionlint }}
       module-conformance: ${{ inputs.module-conformance }}
       format-check: ${{ inputs.format-check }}
+      determinism-check: ${{ inputs.determinism-check }}
       dead-symbol-check: ${{ inputs.dead-symbol-check }}
       dead-symbol-base: ${{ inputs.dead-symbol-base }}
       runs-on: ${{ inputs.runs-on }}

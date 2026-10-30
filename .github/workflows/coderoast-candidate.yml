@@ -1,7 +1,8 @@
 name: CodeRoast Candidate
 
 # A repository's candidate STORE job (DN-142.D31, slice S4), after its CI with the postflight: the
-# gcc-16 SHIP FORM of every package the repository releases (`malf store-create --ship`, in the image,
+# gcc-16 SHIP FORM of every package the repository releases and of every CUT TOOL it declares (DN-142.D33:
+# a tool a cut gate runs on the release seat, stored and never released; `malf store-create --ship`, in the image,
 # no test of the package built or run), each bound to the clang source verdict CI wrote by EQUAL
 # INPUTS (`artefact_store.py bound`), then every owned object and record pushed to the repository's own
 # `store-<repository>` on ghcr, attested, and the index published LAST, so its presence means the
@@ -147,7 +148,7 @@ jobs:
           # A source-only upstream ships no package to restore: the ship walk creates the ones it needs (malf's _malf_store_steps).
           echo "MALF_UPSTREAM_SOURCES=$roots" >> "$GITHUB_ENV"
 
-      - name: The ship form of every shipped package, in the image, then its binding to the source verdict
+      - name: The ship form of every shipped package and every cut tool, in the image, then its binding to the source verdict
         shell: bash
         run: |
           set -euo pipefail
@@ -156,10 +157,12 @@ jobs:
           mapfile -t shipped < <(python3 "$MALF_CHECKOUT/artefact_store.py" shipped "$GITHUB_WORKSPACE")
           [ "${#shipped[@]}" -gt 0 ] \
             || { echo "::error::$GITHUB_REPOSITORY ships no package (packages.yml at HEAD): a candidate stores what a release publishes"; exit 1; }
-          echo "shipped: ${shipped[*]}"
+          # note: stored = shipped plus the cut's tools (`cut_tool:`), which the cut runs on the release seat and no release ships (DN-142.D33)
+          mapfile -t stored < <(python3 "$MALF_CHECKOUT/artefact_store.py" stored "$GITHUB_WORKSPACE")
+          echo "shipped: ${shipped[*]}; stored: ${stored[*]}"
           CONAN_HOME="$RUNNER_TEMP/candidate-conan-host" MALF_STORE_DIR="$store" MALF_WORKSPACE_ROOT="$GITHUB_WORKSPACE" \
-            bash "$MALF_CHECKOUT/malf" store-create --ship "${shipped[@]}"
-          python3 "$MALF_CHECKOUT/artefact_store.py" bound "$store" "${shipped[@]}"
+            bash "$MALF_CHECKOUT/malf" store-create --ship "${stored[@]}"
+          python3 "$MALF_CHECKOUT/artefact_store.py" bound "$store" "${stored[@]}"
 
       # A RELEASE PUBLISHES FROM ITS CANDIDATE (DN-142.D33 (3)): every byte a Release attaches, a benchmark
       # alone excepted (the cut measures it), is a record of this store, so what no ship-form create holds is

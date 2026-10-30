@@ -42,6 +42,11 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
     artefact_store.py shipped <checkout>
         the packages a release of <checkout> ships, from its packages.yml at HEAD, one per line: each
         `release: true` package and each package with a `published` executable (an image's binary)
+    artefact_store.py cut-tools <checkout>
+        the cut's tools <checkout> declares (`cut_tool: {why}` beside `release:`, DN-142.D33), one per line;
+        exit 1 refusing a malformed one or one that is also released or published
+    artefact_store.py stored <checkout>
+        what a candidate's store job creates and binds: `shipped` and `cut-tools`, one per line
     artefact_store.py bound <store> <package>...
         each package has exactly one ship-form create record and one PASSING source verdict, EQUAL-INPUTS
         (`binding`); a line each, exit 0 all bound, 1 any not: what a candidate's store job pushes over
@@ -2206,9 +2211,58 @@ def shipped_packages(checkout: Path) -> list[str]:
     if shown.returncode != 0:
         raise Refused(f"{checkout} holds no packages.yml at HEAD: {shown.stderr.strip()}")
     packages = (yaml.safe_load(shown.stdout) or {}).get("packages") or {}
-    return sorted(name for name, entry in packages.items()
-                  if (entry or {}).get("release") is True
-                  or any(executable_class(value) == "published" for value in ((entry or {}).get("executables") or {}).values()))
+    return sorted(name for name, entry in packages.items() if _shipped(entry or {}))
+
+
+def _shipped(entry: dict) -> bool:
+    """A packages.yml entry a release ships: `release: true`, or an executable classed `published`."""
+    return entry.get("release") is True \
+        or any(executable_class(value) == "published" for value in (entry.get("executables") or {}).values())
+
+
+# THE CUT'S TOOLS (DN-142.D33, the Founder's option (i), 2026-10-30): a package a cut gate runs on the release
+# seat, which no release ships. `cut_tool: {why: <the gate that runs it>}` beside `release:` makes the candidate's
+# store job create it in the ship form, bind it to its source verdict and store it with what ships, and the cut
+# restores it by key and runs it, building nothing. Never released: a cut tool that also ships, or that names a
+# publication site, is refused here and by store_publish's Release rows alike.
+CUT_TOOL_FIELD = "cut_tool"
+
+
+def cut_tool_defects(package: str, entry: dict) -> list[str]:
+    """Why `entry`, the packages.yml entry of `package`, is not a well-formed cut tool; [] when it declares none
+    or a well-formed one: `{why: <non-empty>}`, `release: false`, no `published` executable, no `objects:` site."""
+    if CUT_TOOL_FIELD not in entry:
+        return []
+    declared = entry[CUT_TOOL_FIELD]
+    defects = []
+    if not isinstance(declared, dict) or set(declared) != {"why"} or not str(declared.get("why") or "").strip():
+        defects.append(f"{package}: `{CUT_TOOL_FIELD}:` is a mapping holding exactly a non-empty `why:`, not {declared!r}")
+    if _shipped(entry) or entry.get("objects"):
+        defects.append(f"{package}: a cut tool is never released, and this entry is `release: true`, classes an "
+                       "executable `published` or names an `objects:` site (DN-142.D33)")
+    return defects
+
+
+def cut_tool_packages(checkout: Path) -> list[str]:
+    """`cut-tools`: the packages packages.yml at HEAD of `checkout` declares `cut_tool:`, sorted; raises Refused
+    naming every malformed or released one (`cut_tool_defects`)."""
+    import yaml
+
+    shown = subprocess.run(["git", "-C", str(checkout), "show", "HEAD:packages.yml"], capture_output=True,
+                           text=True, check=False)
+    if shown.returncode != 0:
+        raise Refused(f"{checkout} holds no packages.yml at HEAD: {shown.stderr.strip()}")
+    packages = (yaml.safe_load(shown.stdout) or {}).get("packages") or {}
+    defects = [defect for name, entry in sorted(packages.items()) for defect in cut_tool_defects(name, entry or {})]
+    if defects:
+        raise Refused("; ".join(defects))
+    return sorted(name for name, entry in packages.items() if CUT_TOOL_FIELD in (entry or {}))
+
+
+def stored_packages(checkout: Path) -> list[str]:
+    """`stored`: what a candidate's store job creates in the ship form and binds, sorted: every shipped package
+    (`shipped_packages`) and every cut tool (`cut_tool_packages`)."""
+    return sorted(set(shipped_packages(checkout)) | set(cut_tool_packages(checkout)))
 
 
 def bound(store: Path, packages: list[str]) -> int:
@@ -4193,9 +4247,10 @@ def main(argv: list[str]) -> int:
         return ship_equal(Path(argv[1]))
     if len(argv) == 4 and argv[0] == "binding":
         return binding(Path(argv[1]), argv[2], argv[3])
-    if len(argv) == 2 and argv[0] == "shipped":
+    if len(argv) == 2 and argv[0] in ("shipped", "cut-tools", "stored"):
+        listed = {"shipped": shipped_packages, "cut-tools": cut_tool_packages, "stored": stored_packages}[argv[0]]
         try:
-            print("\n".join(shipped_packages(Path(argv[1]))))
+            print("\n".join(listed(Path(argv[1]))))
         except Refused as refused:
             print(f"artefact_store: REFUSED {refused}", file=sys.stderr)
             return 1

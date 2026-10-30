@@ -2,7 +2,8 @@ name: CodeRoast Preflight
 
 # The CHEAP half of a CodeRoast repository's checks, as a reusable workflow: actionlint over the
 # caller's workflows, the C++23 module-conformance gate over its module units, the clang-format
-# conformance gate over its C++ sources, and the dead-symbol-in-comment gate over the change. Nothing
+# conformance gate over its C++ sources, the two determinism gates over its declared
+# deterministic-content core, and the dead-symbol-in-comment gate over the change. Nothing
 # here builds. clang-tidy, which needs a build, is the POSTFLIGHT (`coderoast-postflight` over the
 # dev build); a repository's CI runs both in one run, because a `NOLINT` inserted to satisfy lint
 # reflows its line and breaks format (the Founder, 2026-08-30: lint and format are answered together).
@@ -29,6 +30,16 @@ on:
           Set false ONLY for a repo carrying pre-existing violations, and say so in the caller with the
           file count and the owner — an unexplained false is indistinguishable from an oversight. Also
           false for a repo with no C++ (a TS repo), where the walk finds nothing and the gate is inert.
+        type: boolean
+        required: false
+        default: true
+      determinism-check:
+        description: |
+          Run the two determinism gates (malf determinism_lint.py: no hidden wall-clock read, no std
+          distribution or stateful std engine) over the deterministic-content core the caller's
+          packages.yml declares in its `determinism:` block. A repository holding no such core says so
+          there (`not_a_subject:`) and the gates report NOT A SUBJECT; a packages.yml with no block
+          REFUSES. Set false only for a repository with no packages.yml (a TS repo, the superproject).
         type: boolean
         required: false
         default: true
@@ -135,6 +146,14 @@ jobs:
       - name: C++ format conformance
         if: ${{ inputs.format-check }}
         uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-format-check@9c96c6d975a63b240d2cd39b618205f4a7b1f547
+
+      # Cheap (no toolchain, no build — it reads the repository's declared core through git). Each
+      # repository judges its own deterministic-content core here (DN-142.D33: a lint that judges one
+      # repository's own files runs in that repository); the cross-repository budget sum stays in the
+      # superproject.
+      - name: Determinism gates (clock and std <random>)
+        if: ${{ inputs.determinism-check }}
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-determinism@9c96c6d975a63b240d2cd39b618205f4a7b1f547
 
       # Cheap (no toolchain, no build — it reads text), but placed last on purpose: it is the
       # newest gate here, and a repo should learn its workflows, modules and formatting are sound
