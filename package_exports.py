@@ -129,7 +129,7 @@ def recipes(workspace: Path) -> int:
     the workspace's DECLARED ones (scripts/workspace_layout.py), never whatever sits on the disk.
 
     A repository the CLONE MANIFESTS declare (`required_repos`: repos.txt plus the toolchain's
-    postCreate clone, every one of them checked out by step 0) and absent from the disk refuses
+    `toolchain.txt` row, every one of them checked out by step 0) and absent from the disk refuses
     the population, naming it: skipping it would read green over recipes never judged. A
     repository the root `.gitignore` alone declares (`coderoast-corpora` today: no recipe, and a
     desk without access to the private warehouse does not hold it) is judged when present and

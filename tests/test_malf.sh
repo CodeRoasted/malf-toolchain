@@ -5356,7 +5356,7 @@ check "exports-verify's population is every tracked first-party recipe, whatever
 
 # A declared repository ABSENT from the disk was skipped in silence, so the gate read green over
 # recipes it never saw. A repository the CLONE MANIFESTS declare (`required_repos`: repos.txt and
-# the toolchain's postCreate clone, all checked out by step 0) refuses, exit 3, named; one the root
+# the toolchain's `toolchain.txt` row, all checked out by step 0) refuses, exit 3, named; one the root
 # .gitignore alone declares (`opt` here; coderoast-corpora on the desk) is
 # named as not swept and the run goes on. `s` stays on disk, so the old skip reads exit 0 over it.
 check "exports-verify: a declared repository that is not a clone-manifest one and is absent is named as not swept, never silently" \

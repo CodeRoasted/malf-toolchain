@@ -14,8 +14,8 @@
 # restated here.
 #
 # SOURCE: the sha256-pinned from-source build published by build-gcc-toolchain.yml (x64+arm64
-# native bootstraps, release tag gcc-16.2.0); setup-gcc extracts it to /opt/gcc-16.2 in CI and
-# the devcontainer — the desk mirrors it. Never the ubuntu-toolchain-r PPA (snapshot, not a
+# native bootstraps, release tag gcc-16.2.0); setup-gcc extracts it to /opt/gcc-16.2 in CI, and
+# the desk mirrors it. Never the ubuntu-toolchain-r PPA (snapshot, not a
 # determinism-leg compiler).
 [settings]
 arch=x86_64
