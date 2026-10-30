@@ -56,15 +56,15 @@ jobs:
 
       - name: malf at this workflow's commit, as git
         id: malf
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@7c1c91dde4da5c64a0d01143d8c81f97c743258f
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@ac9f2e7fa76e20540ce937b2835c3b4e4d291e07
         with:
           workflow: coderoast-build.yml
 
       - name: The pinned gh the attestation reads run through
-        uses: CodeRoasted/malf-toolchain/.github/actions/setup-gh@7c1c91dde4da5c64a0d01143d8c81f97c743258f
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-gh@ac9f2e7fa76e20540ce937b2835c3b4e4d291e07
 
       - name: The pinned build environment and the host's provisioning tools
-        uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-environment@7c1c91dde4da5c64a0d01143d8c81f97c743258f
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-environment@ac9f2e7fa76e20540ce937b2835c3b4e4d291e07
 
       - name: The upstream candidates, read through their own stores, their sources at the commits they record
         if: ${{ inputs.upstream != '{}' }}
@@ -104,7 +104,7 @@ jobs:
           echo "MALF_UPSTREAM_ROOTS=${MALF_UPSTREAM_ROOTS:+$MALF_UPSTREAM_ROOTS:}$roots" >> "$GITHUB_ENV"
 
       - name: Dev leg in the image (source verdict) and its postflight
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-source-verdict@7c1c91dde4da5c64a0d01143d8c81f97c743258f
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-source-verdict@ac9f2e7fa76e20540ce937b2835c3b4e4d291e07
         with:
           postflight: ${{ inputs.postflight }}
 
