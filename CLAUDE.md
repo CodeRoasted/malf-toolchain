@@ -30,6 +30,11 @@ Root CLAUDE.md owns malf *usage*; this file is for working ON the tooling.
   last one, and step 0 reds at the cut until it has (`pin_coherence` INV-17 (g),
   `OPS-1.S3`). Re-pin between cuts only on a stated need, a consumer change that
   needs malf code the pin lacks, and name that need in the re-pin's message.
+  **Every re-pin cuts a toolchain release** (`DN-108.D38`): `./pharos repin
+  --toolchain X.Y.Z` and `./pharos bump <V> --toolchain X.Y.Z` tag the commit the
+  reach then pins as the ANNOTATED `toolchain-vX.Y.Z`, strictly above the newest
+  `toolchain-v*` on origin. Never cut, move or delete a `toolchain-v*` tag by
+  hand: consumers pin the SHA, and the tag is the version a human reads.
   Treat every edit as a cross-repo change all the same: it ships at the next cut.
 - `profiles/` and `config/` are single-source by design — never fork a per-repo
   copy; repos symlink or fetch them.
