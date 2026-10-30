@@ -418,7 +418,7 @@ uc_act() {   # <unconfined why or empty> — the act's exit reading a SIBLING re
     bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e
         _MALF_STEP_UNCONFINED="$2"
         _MALF_DOMAIN=(--workspace "$3/ws" --store "$3/store" --scratch "$3/scratch")
-        CONAN_HOME="$3/scratch/home" _malf_confined "$3/tally" pkg "$3/ws/repo/recipe" sh -c "cat \"$3/ws/sibling/secret.txt\" >/dev/null 2>&1" 2>/dev/null
+        CONAN_HOME="$3/scratch/home" _malf_confined "$3/tally" "$3/ws/repo/recipe" sh -c "cat \"$3/ws/sibling/secret.txt\" >/dev/null 2>&1" 2>/dev/null
         echo "rc=$? $(cat "$3/tally")"' _ "$MALF_BIN" "$1" "$uc_tmp"
 }
 check "an undeclared act runs in its domain: a read of a sibling repository is denied, its tally counted or uncounted" \
@@ -3296,72 +3296,12 @@ printf 'add_test([=[RtProbe.Passes]=] "%s")\nadd_test([=[RtProbe.Skips]=] "%s")\
 check "a create whose default selection skips an undeclared test FAILS, naming it and its message" \
       "rc=1 1 1" "$(echo -n "$(rt_create) "; echo -n "$(grep -c 'build RtProbe.Skips skipped' "$tp_tmp/rt.log") "; grep -c 'undeclared skip(s)' "$tp_tmp/rt.log")"
 
-# THE CORPUS LEGS (DN-142.D21 (1), (3)): with `user.malf:corpus_gates` naming a document that names
-# the package, the create runs each leg's suites under the leg's mounts, records what ctest cannot
-# say (a suite that selects nothing, a test ctest cannot see skip), and never fails on a red leg;
-# the corpus verdict artefact_store keeps from it is `pass` only when every row passed.
-rc_doc="$tp_tmp/corpus_gates.json"
-rc_corpus="$rt_home/malf-test-results/rt_probe/$rt_empty_id.corpus-sample"
-printf '#!/bin/sh\n[ "$RT_MOUNT" = /mnt/rt-mount ] || { echo "RT_MOUNT is <$RT_MOUNT>"; exit 1; }\n' > "$tp_tmp/rc_reads"
-printf '#!/bin/sh\necho "[  SKIPPED ] RtCorpus.Reads: no mount"\n' > "$tp_tmp/rc_skips"
-printf '#!/bin/sh\n[ -z "${RT_MOUNT+set}" ] || { echo "a default test sees RT_MOUNT=$RT_MOUNT"; exit 1; }\n' > "$tp_tmp/rc_unset"
-chmod +x "$tp_tmp/rc_reads" "$tp_tmp/rc_skips" "$tp_tmp/rc_unset"
-rc_tests() {   # <test lines...> — each `name:command[:guarded|plain]`, the third field a corpus label
-    local spec name command corpus
-    : > "$rt_pkg/CTestTestfile.cmake"
-    for spec in "$@"; do
-        IFS=: read -r name command corpus <<< "$spec"
-        printf 'add_test([=[%s]=] "%s")\n' "$name" "$command" >> "$rt_pkg/CTestTestfile.cmake"
-        case "$corpus" in
-            guarded) printf 'set_tests_properties([=[%s]=] PROPERTIES LABELS corpus SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])\n' "$name" >> "$rt_pkg/CTestTestfile.cmake" ;;
-            plain)   printf 'set_tests_properties([=[%s]=] PROPERTIES LABELS corpus)\n' "$name" >> "$rt_pkg/CTestTestfile.cmake" ;;
-        esac
-    done
-}
-rc_document() {   # <suite>... — one sample leg over the named suites, RT_MOUNT its one mount
-    python3 -c 'import json, sys
-print(json.dumps({"data": {"rt_role": "0" * 64}, "packages": {"rt_probe": [
-    {"leg": "sample", "suites": sys.argv[1:], "environment": {"RT_MOUNT": "/mnt/rt-mount"}}]}}))' "$@" > "$rc_doc"
-}
-rc_verdict() {   # -> `<verdict> <outcome>...` of the corpus record artefact_store keeps from the last create
-    rm -rf "$tp_tmp/cstore"
-    MALF_SYSTEM="$MALF_TEST_SYSTEM" python3 -c 'import json, sys
-from pathlib import Path
-sys.path.insert(0, sys.argv[1])
-import artefact_store as store
-store.corpus_record(Path(sys.argv[2]), "rt-build-key", "rt_probe", sys.argv[3], "fixture", Path(sys.argv[1]),
-                    Path(sys.argv[4]), {"rt_probe": "rt-content"}, Path(sys.argv[5]))
-record = json.loads(next((Path(sys.argv[2]) / "records").glob("*.json")).read_text())
-corpus = record["outputs"]["corpus"]
-print(corpus["verdict"], " ".join(f"{row[1]}={row[2]}" for row in corpus["results"]))' \
-        "$MALF_ROOT" "$tp_tmp/cstore" "$rt_empty_id" "$rt_home/malf-test-results" "$rc_doc" 2>&1 | grep -v '^artefact_store: '
-}
+# THE CORPUS LISTING: a create runs no `corpus`-labelled test (a failing one leaves it green), and lists
+# each one's name in `<package id>.corpus-listed.json`, its promise of a test verdict.
 rm -rf "$rt_home/malf-test-results/rt_probe"
-rc_tests "RtProbe.NoMount:$tp_tmp/rc_unset" "RtCorpus.Reads:$tp_tmp/rc_reads:guarded"
-rc_document RtCorpus
-check "without the corpus conf a create runs no corpus leg and lists its corpus names: no corpus file, RtCorpus.Reads listed" \
-      "rc=0 absent 1" "$(rt_create) $([[ -e "$rc_corpus.xml" ]] && echo present || echo absent) $(grep -c '"RtCorpus.Reads"' "$rt_home/malf-test-results/rt_probe/$rt_empty_id.corpus-listed.json" 2>/dev/null)"
-check "with the conf the leg runs its suite under the leg's mount, JUnit naming the test, and the default test never sees the mount" \
-      "rc=0 1 1 pass RtCorpus.Reads=passed" "$(rt_create -c "user.malf:corpus_gates=$rc_doc") $(grep -c 'name="RtCorpus.Reads"' "$rc_corpus.xml" 2>/dev/null) $(grep -c 'name="RtProbe.NoMount"' "$rt_junit" 2>/dev/null) $(rc_verdict)"
-check "the leg's mount rides its ctest command alone: env RT_MOUNT=... ctest ... -L corpus -R '^(RtCorpus)\\.'" \
-      "1" "$(grep -F "env RT_MOUNT=/mnt/rt-mount ctest --test-dir " "$tp_tmp/rt.log" | grep -cF -- "--output-on-failure -L corpus -R '^(RtCorpus)\\.' --output-junit $rc_corpus.xml < /dev/null")"
-rc_tests "RtProbe.NoMount:$tp_tmp/rc_unset" "RtCorpus.Reads:$tp_tmp/rc_skips:guarded"
-check "a corpus test that GTEST_SKIPs under the conf is a skipped row and the corpus verdict FAILS" \
-      "rc=0 fail RtCorpus.Reads=skipped" "$(rt_create -c "user.malf:corpus_gates=$rc_doc") $(rc_verdict)"
-rc_tests "RtProbe.NoMount:$tp_tmp/rc_unset" "RtCorpus.Reads:$tp_tmp/rc_reads:guarded"
-rc_document RtCorpus RtMissing
-check "a suite the document names and the tree does not register is an absent row and the corpus verdict FAILS" \
-      "rc=0 fail RtCorpus.Reads=passed RtMissing.*=absent" "$(rt_create -c "user.malf:corpus_gates=$rc_doc") $(rc_verdict)"
-rc_tests "RtProbe.NoMount:$tp_tmp/rc_unset" "RtCorpus.Reads:$tp_tmp/rc_reads:plain"
-rc_document RtCorpus
-check "a corpus test registered without SKIP_REGULAR_EXPRESSION is an unguarded row and the corpus verdict FAILS" \
-      "rc=0 fail RtCorpus.Reads=passed RtCorpus.Reads=unguarded" "$(rt_create -c "user.malf:corpus_gates=$rc_doc") $(rc_verdict)"
-rc_tests "RtProbe.NoMount:$tp_tmp/rc_unset" "RtCorpus.Reads:$rt_false:guarded"
-check "a FAILING corpus test leaves the create green, its package built, and the corpus verdict FAILS" \
-      "rc=0 1 fail RtCorpus.Reads=failed" "$(rt_create -c "user.malf:corpus_gates=$rc_doc") $(CONAN_HOME="$rt_home" conan list 'rt_probe/*:*' --format=json 2>/dev/null | grep -c "$rt_empty_id") $(rc_verdict)"
-rc_tests "RtProbe.NoMount:$tp_tmp/rc_unset" "RtCorpus.Reads:$tp_tmp/rc_reads:guarded"
-check "premise — the default test that asserts no mount REDS the create when a mount leaks into its environment" \
-      "rc=1" "$(RT_MOUNT=leaked rt_create)"
+rt_tests "RtProbe.Passes:$rt_true" "RtCorpus.Reads:$rt_false:corpus"
+check "a create runs no corpus-labelled test and lists its name: RtCorpus.Reads listed, never in the JUnit" \
+      "rc=0 1 0" "$(rt_create) $(grep -c '"RtCorpus.Reads"' "$rt_home/malf-test-results/rt_probe/$rt_empty_id.corpus-listed.json" 2>/dev/null) $(grep -c 'name="RtCorpus.Reads"' "$rt_junit" 2>/dev/null)"
 # THE CONTENT MANIFEST (DN-142.D21 (5)): one digest of a data root's bytes, whatever path reaches
 # them; a same-size rewrite that keeps the mtime moves it.
 mkdir -p "$tp_tmp/data/sub"; printf 'alpha\n' > "$tp_tmp/data/a.log"; printf 'beta\n' > "$tp_tmp/data/sub/b.log"
@@ -3420,9 +3360,8 @@ sed -i 's/^    "ship": (.*),$/    "ship": ("-c", "user.probe:ship=1"),/' "$cs_tm
 check "the ship form's set is READ from the helper and rides the create alone: the writer's set is untouched, the third-party phases run it" \
       "-c|user.malf:profile=linux-gcc16-release / -c|user.probe:ship=1" \
       "$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; MALF_PROFILE_NAME=linux-gcc16-release MALF_STEP_FORM=ship _malf_writer_create_args && echo "$(printf "%s\n" "${_MALF_WRITER_ARGS[@]}" | paste -sd"|") / $(printf "%s\n" "${_MALF_FORM_ARGS[@]}" | paste -sd"|")"' _ "$cs_tmp/shipmutant/malf")"
-check "store-create --ship refuses the corpus gates before anything runs (exit 2), and an unknown option still" \
-      "rc=2 1 rc=1" \
-      "$(MALF_CORPUS_GATES=/nonexistent bash "$MALF_BIN" store-create --ship > "$cs_tmp/ship.log" 2>&1; echo "rc=$?") $(grep -c 'REFUSED — --ship runs no corpus gate' "$cs_tmp/ship.log") $(bash "$MALF_BIN" store-create --writer > /dev/null 2>&1; echo "rc=$?")"
+check "store-create refuses an unknown option before anything runs" \
+      "rc=1" "$(bash "$MALF_BIN" store-create --writer > /dev/null 2>&1; echo "rc=$?")"
 check "DN-142.D33 (the cut's bench measurement): the ship-bench conf set configures the bench targets (no skip_test) and runs only the benchmarks" \
       "rc=0 -c|user.malf:bench_only=True|-c|user.malf:run_test_package=True" \
       "$(out="$(python3 "$MALF_ROOT/malf_recipe_tests.py" create-args ship-bench)"; echo "rc=$? $(paste -sd'|' <<< "$out")")"
@@ -3997,7 +3936,7 @@ from pathlib import Path
 store = Path('$2')
 build = next(r for r in (json.loads(p.read_text()) for p in (store / 'records').glob('*.json'))
              if r['inputs']['step']['kind'] == 'conan-create')['key']
-outcome, why = a.unservable(store, a.outcome_document(build, 'bi_tool', 'fixture', None), False)
+outcome, why = a.unservable(store, a.outcome_document(build, 'bi_tool', 'fixture'), False)
 print('SERVED' if outcome is not None else 'EXECUTES ' + why)" 2>&1 | tail -1
 }
 mkdir -p "$bi_tmp/promised/bi_tool"; printf '[]\n' > "$bi_tmp/promised/bi_tool/$bi_empty_id.corpus-listed.json"
@@ -4035,7 +3974,7 @@ import json
 from pathlib import Path
 ship = next(r for r in (json.loads(p.read_text()) for p in Path('$bi_tmp/sstore/records').glob('*.json'))
             if r['inputs']['step']['kind'] == 'conan-create')['key']
-outcome, why = a.unservable(Path('$bi_tmp/wstore'), a.outcome_document(ship, 'bi_tool', 'fixture', None), False)
+outcome, why = a.unservable(Path('$bi_tmp/wstore'), a.outcome_document(ship, 'bi_tool', 'fixture'), False)
 print('EXECUTES' if outcome is None else 'SERVED', why)" 2>&1 | tail -1)"
 check "a create whose form nobody named is REFUSED and stores nothing: a form is never assumed" \
       "rc=1 1 0" \
@@ -4056,7 +3995,7 @@ records = [json.loads(p.read_text()) for p in Path('$bi_tmp/tstore/records').glo
 outcome = next(r for r in records if r['inputs']['step']['kind'] == 'step-outcome')
 verdict = next(r for r in records if r['inputs']['step']['kind'] == 'test-verdict')
 build = next(r for r in records if r['inputs']['step']['kind'] == 'conan-create')['key']
-served, _why = a.unservable(Path('$bi_tmp/tstore'), a.outcome_document(build, 'bi_tool', 'fixture', None), False)
+served, _why = a.unservable(Path('$bi_tmp/tstore'), a.outcome_document(build, 'bi_tool', 'fixture'), False)
 print(json.dumps(outcome['outputs']['outcome']['expected']), len(verdict['outputs']['verdict']['results']),
       'SERVED' if served else 'EXECUTES')" 2>&1 | tail -1)"
 check "the same ship-form create whose test_package wrote no result is never served: its outcome lacks the verdict it expected" \
@@ -4066,7 +4005,7 @@ import json
 from pathlib import Path
 build = next(r for r in (json.loads(p.read_text()) for p in Path('$bi_tmp/t0store/records').glob('*.json'))
              if r['inputs']['step']['kind'] == 'conan-create')['key']
-outcome, why = a.unservable(Path('$bi_tmp/t0store'), a.outcome_document(build, 'bi_tool', 'fixture', None), False)
+outcome, why = a.unservable(Path('$bi_tmp/t0store'), a.outcome_document(build, 'bi_tool', 'fixture'), False)
 print('SERVED' if outcome else 'EXECUTES ' + why)" 2>&1 | tail -1)"
 # A content recipe (`package_type = "build-scripts"`) is created in the BUILD context alone; its
 # step is recorded all the same (measured on insight_scenarios: the graph holds no host node).
@@ -6567,7 +6506,7 @@ ls_step() {   # <malf dir> <package>
         _malf_ship_lock_args || exit 2
         # These arms judge the LOCK a create resolves against, over a fixture MALF_DIR holding only its
         # lock; the create runs unconfined here, and the domain is judged by the malf_closure selftest ([7k]).
-        _malf_confined() { shift 3; "$@"; }
+        _malf_confined() { shift 2; "$@"; }
         _malf_store_create_step "$4" "$5" ls_ "$6/graph.json" "$6/create.log" none' \
         _ "$MALF_BIN" "$ls_tmp/$1" "$ls_home/profiles/fixture" "$2" "$ls_tmp/$2" "$ls_tmp" 2> "$ls_tmp/refusal.log"
     local rc=$? revision
@@ -7106,27 +7045,8 @@ check "a line is cut at 2000 characters, so one runaway line cannot flood the jo
       "$((10 + 2000))" "$(grep '^malf log| wide' <<< "$ql_out" | awk '{ print length($0) }')"
 check "an empty log and an absent one each say so in ONE quoted line, and neither is a failure" \
       "1 rc=0|1 rc=0" "$(ql_quote "$ql_tmp/empty.log" | grep -c 'absent or empty') $(ql_quote "$ql_tmp/empty.log" | tail -1)|$(ql_quote "$ql_tmp/none.log" | grep -c 'absent or empty') $(ql_quote "$ql_tmp/none.log" | tail -1)"
-ql_body="$(sed -n '/^cmd_store_create()/,/^}/p' "$MALF_BIN")"
 check "every failure that names a step's log quotes it: the create, the key before a create or a build, a build, a third-party resolve and install" \
       "1 1 1 1 1 1" "$(for ql_fn in _malf_store_create_in _malf_store_run_step _malf_store_build_one _malf_store_build_in; do sed -n "/^$ql_fn()/,/^}/p" "$MALF_BIN" | grep -c '_malf_quote_log "$scratch/$name.log"'; done | tr '\n' ' ')$(sed -n '/^_malf_store_third_party()/,/^}/p' "$MALF_BIN" | grep -c '_malf_quote_log "$log"') $(sed -n '/^_malf_store_third_party_in()/,/^}/p' "$MALF_BIN" | grep -c '_malf_quote_log "$log"')"
-check "each of the walk's three red returns after its steps archives the logs first, and the walk removes a stale archive before its first step" \
-      "3 3 1" "$(grep -c '_malf_store_keep_logs "$scratch"' <<< "$ql_body") $(grep -B1 -E 'echo "malf store-create: (STOPPED|FAILED|every step built and tested)' <<< "$ql_body" | grep -c '_malf_store_keep_logs') $(grep -c 'rm -f "$MALF_STORE_LOG_ARCHIVE"' <<< "$ql_body")"
-mkdir -p "$ql_tmp/scratch/home.pkg.x" "$ql_tmp/scratch/nested"
-echo a > "$ql_tmp/scratch/pkg.log"; echo b > "$ql_tmp/scratch/pkg.third-party.log"
-echo c > "$ql_tmp/scratch/pkg.graph.json"; echo d > "$ql_tmp/scratch/nested/deep.log"; echo e > "$ql_tmp/scratch/home.pkg.x/conan.log"
-ql_keep() {   # <archive or ''> -> the archive's member list (or none), then rc=<status>
-    local out rc
-    out="$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set -e
-        if [[ -n "$3" ]]; then export MALF_STORE_LOG_ARCHIVE="$3"; else unset MALF_STORE_LOG_ARCHIVE; fi
-        _malf_store_keep_logs "$2"' _ "$MALF_BIN" "$ql_tmp/scratch" "$1" 2>&1)"; rc=$?
-    if [[ -n "$1" && -f "$1" ]]; then printf '%s' "$(tar -tzf "$1" | LC_ALL=C sort | tr '\n' ' ')"; else printf 'none '; fi
-    printf 'rc=%s %s' "$rc" "$(grep -c 'archived in\|archiving the logs' <<< "$out")"
-}
-check "a set archive holds exactly the scratch's top-level logs — no graph, no nested file, no step home's" \
-      "pkg.log pkg.third-party.log rc=0 1" "$(ql_keep "$ql_tmp/logs.tar.gz")"
-check "unset, nothing is archived and nothing is said" "none rc=0 0" "$(ql_keep '')"
-check "an archive that cannot be written is said, leaves no file, and is never a failure of the walk" \
-      "none rc=0 1" "$(ql_keep "$ql_tmp/no-such-dir/logs.tar.gz")"
 rm -rf "$ql_tmp"
 echo
 

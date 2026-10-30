@@ -27,10 +27,9 @@ anchored path (DN-142.D29 (7)): a file the grammar cannot see goes unwatched, si
 THE DOMAIN (DN-142.D29 (5), (8)). A keyed act runs in a Landlock domain that DENIES the ground a key
 member identifies piece by piece, finer than whole: the workspace root (repositories key through
 `sources` and `test_package`, per package), every conan home but the step's own (packages key through
-`upstream` and `third_party`, per node), the store root (records enter only as output digests) and
-every corpus root (corpora key through `data`, per mount). Inside that ground it RE-GRANTS the step's
-share: malf's whole checkout, the step's own repository (its export reads the recipe and derives its
-exports from git), its step home, its scratch, each corpus mount its own `data` names, and the
+`upstream` and `third_party`, per node) and the store root (records enter only as output digests).
+Inside that ground it RE-GRANTS the step's share: malf's whole checkout, the step's own repository (its
+export reads the recipe and derives its exports from git), its step home, its scratch, and the
 parameter files its command line names. Everything else stays readable: it is the `system` member's
 ground, keyed whole. The act WRITES only into locations of its own, a TMPDIR and a HOME under the walk's
 scratch: every ancestor of a denied root (`$HOME` among them, which holds the workspace, `~/.conan2` and
@@ -39,8 +38,7 @@ the act (DN-142.D30 (9) R8). Where `strace` is on the PATH the act's denials are
 refuses the act: nothing of it is stored, and the refusal names each path.
 
     malf_closure.py confine <malf-dir> --tally <file> --workspace <dir> --store <dir>
-                            [--conan-home <dir>]... [--corpus-gates <file> --package <name>]
-                            [--parameter-file <file>]... --act-root <dir> --home <dir> --scratch <dir>
+                            [--conan-home <dir>]... [--parameter-file <file>]... --act-root <dir> --home <dir> --scratch <dir>
                             [--unconfined] -- <command> [<argument>...]
         <command> in its step's domain, with a TMPDIR and a HOME of its own, empty, under <scratch>
         (removed when it ends); exit the command's own, DENIED (3) refused for a counted denial, or 2
@@ -356,37 +354,19 @@ def repository_of(act_root: Path) -> list[Path]:
     return [Path(line) for line in lines] if found.returncode == 0 and len(lines) == 2 else [act_root]
 
 
-def corpus_mounts(document: Path, package: str | None) -> tuple[list[Path], list[Path]]:
-    """(every mount the corpus gates document names, the mounts of `package`'s own legs): the
-    document's `packages: {<name>: [{leg, suites, environment: {<variable>: <absolute path>}}]}`.
-    raises ClosureError on a document that is not that shape or a mount that is not absolute."""
-    try:
-        packages = json.loads(document.read_text()).get("packages", {})
-        named = {name: [Path(value) for leg in legs for value in leg["environment"].values()]
-                 for name, legs in packages.items()}
-    except (OSError, ValueError, AttributeError, KeyError, TypeError) as unread:
-        raise ClosureError(f"the corpus gates document {document} cannot be read as its mounts: {unread!r}") from unread
-    relative = sorted(str(path) for paths in named.values() for path in paths if not path.is_absolute())
-    if relative:
-        raise ClosureError(f"the corpus gates document {document} names mount(s) by a relative path: {', '.join(relative)}")
-    return [path for paths in named.values() for path in paths], named.get(package or "", [])
-
-
 def step_domain(malf_dir: Path, workspace: Path, store: Path, conan_homes: list[Path], home: Path, scratch: Path,
-                act_root: Path, corpus_gates: Path | None = None, package: str | None = None,
-                parameter_files: list[Path] | tuple = ()) -> Domain:
+                act_root: Path, parameter_files: list[Path] | tuple = ()) -> Domain:
     """The domain of one keyed act (DN-142.D29 (5)). A denied root that does not exist denies nothing
     and is dropped; a granted root that does not exist is refused (ClosureError), and so is a step
     whose repository is the workspace root itself, since its grant would deny nothing."""
-    every_mount, own_mounts = corpus_mounts(corpus_gates, package) if corpus_gates is not None else ([], [])
     own_home = home.resolve()
-    denied = [path.resolve() for path in [workspace, store, *conan_homes, *every_mount]
+    denied = [path.resolve() for path in [workspace, store, *conan_homes]
               if path.exists() and path.resolve() != own_home]
     repository, *git_dir = repository_of(act_root)
     if repository.resolve() == workspace.resolve():
         raise ClosureError(f"the act's repository {repository} is the workspace root itself, so its domain would "
                            "deny no sibling repository (DN-142.D29 (5))")
-    granted = [malf_dir, repository, *git_dir, home, scratch, *own_mounts, *parameter_files]
+    granted = [malf_dir, repository, *git_dir, home, scratch, *parameter_files]
     absent = sorted(str(path) for path in granted if not path.exists())
     if absent:
         raise ClosureError(f"the step's domain grants root(s) that do not exist: {', '.join(absent)}")
@@ -581,7 +561,7 @@ def _confined(domain: Domain, tally: Path, command: list[str], tracer: str | Non
               f"is never stored (DN-142.D29 (8))", file=sys.stderr)
         if denied.ground:
             print(f"malf_closure:   {len(denied.ground)} path(s) of ground the step's key does not name (a sibling "
-                  f"repository, another conan home, the store or a corpus not its own); declare the read in the key if "
+                  f"repository, another conan home, or the store); declare the read in the key if "
                   f"it is a real input, or remove it, never widen the grant by hand: " + ", ".join(denied.ground),
                   file=sys.stderr)
         if denied.beside:
@@ -713,10 +693,6 @@ def selftest() -> int:
         store = base / "store"
         (store / "records").mkdir(parents=True)
         (store / "records" / "k.json").write_text("{}\n")
-        corpora = base / "corpora"
-        for name in ("own", "other"):
-            (corpora / name).mkdir(parents=True)
-            (corpora / name / "a.log").write_text(f"{name} corpus\n")
         scratch = base / "scratch"
         step_home = scratch / "home.step"
         step_home.mkdir(parents=True)
@@ -724,17 +700,13 @@ def selftest() -> int:
         parameters = workspace / "out" / "bench.json"
         parameters.parent.mkdir()
         parameters.write_text("{}\n")
-        gates = scratch / "corpus_gates.json"
-        gates.write_text(json.dumps({"packages": {
-            "pkg": [{"leg": "sample", "suites": ["S"], "environment": {"OWN": str(corpora / "own")}}],
-            "other": [{"leg": "sample", "suites": ["T"], "environment": {"OTHER": str(corpora / "other")}}]}}))
         domain = step_domain(malf, workspace, store, [workspace / ".conan2", user_home], step_home, scratch,
-                             repository / "recipe", gates, "pkg", [parameters])
-        arm("the domain denies the workspace, every conan home outside the step's own, the store and every corpus "
-            "mount; it re-grants malf whole, the step's repository, its home, its scratch, its own mount and its "
-            "parameter file", (domain.denied, domain.granted),
-            (_outermost([path.resolve() for path in (workspace, user_home, store, corpora / "own", corpora / "other")]),
-             _outermost([path.resolve() for path in (malf, repository, step_home, scratch, corpora / "own", parameters)])))
+                             repository / "recipe", [parameters])
+        arm("the domain denies the workspace, every conan home outside the step's own and the store; it re-grants "
+            "malf whole, the step's repository, its home, its scratch and its parameter file",
+            (domain.denied, domain.granted),
+            (_outermost([path.resolve() for path in (workspace, user_home, store)]),
+             _outermost([path.resolve() for path in (malf, repository, step_home, scratch, parameters)])))
         tally = base / "tally"
         tracer = shutil.which("strace")
         arm("the seat carries the tracer the denial counter runs (DN-142.D29 (8))", tracer is not None, True)
@@ -764,16 +736,15 @@ def selftest() -> int:
             code = confine(domain, scratch, tally, [sys.executable, "-I", "-c", probe, str(sibling / "secret.txt")], tracer=tracer)
         arm("RED: the same read behind `try/except OSError` is refused all the same",
             (code, tally.read_text().split()), (DENIED, [COUNTED, "1"]))
-        code, counted, said = act(f"cat {store / 'records' / 'k.json'} >/dev/null 2>&1; "
-                                  f"cat {corpora / 'other' / 'a.log'} >/dev/null 2>&1")
-        arm("RED: the store and a corpus mount the step's own legs do not name are denied, each counted",
-            (code, counted), (DENIED, [COUNTED, "2"]))
+        code, counted, said = act(f"cat {store / 'records' / 'k.json'} >/dev/null 2>&1")
+        arm("RED: the store is denied, counted",
+            (code, counted), (DENIED, [COUNTED, "1"]))
         code, counted, _said = act(f"cat {repository / 'recipe' / 'conanfile.py'} {malf / 'unreached.py'} "
                                    f"{malf / '.github' / 'workflows' / 'ci.yml'} {step_home / 'profile'} "
-                                   f"{corpora / 'own' / 'a.log'} {parameters} /etc/hostname >/dev/null "
+                                   f"{parameters} /etc/hostname >/dev/null "
                                    f"&& git -C {repository} rev-parse HEAD >/dev/null")
-        arm("an act reading its own repository and its git, any malf file, its home, its own corpus mount, its "
-            "parameter file and a system path runs, counted at zero: its records keep denials_counted true",
+        arm("an act reading its own repository and its git, any malf file, its home, its parameter file and a "
+            "system path runs, counted at zero: its records keep denials_counted true",
             (code, counted, denials_counted(tally)), (0, [COUNTED, "0"], True))
         submodule = workspace / "submodule"
         (workspace / ".git-modules").mkdir()
@@ -813,7 +784,7 @@ def selftest() -> int:
             str(base / "into-workspace") in domain_argv(domain), False)
         refusals = []
         for label, call in (("absent", lambda: step_domain(malf, workspace, store, [], step_home, scratch,
-                                                            repository / "recipe", None, None, [base / "absent.json"])),
+                                                            repository / "recipe", [base / "absent.json"])),
                             ("workspace", lambda: step_domain(malf, repository, store, [], step_home, scratch,
                                                                repository / "recipe"))):
             try:
@@ -996,8 +967,6 @@ def main(argv: list[str]) -> int:
         options.add_argument("--workspace", type=Path, required=True)
         options.add_argument("--store", type=Path, required=True)
         options.add_argument("--conan-home", action="append", default=[], type=Path)
-        options.add_argument("--corpus-gates", type=Path)
-        options.add_argument("--package")
         options.add_argument("--parameter-file", action="append", default=[], type=Path)
         options.add_argument("--act-root", type=Path, required=True)
         options.add_argument("--home", type=Path, required=True)
@@ -1011,7 +980,7 @@ def main(argv: list[str]) -> int:
             return located(given.scratch, given.tally, argv[split + 1:])
         try:
             domain = step_domain(given.malf_dir, given.workspace, given.store, given.conan_home, given.home,
-                                 given.scratch, given.act_root, given.corpus_gates, given.package, given.parameter_file)
+                                 given.scratch, given.act_root, given.parameter_file)
         except ClosureError as unread:
             print(f"malf_closure.py confine: REFUSED — {unread}", file=sys.stderr)
             return 2

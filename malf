@@ -5116,8 +5116,7 @@ Commands:
                                    in the purged `cut-verify` home; package and test-verdict
                                    records keyed by inputs; a failed step skips its dependents — exit 1 on a failed or
                                    skipped step or a differing output at an equal key. A failed step's
-                                   log is quoted (ctest's roll-up, its last 200 lines); a red walk
-                                   archives its logs into MALF_STORE_LOG_ARCHIVE when set.
+                                   log is quoted (ctest's roll-up, its last 200 lines).
                                    --ship: a candidate's form (DN-142.D31 (1)), no test of the
                                    package built or run, its test_package run; keyed apart
     source-verdict [--profile <clang profile>] <repository>
@@ -5634,10 +5633,8 @@ _malf_conan_home_fresh() {   # <home>
 # two-producer check), driver and acts together, so the conan that computes a key before its step is
 # the conan that creates. Inside, MALF_SYSTEM names the pinned config digest. The container sees,
 # each at its own absolute path: the workspace, the store, every conan home the walk names, /tmp (where
-# the walk's scratch is made, kept on the host when a step fails), the source download cache, the log
-# archive's directory, the
-# corpus document and its mounts (read-only), and for a walk running benchmarks the bench document and
-# the build slot (read-only) with the host's process ids, so the slot's holder is judged alive or dead
+# the walk's scratch is made, kept on the host when a step fails), the source download cache, and for a
+# walk running benchmarks the bench document and the build slot (read-only) with the host's process ids, so the slot's holder is judged alive or dead
 # as on the host. Its environment is exactly the walk's declared variables. The walk runs as uid 1000 with
 # no capability in a nested user namespace, as every act container does (DN-142.D30 (8) R4).
 # post: the container's exit, or 2 refused before it ran.
@@ -5667,7 +5664,7 @@ _malf_store_create_in_environment() {   # <writer|ship> <package>...
             || { echo "malf store-create: $directory is not in a git checkout" >&2; return 2; }
         [[ "$directory" == "$MALF_WORKSPACE_ROOT"/* || "$directory" == "$MALF_DIR"/* ]] || args+=(--mount "$directory")
     done
-    local cut_home="${MALF_CUT_VERIFY_CONAN_HOME:-$MALF_CONAN_HOME_BASE/cut-verify}" home recipes prefixes
+    local cut_home="$MALF_CONAN_HOME_BASE/cut-verify" home recipes prefixes
     # THE CONTAINER HAS NO NETWORK, SO THE HOST PROVISIONS FIRST (package_twin.py provision): the home the
     # walk reads its recipes from (its own, or the seed a fresh one is seeded from) holds every lock
     # revision, and the download cache every source those recipes declare, each checked by its digest.
@@ -5690,18 +5687,12 @@ _malf_store_create_in_environment() {   # <writer|ship> <package>...
         [[ -n "$home" ]] || continue
         mkdir -p "$home" && args+=(--mount "$home")
     done
-    [[ -z "${MALF_STORE_LOG_ARCHIVE:-}" ]] || args+=(--mount "$(dirname "$(realpath -m "$MALF_STORE_LOG_ARCHIVE")")")
-    if [[ -n "${MALF_CORPUS_GATES:-}" ]]; then
-        [[ -f "$MALF_CORPUS_GATES" ]] || { echo "malf store-create: MALF_CORPUS_GATES='$MALF_CORPUS_GATES' names no file" >&2; return 2; }
-        args+=(--read-only-mount "$(dirname "$(realpath "$MALF_CORPUS_GATES")")" --corpus-gates "$(realpath "$MALF_CORPUS_GATES")")
-    fi
     if [[ -n "${MALF_BENCH:-}" ]]; then
         [[ -f "$MALF_BENCH" ]] || { echo "malf store-create: MALF_BENCH='$MALF_BENCH' names no file" >&2; return 2; }
         args+=(--read-only-mount "$(dirname "$(realpath "$MALF_BENCH")")" --read-only-mount "$(dirname "$MALF_BUILD_SLOT_DIR")" --host-pids)
     fi
-    for name in MALF_STORE_PARAMETERS MALF_STORE_LOG_ARCHIVE MALF_CORPUS_GATES MALF_BENCH MALF_BENCH_SLOT_TOKEN \
-                MALF_CUT_VERIFY_CONAN_HOME MALF_CUT_VERIFY_PROFILE MALF_STORE_CONAN_HOME MALF_TWIN_SEED_HOME \
-                MALF_STORE_BUILD_REV MALF_STORE_REJUDGE; do
+    for name in MALF_STORE_PARAMETERS MALF_BENCH MALF_BENCH_SLOT_TOKEN MALF_CUT_VERIFY_PROFILE \
+                MALF_STORE_CONAN_HOME MALF_TWIN_SEED_HOME MALF_STORE_BUILD_REV MALF_STORE_REJUDGE; do
         [[ -z "${!name:-}" ]] || args+=(--env "$name")
     done
     export MALF_STORE_DIR="$store" MALF_WORKSPACE_ROOT CONAN_HOME="$MALF_CONAN_HOME_BASE" MALF_BUILD_SLOT_DIR
@@ -5798,26 +5789,18 @@ _malf_store_walk_backends() {   # <out> [<package>...]
 # writer-form record of one package never share a key, a verdict or an outcome, and neither form is ever
 # served for the other; a ship-form create that leaves a result of its own tests is refused. Its outcome
 # expects the package, and a test verdict only when the recipe tracks a test_package. A `stored: false`
-# step has nothing to create in this form and is left out of the walk, printed; the corpus gates
-# (MALF_CORPUS_GATES) run inside writer-form creates, so naming them under `--ship` is refused. MALF_BENCH
-# under `--ship` is the cut's bench measurement (DN-142.D33): each create takes the ship-bench conf set
+# step has nothing to create in this form and is left out of the walk, printed. MALF_BENCH under `--ship`
+# is the cut's bench measurement (DN-142.D33): each create takes the ship-bench conf set
 # (malf_recipe_tests.py), configuring its bench targets and running only the benchmarks, and stores its
 # bench verdict beside the package; its walk's store is the cut's scratch, never a candidate's. The
 # third-party phases run under the writer's set in both forms: one act.
-#
-# THE CORPUS GATES (DN-142.D21): MALF_CORPUS_GATES, when set, names the parameter document step 0's
-# Pharos writes. Every create then carries `-c user.malf:corpus_gates=<document>`, so the package the
-# document names runs its corpus legs inside its create (malf_recipe_tests.py), and its corpus
-# verdict is recorded beside its test verdict. A `user.*` conf is never a package-id input, and the
-# document's mount paths reach no key: its `data` digests do.
 #
 # Named packages select their closure in the walk (their first-party requirements, test ones
 # included); none named means every step. A step whose first-party requirement failed is SKIPPED,
 # never failed for a missing upstream, and the walk goes on.
 #
-# THE HOME is the keyed `cut-verify` home (`MALF_CUT_VERIFY_CONAN_HOME` names another): purged of
-# every first-party package and of the previous run's results first, so every step rebuilds
-# first-party code from its export, and twin-verify seeds its two homes' third-party packages from
+# THE HOME is the keyed `cut-verify` home: purged of every first-party package and of the previous
+# run's results first, so every step rebuilds first-party code from its export, and twin-verify seeds its two homes' third-party packages from
 # it. It is where the walk RESOLVES; every step BUILDS in a step home of its own (_malf_step_home, DN-142.D25 (5) call F). MALF_STORE_CONAN_HOME names another; one this run
 # creates is seeded with the `cut-verify` home's third-party packages (MALF_TWIN_SEED_HOME names another).
 # THE STORE is a directory standing in for the remote one until its transport and its writer
@@ -5828,8 +5811,7 @@ _malf_store_walk_backends() {   # <out> [<package>...]
 # Exit 0 every step green and every output stored or matching; 1 a step failed, was skipped, or
 # rebuilt at an equal key differs; 2 refused before any step.
 # Usage: malf store-create [--ship] [<package>...]   (MALF_STORE_DIR: the store, default ~/coderoast-store;
-#        a root under a cache is refused, _malf_store_root; MALF_STORE_LOG_ARCHIVE: where a red walk
-#        archives its logs, _malf_store_keep_logs)
+#        a root under a cache is refused, _malf_store_root)
 cmd_store_create() {
     local arg form=writer
     local -a names=()
@@ -5841,10 +5823,6 @@ cmd_store_create() {
         esac
     done
     set -- "${names[@]}"
-    if [[ "$form" == ship && -n "${MALF_CORPUS_GATES:-}" ]]; then
-        echo "malf store-create: REFUSED — --ship runs no corpus gate: the corpus legs run inside writer-form creates, and MALF_CORPUS_GATES='${MALF_CORPUS_GATES:-}' names some (DN-142.D31 (1))" >&2
-        return 2
-    fi
     # A BENCH WALK SERVES NO STEP: a benchmark measures an execution, and a stored outcome (the candidate the cut
     # restored holds one at the ship form's key) would be served with no benchmark run; every step executes and
     # is compared with its record instead.
@@ -5865,7 +5843,7 @@ cmd_store_create() {
     mapfile -t bench_args < <(_malf_store_bench_args) && [[ "${bench_args[0]:-}" != REFUSED ]] || return 2
     _malf_apply_profile "${MALF_CUT_VERIFY_PROFILE:-linux-gcc16-release}"
     _malf_store_parameters "$MALF_PROFILE_NAME" malf store-create || return 2
-    local cut_home="${MALF_CUT_VERIFY_CONAN_HOME:-$MALF_CONAN_HOME_BASE/cut-verify}"
+    local cut_home="$MALF_CONAN_HOME_BASE/cut-verify"
     local seed_home="${MALF_TWIN_SEED_HOME:-$cut_home}"
     local scratch; scratch="$(mktemp -d /tmp/malf-store.XXXXXX)"
     # A red walk keeps this scratch for its reader, who may be another uid (see source-verdict's).
@@ -5925,22 +5903,14 @@ cmd_store_create() {
     python3 "$MALF_DIR/artefact_store.py" toolchain "$(dirname "$(dirname "$compiler")")" "$scratch/toolchain.json" || return 2
     _malf_writer_create_args || return 2
     _malf_writer_environment || return 2
-    local -a corpus_args=()
-    if [[ -n "${MALF_CORPUS_GATES:-}" ]]; then
-        [[ -f "$MALF_CORPUS_GATES" ]] \
-            || { echo "malf store-create: MALF_CORPUS_GATES='$MALF_CORPUS_GATES' names no file" >&2; return 2; }
-        _MALF_WRITER_ARGS+=(-c "user.malf:corpus_gates=$MALF_CORPUS_GATES")
-        corpus_args=("$MALF_CORPUS_GATES")
-        echo "=== malf store-create: the corpus gates of $MALF_CORPUS_GATES run in the creates it names ==="
-    fi
     if [[ ${#bench_args[@]} -gt 0 ]]; then
         _MALF_WRITER_ARGS+=("${bench_args[@]}")
         echo "=== malf store-create: the benchmarks of the packages $MALF_BENCH names run in their creates, under the build slot ==="
     fi
 
     # THE GROUND EVERY ACT OF THE WALK IS DENIED (DN-142.D29 (5)), named once: the workspace, every conan
-    # home the walk knows (its base, the walk's home, the seed home, conan's default), the store and the
-    # corpus document's mounts; each act adds its own repository, home and scratch (_malf_confined).
+    # home the walk knows (its base, the walk's home, the seed home, conan's default) and the store;
+    # each act adds its own repository, home and scratch (_malf_confined).
     # A REPOSITORY's own workspace (DN-142.D31 (5)) is the act's repository itself, so the denied ground is its
     # parent, its siblings on a desk and the checkout's directory on a runner, as `source-verdict` denies it.
     local denied="$MALF_WORKSPACE_ROOT"
@@ -5948,11 +5918,9 @@ cmd_store_create() {
     _MALF_DOMAIN=(--workspace "$denied" --store "$store" --scratch "$scratch"
                   --conan-home "$MALF_CONAN_HOME_BASE" --conan-home "$CONAN_HOME" --conan-home "$seed_home"
                   --conan-home "$HOME/.conan2")
-    [[ -z "${MALF_CORPUS_GATES:-}" ]] || _MALF_DOMAIN+=(--corpus-gates "$MALF_CORPUS_GATES")
     [[ -z "${MALF_BENCH:-}" ]] || _MALF_DOMAIN+=(--parameter-file "$MALF_BENCH")
 
     local name path deps kind dep blocked rc=0 total=0 run_at step_rc stopped=""
-    [[ -z "${MALF_STORE_LOG_ARCHIVE:-}" ]] || rm -f "$MALF_STORE_LOG_ARCHIVE"
     local -a failed=() skipped=()
     local -A broke=()
     _MALF_WALK_SERVED=0
@@ -5970,7 +5938,7 @@ cmd_store_create() {
         fi
         step_rc=0
         _malf_store_run_step "$total" "$name" "$path" "$kind" "$store" "$scratch" "$prefixes" "$run_at" \
-            "${corpus_args[@]}" || step_rc=$?
+            || step_rc=$?
         case $step_rc in
             0) ;;
             "$_MALF_STEP_FAILED") failed+=("$name"); broke["$name"]=1 ;;
@@ -5982,18 +5950,15 @@ cmd_store_create() {
     echo "=== malf store-create: restored $(python3 "$MALF_DIR/artefact_store.py" restore-ledger "$scratch/restore.jsonl") ==="
     echo "=== malf store-create: $_MALF_WALK_SERVED of $total step(s) served from the store, $((total - _MALF_WALK_SERVED)) executed or not reached ==="
     if [[ -n "$stopped" ]]; then
-        _malf_store_keep_logs "$scratch"
         echo "malf store-create: STOPPED at $name — a kept record's transport is absent, so the store is corrupt and nothing after it ran (DN-142.D17 (2)) — logs in $scratch" >&2
         return 1
     fi
 
     if [[ ${#failed[@]} -gt 0 || ${#skipped[@]} -gt 0 ]]; then
-        _malf_store_keep_logs "$scratch"
         echo "malf store-create: FAILED ${#failed[@]} step(s): ${failed[*]:-none}; skipped ${#skipped[@]}: ${skipped[*]:-none} — logs in $scratch" >&2
         return 1
     fi
     if [[ $rc -ne 0 ]]; then
-        _malf_store_keep_logs "$scratch"
         echo "malf store-create: every step built and tested, and recording one failed or differs at an equal key (above) — logs in $scratch" >&2
         return 1
     fi
@@ -6039,30 +6004,6 @@ _malf_quote_log() {   # <log> <subject>
         tail -n "$_MALF_LOG_TAIL_LINES" "$log"
     } | cut -c "-$_MALF_LOG_LINE_CHARS" | awk -v quote="$_MALF_LOG_QUOTE" '{ print quote $0 }' >&2 \
         || echo "${_MALF_LOG_QUOTE}$subject: its log $log could not be quoted (above)" >&2
-    return 0
-}
-
-# A RED WALK'S LOGS ARE ARCHIVED WHERE ITS CALLER NAMES (MALF_STORE_LOG_ARCHIVE), because the scratch
-# that holds them is under /tmp, which the release runner's service keeps private (systemd
-# PrivateTmp): the caller names a path its job uploads as an artifact.
-# Every `*.log` at the top of the scratch, and nothing else: the graphs, the key documents and the
-# step homes stay. A green walk removes its scratch and writes no archive.
-# post: the archive written and named on stderr, or a line saying why not; never a non-zero exit.
-_malf_store_keep_logs() {   # <scratch>
-    local scratch="$1" archive="${MALF_STORE_LOG_ARCHIVE:-}"
-    [[ -n "$archive" ]] || return 0
-    local -a logs=()
-    mapfile -t logs < <(find "$scratch" -maxdepth 1 -type f -name '*.log' -printf '%P\n' | LC_ALL=C sort)
-    if [[ ${#logs[@]} -eq 0 ]]; then
-        echo "malf store-create: no log in $scratch, so nothing is archived into $archive" >&2
-        return 0
-    fi
-    if tar -czf "$archive" -C "$scratch" -- "${logs[@]}"; then
-        echo "malf store-create: ${#logs[@]} log(s) of $scratch archived in $archive" >&2
-    else
-        rm -f "$archive"
-        echo "malf store-create: archiving the logs of $scratch into $archive failed (above)" >&2
-    fi
     return 0
 }
 
@@ -6139,16 +6080,15 @@ _malf_store_restore() {   # <store> <home> <document> <scratch> <subject> [<grap
 # judged, DN-142.D17 (5)). The create, the build and their records run in a step home of their own
 # (_malf_step_home), restored from the store; a refused restore closes the step UNRECORDED, and so
 # does a corrupt store, which also returns _MALF_STEP_STOPPED: the walk runs nothing after it.
-# pre: the walk's environment (cmd_store_create), $9... the corpus gates arguments.
+# pre: the walk's environment (cmd_store_create).
 # post: exit 0 PASS, _MALF_STEP_FAILED, _MALF_STEP_UNRECORDED, _MALF_STEP_SKIPPED or
 #       _MALF_STEP_STOPPED, SKIPPED with _MALF_THIRD_PARTY_CAUSE naming the cause.
 _MALF_STEP_FAILED=1
 _MALF_STEP_UNRECORDED=2
 _MALF_STEP_SKIPPED=4
 _MALF_STEP_STOPPED=8
-_malf_store_run_step() {   # <n> <name> <path> <create|build> <store> <scratch> <prefixes> <walk start> [<corpus gates>]
+_malf_store_run_step() {   # <n> <name> <path> <create|build> <store> <scratch> <prefixes> <walk start>
     local total="$1" name="$2" path="$3" kind="$4" store="$5" scratch="$6" prefixes="$7" run_at="$8"
-    local -a corpus_args=("${@:9}")
     local step_at step_cpu step_home verdict rc=0
     _MALF_STEP_UNCONFINED=""
     _malf_store_third_party "$total" "$name" "$path" "$prefixes" "$store" "$scratch" "$run_at" || rc=$?
@@ -6223,7 +6163,7 @@ _malf_store_run_step() {   # <n> <name> <path> <create|build> <store> <scratch> 
         return "$_MALF_STEP_UNRECORDED"
     fi
     rc=0
-    _malf_store_serve "$name" "$store" "$scratch" "$CONAN_HOME" "${corpus_args[@]}" || rc=$?
+    _malf_store_serve "$name" "$store" "$scratch" "$CONAN_HOME" || rc=$?
     case $rc in
         0) _MALF_WALK_SERVED=$((_MALF_WALK_SERVED + 1))
            _malf_store_closed "$total" "$name" REUSED "$run_at" "$step_at" "$step_cpu" "$scratch/times"; return 0 ;;
@@ -6237,7 +6177,7 @@ _malf_store_run_step() {   # <n> <name> <path> <create|build> <store> <scratch> 
         _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
         return "$_MALF_STEP_UNRECORDED"
     fi
-    _malf_store_create_in "$name" "$path" "$store" "$scratch" "$prefixes" "$step_home" "${corpus_args[@]}"
+    _malf_store_create_in "$name" "$path" "$store" "$scratch" "$prefixes" "$step_home"
     rc=$?
     rm -rf "$step_home"
     case $rc in
@@ -6261,9 +6201,9 @@ _malf_store_run_step() {   # <n> <name> <path> <create|build> <store> <scratch> 
 # post: exit 0 served; _MALF_SERVE_MISS it executes; 1 a refused restore; 2 a corrupt store.
 _MALF_SERVE_MISS=3
 _MALF_WALK_SERVED=0
-_malf_store_serve() {   # <name> <store> <scratch> <walk home> [<corpus gates>]
+_malf_store_serve() {   # <name> <store> <scratch> <walk home>
     python3 "$MALF_DIR/artefact_store.py" serve "$2" "$4" "$3/$1.key-first.json" "$1" "$MALF_PROFILE_NAME" \
-        "$3/restore.jsonl" "${@:5}"
+        "$3/restore.jsonl"
 }
 
 # A CREATE STEP IN ITS OWN HOME (DN-142.D25 (5) call F): the home restored from the key-first document
@@ -6272,9 +6212,8 @@ _malf_store_serve() {   # <name> <store> <scratch> <walk home> [<corpus gates>]
 # pre: the key-first document and graph of <name> are in <scratch> (_malf_store_key_first).
 # post: exit 0 recorded; _MALF_STEP_FAILED the create failed; _MALF_STEP_UNRECORDED a refused restore or
 #       a record refused or differing; _MALF_STEP_STOPPED a corrupt store.
-_malf_store_create_in() {   # <name> <path> <store> <scratch> <prefixes> <step home> [<corpus gates>]
+_malf_store_create_in() {   # <name> <path> <store> <scratch> <prefixes> <step home>
     local name="$1" path="$2" store="$3" scratch="$4" prefixes="$5" step_home="$6" rc=0
-    local -a corpus_args=("${@:7}")
     _malf_store_restore "$store" "$step_home" "$scratch/$name.key-first.json" "$scratch" "$name" \
         "$scratch/$name.key-first.graph.json" || rc=$?
     [[ $rc -eq 0 ]] || { [[ $rc -eq 2 ]] && return "$_MALF_STEP_STOPPED"; return "$_MALF_STEP_UNRECORDED"; }
@@ -6289,7 +6228,7 @@ _malf_store_create_in() {   # <name> <path> <store> <scratch> <prefixes> <step h
         MALF_STEP_TALLY="$_MALF_STEP_TALLY" \
         MALF_STEP_TEST_FOLDER="$_MALF_TEST_FOLDER" CONAN_HOME="$step_home" python3 "$MALF_DIR/artefact_store.py" conan-step "$store" "$step_home" \
         "$scratch/$name.graph.json" "$name" "$MALF_PROFILE_NAME" "$MALF_DIR" "$scratch/toolchain.json" "$prefixes" \
-        "$step_home/malf-test-results" "${corpus_args[@]}"; then
+        "$step_home/malf-test-results"; then
         echo "malf store-create: recording $name failed, or differs at an equal key (above)" >&2
         return "$_MALF_STEP_UNRECORDED"
     fi
@@ -6381,9 +6320,9 @@ _malf_store_key_first() {   # <name> <prefixes> <store> <scratch> <log> <recipe 
 # one its own `third-party-create` step built and recorded (_malf_store_third_party). A binary
 # missing from the home fails the create naming it, never builds or downloads inside it.
 # ONE KEYED ACT, IN ITS DOMAIN (DN-142.D29 (5), (8)): `malf_closure.py confine` runs the command denied
-# the walk's ground (_MALF_DOMAIN: the workspace, the other conan homes, the store, the corpus mounts)
-# and re-granted its own share of it (malf whole, the repository holding <act root>, its home CONAN_HOME,
-# the walk's scratch, the corpus mounts <package>'s legs name); where `strace` is on the PATH it counts
+# the walk's ground (_MALF_DOMAIN: the workspace, the other conan homes, the store) and re-granted its
+# own share of it (malf whole, the repository holding <act root>, its home CONAN_HOME, the walk's
+# scratch); where `strace` is on the PATH it counts
 # the act's denials, and a counted one REFUSES the act (exit 3, the paths named), so nothing of it is
 # recorded. The tally says `counted <n>` or `uncounted`, which the act's records keep as
 # `denials_counted`. _MALF_STEP_UNCONFINED, the running step's packages.yml `unconfined:` why (empty
@@ -6393,16 +6332,16 @@ _malf_store_key_first() {   # <name> <prefixes> <store> <scratch> <log> <recipe 
 # TMPDIR and a HOME, empty, under the walk's scratch, never keyed, and refuses at exit 2 before the act a
 # domain whose /tmp, TMPDIR or HOME holds denied ground.
 _MALF_DOMAIN=()
-_malf_confined() {   # <tally> <package> <act root> <command>...
-    local tally="$1" package="$2" root="$3"
-    shift 3
-    [[ -n "$tally" && -n "$package" && -n "$root" ]] \
-        || { echo "malf: a confined act names its tally, its package and its source ('$tally', '$package', '$root'), or it does not run" >&2; return 2; }
+_malf_confined() {   # <tally> <act root> <command>...
+    local tally="$1" root="$2"
+    shift 2
+    [[ -n "$tally" && -n "$root" ]] \
+        || { echo "malf: a confined act names its tally and its source ('$tally', '$root'), or it does not run" >&2; return 2; }
     [[ ${#_MALF_DOMAIN[@]} -gt 0 ]] \
         || { echo "malf: a confined act runs inside a walk that named its denied ground (_MALF_DOMAIN), and none was named" >&2; return 2; }
     local -a unconfined=()
     [[ -z "${_MALF_STEP_UNCONFINED:-}" ]] || unconfined=(--unconfined)
-    python3 "$MALF_DIR/malf_closure.py" confine "$MALF_DIR" "${_MALF_DOMAIN[@]}" --package "$package" \
+    python3 "$MALF_DIR/malf_closure.py" confine "$MALF_DIR" "${_MALF_DOMAIN[@]}" \
         --act-root "$root" --home "$CONAN_HOME" --tally "$tally" "${unconfined[@]}" -- "$@"
 }
 
@@ -6417,7 +6356,7 @@ _malf_store_create_step() {   # <name> <path> <prefixes> <graph> <log> <test fol
     mapfile -t build_args < <(_malf_store_build_args "$1")
     _malf_home_profiles "$CONAN_HOME"
     _malf_conan_jobs "malf store-create: conan create $1"
-    _malf_confined "${_MALF_STEP_TALLY:-}" "$1" "$2" conan create "$2" "${_MALF_HOME_PROFILES[@]}" \
+    _malf_confined "${_MALF_STEP_TALLY:-}" "$2" conan create "$2" "${_MALF_HOME_PROFILES[@]}" \
         -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${_MALF_FORM_ARGS[@]}" "${build_args[@]}" "${_MALF_SHIP_LOCK[@]}" \
         -c "tools.build:jobs=$_MALF_CONAN_JOBS" "${test_args[@]}" --no-remote --format=json > "$4" 2> "$5"
 }
@@ -6545,7 +6484,7 @@ _malf_store_third_party_in() {   # <name> <path> <prefixes> <store> <scratch> <g
         *) _MALF_THIRD_PARTY_CAUSE="restoring its phase home was refused (above)"; return 1 ;;
     esac
     _malf_conan_jobs "malf store-create: conan install $name:third-party"
-    if ! CONAN_HOME="$phase_home" _malf_confined "$scratch/$name.third-party.denials" "$name" "$path" conan install "$path" "${common[@]}" "${builds[@]}" \
+    if ! CONAN_HOME="$phase_home" _malf_confined "$scratch/$name.third-party.denials" "$path" conan install "$path" "${common[@]}" "${builds[@]}" \
             -c "tools.build:jobs=$_MALF_CONAN_JOBS" --no-remote --output-folder="$scratch/$name.third-party" \
             --format=json > "$scratch/$name.third-party.install.json" 2>> "$log"; then
         _MALF_THIRD_PARTY_CAUSE="building ${builds[*]#--build=} failed ($log)"
@@ -6777,7 +6716,7 @@ _malf_store_build_in() {   # <name> <prefix> <tree> <store> <scratch> <prefixes>
     [[ $rc -eq 0 ]] || { [[ $rc -eq 2 ]] && return 2; return 1; }
     _malf_home_profiles "$CONAN_HOME"
     _malf_conan_jobs "malf store-create: conan build $name"
-    if ! _malf_confined "$scratch/$name.denials" "$name" "$scratch/$name/$prefix" conan build "$scratch/$name/$prefix" "${_MALF_HOME_PROFILES[@]}" \
+    if ! _malf_confined "$scratch/$name.denials" "$scratch/$name/$prefix" conan build "$scratch/$name/$prefix" "${_MALF_HOME_PROFILES[@]}" \
             -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${_MALF_SHIP_LOCK[@]}" -c "tools.build:jobs=$_MALF_CONAN_JOBS" --build=never --no-remote \
             --format=json > "$scratch/$name.graph.json" 2> "$scratch/$name.log"; then
         echo "malf store-create: conan build $name failed — $scratch/$name.log" >&2
@@ -6827,7 +6766,7 @@ _malf_source_verdict_in_environment() {   # [--namespaces] <repository> <verb> <
     shift 2
     store="$(_malf_store_root "$verb")" || return 2
     home="$(_malf_environment_home)" || return 2
-    recipes="${MALF_ENVIRONMENT_RECIPES:-${MALF_CUT_VERIFY_CONAN_HOME:-$MALF_CONAN_HOME_BASE/cut-verify}}"
+    recipes="${MALF_ENVIRONMENT_RECIPES:-$MALF_CONAN_HOME_BASE/cut-verify}"
     [[ "$recipes" != *" "* ]] \
         || { echo "malf source-verdict: MALF_ENVIRONMENT_RECIPES names one recipe home here, not '$recipes'" >&2; return 2; }
     mkdir -p "$store" "$home" "$recipes" "$MALF_CONAN_SOURCES_CACHE"
@@ -7029,7 +6968,7 @@ cmd_source_verdict() {
         rc=0
         # The act's home takes its recipes from the key home, which holds every lock revision and lies in
         # the act's scratch: the walk's recipe home is ground its domain denies.
-        _malf_confined "$scratch/$name.denials" "$name" "$repo" env MALF_ENVIRONMENT_RECIPES="$keys" \
+        _malf_confined "$scratch/$name.denials" "$repo" env MALF_ENVIRONMENT_RECIPES="$keys" \
             "$MALF_DIR/malf" test --only --profile "$MALF_PROFILE_NAME" "$path" \
             > "$scratch/$name.log" 2>&1 || rc=$?
         if [[ $rc -ne 0 ]]; then
@@ -7050,7 +6989,7 @@ cmd_source_verdict() {
     if [[ "${MALF_SOURCE_VERDICT_SET:-confined}" == confined ]] \
             && python3 -c 'import sys, yaml; sys.exit(0 if (yaml.safe_load(open(sys.argv[1])) or {}).get("inventory") else 1)' "$repo/packages.yml"; then
         rc=0
-        _malf_confined "$scratch/inventory.denials" inventory "$repo" env MALF_ENVIRONMENT_RECIPES="$keys" \
+        _malf_confined "$scratch/inventory.denials" "$repo" env MALF_ENVIRONMENT_RECIPES="$keys" \
             "$MALF_DIR/malf" inventory --test --profile "$MALF_PROFILE_NAME" "$repo" > "$scratch/inventory.log" 2>&1 || rc=$?
         local skip_needle
         skip_needle="$(python3 -B -c 'import sys; sys.path.insert(0, sys.argv[1]); import build_inventory; print(build_inventory.WORKSPACE_GRAIN_SKIP_NEEDLE)' "$MALF_DIR")" || return 2

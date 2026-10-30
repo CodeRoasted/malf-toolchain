@@ -45,14 +45,13 @@ every privileged syscall by the kernel.
     build_environment.py load
         the verified load: the archive checked and loaded when the pinned id is absent, then `check`
     build_environment.py run [--host-pids] [--home <dir>] [--mount <dir>]... [--read-only-mount <dir>]...
-                             [--corpus-gates <file>] [--env <NAME>]... [--backends <file>] [--attest <file>]
+                             [--env <NAME>]... [--backends <file>] [--attest <file>]
                              [--worktree-repository <dir>]... -- <argv>...
-        <argv> in the environment, each corpus mount the document names mounted read-only; with
-        --backends <file>, beside those backends on the walk's internal network instead of none; with
-        --attest <file>, that file receives `{"image", "id"}` once the integrity check passed and before
-        the container starts, the act's system identity (DN-142.D30 (9) E3); with --worktree-repository,
-        refused unless every worktree entry of each named repository lies under a mount (R9); exit the
-        command's own, or 2 refused before it ran
+        <argv> in the environment; with --backends <file>, beside those backends on the walk's internal
+        network instead of none; with --attest <file>, that file receives `{"image", "id"}` once the
+        integrity check passed and before the container starts, the act's system identity (DN-142.D30
+        (9) E3); with --worktree-repository, refused unless every worktree entry of each named repository
+        lies under a mount (R9); exit the command's own, or 2 refused before it ran
     build_environment.py probe --image <ref>@sha256:<digest> --stdin <file> --capture <file> -- <argv>...
         <argv> in that image, never the build environment's: pulled by digest when the daemon lacks it and
         verified held as that digest, `--network none`, a read-only root, a tmpfs at /tmp and at its working
@@ -379,18 +378,6 @@ def safe_directory_env(mounts: list[Path] | tuple) -> list[str]:
     for index, entry in enumerate(entries):
         declared += ["--env", f"GIT_CONFIG_KEY_{index}=safe.directory", "--env", f"GIT_CONFIG_VALUE_{index}={entry}"]
     return declared
-
-
-def corpus_mounts(document: Path) -> list[Path]:
-    """Every mount the corpus gates document names (malf_closure.corpus_mounts, the domain's reading)."""
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    import malf_closure
-
-    try:
-        every, _own = malf_closure.corpus_mounts(document, None)
-    except malf_closure.ClosureError as unread:
-        raise Refused(str(unread)) from unread
-    return sorted(set(every))
 
 
 def worktree_refusals(repositories: list[Path], mounts: list[Path]) -> list[str]:
@@ -1823,7 +1810,6 @@ def main(argv: list[str]) -> int:
         options = argparse.ArgumentParser(prog="build_environment.py run")
         options.add_argument("--mount", action="append", default=[], type=Path)
         options.add_argument("--read-only-mount", action="append", default=[], type=Path)
-        options.add_argument("--corpus-gates", type=Path)
         options.add_argument("--host-pids", action="store_true")
         options.add_argument("--home", default=CONTAINER_HOME)
         options.add_argument("--env", action="append", default=[])
@@ -1837,9 +1823,8 @@ def main(argv: list[str]) -> int:
             print("build_environment.py run: the command after -- is empty", file=sys.stderr)
             return REFUSED
         try:
-            read_only = [*given.read_only_mount, *(corpus_mounts(given.corpus_gates) if given.corpus_gates else [])]
             return run(read_pin(), argv[split + 1:], given.mount, given.env, docker,
-                       read_only, given.host_pids, given.home,
+                       given.read_only_mount, given.host_pids, given.home,
                        read_backends(given.backends) if given.backends else (), given.attest,
                        given.worktree_repository, given.namespaces)
         except Refused as refused:

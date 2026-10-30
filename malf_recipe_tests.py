@@ -43,19 +43,9 @@ name (DN-142.D13 (3)). Inside a create malf's path map (`malf-path-map.cmake`, D
 the create. Both runners refuse a test source that spells one of the three before any test runs;
 `locators <dir>...` prints the same findings for a tree.
 
-THE CORPUS LEGS (DN-142.D21 (1), (3)). When the conf `user.malf:corpus_gates` names a parameter
-document holding an entry for the package, `run_tests` runs each of its legs after the default
-selection, in order (`sample`, then `full`): one ctest over the `corpus`-labelled tests of the leg's
-named suites, never the bare label, with the leg's mount variables set on that command and nowhere
-else, JUnit to `<package id>.corpus-<leg>.xml`. A suite that selects no test, and a selected test
-registered without `SKIP_REGULAR_EXPRESSION` (so a GTEST_SKIP would read as a pass), are rows of the
-leg's sidecar `<package id>.corpus-<leg>.json`, with the run's exit status. A red leg is recorded,
-never raised: the package was judged by its default selection, and the corpus verdict is a record of
-its own. The document is written by step 0's Pharos; its paths never enter a key.
-
 THE BENCHMARKS (DN-142.D25 (5) calls D and E). When the conf `user.malf:bench` names a parameter
 document whose `packages` list holds the package, `run_tests` runs every benchmark executable the
-build produced, after the tests and the corpus legs, each alone under the deadlock watchdog the conf
+build produced, after the tests, each alone under the deadlock watchdog the conf
 `user.malf:bench_watchdog` names, at BENCH_REPETITIONS repetitions with aggregates only, its stdin the
 null device. Each writes its google-benchmark JSON to `<package id>.bench/<executable>.json`, and the
 sidecar `<package id>.bench.json` holds `{repetitions, timeout, executables: [{name, exit}]}`. Nothing
@@ -98,7 +88,6 @@ import sys
 from pathlib import Path
 
 CORPUS_LABEL = "corpus"
-CORPUS_GATES_CONF = "user.malf:corpus_gates"
 BENCH_CONF = "user.malf:bench"
 BENCH_WATCHDOG_CONF = "user.malf:bench_watchdog"
 # note: the measurement the release's benchmark step took, moved into the create unchanged
@@ -114,8 +103,6 @@ DECLARATION_KEYS = frozenset({"test", "outcome", "profiles", "condition", "why",
 JUDGED_POPULATIONS = ("build", "test_package")
 PROFILE_CONF = "user.malf:profile"
 PROFILES_DIR = Path(__file__).resolve().parent / "profiles"
-# The property gtest_discover_tests sets, without which ctest reads a GTEST_SKIP as a pass.
-SKIP_PROPERTY = "SKIP_REGULAR_EXPRESSION"
 # DN-142.D31 (1): the conf under which a test_package runs although `tools.build:skip_test` is set.
 TEST_PACKAGE_CONF = "user.malf:run_test_package"
 # DN-142.D33 slice (a) ruling (1): the cut's bench measurement over a ship-form walk. The tree configures its
@@ -336,11 +323,6 @@ def corpus_listing(build_dir: str) -> list[str]:
     return sorted(test["name"] for test in shown_tests(["--test-dir", build_dir, "-L", CORPUS_LABEL]))
 
 
-def corpus_regex(suites: list[str]) -> str:
-    """The `-R` expression selecting exactly the named suites' tests."""
-    return "^(" + "|".join(re.escape(suite) for suite in suites) + r")\."
-
-
 def _is_test_source(relative: Path, *, every_source: bool) -> bool:
     if relative.suffix not in CXX_SUFFIXES:
         return False
@@ -455,7 +437,6 @@ def run_tests(conanfile) -> None:
     conanfile.output.info(f"malf: running the test selection of {conanfile.name}, JUnit to {junit}")
     conanfile.run(ctest_command(arguments, junit), env=["conanbuild", "conanrun"])
     _judge_run(conanfile, junit, "build", str(conanfile.source_folder))
-    run_corpus_legs(conanfile, build_dir, results, package_id)
     run_benches(conanfile, build_dir, results, package_id)
 
 
@@ -517,55 +498,6 @@ def run_benches(conanfile, build_dir: str, results: str, package_id: str) -> Non
     Path(_junit(results, conanfile.name, f"{package_id}{BENCH_SUFFIX}.json")).write_text(
         json.dumps({"repetitions": BENCH_REPETITIONS, "timeout": BENCH_TIMEOUT_SECONDS,
                     "executables": ran}, indent=1, sort_keys=True) + "\n")
-
-
-def run_corpus_legs(conanfile, build_dir: str, results: str, package_id: str) -> None:
-    """The legs `user.malf:corpus_gates` names for this package, each its own ctest run; a red leg
-    is recorded in its JUnit file and sidecar, never raised (DN-142.D21 (1)).
-
-    post: for each leg, `<package id>.corpus-<leg>.json` holds `{leg, suites, exit, rows}`, `exit`
-        the ctest status (None when no suite selected a test) and `rows` the `absent` and
-        `unguarded` rows; `<package id>.corpus-<leg>.xml` holds the run when one happened
-    """
-    from conan.errors import ConanException
-    from conan.tools.build import cmd_args_to_string
-
-    document_path = conanfile.conf.get(CORPUS_GATES_CONF)
-    if not document_path:
-        return
-    legs = json.loads(Path(document_path).read_text()).get("packages", {}).get(conanfile.name)
-    if not legs:
-        return
-    if os.name != "posix":
-        raise ConanException(f"malf: {conanfile.name}: the corpus legs set their mounts through "
-                             "`env`, which this platform lacks; step 0 runs them on Linux only")
-    for leg in legs:
-        name, suites, environment = leg["leg"], leg["suites"], leg["environment"]
-        population = f"corpus-{name}"
-        selected = [suite for suite in suites
-                    if (selected_count(["--test-dir", build_dir, "-L", CORPUS_LABEL, "-R",
-                                        corpus_regex([suite])]) or 0) > 0]
-        rows = [[population, f"{suite}.*", "absent"] for suite in suites if suite not in selected]
-        status = None
-        if selected:
-            arguments = ["--test-dir", build_dir, "--output-on-failure", "-L", CORPUS_LABEL,
-                         "-R", corpus_regex(selected)]
-            try:
-                shown = shown_tests(arguments)
-            except RuntimeError as unlisted:
-                raise ConanException(f"malf: {conanfile.name}: {unlisted}") from unlisted
-            rows += [[population, test["name"], "unguarded"] for test in shown
-                     if SKIP_PROPERTY not in {item.get("name") for item in test.get("properties", [])}]
-            junit = _junit(results, conanfile.name, f"{package_id}.{population}.xml")
-            mounts = [f"{variable}={value}" for variable, value in sorted(environment.items())]
-            conanfile.output.info(f"malf: running the {population} leg of {conanfile.name} "
-                                  f"({', '.join(selected)}), JUnit to {junit}")
-            command = (f"{cmd_args_to_string(['env', *mounts])} "
-                       f"{ctest_command(arguments, junit)}")
-            status = conanfile.run(command, env=["conanbuild", "conanrun"], ignore_errors=True)
-        Path(_junit(results, conanfile.name, f"{package_id}.{population}.json")).write_text(
-            json.dumps({"leg": name, "suites": suites, "exit": status, "rows": rows},
-                       indent=1, sort_keys=True) + "\n")
 
 
 def ctest_command(arguments: list[str], junit: str) -> str:

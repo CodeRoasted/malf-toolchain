@@ -13,12 +13,10 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
     artefact_store.py tree <folder>
         the content digest of a file tree, one line of 64 hex
     artefact_store.py conan-step <store> <conan home> <create graph.json> <package> <profile name>
-                                 <malf dir> <toolchain.json> <prefixes> [<results dir> [<corpus gates>]]
+                                 <malf dir> <toolchain.json> <prefixes> [<results dir>]
         the record of one `conan create` step, from the graph its `--format=json` printed: stored
         when the key is new (exit 0), compared when it is not (exit 0 on a match, 1 on a mismatch);
-        with a results directory, the step's test verdict record beside it (DN-142.D5 (3)); with
-        the corpus gates parameter document naming the package, its corpus verdict too
-        (DN-142.D21 (1)), whose red is that record's verdict and never this command's exit; and,
+        with a results directory, the step's test verdict record beside it (DN-142.D5 (3)); and,
         once every record of the step is stored or matching, its `step-outcome` record naming them
         by key, the one record `serve` serves the step from. Its key's `step.form` is MALF_STEP_FORM
         (`writer` or `ship`, refused unset, DN-142.D31 (1)); a ship-form step whose results hold a
@@ -103,7 +101,6 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
     artefact_store.py restore-ledger <ledger>
         the walk's restore totals, one line: calls, nodes, transport bytes, seconds
     artefact_store.py serve <store> <walk home> <key-first.json> <package> <profile name> <ledger>
-                            [<corpus gates>]
         REUSE (N359, DN-142.D19; plan H13): the step whose key the key-first document gives is
         SERVED in place of executing when its `step-outcome` record (written last by `conan-step`
         and `build-step`, naming every record the step wrote) and each record it names are stored,
@@ -222,14 +219,6 @@ A step's test verdict is `fail` on a failed row OR on an undeclared skip or a de
 with its outcome and the step's profile, by a row of the package's `tests/declared_skips.json`,
 read from the create's keyed export_source folder (a `conan build` step's from the materialized
 source MALF_STEP_SOURCE names). The covered rows are kept as `excused` and printed as EXCUSED.
-
-A step's CORPUS VERDICT (DN-142.D21) is a third record, output name `corpus`, written when the
-corpus gates parameter document names the package: its key is the build step's plus the selection
-`-L corpus` with the legs and their suites, plus `data`, each mount role's content digest (never
-its path); its rows are `[corpus-<leg>, test name, outcome]`, the outcome one of `passed`,
-`failed`, `skipped`, `disabled`, `absent` (a named suite that selected no test, or ran none) and
-`unguarded` (a test ctest could not see skip). Its verdict is `pass` only when every row is
-`passed`: a skipped corpus gate is the green-blind state the corpus run exists to refuse.
 
 A step's EXECUTABLES (DN-142.D22) are classified by its package's `executables:` map in the
 recorded `packages.yml` (`published` or `run-from-cache`), which `malf store-create` hands over in a
@@ -1833,7 +1822,7 @@ def _declared_executables_env() -> dict:
 
 def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile: str,
                malf_dir: Path, toolchain: Path, prefixes: tuple[str, ...],
-               results: Path | None = None, corpus_gates: Path | None = None) -> int:
+               results: Path | None = None) -> int:
     built = built_third_party(graph_nodes(graph_json), prefixes)
     if built:
         print(f"artefact_store: REFUSED {package}: its create built or downloaded {len(built)} "
@@ -1890,16 +1879,13 @@ def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile:
     judged = max(stored, verdict_record(store, key_of(document), package, package_id, profile,
                                         malf_dir, results, {package: content}, step_form() != "ship",
                                         declared, keys))
-    if corpus_gates is not None:
-        judged = max(judged, corpus_record(store, key_of(document), package, package_id, profile,
-                                           malf_dir, results, {package: content}, corpus_gates, keys))
     bench = os.environ.get(BENCH_ENV)
     if bench:
         judged = max(judged, bench_record(store, key_of(document), package, package_id, profile, malf_dir,
                                           results, {package: content}, Path(bench), keys))
     tested = document["test_package"] is not None \
         or (results / package / f"{package_id}{LISTED_SUFFIX}").is_file()
-    return judged or outcome_record(store, key_of(document), package, profile, corpus_gates, keys,
+    return judged or outcome_record(store, key_of(document), package, profile, keys,
                                     packaged=True, tested=tested)
 
 
@@ -1982,7 +1968,7 @@ def build_step(store: Path, home: Path, graph_json: Path, package: str, profile:
                             profile, malf_dir, results,
                             {name.split("/")[0]: digest for name, digest in upstream.items()}, True,
                             _helper().read_declarations(source), keys)
-    return judged or outcome_record(store, key_of(document), package, profile, None, keys,
+    return judged or outcome_record(store, key_of(document), package, profile, keys,
                                     packaged=False, tested=True)
 
 
@@ -2312,70 +2298,6 @@ def _link_step_files(results: Path, package: str, package_id: str, files: list[P
         os.link(path, alias)
 
 
-def corpus_rows(results: Path, package: str, package_id: str, legs: list[dict]
-                ) -> tuple[list[list[str]], list[Path]]:
-    """The corpus verdict's rows, each leg's JUnit rows and its sidecar's `absent` and `unguarded`
-    rows, plus one `absent` row per named suite with no test row at all (a leg that never ran, or
-    ran without it); and the files read."""
-    rows, files = [], []
-    for leg in legs:
-        population = f"corpus-{leg['leg']}"
-        junit = results / package / f"{package_id}.{population}.xml"
-        sidecar = results / package / f"{package_id}.{population}.json"
-        leg_rows = []
-        if junit.is_file():
-            files.append(junit)
-            leg_rows += junit_rows(junit, population)
-        if sidecar.is_file():
-            files.append(sidecar)
-            leg_rows += json.loads(sidecar.read_text())["rows"]
-        for suite in leg["suites"]:
-            if not any(row[1].startswith(f"{suite}.") for row in leg_rows):
-                leg_rows.append([population, f"{suite}.*", "absent"])
-        rows += leg_rows
-    return sorted({tuple(row): row for row in rows}.values()), files
-
-
-def corpus_record(store: Path, build_key: str, package: str, package_id: str, profile: str,
-                  malf_dir: Path, results: Path, judged: dict[str, str], gates: Path,
-                  keys: dict | None = None) -> int:
-    """Store or compare one step's corpus verdict (DN-142.D21 (1), (3), (5)) when the corpus gates
-    parameter document names the package; exit 0 when it names none. The verdict's red is in the
-    record, never in the exit: a red corpus gate is judged by step 0's corpus stage, and failing
-    here would fail the package's step for a cause that is not the package."""
-    document_in = json.loads(gates.read_text())
-    legs = document_in.get("packages", {}).get(package)
-    if not legs:
-        return 0
-    rows, files = corpus_rows(results, package, package_id, legs)
-    _link_step_files(results, package, package_id, files)
-    selection = selection_member(malf_dir)
-    selection.update({"labels": ["-L", "corpus"],
-                      "legs": [{"leg": leg["leg"], "suites": sorted(leg["suites"])} for leg in legs]})
-    document = {"step": {"kind": "test-verdict", "package": package, "profile": profile},
-                "build": build_key, "selection": selection, "data": document_in["data"], "system": system_member()}
-    verdict = "pass" if rows and all(row[2] == "passed" for row in rows) else "fail"
-    scratch = Path(tempfile.mkdtemp(prefix="artefact_store."))
-    log = scratch / "corpus.tar"
-    with tarfile.open(log, "w") as bundle:
-        for path in files:
-            info = bundle.gettarinfo(str(path), arcname=path.name)
-            info.mtime, info.uid, info.gid, info.uname, info.gname = 0, 0, 0, "", ""
-            with path.open("rb") as handle:
-                bundle.addfile(info, handle)
-    output = {"verdict": verdict, "results": rows, "findings": key_of(rows), "judged": judged,
-              "tests": len(rows)}
-    if keys is not None:
-        keys[CORPUS_OUTPUT] = key_of(document)
-    stored = LocalStore(store).commit(document, {"corpus": output}, {"corpus": ("log", lambda: log)})
-    if verdict != "pass":
-        bad = [row for row in rows if row[2] != "passed"]
-        print(f"artefact_store: CORPUS RED {package}: {len(bad)} row(s) not passed: "
-              + ", ".join(f"{row[0]} {row[1]} {row[2]}" for row in bad[:NAMED_FILES])
-              + (", ..." if len(bad) > NAMED_FILES else ""))
-    return stored
-
-
 # THE BENCH VERDICT (DN-142.D25 (5) calls D and E): a timing verdict run INSIDE the create of the
 # package that builds the benchmark, under the `user.malf:bench` conf step 0 sets, and recorded as a
 # generalized verdict of its own, `<package>/bench`. Its key is the build key, the helper that ran the
@@ -2473,11 +2395,10 @@ def bench_record(store: Path, build_key: str, package: str, package_id: str, pro
 
 
 # THE STEP'S OUTCOME (N359, DN-142.D19 (3), (8); plan H13): written LAST, once every record a step of
-# the walk writes (its package, its test verdict, its corpus and bench verdicts) was stored or matched,
+# the walk writes (its package, its test verdict, its bench verdict) was stored or matched,
 # so its existence says the step COMPLETED and its `records` name each of them by key. Its key is what
-# those records' keys add to the build key that the walk can know BEFORE the step runs: the corpus
-# legs and data the corpus gates document hands this package, for a package the bench document names
-# the runner its benchmarks would measure on, and the system member, the pinned image the step runs in,
+# those records' keys add to the build key that the walk can know BEFORE the step runs: for a package
+# the bench document names the runner its benchmarks would measure on, and the system member, the pinned image the step runs in,
 # carried by the outcome itself because a `stored: false` step holds no record at its build key
 # (DN-142.D14, DN-142.D30 E4). A step that failed, was refused,
 # crashed, timed out or judged nothing writes none (R6), so nothing of it can ever be served.
@@ -2487,8 +2408,8 @@ def bench_record(store: Path, build_key: str, package: str, package_id: str, pro
 # run always selects a test, DN-142.D13 (2)), when it is a `conan build` (its one product, DN-142.D14),
 # or when malf's helper promised its default selection, the `<package id>.corpus-listed.json` that
 # `run_tests` writes only once the tree enabled testing and before any test runs, past the guard that
-# fails a create whose enabled tree selects no test; the corpus verdict when the gates document names the
-# package; the bench verdict when the bench document does. A content-only package's create, which never
+# fails a create whose enabled tree selects no test; the bench verdict when the bench document names
+# the package. A content-only package's create, which never
 # reaches the helper's selection, promises no verdict. The outcome is `pass` only when the records it
 # names are exactly the expected ones and each passed; otherwise it is `incomplete` or `fail` and never
 # served. The set is an OUTPUT, not a key member: the helper's promise is made inside the act, and the
@@ -2497,22 +2418,15 @@ OUTCOME_KIND = "step-outcome"
 OUTCOME_OUTPUT = "outcome"
 EXPECTED_FIELD = "expected"
 VERDICT_OUTPUT = "verdict"
-CORPUS_OUTPUT = "corpus"
 SERVE_MISS = 3
 
 
-def outcome_document(build_key: str, package: str, profile: str, corpus_gates: Path | None) -> dict:
+def outcome_document(build_key: str, package: str, profile: str) -> dict:
     """The input document of `package`'s outcome at `build_key`, from what the walk hands the step."""
-    corpus = None
-    if corpus_gates is not None:
-        gates = json.loads(corpus_gates.read_text())
-        legs = gates.get("packages", {}).get(package)
-        corpus = {"legs": [{"leg": leg["leg"], "suites": sorted(leg["suites"])} for leg in legs],
-                  "data": gates["data"]} if legs else None
     bench_path = os.environ.get(BENCH_ENV)
     benched = bool(bench_path) and package in json.loads(Path(bench_path).read_text()).get("packages", [])
     return {"step": {"kind": OUTCOME_KIND, "package": package, "profile": profile}, "build": build_key,
-            "corpus": corpus, "bench": {"runner": bench_runner()} if benched else None, "system": system_member()}
+            "bench": {"runner": bench_runner()} if benched else None, "system": system_member()}
 
 
 def _record_verdict(record: dict) -> str:
@@ -2526,8 +2440,7 @@ def _record_verdict(record: dict) -> str:
 def expected_records(document: dict, packaged: bool, tested: bool) -> list[str]:
     """The records a step promised, sorted, from its outcome document and the two promises its caller
     read: `packaged` the step stores a package, `tested` it promised a test verdict."""
-    promised = {PACKAGE_OUTPUT: packaged, VERDICT_OUTPUT: tested, CORPUS_OUTPUT: document["corpus"] is not None,
-                BENCH_OUTPUT: document["bench"] is not None}
+    promised = {PACKAGE_OUTPUT: packaged, VERDICT_OUTPUT: tested, BENCH_OUTPUT: document["bench"] is not None}
     return sorted(name for name, made in promised.items() if made)
 
 
@@ -2543,14 +2456,14 @@ def record_set_defects(expected: list[str], records: dict) -> list[str]:
     return defects
 
 
-def outcome_record(store: Path, build_key: str, package: str, profile: str, corpus_gates: Path | None,
-                   keys: dict, packaged: bool, tested: bool) -> int:
+def outcome_record(store: Path, build_key: str, package: str, profile: str, keys: dict, packaged: bool,
+                   tested: bool) -> int:
     """Store or compare `package`'s outcome over the records `keys` names (every one already committed),
     declaring the set its step promised (`expected_records`).
     post: as LocalStore.commit; the outcome is `pass` only when `keys` names exactly the expected records
           and each passed, `incomplete` when the two sets differ (each difference printed), else `fail`."""
     local = LocalStore(store)
-    document = outcome_document(build_key, package, profile, corpus_gates)
+    document = outcome_document(build_key, package, profile)
     expected = expected_records(document, packaged, tested)
     verdicts = {name: _record_verdict(local.record(key)) for name, key in sorted(keys.items())}
     defects = record_set_defects(expected, keys)
@@ -2594,8 +2507,7 @@ def unservable(store: Path, document: dict, rejudge: bool) -> tuple[dict | None,
     return outcome, None
 
 
-def serve(store: Path, home: Path, key_first: Path, package: str, profile: str, ledger: Path,
-          corpus_gates: Path | None) -> int:
+def serve(store: Path, home: Path, key_first: Path, package: str, profile: str, ledger: Path) -> int:
     """`serve`: the step `key_first` names served from the store in place of executing it, when
     `unservable` finds nothing against it: its stored package restored into the walk's `home` (where the
     steps after it resolve, exactly as an executed step's recorded package is), and each of its records
@@ -2604,7 +2516,7 @@ def serve(store: Path, home: Path, key_first: Path, package: str, profile: str, 
           the restore."""
     document = json.loads(key_first.read_text())
     build_key = key_of(document)
-    outcome, why = unservable(store, outcome_document(build_key, package, profile, corpus_gates),
+    outcome, why = unservable(store, outcome_document(build_key, package, profile),
                               os.environ.get(REJUDGE_ENV) == "1")
     if outcome is None:
         print(f"artefact_store: EXECUTES {package} key {build_key}: {why}")
@@ -3806,7 +3718,7 @@ def selftest() -> int:
                 with contextlib.redirect_stdout(io.StringIO()) as out, \
                         contextlib.redirect_stderr(io.StringIO()) as err:
                     code = outcome_record(sstore, key_of(json.loads(key_first.read_text())), "ex_low", profile,
-                                          None, keys, packaged=True, tested=tested)
+                                          keys, packaged=True, tested=tested)
             finally:
                 os.environ.pop(TALLY_ENV, None)
                 if saved is not None:
@@ -3819,20 +3731,11 @@ def selftest() -> int:
             try:
                 with contextlib.redirect_stdout(io.StringIO()) as out, \
                         contextlib.redirect_stderr(io.StringIO()) as err:
-                    code = serve(sstore, into, key_first, "ex_low", profile, root / "serve.jsonl", None)
+                    code = serve(sstore, into, key_first, "ex_low", profile, root / "serve.jsonl")
             finally:
                 globals()["_conan_restore"] = saved
             return code, out.getvalue() + err.getvalue()
 
-        gates = root / "corpus_gates.json"
-        gates.write_text(json.dumps({"packages": {"ex_low": [{"leg": "sample", "suites": ["S", "R"],
-                                                              "environment": {"MOUNT": str(root / "mount")}}]},
-                                     "data": {"MOUNT": "d" * 64}}))
-        keyed = outcome_document(build_key, "ex_low", profile, gates)
-        expect("RED: a corpus leg's outcome member is its legs and suites and its data's digests, never the mount's "
-               "path, which no key may hold (step 0 run 39851092354: insight_canon refused)",
-               (keyed["corpus"], len(key_of(keyed))),
-               ({"legs": [{"leg": "sample", "suites": ["R", "S"]}], "data": {"MOUNT": "d" * 64}}, 64))
         code, printed = served(root / "walk-miss")
         expect("RED: a key the store never completed EXECUTES, naming why, and nothing is restored",
                (code, "EXECUTES ex_low key" in printed and "no completed step at this key" in printed,
@@ -3840,7 +3743,7 @@ def selftest() -> int:
         code, printed = outcome_with({PACKAGE_OUTPUT: build_key, "verdict": verdict_key}, "counted 0\n")
         expect("a completed step's outcome is stored LAST, naming each record by key, its verdict the records'",
                (code, LocalStore(sstore).record(key_of(outcome_document(
-                   key_of(json.loads(key_first.read_text())), "ex_low", profile, None)))["outputs"][OUTCOME_OUTPUT]
+                   key_of(json.loads(key_first.read_text())), "ex_low", profile)))["outputs"][OUTCOME_OUTPUT]
                 ["records"]), (0, {PACKAGE_OUTPUT: build_key, "verdict": verdict_key}))
         code, printed = served(root / "walk-served")
         cold = root / "walk-cold"
@@ -3895,7 +3798,7 @@ def selftest() -> int:
             if LocalStore(sstore).record(name[:-len(".json")])["inputs"]["step"].get("kind") == OUTCOME_KIND:
                 (sstore / "records" / name).unlink()
         code, printed = outcome_with({PACKAGE_OUTPUT: build_key}, "counted 0\n")
-        outcome_key = key_of(outcome_document(key_of(json.loads(key_first.read_text())), "ex_low", profile, None))
+        outcome_key = key_of(outcome_document(key_of(json.loads(key_first.read_text())), "ex_low", profile))
         stored_outcome = LocalStore(sstore).record(outcome_key)["outputs"][OUTCOME_OUTPUT]
         expect("RED (DN-142.D31 (1), the serve hole): a step that promised a verdict and names its package alone "
                "is stored `incomplete`, declaring both records, and is never served",
@@ -3910,12 +3813,12 @@ def selftest() -> int:
         expect("RED: an outcome whose records lack an expected one is never served, whatever verdict it states",
                (code, "its outcome lacks the record(s) it expected: verdict" in printed), (SERVE_MISS, True))
         forged["outputs"][OUTCOME_OUTPUT]["records"] = {PACKAGE_OUTPUT: build_key, VERDICT_OUTPUT: verdict_key,
-                                                         CORPUS_OUTPUT: verdict_key}
+                                                         "stray": verdict_key}
         forged["outputs"][OUTCOME_OUTPUT][EXPECTED_FIELD] = [PACKAGE_OUTPUT, VERDICT_OUTPUT]
         record_path.write_text(json.dumps(forged))
         code, printed = served(root / "walk-undeclared")
         expect("RED: an outcome naming a record its step never promised is never served",
-               (code, "its outcome names record(s) its step never promised: corpus" in printed), (SERVE_MISS, True))
+               (code, "its outcome names record(s) its step never promised: stray" in printed), (SERVE_MISS, True))
         del forged["outputs"][OUTCOME_OUTPUT][EXPECTED_FIELD]
         record_path.write_text(json.dumps(forged))
         code, printed = served(root / "walk-undeclaring")
@@ -3936,14 +3839,14 @@ def selftest() -> int:
         try:
             with contextlib.redirect_stdout(io.StringIO()):
                 written = (verdict_record(ystore, unheld, "ex_low", "pid", profile, malf_dir, yresults, {}, True, [], ykeys),
-                           outcome_record(ystore, unheld, "ex_low", profile, None, ykeys,
+                           outcome_record(ystore, unheld, "ex_low", profile, ykeys,
                                           packaged=False, tested=True))
         finally:
             os.environ.pop(TALLY_ENV, None)
             if saved is not None:
                 os.environ[TALLY_ENV] = saved
         yrecords = [LocalStore(ystore).record(key) for key in
-                    (ykeys.get("verdict"), key_of(outcome_document(unheld, "ex_low", profile, None)))]
+                    (ykeys.get("verdict"), key_of(outcome_document(unheld, "ex_low", profile)))]
         expect("RED-FIRST (DN-142.D30 E4): a test verdict and a step outcome each carry the pinned system member "
                "themselves, with no record held at their build key",
                (written, [((record or {}).get("inputs") or {}).get("system") for record in yrecords]),
@@ -4057,12 +3960,11 @@ def main(argv: list[str]) -> int:
     if len(argv) == 3 and argv[0] == "toolchain":
         Path(argv[2]).write_text(json.dumps(measure_toolchain(Path(argv[1])), sort_keys=True))
         return 0
-    if len(argv) in (9, 10, 11) and argv[0] == "conan-step":
+    if len(argv) in (9, 10) and argv[0] == "conan-step":
         try:
             return conan_step(Path(argv[1]), Path(argv[2]), Path(argv[3]), argv[4], argv[5],
                               Path(argv[6]), Path(argv[7]), tuple(argv[8].split()),
-                              Path(argv[9]) if len(argv) >= 10 else None,
-                              Path(argv[10]) if len(argv) == 11 else None)
+                              Path(argv[9]) if len(argv) == 10 else None)
         except Refused as refused:
             print(f"artefact_store: REFUSED {refused}", file=sys.stderr)
             return 1
@@ -4133,9 +4035,8 @@ def main(argv: list[str]) -> int:
     if len(argv) in (6, 8) and argv[0] == "restore":
         return restore(Path(argv[1]), Path(argv[2]), json.loads(Path(argv[3]).read_text()), Path(argv[4]),
                        argv[5], (Path(argv[6]), Path(argv[7])) if len(argv) == 8 else None)
-    if len(argv) in (7, 8) and argv[0] == "serve":
-        return serve(Path(argv[1]), Path(argv[2]), Path(argv[3]), argv[4], argv[5], Path(argv[6]),
-                     Path(argv[7]) if len(argv) == 8 else None)
+    if len(argv) == 7 and argv[0] == "serve":
+        return serve(Path(argv[1]), Path(argv[2]), Path(argv[3]), argv[4], argv[5], Path(argv[6]))
     if len(argv) == 2 and argv[0] == "restore-ledger":
         print(restore_ledger(Path(argv[1])))
         return 0
