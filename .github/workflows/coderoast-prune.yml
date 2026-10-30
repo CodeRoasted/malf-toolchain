@@ -54,12 +54,12 @@ jobs:
     steps:
       - name: malf at this workflow's commit, as git (store_transport.py)
         id: malf
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@c46a2e7e393f9bea560e1dd5b4019ba798262eaa
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@afda850da7d017d015bd16e26d7bcf9e0815336f
         with:
           workflow: coderoast-prune.yml
 
       - name: The pinned gh the cut run is read through
-        uses: CodeRoasted/malf-toolchain/.github/actions/setup-gh@c46a2e7e393f9bea560e1dd5b4019ba798262eaa
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-gh@afda850da7d017d015bd16e26d7bcf9e0815336f
 
       - name: The keep-set of a successful superproject cut run, held to the dispatcher's digest (GATING)
         env:
