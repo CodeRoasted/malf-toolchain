@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # conan-home.sh <persistent: true|false> — setup-build-env's CONAN_HOME, printed on stdout.
 #
-# false (every consumer but step 0): `<workspace>/.conan2`, which `actions/cache` restores and saves.
+# false (every consumer but the cut's release-seat jobs): `<workspace>/.conan2`, which `actions/cache` restores and saves.
 #
 # true (DN-119.D2): ONE home per runner, OUTSIDE the checkout, under the runner user's own HOME, so it
 # outlives the job and `actions/checkout`'s `git clean -ffdx` never empties it. Measured over step 0's

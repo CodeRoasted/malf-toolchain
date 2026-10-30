@@ -2,9 +2,9 @@ name: CodeRoast golden compare
 
 # The determinism golden's verdict, as a reusable workflow: download every leg's
 # `golden-digest-*` artifact of THIS run, require them byte-identical through the
-# `coderoast-golden-compare` action, and upload the agreed digest and its sha256 as
-# `determinism-golden` — the artifact `coderoast-attach-golden.yml` publishes and step 0 ingests. One body for every engine's `golden.yaml`
-# (canon, metalog, eidos) instead of one copy each. The proof legs that produce the digests stay
+# `coderoast-golden-compare` action, and upload the agreed digest as `determinism-golden` — the
+# artifact the caller's candidate ingests (`artefact_store.py candidate-ingest`). One body for every
+# engine's `golden.yaml` (canon, metalog, eidos) instead of one copy each. The proof legs that produce the digests stay
 # in the callers: each engine proves a different harness.
 #
 # THE PRODUCER-SIDE CONFORMANCE GATE IS AN INPUT, NOT A FORK. A caller that publishes MetaLog
@@ -52,9 +52,8 @@ jobs:
 
       # The STANDARD the producer declares it writes against, plus the validator SPEC §8 clause 1
       # calls "the test" — which since v0.9.0 also decides clause 4. PUBLIC + anonymous, so the
-      # caller stays forkable. The caller passes `main` off a pre-tag reading's `subjects` answer, or
-      # the commit step 0 recorded on the pre-tag reading: metalog-spec is on a deliberately
-      # decoupled version line and never carries the uniform vX.Y.Z tag, so a tag ref would 404.
+      # caller stays forkable. The caller passes `main`, its `subjects` answer: metalog-spec is on a
+      # deliberately decoupled version line and never carries the uniform vX.Y.Z tag, so a tag ref would 404.
       - name: Check out metalog-spec into _spec/ (the schema + its validator; PUBLIC, anonymous)
         if: ${{ inputs.spec-ref != '' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -99,19 +98,9 @@ jobs:
           GOLDEN: ${{ github.workspace }}/determinism-golden.txt
           SPEC_ROOT: ${{ github.workspace }}/_spec
 
-      # THE JOB'S OWN READING OF THE BYTES RIDES INSIDE THE ARTIFACT, as a file and never as a job
-      # output (the secret masker can drop an output silently): step 0 ingests this artifact only
-      # when three producers agree — this sha256, GitHub's artifact digest, and its own
-      # recomputation (the N360 plan's item A4, DN-142.D20 (2)).
-      - name: Write the golden's sha256 beside it
-        shell: bash
-        run: sha256sum determinism-golden.txt | tee determinism-golden.txt.sha256
-
-      - name: Upload the validated golden and its sha256 (the Release attaches the golden)
+      - name: Upload the validated golden (the candidate ingests it)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: determinism-golden
-          path: |
-            determinism-golden.txt
-            determinism-golden.txt.sha256
+          path: determinism-golden.txt
           if-no-files-found: error

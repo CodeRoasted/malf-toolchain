@@ -119,7 +119,7 @@ seat's rootless dockerd gives a container no cgroup of its own, so the docker un
 
 The rootful daemon's socket is `root:docker 0660`, so membership of `docker` is root on the host
 (`docker run -v /:/host`): every process of the desk account, every agent lane included, could read
-the release runner account's store-writer credential whatever its home's mode (`DN-142.D6`, R1). The
+the release runner account's registration credential whatever its home's mode (`DN-142.D6`, R1). The
 desk therefore runs a rootless dockerd of its own, as the runners do, and leaves the group (the
 Founder, 2026-10-10).
 
@@ -142,8 +142,8 @@ The two steps that need root, in this order:
 
 Then, from a fresh terminal, `bash malf/runner/desk-rootless-docker.sh --prove`: no `docker` group,
 the rootful socket refuses the account, the rootless daemon answers, and a container bind-mounting
-`/home/ghrelease` or `/` — unprivileged and `--privileged` — reads neither the writer's credential
-nor `/etc/shadow`, each refusal paired with a control read of the account's own file.
+`/home/ghrelease` or `/` — unprivileged and `--privileged` — reads neither the release runner's
+credential (`actions-runner-release/.credentials`) nor `/etc/shadow`, each refusal paired with a control read of the account's own file.
 
 **What this does not close, and the proof prints it as RESIDUAL:** WSL interop. `wsl.exe -u root`
 answers uid 0, with no password, to any process of the desk account (measured 2026-10-10), because

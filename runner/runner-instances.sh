@@ -14,7 +14,7 @@
 #   ci       malf-runner, account ghrunner  — every private repository's CI, the corpus collector.
 #            Moved off the desk account (ROADMAP N214); its lifecycle is a MOVE of a runner the
 #            desk registered.
-#   release  malf-release, account ghrelease — step 0 (pharos-build.yml) and every release job.
+#   release  malf-release, account ghrelease — the cut (cut.yml), whose runner group admits nothing else.
 #            Its lifecycle is a fresh INSTALL: this box never had a runner under that account.
 
 ORG="CodeRoasted"

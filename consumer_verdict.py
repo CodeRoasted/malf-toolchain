@@ -77,7 +77,6 @@ from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import artefact_store  # noqa: E402 — a sibling module, located from this file
-import store_manifest  # noqa: E402 — a sibling module, located from this file
 
 NAME = "consumer"
 ACT_ARGV = ["consumer_verdict.py", "prepare", "conclude"]
@@ -302,8 +301,8 @@ def prepare(store: Path, steps: list[dict], package: str, entry: str, repository
     work.mkdir(parents=True)
     executable = Path(entry).name
     try:
-        store_manifest.extract(store / "objects" / output["transport"], entry, held[entry], work / executable)
-    except store_manifest.Refused as refused:
+        artefact_store.extract(store / "objects" / output["transport"], entry, held[entry], work / executable)
+    except artefact_store.Refused as refused:
         raise Refused(str(refused)) from refused
     (work / executable).chmod(0o755)
     baseline, tree = baseline_at(repository, commit, package_path, work)

@@ -3,16 +3,15 @@
 
 DN-142.D9 (the Founder, 2026-10-10, N360 plan ruling R-5): an image is a build step whose inputs are
 stored bytes, built once and stored as an object; the tag's publish copies that archive to the
-registry by digest and builds nothing. DN-142.D33 (3) moves the build from step 0 into the image's
-repository's candidate store job (`candidate`, below); step 0's `build` stays until that path retires
-(DN-142.D33 slice (f)). Its inputs, each identified by bytes or a git object:
-  * every executable the image carries, by its ENTRY DIGEST in the create record of its package
-    (step 0: this run's; a candidate: its ship-form create), written from the stored transport and
-    verified against that digest (a stripped, runpath-free published entry, DN-142.D20 (3), DN-142.D22);
-  * every runtime library the image declares, resolved by the ship compiler
-    (`<cxx> -print-file-name=<name>`, symlinks followed) and identified by its SHA-256;
-  * the image's repository tree at the commit step 0 recorded, exported with `git archive` (never
-    the disk): its Dockerfile and every file the Dockerfile copies. The base image is the
+registry by digest and builds nothing. DN-142.D33 (3): it is built in the image's repository's
+candidate store job (`candidate`, below). Its inputs, each identified by bytes or a git object:
+  * every executable the image carries, by its ENTRY DIGEST in the candidate's ship-form create record
+    of its package, written from the stored transport and verified against that digest (a stripped,
+    runpath-free published entry, DN-142.D20 (3), DN-142.D22);
+  * every runtime library the image declares, resolved by the ship compiler inside the pinned build
+    environment (`<cxx> -print-file-name=<name>`, symlinks followed) and identified by its SHA-256;
+  * the image's repository tree at the candidate's commit, exported with `git archive` (never the
+    disk): its Dockerfile and every file the Dockerfile copies. The base image is the
     Dockerfile's own `FROM … @sha256:` line, so the tree carries it.
 
 THE STAGING CONTRACT, which the Dockerfile copies from: the build context is that export, plus
@@ -30,17 +29,14 @@ THE ARCHIVE IS JUDGED BEFORE IT IS STORED: one manifest in its index, for linux/
 blob the manifest names present and hashing to its digest, so the publish side can push it verbatim
 and the registry's digest is the archive's.
 
-    store_image.py build <store> <plan.json> <steps.json> <image> <repository dir> <commit> <cxx> <run> <scratch>
-        builds the image the plan declares, stores the archive and its record; the record's line is
-        `artefact_store: STORED <image> image key <key> image manifest sha256:<digest>`. Exit 0
-        stored, 1 refused (the reason on stderr, nothing stored)
     store_image.py candidate <store> <repository dir> <run> <scratch>
         a repository's CANDIDATE store job (DN-142.D33 (3)): every image the repository's packages.yml at
         HEAD declares under `images:`, built from the ship-form create records of <store> (exactly one per
         package an `image` site names, its entry digest verified) and the runtime libraries the PINNED
         BUILD ENVIRONMENT's ship compiler resolves (the compiler runs in the image, never on the runner,
-        whose host carries no gcc-16), then stored as above; a repository declaring no image stores
-        nothing and exits 0
+        whose host carries no gcc-16), then stored under a record addressed by <run>; the record's line is
+        `artefact_store: STORED <image> image key <key> image manifest sha256:<digest>`; a repository
+        declaring no image stores nothing and exits 0; exit 1 refused (the reason on stderr, nothing stored)
     store_image.py selftest
         every refusal and the stored record, with a fake builder (no docker)
 
@@ -52,9 +48,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-import os
 import re
-import shutil
 import subprocess
 import sys
 import tarfile
@@ -64,7 +58,6 @@ from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import artefact_store  # noqa: E402 — a sibling module, located from this file
-import store_manifest  # noqa: E402 — a sibling module, located from this file
 
 STAGING = ".store-image"
 RUNTIME = "runtime"
@@ -151,15 +144,6 @@ def judge_archive(archive: Path) -> tuple[str, list[list[str]]]:
     return descriptor["digest"], sorted({tuple(entry): entry for entry in entries}.values())
 
 
-def _plan_image(plan: dict, image: str) -> tuple[str, dict]:
-    """(the repository that declares `image`, its plan entry)."""
-    found = [(repo, body["images"][image]) for repo, body in sorted(plan.get("repositories", {}).items())
-             if image in (body.get("images") or {})]
-    if len(found) != 1:
-        raise Refused(f"the plan declares the image {image!r} in {len(found)} repositories, not one")
-    return found[0]
-
-
 def _export(repository: Path, commit: str, into: Path) -> str:
     """The repository's tree at `commit`, written under `into`; its git tree id."""
     tree = subprocess.run(["git", "-C", str(repository), "rev-parse", f"{commit}^{{tree}}"],
@@ -187,46 +171,15 @@ def _inside(member: tarfile.TarInfo, destination: str) -> tarfile.TarInfo | None
         return None
 
 
-def _runtime(cxx: str, name: str, into: Path) -> str:
-    """The runtime library `name` the compiler resolves, copied (symlinks followed) into `into`;
-    its SHA-256."""
-    asked = subprocess.run([cxx, f"-print-file-name={name}"], capture_output=True, text=True, check=False)
-    resolved = Path(asked.stdout.strip())
-    if asked.returncode != 0 or not resolved.is_absolute() or not resolved.is_file():
-        raise Refused(f"{cxx} does not resolve the runtime {name}: it answered {asked.stdout.strip()!r}")
-    target = into / name
-    shutil.copyfile(resolved.resolve(), target)
-    return artefact_store.file_sha256(target)
-
-
 # A package's create record for an image, as the caller finds it: (its key, the record), or None.
 Created = Callable[[str], "tuple[str, dict] | None"]
 # A runtime library resolved into a directory: (name, directory) -> its SHA-256.
 Resolver = Callable[[str, Path], str]
 
 
-def build(store: Path, plan: dict, steps: list[dict], image: str, repository: Path, commit: str,
-          cxx: str, run: str, scratch: Path, builder: Builder = docker_build) -> int:
-    """Build `image` from this step-0 run's stored entries and store it; artefact_store.LocalStore's
-    exit: 0 stored (a new run is always a new key)."""
-    repo, declared = _plan_image(plan, image)
-    if repository.resolve().name != repo and repository.name != repo:
-        raise Refused(f"the image {image} is {repo}'s, and the repository given is {repository.name}")
-    by_id = {step["id"]: step for step in steps}
-    local = artefact_store.LocalStore(store)
-
-    def created(package: str) -> tuple[str, dict] | None:
-        step = by_id.get(f"{package}/package")
-        record = local.record(step["key"]) if step else None
-        return (step["key"], record) if record is not None else None
-
-    return _assemble(store, image, repo, declared, created, "step 0 stored no {package} package in this run",
-                     repository, commit, lambda name, into: _runtime(cxx, name, into), run, scratch, builder)
-
-
-def _assemble(store: Path, image: str, repo: str, declared: dict, created: Created, absent: str,
-              repository: Path, commit: str, resolve: Resolver, run: str, scratch: Path, builder: Builder) -> int:
-    """The image step itself, whatever found its package records: the context exported at `commit`,
+def _assemble(store: Path, image: str, repo: str, declared: dict, created: Created, repository: Path, commit: str,
+              resolve: Resolver, run: str, scratch: Path, builder: Builder) -> int:
+    """The image step itself: the context exported at `commit`,
     each executable staged from its create record's transport at its entry digest, each runtime library
     resolved, the archive built, judged and stored under a record addressed by `run`."""
     if not RUN_ID.match(run):
@@ -245,7 +198,7 @@ def _assemble(store: Path, image: str, repo: str, declared: dict, created: Creat
         package, entry = executable["package"], executable["entry"]
         found = created(package)
         if found is None:
-            raise Refused(f"{image}: " + absent.format(package=package))
+            raise Refused(f"{image}: the candidate holds no ship-form create of {package}")
         key, record = found
         output = record["outputs"]["package"]
         held = {path: digest for path, _mode, digest in output["entries"]}
@@ -254,8 +207,8 @@ def _assemble(store: Path, image: str, repo: str, declared: dict, created: Creat
         target = staged / entry
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
-            store_manifest.extract(store / "objects" / output["transport"], entry, held[entry], target)
-        except store_manifest.Refused as refused:
+            artefact_store.extract(store / "objects" / output["transport"], entry, held[entry], target)
+        except artefact_store.Refused as refused:
             raise Refused(f"{image}: {refused}") from refused
         target.chmod(0o755)
         executables.append({"package": package, "entry": entry, "digest": held[entry], "record": key})
@@ -375,8 +328,7 @@ def candidate(store: Path, repository: Path, run: str, scratch: Path, builder: B
     resolver = resolve if resolve is not None else image_runtime(ship_compiler())
     worst = 0
     for image, declared in sorted(images.items()):
-        worst = max(worst, _assemble(store, image, repository.resolve().name, declared, created,
-                                     "the candidate holds no ship-form create of {package}", repository, commit,
+        worst = max(worst, _assemble(store, image, repository.resolve().name, declared, created, repository, commit,
                                      resolver, run, scratch / image, builder))
     return worst
 
@@ -416,9 +368,8 @@ def _layout(manifest_extra: dict | None = None, platform: str = PLATFORM, drop_l
     return write
 
 
-def _fixture(root: Path) -> tuple[Path, dict, list[dict], Path, str, str]:
-    """A store holding a server package with one published entry, the plan declaring its image, the
-    run's steps, the image's repository at a commit, and a fake compiler resolving one runtime."""
+def _fixture(root: Path) -> tuple[Path, Path]:
+    """A store holding a server package with one published entry, and the image's repository at a commit."""
     store = root / "store"
     (store / "objects").mkdir(parents=True)
     (store / "records").mkdir()
@@ -437,7 +388,6 @@ def _fixture(root: Path) -> tuple[Path, dict, list[dict], Path, str, str]:
         {"key": key, "inputs": document,
          "outputs": {"package": {"content": artefact_store.key_of(entries), "entries": entries,
                                  "transport": transport}}}))
-    steps = [{"id": "server_pkg/package", "key": key, "verdict": None}]
     repository = root / "server-repo"
     repository.mkdir()
     git = ["git", "-C", str(repository), "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
@@ -447,21 +397,7 @@ def _fixture(root: Path) -> tuple[Path, dict, list[dict], Path, str, str]:
     (repository / "NOTICE").write_text("notice\n")
     subprocess.run([*git, "add", "."], check=True)
     subprocess.run([*git, "commit", "-q", "-m", "fixture"], check=True)
-    commit = subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
-    runtime = root / "toolchain" / "lib64" / "libstdc++.so.6.0.36"
-    runtime.parent.mkdir(parents=True)
-    runtime.write_bytes(b"runtime bytes")
-    (runtime.parent / "libstdc++.so.6").symlink_to(runtime.name)
-    cxx = root / "toolchain" / "g++"
-    cxx.write_text(f"#!/bin/sh\ncase \"$1\" in -print-file-name=libstdc++.so.6) echo {runtime.parent}/libstdc++.so.6;;"
-                   f" *) echo \"$1\" | sed 's/-print-file-name=//';; esac\n")
-    cxx.chmod(0o755)
-    plan = {"format": store_manifest.PLAN_FORMAT, "visibility": {"server-repo": "private"},
-            "repositories": {"server-repo": {"assets": [],
-        "images": {"server-image": {"dockerfile": "docker/Dockerfile", "runtime": ["libstdc++.so.6"],
-                                    "executables": [{"package": "server_pkg", "entry": "bin/server",
-                                                     "source": "server-repo"}]}}}}}
-    return store, plan, steps, repository, commit, str(cxx)
+    return store, repository
 
 
 CANDIDATE_PACKAGES = """\
@@ -480,7 +416,7 @@ packages:
 def _candidate_fixture(root: Path, packages: str, ship: bool = True) -> tuple[Path, Path]:
     """`_fixture`'s store and repository, the create record turned into a candidate's ship-form create and
     the repository committing `packages` as its packages.yml (its directory named `server-repo`)."""
-    store, _plan, _steps, repository, _commit, _cxx = _fixture(root)
+    store, repository = _fixture(root)
     record_path = next((store / "records").iterdir())
     body = json.loads(record_path.read_text())
     if ship:
@@ -574,12 +510,17 @@ def selftest() -> int:
         return [json.loads(path.read_text()) for path in sorted((store / "records").glob("*.json"))
                 if json.loads(path.read_text())["inputs"]["step"]["kind"] == IMAGE_KIND]
 
+    quiet: Callable[[str], None] = lambda _line: None  # noqa: E731 — a sink for the verb's lines
+
+    def built(store: Path, repository: Path, run: str, scratch: Path, builder: Builder = _layout()) -> Callable:
+        return lambda: candidate(store, repository, run, scratch, builder, _fake_runtime, quiet)
+
     with tempfile.TemporaryDirectory() as scratch:
         root = Path(scratch)
-        store, plan, steps, repository, commit, cxx = _fixture(root / "a")
+        store, repository = _candidate_fixture(root / "a", CANDIDATE_PACKAGES)
+        ship = next(json.loads(path.read_text())["key"] for path in (store / "records").glob("*.json"))
         arm("the image is built from the stored entry and the resolved runtime, and stored",
-            lambda: build(store, plan, steps, "server-image", repository, commit, cxx, "run-1",
-                          root / "s1", _layout()), None)
+            built(store, repository, "run-1", root / "s1"), None)
         stored = records(store)
         if len(stored) != 1:
             failures.append(f"{len(stored)} image record(s) stored, want 1")
@@ -594,70 +535,54 @@ def selftest() -> int:
                 with tarfile.open(fileobj=io.BytesIO(layer.read())) as staged:
                     files = {member.name: staged.extractfile(member).read() for member in staged if member.isfile()}
             want_files = {f"{STAGING}/bin/server": b"\x7fELF server bytes",
-                          f"{STAGING}/{RUNTIME}/libstdc++.so.6": b"runtime bytes"}
+                          f"{STAGING}/{RUNTIME}/libstdc++.so.6": b"image runtime bytes"}
             if files != want_files:
                 failures.append(f"the image's context staged {sorted(files)}, want {sorted(want_files)} with their bytes")
             document = body["inputs"]
             if document["executables"] != [{"package": "server_pkg", "entry": "bin/server",
                                              "digest": hashlib.sha256(b"\x7fELF server bytes").hexdigest(),
-                                             "record": steps[0]["key"]}] or \
-                    document["runtime"] != {"libstdc++.so.6": hashlib.sha256(b"runtime bytes").hexdigest()} or \
+                                             "record": ship}] or \
                     document["run"] != "run-1" or body["outputs"]["image"]["manifest"] != f"sha256:{digest}":
                 failures.append(f"the image record does not name its inputs and manifest: {json.dumps(body)[:400]}")
         arm("a second build of the same inputs is a second record, addressed by its run, never a compare",
-            lambda: build(store, plan, steps, "server-image", repository, commit, cxx, "run-2",
-                          root / "s2", _layout()), None)
+            built(store, repository, "run-2", root / "s2"), None)
         if len(records(store)) != 2:
             failures.append(f"two runs stored {len(records(store))} image record(s), want 2")
 
-        arm("an image no repository of the plan declares is refused",
-            lambda: build(store, plan, steps, "no-image", repository, commit, cxx, "run-3", root / "s3", _layout()),
-            "in 0 repositories")
-        arm("an image whose package step 0 did not store in this run is refused",
-            lambda: build(store, plan, [], "server-image", repository, commit, cxx, "run-4", root / "s4", _layout()),
-            "stored no server_pkg package in this run")
-        bad = json.loads(json.dumps(plan))
-        bad["repositories"]["server-repo"]["images"]["server-image"]["executables"][0]["entry"] = "bin/other"
-        arm("an executable the stored package does not hold is refused",
-            lambda: build(store, bad, steps, "server-image", repository, commit, cxx, "run-5", root / "s5", _layout()),
-            "holds no entry bin/other")
         arm("an archive whose index names two manifests is refused",
-            lambda: build(store, plan, steps, "server-image", repository, commit, cxx, "run-6", root / "s6",
-                          _layout(manifests=2)), "names 2 manifests")
+            built(store, repository, "run-6", root / "s6", _layout(manifests=2)), "names 2 manifests")
         arm("an archive for another platform is refused",
-            lambda: build(store, plan, steps, "server-image", repository, commit, cxx, "run-7", root / "s7",
-                          _layout(platform="linux/arm64")), "not an image manifest for linux/amd64")
+            built(store, repository, "run-7", root / "s7", _layout(platform="linux/arm64")),
+            "not an image manifest for linux/amd64")
         arm("an archive missing a blob its manifest names is refused",
-            lambda: build(store, plan, steps, "server-image", repository, commit, cxx, "run-8", root / "s8",
-                          _layout(drop_layer=True)), "holds no blob for its layer 0")
-        arm("a run identity that is not one is refused",
-            lambda: build(store, plan, steps, "server-image", repository, commit, cxx, "/tmp/x", root / "s9",
-                          _layout()), "is not a run identity")
+            built(store, repository, "run-8", root / "s8", _layout(drop_layer=True)), "holds no blob for its layer 0")
+        arm("a run identity that is not one is refused", built(store, repository, "/tmp/x", root / "s9"),
+            "is not a run identity")
         if len(records(store)) != 2:
             failures.append(f"a refused build stored a record: {len(records(store))} image record(s), want 2")
 
-        tampered_store, tampered_plan, tampered_steps, tampered_repo, tampered_commit, tampered_cxx = _fixture(root / "b")
-        transport = next((tampered_store / "objects").iterdir())
-        data = bytearray(transport.read_bytes())
-        transport.write_bytes(bytes(data))
-        record_path = next((tampered_store / "records").iterdir())
+        other, other_repository = _candidate_fixture(
+            root / "b", CANDIDATE_PACKAGES.replace("bin/server:", "bin/other:"))
+        arm("an executable the stored package does not hold is refused",
+            built(other, other_repository, "run-5", root / "s5"), "holds no entry bin/other")
+
+        tampered, tampered_repository = _candidate_fixture(root / "c", CANDIDATE_PACKAGES)
+        record_path = next((tampered / "records").iterdir())
         body = json.loads(record_path.read_text())
         body["outputs"]["package"]["entries"][0][2] = "e" * 64
         record_path.write_text(json.dumps(body))
         arm("an entry whose stored bytes differ from the record's digest is refused",
-            lambda: build(tampered_store, tampered_plan, tampered_steps, "server-image", tampered_repo,
-                          tampered_commit, tampered_cxx, "run-10", root / "s10", _layout()), "hashes to")
+            built(tampered, tampered_repository, "run-10", root / "s10"), "hashes to")
 
-        staged_store, staged_plan, staged_steps, staged_repo, _commit, staged_cxx = _fixture(root / "c")
-        (staged_repo / STAGING).mkdir()
-        (staged_repo / STAGING / "planted").write_text("x\n")
-        subprocess.run(["git", "-C", str(staged_repo), "-c", "user.name=t", "-c", "user.email=t@t",
+        planted, planted_repository = _candidate_fixture(root / "d", CANDIDATE_PACKAGES)
+        (planted_repository / STAGING).mkdir()
+        (planted_repository / STAGING / "planted").write_text("x\n")
+        subprocess.run(["git", "-C", str(planted_repository), "-c", "user.name=t", "-c", "user.email=t@t",
                         "-c", "commit.gpgsign=false", "add", "."], check=True)
-        subprocess.run(["git", "-C", str(staged_repo), "-c", "user.name=t", "-c", "user.email=t@t",
+        subprocess.run(["git", "-C", str(planted_repository), "-c", "user.name=t", "-c", "user.email=t@t",
                         "-c", "commit.gpgsign=false", "commit", "-q", "-m", "plant"], check=True)
         arm("a tree that tracks the staging directory is refused",
-            lambda: build(staged_store, staged_plan, staged_steps, "server-image", staged_repo, "HEAD",
-                          staged_cxx, "run-11", root / "s11", _layout()), "tracks .store-image/")
+            built(planted, planted_repository, "run-11", root / "s11"), "tracks .store-image/")
 
         candidate_arms(arm, failures, root / "candidate")
 
@@ -673,9 +598,6 @@ def main(argv: list[str]) -> int:
             return selftest()
         if len(argv) == 5 and argv[0] == "candidate":
             return candidate(Path(argv[1]), Path(argv[2]), argv[3], Path(argv[4]))
-        if len(argv) == 10 and argv[0] == "build":
-            return build(Path(argv[1]), json.loads(Path(argv[2]).read_text()), json.loads(Path(argv[3]).read_text()),
-                         argv[4], Path(argv[5]), argv[6], argv[7], argv[8], Path(argv[9]))
     except Refused as refused:
         print(f"store_image: REFUSED — {refused}", file=sys.stderr)
         return 1

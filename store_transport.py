@@ -8,8 +8,8 @@ runner's disk is only a cache (the Founder's item 6): PUSH writes every object a
 store to the package whatever the runner; a READ pulls by digest into a content-addressed cache, judging
 every byte by its SHA-256, so a stale or foreign cache entry is a miss; the no-op test reads ghcr only.
 
-The tags (DN-142.D31 (3)): `sha256-<hex>` one object (the manifest step 0's replica writes, byte for
-byte, so the two writers share a tag); `record-<key>` one record, its file's bytes as the one layer;
+The tags (DN-142.D31 (3)): `sha256-<hex>` one object (store_replica's canonical object manifest);
+`record-<key>` one record, its file's bytes as the one layer;
 `candidate-<candidate key>` the index, pushed LAST and only after the run attested it;
 `mismatch-<key>-<first 54 hex of the record's manifest digest>` a second record at an existing key whose
 compared outputs differ (64 hex would make a 138-character tag, and OCI caps a tag at 128).
@@ -70,9 +70,6 @@ package's privacy and every read judged by digest.
         deleting nothing, on an unreadable, foreign-schema or empty keep-set and on a kept candidate the store
         does not hold. Env: GITHUB_TOKEN, the repository's own, whose repository holds the Admin role on the
         package (granted by default to the repository whose workflow first published it).
-    store_transport.py owns-store <checkout> <commit>
-        exit 0 when the repository at <commit> carries `.github/workflows/candidate.yml` (it owns its
-        store, DN-142.D31 (3)), 3 when it does not
     store_transport.py selftest
         every verb against an in-process registry, a fixture API and recorded-shape attestations; no network
 
@@ -233,14 +230,6 @@ def _git(checkout: Path, *argv: str) -> str:
 def checkout_identity(checkout: Path) -> tuple[str, str]:
     """(commit, tree) of the checkout's HEAD."""
     return _git(checkout, "rev-parse", "HEAD"), _git(checkout, "rev-parse", "HEAD^{tree}")
-
-
-def owns_store(checkout: Path, commit: str) -> bool:
-    """The repository owns its store at `commit` when its tree carries its own candidate workflow, the
-    one writer of `store-<repo>` (DN-142.D31 (3), (4)); without it, its package is step 0's replica."""
-    done = subprocess.run(["git", "-C", str(checkout), "cat-file", "-e", f"{commit}:{CANDIDATE_WORKFLOW}"],
-                          capture_output=True, check=False)
-    return done.returncode == 0
 
 
 def read_upstream(path: str | None) -> dict[str, str]:
@@ -643,7 +632,7 @@ def _put(registry: Registry, reference: str, manifest: bytes, blobs: list[bytes]
 
 
 def push_object(registry: Registry, store: Path, hex_digest: str, say: Callable[[str], None]) -> str:
-    """An object by its digest, under the manifest step 0's replica writes; never rewritten."""
+    """An object by its digest, under store_replica's canonical object manifest; never rewritten."""
     source = store / "objects" / hex_digest
     if not source.is_file() or artefact_store.file_sha256(source) != hex_digest:
         raise Refused(f"the store does not hold object {hex_digest} whole, and a record names it")
@@ -953,8 +942,8 @@ def package_view(get: Callable[[str], "tuple[int, dict]"], owner: str) -> Callab
 
 
 def own_expected(get: Callable[[str], "tuple[int, dict]"], owner: str, name: str) -> store_replica.Expected:
-    """What the repository's own store package must be (store_replica.expected_package, the rule Pharos's
-    A1c reads), from the repository's visibility as the API answers it."""
+    """What the repository's own store package must be (store_replica.expected_package), from the
+    repository's visibility as the API answers it."""
     status, seen = get(f"repos/{owner}/{name}")
     if status != 200 or seen.get("visibility") not in store_replica.VISIBILITIES:
         raise Refused(f"the API answered HTTP {status} and visibility {seen.get('visibility')!r} for "
@@ -1171,10 +1160,6 @@ def selftest() -> int:
                 lambda: candidate_key(repository, tree, {"o/r": "short"}), "not a candidate key")
             arm("RED: a repository that is not owner/name is refused",
                 lambda: candidate_key("coderoast-ipc", tree, {}), "not an owner/repository name")
-            expect("a repository whose commit carries candidate.yml owns its store", owns_store(checkout, commit), True)
-            bare = _repository(root / "bare", ["x"], candidate=False) if (root / "bare").mkdir() is None else None
-            expect("a repository whose commit carries no candidate.yml is step 0's replica",
-                   owns_store(bare, checkout_identity(bare)[0]), False)
 
             # -- a run store: two own records with objects, a third-party record, an upstream record.
             store = root / "store"
@@ -1225,7 +1210,7 @@ def selftest() -> int:
             index_manifest = sha256(one_layer_manifest(INDEX_TYPE, INDEX_MEDIA, (out / "index.json").read_bytes()))
             expect("the subjects are every object, every record and the index, by manifest digest",
                    (len(subjects), subjects[-1]), (2 + 3 + 1, f"{index_manifest}  {candidate_tag(key)}"))
-            expect("an object's manifest is the one step 0's replica writes (one tag, two writers)",
+            expect("an object's manifest is store_replica's canonical object manifest",
                    fake.tags[object_tag(transport)],
                    "sha256:" + sha256(store_replica.object_manifest(transport, len(b"a ship-form transport\n" * 32))))
             expect("the index names the commit, tree, key, malf and the image",
@@ -1721,8 +1706,6 @@ def main(argv: list[str]) -> int:
     verb.add_argument("--sources"), verb.add_argument("--store"), verb.add_argument("--signer-workflow")
     verb = verbs.add_parser("package-check")
     verb.add_argument("repository")
-    verb = verbs.add_parser("owns-store")
-    verb.add_argument("checkout"), verb.add_argument("commit")
     verb = verbs.add_parser("index")
     verb.add_argument("repository"), verb.add_argument("key")
     verb = verbs.add_parser("prune")
@@ -1757,8 +1740,6 @@ def main(argv: list[str]) -> int:
             print(candidate_key(args.repository, checkout_identity(Path(args.checkout))[1], read_upstream(args.upstream),
                                 read_upstream(args.sources)))
             return 0
-        if args.verb == "owns-store":
-            return 0 if owns_store(Path(args.checkout), args.commit) else ABSENT
         if args.verb == "upstream":
             return upstream_verb(args, get, token, say)
         if args.verb == "sources":

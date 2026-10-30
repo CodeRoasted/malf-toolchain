@@ -1123,7 +1123,7 @@ _malf_lockfile_args() {
     [[ -n "${MALF_LOCKFILE_STRICT:-}" ]] || echo "--lockfile-partial"
 }
 
-# The lockfile of an act on the SHIP leg (store-create, twin-verify, relocate-verify): malf/conan.lock, STRICT, whatever MALF_LOCKFILE_STRICT says. Measured 2026-10-10
+# The lockfile of an act on the SHIP leg (store-create, twin-verify): malf/conan.lock, STRICT, whatever MALF_LOCKFILE_STRICT says. Measured 2026-10-10
 # (W486 G2): the first DN-142.D16 store-create resolved with no lockfile and took the home's own
 # boost recipe revision, cmake 4.4.2, hiredis 1.3.0 and libpq 17.7 where the lock names others, so
 # libpqxx, redis-plus-plus and drogon changed package id. With a lockfile a requirement the lock
@@ -5095,12 +5095,6 @@ Commands:
                                    re-pin, then the `pins` family last. Does NOT touch the Sift
                                    Action engine pin — that tracks the PUBLISHED engine and is
                                    sift-action/bump.sh's.
-    relocate-verify [pkg]          the released set's relocatability (ROADMAP N366): every
-                                   released package of store-create's home is scanned for an
-                                   absolute path in the cmake files it ships, then restored into a
-                                   FRESH home at another path and consumed — every module it ships
-                                   compiled by a synthetic consumer — with the producer home
-                                   unreadable. Run after store-create; exit 0 only when both pass
     twin-verify                    the released set's path independence (ROADMAP N366, DN-142.D4):
                                    store-create of the released set into TWO fresh conan homes at
                                    two absolute paths, the second under another user (a user
@@ -5119,7 +5113,7 @@ Commands:
                                    DN-142.D3, DN-142.D5, DN-142.D6): every step of malf's walk (named:
                                    their closure), each created
                                    from its export with its tests run (a stored: false one conan-built),
-                                   in the purged B2 home (`cut-verify`); package and test-verdict
+                                   in the purged `cut-verify` home; package and test-verdict
                                    records keyed by inputs; a failed step skips its dependents — exit 1 on a failed or
                                    skipped step or a differing output at an equal key. A failed step's
                                    log is quoted (ctest's roll-up, its last 200 lines); a red walk
@@ -5163,9 +5157,9 @@ Commands:
                                    Builds pass --lockfile automatically when the file exists;
                                    MALF_LOCKFILE_STRICT=1 drops --lockfile-partial so an
                                    unlocked dependency is a hard error (CI / release legs).
-                                   The ship-leg acts (store-create, twin-verify,
-                                   relocate-verify) always resolve strictly against
-                                   it and refuse when it is absent.
+                                   The ship-leg acts (store-create, twin-verify)
+                                   always resolve strictly against it and refuse
+                                   when it is absent.
     slot    [status|acquire|release]
                                    the WORKSPACE build slot — one LANE builds at a time, across
                                    every repo and across the gaps between its runs (this is not
@@ -5391,34 +5385,6 @@ cmd_bump() {
     # an engine cut publishes, then cut an Action release and re-point @v1.
 }
 
-# malf relocate-verify — ROADMAP N366's first half: is every package `malf store-create` created
-# consumable from ANOTHER home, by another account? malf/package_relocate.py owns both arms (the
-# scan of the cmake files every package ships, and the consumption from a fresh home with the
-# producer home unreadable) and says why each sees what the other cannot. The fresh home is
-# removed after the run, the producer home's mode restored.
-#
-# Usage: malf relocate-verify [pkg]   (MALF_RELOCATE_SOURCE_HOME: the producer home, default
-#                                      store-create's, the B2 `cut-verify` home)
-cmd_relocate_verify() {
-    local only=""
-    if [[ $# -gt 0 ]]; then
-        [[ $# -eq 1 && "$1" != -* ]] || _malf_refuse_option relocate-verify "$1"
-        only="$1"
-    fi
-    local source="${MALF_RELOCATE_SOURCE_HOME:-$MALF_CONAN_HOME_BASE/cut-verify}"
-    [[ -f "$source/settings.yml" ]] \
-        || { echo "malf relocate-verify: $source is not a conan home — run 'malf store-create' first, or set MALF_RELOCATE_SOURCE_HOME" >&2; return 1; }
-    _malf_ship_lock_args || return 1
-    local scratch rc=0
-    scratch="$(mktemp -d /tmp/malf-relocate.XXXXXX)"
-    python3 "$MALF_WORKSPACE_ROOT/scripts/version_line.py" released "$MALF_WORKSPACE_ROOT" > "$scratch/released.tsv" \
-        || { echo "malf relocate-verify: failed to resolve the released-package list" >&2; rm -rf "$scratch"; return 1; }
-    python3 "$MALF_DIR/package_relocate.py" run "$source" "$scratch/conan-home" "$scratch/released.tsv" \
-        "${MALF_CUT_VERIFY_PROFILE:-linux-gcc16-release}" "${_MALF_SHIP_LOCK[0]#--lockfile=}" ${only:+"$only"} || rc=$?
-    rm -rf "$scratch"
-    return "$rc"
-}
-
 # malf twin-verify — DN-142.D4 (a)'s gate, run where its two homes can be made: two `malf
 # store-create` runs of ONE commit over the released set, each into a fresh conan home of its own
 # with a store of its own, and every released
@@ -5620,7 +5586,7 @@ _malf_writer_create_args() {
 # a FIXED path outside every cache, so on the release runner's account the default IS the ruled
 # ~ghrelease/coderoast-store. A root under ~/.cache or $XDG_CACHE_HOME is REFUSED, symlinks resolved:
 # a cache may be wiped by anyone, and the store holds what no rebuild restores — the objects a
-# release references and step 0's last green record, B3c's reference.
+# release references and the keyed verdicts the cut's preflight reads back.
 # Usage: _malf_store_root <verb>   -> the resolved root on stdout, or exit 2 naming the cache
 _malf_store_root() {
     local verb="$1" root="${MALF_STORE_DIR:-$HOME/coderoast-store}" resolved cache
@@ -5630,7 +5596,7 @@ _malf_store_root() {
         [[ -n "$cache" ]] || continue
         cache="$(realpath -m -- "$cache")" || continue
         if [[ "$resolved" == "$cache" || "$resolved" == "$cache"/* ]]; then
-            echo "malf $verb: REFUSED — the store root $root resolves to $resolved, under the cache $cache; a cache may be wiped, and the store keeps every object a release references and step 0's B3c reference. Set MALF_STORE_DIR to a path outside every cache (default \$HOME/coderoast-store; DN-142.D6, R-2)" >&2
+            echo "malf $verb: REFUSED — the store root $root resolves to $resolved, under the cache $cache; a cache may be wiped, and the store keeps every object a release references and the keyed verdicts the cut's preflight reads back. Set MALF_STORE_DIR to a path outside every cache (default \$HOME/coderoast-store; DN-142.D6, R-2)" >&2
             return 2
         fi
     done
@@ -5849,12 +5815,11 @@ _malf_store_walk_backends() {   # <out> [<package>...]
 # included); none named means every step. A step whose first-party requirement failed is SKIPPED,
 # never failed for a missing upstream, and the walk goes on.
 #
-# THE HOME is step 0's B2 home (`MALF_CUT_VERIFY_CONAN_HOME`, default the keyed `cut-verify` home):
-# purged of every first-party package and of the previous run's results first, so every step
-# rebuilds first-party code from its export, and the acts after this one (step 0's server smoke and
-# relocate-verify) consume what this act recorded, restored into it from the store. It is where the
-# walk RESOLVES; every step BUILDS in a step home of its own (_malf_step_home, DN-142.D25 (5) call F). MALF_STORE_CONAN_HOME names another; one this run
-# creates is seeded with the B2 home's third-party packages (MALF_TWIN_SEED_HOME names another).
+# THE HOME is the keyed `cut-verify` home (`MALF_CUT_VERIFY_CONAN_HOME` names another): purged of
+# every first-party package and of the previous run's results first, so every step rebuilds
+# first-party code from its export, and twin-verify seeds its two homes' third-party packages from
+# it. It is where the walk RESOLVES; every step BUILDS in a step home of its own (_malf_step_home, DN-142.D25 (5) call F). MALF_STORE_CONAN_HOME names another; one this run
+# creates is seeded with the `cut-verify` home's third-party packages (MALF_TWIN_SEED_HOME names another).
 # THE STORE is a directory standing in for the remote one until its transport and its writer
 # credential are ruled; nothing here publishes anywhere.
 # THE ENVIRONMENT: called on the host (no MALF_SYSTEM), the walk runs as one container of the pinned
@@ -6079,7 +6044,7 @@ _malf_quote_log() {   # <log> <subject>
 
 # A RED WALK'S LOGS ARE ARCHIVED WHERE ITS CALLER NAMES (MALF_STORE_LOG_ARCHIVE), because the scratch
 # that holds them is under /tmp, which the release runner's service keeps private (systemd
-# PrivateTmp): step 0 names a path beside its record, and pharos-build.yml uploads it as an artifact.
+# PrivateTmp): the caller names a path its job uploads as an artifact.
 # Every `*.log` at the top of the scratch, and nothing else: the graphs, the key documents and the
 # step homes stay. A green walk removes its scratch and writes no archive.
 # post: the archive written and named on stderr, or a line saying why not; never a non-zero exit.
@@ -6848,7 +6813,7 @@ _malf_environment_home() {
 # host provisions what the container cannot fetch, then re-runs itself as ONE container of the pinned image.
 # Its workspace is the repository alone (MALF_WORKSPACE_ROOT=<repository>, DN-142.D31 (5)); its conan home
 # the image's own (_malf_environment_home), its third-party recipes restored from MALF_ENVIRONMENT_RECIPES
-# (default the B2 walk's home, `cut-verify`), which is first made a conan home when it is none and then
+# (default store-create's home, `cut-verify`), which is first made a conan home when it is none and then
 # provisioned from its remotes (package_twin.py provision), with conan's source download cache; the lock is
 # strict. The container sees, each at its own path: the repository and its git directory, malf and its git
 # directory, the store, /tmp, the image's home, the recipe home (read-only) and the source cache.
@@ -7777,7 +7742,6 @@ case "$COMMAND" in
     source-act)       cmd_source_act "$@" ;;
     sandbox)          cmd_sandbox "$@" ;;
     environment)      exec python3 "$MALF_DIR/build_environment.py" "$@" ;;
-    relocate-verify)  cmd_relocate_verify "$@" ;;
     lock)             cmd_lock "$@" ;;
     slot)             cmd_slot "$@" ;;
     sbom)             cmd_sbom "$@" ;;

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The golden's agreement is the compare job's verdict (DN-142.D25 (5), call A): step 0 ingests the
+# The golden's agreement is the compare job's verdict (DN-142.D25 (5), call A): the candidate ingests the
 # `determinism-golden` artifact of a golden run and adds no agreement verdict of its own, so the
 # ruling rests on the SHAPE of .github/workflows/coderoast-golden-compare.yml. In its `compare` job:
 #   * the upload of `determinism-golden` comes after the compare action and after the conformance

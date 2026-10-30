@@ -1,42 +1,23 @@
 #!/usr/bin/env python3
-"""The store's read replica on ghcr: the writer pushes a stored object by digest, a release job reads it back by digest.
+"""The ghcr client a repository's own store is written and read through, and the guard on its package.
 
-DN-142.D6 (the remote transport, ruled 2026-10-10, R4 and R5 measured): one PRIVATE ghcr package per
-source repository, `ghcr.io/coderoasted/store-<repository>`, written only by the writer account's
-token, read by that repository's `GITHUB_TOKEN` alone. An object is one OCI artifact manifest whose
-one layer is the object's bytes, tagged `sha256-<content digest>`, so a reader holding the content
-digest from a signed manifest slice needs no other name. Every byte is checked against a digest
-computed here: the object against its name in the local store before the push, the registry's
-manifest digest against the canonical manifest's own, an existing tag against the manifest this
-module would write, and a fetched layer against the digest asked for.
+DN-142.D31 (3): one package per source repository, `ghcr.io/<owner>/store-<repository>`, written by
+its own candidate (store_transport.py) and read back by digest. This module is the OCI distribution
+client (`Registry`: Bearer-challenge auth, a token reused only on its own registry's origin, every
+manifest and blob checked against the digest computed here) and THE ONE RULE on the package
+(`expected_package`): it has the repository's own visibility and is LINKED to that repository —
+public for a public one, private for a private one.
 
-THE PACKAGE GUARD, BEFORE AND AFTER EVERY WRITE: the GitHub API must answer the visibility and
-the link THE ONE RULE derives (`expected_package`, DN-142.D31 (3) and the Founder's item 6). A
-repository that does not own its store is step 0's replica (DN-142.D6): `private`, linked to no
-repository. A repository that owns its store (its candidate writes `store-<repository>`) has a
-package of the repository's own visibility, LINKED to that repository: public for a public one,
-private for a private one. Pharos's A1c reads the same rule from this module, so the writer and the
-probe cannot drift. A package that does not exist yet is created by a SENTINEL push first — an empty
-artifact carrying no product byte — and is then guarded before any object reaches it, because a
-package that came up `internal` or `public` would expose every byte pushed to it. No REST endpoint
-sets a container package's visibility, so a refusal names the settings page and writes nothing
-more; setting it by hand is the remedy, and the next run verifies it.
+THE PACKAGE GUARD, BEFORE ANY WRITE (`ensure_guarded`): the GitHub view of the package must answer that
+visibility and that link. A package that does not exist yet is created by a SENTINEL push first — an
+empty artifact carrying no product byte, annotated with the repository it links to — and is then
+guarded before any object reaches it, because a package that came up `internal` or `public` would
+expose every byte pushed to it. No REST endpoint sets a container package's visibility, so a refusal
+names the settings page and writes nothing more; setting it by hand is the remedy, and the next run
+verifies it.
 
-    store_replica.py push [--own <public|private>] <store dir> <repository> <object digest>...
-        the writer's act: each object of the local store, by its 64-hex name, to
-        ghcr.io/coderoasted/store-<repository>, the package guarded before and after; an object
-        already replicated is verified, never rewritten. `--own` names a repository that owns its
-        store and that repository's visibility; without it the package is step 0's replica. Token:
-        the file MALF_STORE_TOKEN_FILE (the writer account's classic PAT, `write:packages`), never
-        an argument or an echo.
-    store_replica.py push-slice [--own <public|private>] <repository> <step-0 record digest> <slice> <signature>
-        the writer's act: the repository's signed manifest slice for that step-0 record, under
-        the tag slice-<record digest>, the package guarded the same way; never rewritten
-    store_replica.py fetch <repository> <object digest> <out file>
-        a reader's act: the object by its digest, written only after its SHA-256 is verified.
-        Token: GITHUB_TOKEN (the repository's own, `packages: read`).
     store_replica.py selftest
-        every refusal against an in-process registry and API, and the round trip; no network
+        every refusal against an in-process registry and package view, and the round trip; no network
 
 Exit 0 done, 1 refused (the reason on stderr), 2 a usage error.
 """
@@ -46,38 +27,24 @@ from __future__ import annotations
 import hashlib
 import http.server
 import json
-import os
 import re
 import sys
-import tempfile
 import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Callable
 
 REGISTRY = "https://ghcr.io"
 API = "https://api.github.com"
-ORG = "coderoasted"
-PACKAGE_PREFIX = "store-"
-REPOSITORY_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
-DIGEST_HEX = re.compile(r"^[0-9a-f]{64}$")
 OCI_MANIFEST = "application/vnd.oci.image.manifest.v1+json"
 OCI_EMPTY = "application/vnd.oci.empty.v1+json"
 OBJECT_TYPE = "application/vnd.coderoast.store.object.v1"
 SENTINEL_TYPE = "application/vnd.coderoast.store.sentinel.v1"
 SENTINEL_TAG = "store-sentinel"
-SLICE_TYPE = "application/vnd.coderoast.store.slice.v1"
-SLICE_MEDIA = "application/vnd.coderoast.store.slice.v1+json"
-SIGNATURE_MEDIA = "application/vnd.coderoast.store.signature.v1"
 EMPTY_BYTES = b"{}"
 EMPTY_DIGEST = "sha256:" + hashlib.sha256(EMPTY_BYTES).hexdigest()
-CHUNK = 1 << 20
-TOKEN_FILE_ENV = "MALF_STORE_TOKEN_FILE"
-REGISTRY_USER_ENV = "MALF_STORE_REGISTRY_USER"
-REGISTRY_USER_DEFAULT = "coderoast-dev"
 
 
 class Refused(Exception):
@@ -86,39 +53,6 @@ class Refused(Exception):
 
 def canonical(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(CHUNK), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def package_of(repository: str) -> str:
-    if not REPOSITORY_NAME.match(repository):
-        raise Refused(f"{repository!r} is not a repository name")
-    return PACKAGE_PREFIX + repository
-
-
-def object_tag(hex_digest: str) -> str:
-    return f"sha256-{hex_digest}"
-
-
-def slice_tag(record_hex: str) -> str:
-    return f"slice-{record_hex}"
-
-
-def slice_manifest(slice_bytes: bytes, signature: bytes) -> bytes:
-    """A repository's signed slice for one step-0 record: the slice and its signature, two layers."""
-    return canonical({
-        "schemaVersion": 2, "mediaType": OCI_MANIFEST, "artifactType": SLICE_TYPE,
-        "config": {"mediaType": OCI_EMPTY, "digest": EMPTY_DIGEST, "size": len(EMPTY_BYTES)},
-        "layers": [{"mediaType": SLICE_MEDIA, "digest": "sha256:" + hashlib.sha256(slice_bytes).hexdigest(),
-                    "size": len(slice_bytes)},
-                   {"mediaType": SIGNATURE_MEDIA, "digest": "sha256:" + hashlib.sha256(signature).hexdigest(),
-                    "size": len(signature)}]})
 
 
 def object_manifest(hex_digest: str, size: int, artifact: str = OBJECT_TYPE) -> bytes:
@@ -245,12 +179,6 @@ class Registry:
                           f"written hash to {expected}")
         return expected
 
-    def layers(self, tag: str) -> list[dict]:
-        answer = self.call("GET", f"manifests/{tag}", "pull", {"Accept": OCI_MANIFEST})
-        if answer.status != 200:
-            raise Refused(f"GET manifest {self.name}:{tag}: HTTP {answer.status}")
-        return json.loads(answer.body).get("layers", [])
-
     def blob(self, hex_digest: str) -> bytes:
         """A blob's bytes, only once they hash to the digest asked for; a redirect is followed bare."""
         blob = self.call("GET", f"blobs/sha256:{hex_digest}", "pull")
@@ -263,68 +191,21 @@ class Registry:
             raise Refused(f"the blob served for sha256:{hex_digest} hashes to sha256:{got}")
         return blob.body
 
-    def get_layer(self, hex_digest: str, out: Path) -> None:
-        """The object's bytes from its manifest's one layer, written to `out` only once verified."""
-        tag = object_tag(hex_digest)
-        layers = self.layers(tag)
-        if len(layers) != 1 or layers[0].get("digest") != f"sha256:{hex_digest}":
-            raise Refused(f"{self.name}:{tag} does not name sha256:{hex_digest} as its one layer")
-        data = self.blob(hex_digest)
-        staged = out.with_name(f".{out.name}.partial")
-        staged.write_bytes(data)
-        staged.replace(out)
-
-    def get_slice(self, record_hex: str) -> tuple[bytes, bytes]:
-        """(the slice, its signature) for one step-0 record, each verified against its layer digest.
-        The signature itself is the publish job's to verify (store_manifest.verify)."""
-        tag = slice_tag(record_hex)
-        layers = self.layers(tag)
-        media = [layer.get("mediaType") for layer in layers]
-        if media != [SLICE_MEDIA, SIGNATURE_MEDIA]:
-            raise Refused(f"{self.name}:{tag} holds layers {media}, not a slice and its signature")
-        slice_layer, signature_layer = (layer["digest"].split(":", 1)[1] for layer in layers)
-        return self.blob(slice_layer), self.blob(signature_layer)
-
-
-def github_guard(api: str, org: str, token: str) -> Callable[[str], dict | None]:
-    """The package's GitHub view: its JSON, or None when the API says it does not exist."""
-
-    def view(package: str) -> dict | None:
-        request = urllib.request.Request(f"{api}/orgs/{org}/packages/container/{package}")
-        request.add_header("Authorization", f"Bearer {token}")
-        request.add_header("Accept", "application/vnd.github+json")
-        answer = _send(request)
-        if answer.status == 404:
-            return None
-        if answer.status != 200:
-            raise Refused(f"the package API answered HTTP {answer.status} for {package}; its visibility "
-                          f"cannot be verified, so nothing is written")
-        return json.loads(answer.body)
-
-    return view
-
-
 VISIBILITIES = ("public", "private")
 
 
 @dataclass(frozen=True)
 class Expected:
     """What the package guard requires of a store package: its visibility, and the repository it is
-    linked to (`owner/name`, lower case), or None for a package linked to no repository."""
+    linked to (`owner/name`, lower case)."""
 
     visibility: str
-    linked: str | None
+    linked: str
 
 
-STEP0_REPLICA = Expected("private", None)
-
-
-def expected_package(owner: str, repository: str, own_visibility: str | None) -> Expected:
-    """THE ONE RULE (DN-142.D31 (3), item 6): `own_visibility` is None for a repository whose store is
-    step 0's replica (private, unlinked, DN-142.D6), else that repository's own visibility, and its
-    package then has that visibility and is linked to it."""
-    if own_visibility is None:
-        return STEP0_REPLICA
+def expected_package(owner: str, repository: str, own_visibility: str) -> Expected:
+    """THE ONE RULE (DN-142.D31 (3), item 6): the package has the repository's own visibility and is
+    linked to it."""
     if own_visibility not in VISIBILITIES:
         raise Refused(f"{owner}/{repository} is {own_visibility!r}: a repository owning its store is public "
                       f"or private, and no rule names a package for any other visibility")
@@ -340,9 +221,6 @@ def package_defect(seen: dict | None, package: str, expected: Expected) -> str |
     linked = seen.get("repository")
     linked = str(linked.get("full_name", linked) if isinstance(linked, dict) else linked or "").lower() or None
     if linked != expected.linked:
-        if expected.linked is None:
-            return (f"{package} is linked to {linked}: a linked package lets that repository's workflows "
-                    f"write it, and step 0's replica is linked to no repository")
         answered = ("carries no `repository` field, as a GITHUB_TOKEN's answer for a private package does: pass a "
                     "read:packages token as MALF_PACKAGE_PEEK_TOKEN" if "repository" not in seen
                     else f"names `repository` {seen['repository']!r}")
@@ -367,81 +245,22 @@ SOURCE_ANNOTATION = "org.opencontainers.image.source"
 
 
 def sentinel_manifest(expected: Expected) -> bytes:
-    """The empty artifact that creates a package; for a package linked to its repository it carries
-    the `org.opencontainers.image.source` annotation ghcr links a new package by (DN-142.D31 (3))."""
-    linked = {"annotations": {SOURCE_ANNOTATION: f"https://github.com/{expected.linked}"}} if expected.linked else {}
+    """The empty artifact that creates a package, carrying the `org.opencontainers.image.source`
+    annotation ghcr links a new package to its repository by (DN-142.D31 (3))."""
     return canonical({
         "schemaVersion": 2, "mediaType": OCI_MANIFEST, "artifactType": SENTINEL_TYPE,
         "config": {"mediaType": OCI_EMPTY, "digest": EMPTY_DIGEST, "size": len(EMPTY_BYTES)},
-        "layers": [{"mediaType": OCI_EMPTY, "digest": EMPTY_DIGEST, "size": len(EMPTY_BYTES)}], **linked})
+        "layers": [{"mediaType": OCI_EMPTY, "digest": EMPTY_DIGEST, "size": len(EMPTY_BYTES)}],
+        "annotations": {SOURCE_ANNOTATION: f"https://github.com/{expected.linked}"}})
 
 
 def ensure_guarded(registry: Registry, view: Callable[[str], dict | None], org: str, package: str,
-                   say: Callable[[str], None], expected: Expected = STEP0_REPLICA) -> None:
+                   say: Callable[[str], None], expected: Expected) -> None:
     """The package exists, with the visibility and link `expected` names, before any product byte reaches it."""
     if view(package) is None:
         registry.push_blob(EMPTY_DIGEST.split(":")[1], EMPTY_BYTES)
         registry.put_manifest(SENTINEL_TAG, sentinel_manifest(expected))
         say(f"store_replica: created {package} with an empty sentinel; guarding it before any object")
-    verify_package(view, org, package, expected)
-
-
-def replicate(store: Path, registry: Registry, view: Callable[[str], dict | None], org: str,
-              package: str, digests: list[str], say: Callable[[str], None],
-              expected: Expected = STEP0_REPLICA) -> None:
-    """Push each named object of `store`, the package guarded before the first and after the last."""
-    for hex_digest in digests:
-        if not DIGEST_HEX.match(hex_digest):
-            raise Refused(f"{hex_digest!r} is not an object digest (64 hex)")
-    ensure_guarded(registry, view, org, package, say, expected)
-    for hex_digest in digests:
-        source = store / "objects" / hex_digest
-        if not source.is_file():
-            raise Refused(f"no object {hex_digest} in {store / 'objects'}")
-        actual = sha256_file(source)
-        if actual != hex_digest:
-            raise Refused(f"the local object {source} hashes to {actual}, not its name")
-        manifest = object_manifest(hex_digest, source.stat().st_size)
-        manifest_digest = "sha256:" + hashlib.sha256(manifest).hexdigest()
-        held = registry.manifest_digest(object_tag(hex_digest))
-        if held is not None:
-            if held != manifest_digest:
-                raise Refused(f"{package}:{object_tag(hex_digest)} holds {held}, not the object's "
-                              f"manifest {manifest_digest}: an object's name is never rewritten")
-            say(f"store_replica: PRESENT {package} sha256:{hex_digest} (manifest {manifest_digest})")
-            continue
-        registry.push_blob(EMPTY_DIGEST.split(":")[1], EMPTY_BYTES)
-        registry.push_blob(hex_digest, source.read_bytes())
-        registry.put_manifest(object_tag(hex_digest), manifest)
-        if registry.manifest_digest(object_tag(hex_digest)) != manifest_digest:
-            raise Refused(f"{package}:{object_tag(hex_digest)} did not read back as {manifest_digest}")
-        say(f"store_replica: PUSHED {package} sha256:{hex_digest} (manifest {manifest_digest})")
-    verify_package(view, org, package, expected)
-
-
-def replicate_slice(registry: Registry, view: Callable[[str], dict | None], org: str, package: str,
-                    record_hex: str, slice_bytes: bytes, signature: bytes, say: Callable[[str], None],
-                    expected: Expected = STEP0_REPLICA) -> None:
-    """Push a repository's signed slice under `slice-<step-0 record digest>`, never rewritten."""
-    if not DIGEST_HEX.match(record_hex):
-        raise Refused(f"{record_hex!r} is not a step-0 record digest (64 hex)")
-    ensure_guarded(registry, view, org, package, say, expected)
-    manifest = slice_manifest(slice_bytes, signature)
-    manifest_digest = "sha256:" + hashlib.sha256(manifest).hexdigest()
-    held = registry.manifest_digest(slice_tag(record_hex))
-    if held is not None:
-        if held != manifest_digest:
-            raise Refused(f"{package}:{slice_tag(record_hex)} holds {held}, not this slice's manifest "
-                          f"{manifest_digest}: a record's slice is never rewritten")
-        say(f"store_replica: PRESENT {package} {slice_tag(record_hex)}")
-    else:
-        registry.push_blob(EMPTY_DIGEST.split(":")[1], EMPTY_BYTES)
-        for data in (slice_bytes, signature):
-            registry.push_blob(hashlib.sha256(data).hexdigest(), data)
-        registry.put_manifest(slice_tag(record_hex), manifest)
-        if registry.manifest_digest(slice_tag(record_hex)) != manifest_digest:
-            raise Refused(f"{package}:{slice_tag(record_hex)} did not read back as {manifest_digest}")
-        say(f"store_replica: PUSHED {package} {slice_tag(record_hex)} (manifest {manifest_digest})")
     verify_package(view, org, package, expected)
 
 
@@ -510,7 +329,10 @@ def _fake_server(fake: Fake) -> tuple[http.server.ThreadingHTTPServer, str]:
                     if not reference.startswith("sha256:"):
                         fake.tags[reference] = digest
                     if fake.package is None:
-                        fake.package = {"name": parts[3], "visibility": fake.created_visibility}
+                        source = (json.loads(data).get("annotations") or {}).get(SOURCE_ANNOTATION, "")
+                        fake.package = {"name": parts[3], "visibility": fake.created_visibility,
+                                        **({"repository": {"full_name": source.removeprefix("https://github.com/")}}
+                                           if source else {})}
                     answered = ("sha256:" + "0" * 64) if fake.lie_manifest_digest else digest
                     self._reply(201, b"", {"Docker-Content-Digest": answered})
                     return
@@ -549,6 +371,11 @@ def _fake_server(fake: Fake) -> tuple[http.server.ThreadingHTTPServer, str]:
     return server, f"http://127.0.0.1:{server.server_address[1]}"
 
 
+OWNER = "coderoasted"
+REPOSITORY = "coderoast-ipc"
+PACKAGE = f"store-{REPOSITORY}"
+
+
 def selftest() -> int:
     failures: list[str] = []
     armed = [0]
@@ -565,143 +392,114 @@ def selftest() -> int:
         if refusal is not None:
             failures.append(f"{label}: succeeded, want a refusal containing {refusal!r}")
 
-    with tempfile.TemporaryDirectory() as scratch:
-        store = Path(scratch) / "store"
-        (store / "objects").mkdir(parents=True)
-        payload = b"a stored object\n" * 64
-        good = hashlib.sha256(payload).hexdigest()
-        (store / "objects" / good).write_bytes(payload)
-        liar = hashlib.sha256(b"what the name claims").hexdigest()
-        (store / "objects" / liar).write_bytes(b"other bytes")
+    payload = b"a stored object\n" * 64
+    good = hashlib.sha256(payload).hexdigest()
+    private = expected_package(OWNER, REPOSITORY, "private")
+    scenes: list[http.server.ThreadingHTTPServer] = []
 
-        def scene(**knobs) -> tuple[Fake, Registry, Callable[[str], dict | None], list[str]]:
-            fake = Fake(**knobs)
-            server, base = _fake_server(fake)
-            scenes.append(server)
-            said: list[str] = []
-            return fake, Registry(base, f"{ORG}/store-probe", ("user", "token")), \
-                github_guard(base, ORG, "api-token"), said
+    def scene(**knobs) -> tuple[Fake, Registry, Callable[[str], dict | None], list[str]]:
+        fake = Fake(**knobs)
+        server, base = _fake_server(fake)
+        scenes.append(server)
+        return fake, Registry(base, f"{OWNER}/{PACKAGE}", ("user", "token")), lambda _package: fake.package, []
 
-        scenes: list[http.server.ThreadingHTTPServer] = []
-        try:
+    def guarded(registry: Registry, view: Callable[[str], dict | None], said: list[str],
+                expected: Expected = private) -> Callable[[], None]:
+        return lambda: ensure_guarded(registry, view, OWNER, PACKAGE, said.append, expected)
+
+    def round_trip(registry: Registry) -> None:
+        manifest = object_manifest(good, len(payload))
+        for data in (EMPTY_BYTES, payload):
+            registry.push_blob(hashlib.sha256(data).hexdigest(), data)
+        registry.put_manifest(f"sha256-{good}", manifest)
+        if registry.manifest_digest(f"sha256-{good}") != "sha256:" + hashlib.sha256(manifest).hexdigest():
+            raise Refused("the object's tag did not read back as its manifest")
+        if registry.blob(good) != payload:
+            raise Refused("the fetched bytes differ from the pushed object")
+
+    try:
+        fake, registry, view, said = scene()
+        arm("a new package: the sentinel creates it linked to its repository, and the guard passes",
+            guarded(registry, view, said), None)
+        if SENTINEL_TAG not in fake.tags:
+            failures.append(f"the registry holds tags {sorted(fake.tags)}, want the sentinel")
+        arm("an object pushed by digest reads back byte-equal under its canonical manifest",
+            lambda: round_trip(registry), None)
+        pushes = len(fake.blobs)
+        arm("a blob the registry already holds is not uploaded again",
+            lambda: registry.push_blob(good, payload), None)
+        if len(fake.blobs) != pushes:
+            failures.append("a re-push of a held blob uploaded it again")
+
+        fake, registry, view, said = scene(created_visibility="internal")
+        arm("a package that came up internal is refused BEFORE any object reaches it",
+            guarded(registry, view, said), "not 'private'")
+
+        for label, package_view, own, refusal in (
+                ("a public repository's own store, public and linked to it, is accepted",
+                 {"visibility": "public", "repository": {"full_name": "CodeRoasted/coderoast-ipc"}},
+                 "public", None),
+                ("a private repository's own store, private and linked to it, is accepted",
+                 {"visibility": "private", "repository": {"full_name": "CodeRoasted/coderoast-ipc"}},
+                 "private", None),
+                ("RED: a public repository's own store still private (before the flip) is refused",
+                 {"visibility": "private", "repository": {"full_name": "CodeRoasted/coderoast-ipc"}},
+                 "public", "not 'public'"),
+                ("RED: a public repository's own store linked to no repository is refused",
+                 {"visibility": "public"}, "public", "linked to no repository, not coderoasted/coderoast-ipc"),
+                ("RED: an own store linked to ANOTHER repository is refused",
+                 {"visibility": "public", "repository": {"full_name": "CodeRoasted/insight-canon"}},
+                 "public", "not coderoasted/coderoast-ipc"),
+                ("RED: a private repository's own store linked to no repository is refused",
+                 {"visibility": "private"}, "private", "linked to no repository")):
             fake, registry, view, said = scene()
-            arm("a new package: sentinel, guard, push, read back byte-equal",
-                lambda: replicate(store, registry, view, ORG, "store-probe", [good], said.append), None)
-            out = Path(scratch) / "fetched"
-            arm("the reader fetches the object by digest", lambda: registry.get_layer(good, out), None)
-            if not out.is_file() or out.read_bytes() != payload:
-                failures.append("the fetched bytes differ from the stored object")
-            if SENTINEL_TAG not in fake.tags or object_tag(good) not in fake.tags:
-                failures.append(f"the registry holds tags {sorted(fake.tags)}, want the sentinel and the object")
-            pushes = len(fake.manifests)
-            arm("a re-push of the same object is recognised and writes nothing",
-                lambda: replicate(store, registry, view, ORG, "store-probe", [good], said.append), None)
-            if len(fake.manifests) != pushes or not any("PRESENT" in line for line in said):
-                failures.append("a re-push wrote a manifest or did not report PRESENT")
+            fake.package = {"name": PACKAGE, **package_view}
+            arm(label, guarded(registry, view, said, expected_package(OWNER, REPOSITORY, own)), refusal)
+        arm("RED: an owned store of a visibility no rule names is refused",
+            lambda: expected_package(OWNER, REPOSITORY, "internal"), "no rule names")
+        if json.loads(sentinel_manifest(private)).get("annotations") != {
+                SOURCE_ANNOTATION: "https://github.com/coderoasted/coderoast-ipc"}:
+            failures.append(f"the sentinel carries {sentinel_manifest(private)!r}, want the source annotation")
 
-            fake.tags[object_tag(good)] = next(d for d, b in fake.manifests.items() if SENTINEL_TYPE in b.decode())
-            arm("a tag holding another manifest is refused, never rewritten",
-                lambda: replicate(store, registry, view, ORG, "store-probe", [good], said.append),
-                "never rewritten")
+        _fake, registry, _view, said = scene(lie_manifest_digest=True)
+        arm("a registry answering another manifest digest is refused",
+            lambda: registry.put_manifest("t", object_manifest(good, len(payload))), "the bytes written hash to")
 
-            _fake, registry, view, said = scene()
-            arm("a local object that does not hash to its name is refused before any push",
-                lambda: replicate(store, registry, view, ORG, "store-probe", [liar], said.append),
-                "not its name")
-            arm("a name that is not 64 hex is refused",
-                lambda: replicate(store, registry, view, ORG, "store-probe", ["../x"], said.append),
-                "not an object digest")
+        fake, registry, _view, said = scene()
+        round_trip(registry)
+        fake.corrupt_blobs = True
+        arm("a fetched blob whose bytes differ from its digest is refused",
+            lambda: registry.blob(good), "hashes to")
+        arm("a fetch of a blob the package does not hold is refused",
+            lambda: registry.blob("f" * 64), "HTTP 404")
 
-            fake, registry, view, said = scene(created_visibility="internal")
-            arm("a package that came up internal is refused BEFORE any object reaches it",
-                lambda: replicate(store, registry, view, ORG, "store-probe", [good], said.append),
-                "not 'private'")
-            if object_tag(good) in fake.tags:
-                failures.append("an object was pushed into a package that is not private")
+        fake, registry, _view, said = scene()
 
-            fake, registry, view, said = scene()
-            fake.package = {"name": "store-probe", "visibility": "private",
-                            "repository": {"full_name": "CodeRoasted/coderoast-ipc"}}
-            arm("a package linked to a repository is refused", lambda: replicate(
-                store, registry, view, ORG, "store-probe", [good], said.append), "is linked to")
+        def second_call_unchallenged() -> None:
+            registry.manifest_digest(SENTINEL_TAG)
+            fake.challenged = 0
+            registry.manifest_digest(SENTINEL_TAG)
+            if fake.challenged:
+                raise Refused(f"the second call drew {fake.challenged} challenge(s)")
 
-            for label, package_view, own, refusal in (
-                    ("a public repository's own store, public and linked to it, is accepted",
-                     {"visibility": "public", "repository": {"full_name": "CodeRoasted/coderoast-ipc"}},
-                     "public", None),
-                    ("a private repository's own store, private and linked to it, is accepted",
-                     {"visibility": "private", "repository": {"full_name": "CodeRoasted/coderoast-ipc"}},
-                     "private", None),
-                    ("RED: a public repository's own store still private (before the flip) is refused",
-                     {"visibility": "private", "repository": {"full_name": "CodeRoasted/coderoast-ipc"}},
-                     "public", "not 'public'"),
-                    ("RED: a public repository's own store linked to no repository is refused",
-                     {"visibility": "public"}, "public", "linked to no repository, not coderoasted/coderoast-ipc"),
-                    ("RED: an own store linked to ANOTHER repository is refused",
-                     {"visibility": "public", "repository": {"full_name": "CodeRoasted/insight-canon"}},
-                     "public", "not coderoasted/coderoast-ipc"),
-                    ("RED: a private repository's own store linked to no repository is refused",
-                     {"visibility": "private"}, "private", "linked to no repository"),
-                    ("RED: step 0's replica that came up public is refused",
-                     {"visibility": "public"}, None, "not 'private'")):
-                fake, registry, view, said = scene()
-                fake.package = {"name": "store-coderoast-ipc", **package_view}
-                arm(label, lambda own=own: replicate(store, registry, view, ORG, "store-coderoast-ipc", [good],
-                                                     said.append, expected_package(ORG, "coderoast-ipc", own)),
-                    refusal)
-            arm("RED: an owned store of a visibility no rule names is refused",
-                lambda: expected_package(ORG, "coderoast-ipc", "internal"), "no rule names")
-            linked_sentinel = sentinel_manifest(expected_package(ORG, "coderoast-ipc", "public"))
-            if json.loads(linked_sentinel).get("annotations") != {
-                    SOURCE_ANNOTATION: "https://github.com/coderoasted/coderoast-ipc"}:
-                failures.append(f"an owned store's sentinel carries {linked_sentinel!r}, want the source annotation")
-            if "annotations" in json.loads(sentinel_manifest(STEP0_REPLICA)):
-                failures.append("step 0's replica sentinel carries an annotation that would link it")
+        arm("a token the registry issued rides the next call on its scope, which draws no challenge",
+            second_call_unchallenged, None)
+        fake.bearer = "rotated-bearer"
+        arm("a cached token the registry no longer accepts is dropped and re-fetched once",
+            lambda: registry.manifest_digest(SENTINEL_TAG), None)
+        _fake, registry, _view, said = scene(realm="http://elsewhere.invalid/token")
+        arm("RED: a challenge naming a token realm off the registry's origin is refused, and no credential goes there",
+            lambda: registry.manifest_digest(SENTINEL_TAG), "no credential is sent there")
 
-            fake, registry, view, said = scene(lie_manifest_digest=True)
-            arm("a registry answering another manifest digest is refused",
-                lambda: replicate(store, registry, view, ORG, "store-probe", [good], said.append),
-                "the bytes written hash to")
+        def unreachable(_package: str) -> dict | None:
+            raise Refused(f"the package API answered HTTP 403 for {PACKAGE}; its visibility cannot be "
+                          f"verified, so nothing is written")
 
-            fake, registry, view, said = scene()
-            replicate(store, registry, view, ORG, "store-probe", [good], said.append)
-            fake.corrupt_blobs = True
-            arm("a fetched blob whose bytes differ from its digest is refused, and nothing is written",
-                lambda: registry.get_layer(good, Path(scratch) / "corrupt"), "hashes to")
-            if (Path(scratch) / "corrupt").exists():
-                failures.append("a corrupt fetch left its bytes at the output path")
-            arm("a fetch of an object the package does not hold is refused",
-                lambda: registry.get_layer("f" * 64, Path(scratch) / "absent"), "HTTP 404")
-
-            def unreachable(_package: str) -> dict | None:
-                raise Refused("the package API answered HTTP 403 for store-probe; its visibility "
-                              "cannot be verified, so nothing is written")
-
-            fake, registry, _view, said = scene()
-
-            def second_call_unchallenged() -> None:
-                registry.manifest_digest(SENTINEL_TAG)
-                fake.challenged = 0
-                registry.manifest_digest(SENTINEL_TAG)
-                if fake.challenged:
-                    raise Refused(f"the second call drew {fake.challenged} challenge(s)")
-
-            arm("a token the registry issued rides the next call on its scope, which draws no challenge",
-                second_call_unchallenged, None)
-            fake.bearer = "rotated-bearer"
-            arm("a cached token the registry no longer accepts is dropped and re-fetched once",
-                lambda: registry.manifest_digest(SENTINEL_TAG), None)
-            fake, registry, _view, said = scene(realm="http://elsewhere.invalid/token")
-            arm("RED: a challenge naming a token realm off the registry's origin is refused, and no credential goes there",
-                lambda: registry.manifest_digest(SENTINEL_TAG), "no credential is sent there")
-
-            _fake, registry, _view, said = scene()
-            arm("an API that cannot answer refuses the write",
-                lambda: replicate(store, registry, unreachable, ORG, "store-probe", [good], said.append),
-                "cannot be verified")
-        finally:
-            for server in scenes:
-                server.shutdown()
+        _fake, registry, _view, said = scene()
+        arm("an API that cannot answer refuses the write", guarded(registry, unreachable, said), "cannot be verified")
+    finally:
+        for server in scenes:
+            server.shutdown()
 
     for failure in failures:
         print(f"store_replica selftest FAILED: {failure}")
@@ -709,57 +507,9 @@ def selftest() -> int:
     return 1 if failures else 0
 
 
-def _token(env: str, label: str) -> str:
-    if env == TOKEN_FILE_ENV:
-        path = os.environ.get(TOKEN_FILE_ENV)
-        if not path or not Path(path).is_file():
-            raise Refused(f"{TOKEN_FILE_ENV} names no file: the {label} reads its token from the writer "
-                          f"account's token file, never from an argument")
-        return Path(path).read_text().strip()
-    value = os.environ.get(env, "")
-    if not value:
-        raise Refused(f"{env} is unset: the {label} reads the repository's own token")
-    return value
-
-
 def main(argv: list[str]) -> int:
-    say = print
-    try:
-        if argv == ["selftest"]:
-            return selftest()
-        verb, own, rest = (argv[0] if argv else ""), None, argv[1:]
-        if verb in ("push", "push-slice") and rest[:1] == ["--own"] and len(rest) >= 2:
-            own, rest = rest[1], rest[2:]
-        if verb == "push" and len(rest) >= 3:
-            token = _token(TOKEN_FILE_ENV, "writer")
-            package = package_of(rest[1])
-            registry = Registry(REGISTRY, f"{ORG}/{package}",
-                                (os.environ.get(REGISTRY_USER_ENV, REGISTRY_USER_DEFAULT), token))
-            replicate(Path(rest[0]), registry, github_guard(API, ORG, token), ORG, package, rest[2:], say,
-                      expected_package(ORG, rest[1], own))
-            return 0
-        if verb == "push-slice" and len(rest) == 4:
-            token = _token(TOKEN_FILE_ENV, "writer")
-            package = package_of(rest[0])
-            registry = Registry(REGISTRY, f"{ORG}/{package}",
-                                (os.environ.get(REGISTRY_USER_ENV, REGISTRY_USER_DEFAULT), token))
-            replicate_slice(registry, github_guard(API, ORG, token), ORG, package, rest[1],
-                            Path(rest[2]).read_bytes(), Path(rest[3]).read_bytes(), say,
-                            expected_package(ORG, rest[0], own))
-            return 0
-        if len(argv) == 4 and argv[0] == "fetch":
-            if not DIGEST_HEX.match(argv[2]):
-                raise Refused(f"{argv[2]!r} is not an object digest (64 hex)")
-            token = _token("GITHUB_TOKEN", "reader")
-            package = package_of(argv[1])
-            registry = Registry(REGISTRY, f"{ORG}/{package}",
-                                (os.environ.get("GITHUB_ACTOR", "x-access-token"), token))
-            registry.get_layer(argv[2], Path(argv[3]))
-            say(f"store_replica: FETCHED {package} sha256:{argv[2]} -> {argv[3]}")
-            return 0
-    except Refused as refused:
-        print(f"store_replica: REFUSED — {refused}", file=sys.stderr)
-        return 1
+    if argv == ["selftest"]:
+        return selftest()
     print(__doc__, file=sys.stderr)
     return 2
 

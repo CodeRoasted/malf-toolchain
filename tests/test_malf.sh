@@ -385,27 +385,19 @@ check "sanitizer_verdict selftest: 28 arms, the ASan suite red on its exit and u
       "ok" "$([[ $sanitizer_selftest_status -eq 0 ]] && grep -q '^sanitizer_verdict selftest: 28 arm(s), 0 failure(s)$' <<< "$sanitizer_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$sanitizer_selftest_output")")"
 echo
 
-echo "[7i] store_replica carries its own refusal proof (selftest): every guard of the ghcr read replica fires against an in-process registry and API (DN-142.D6)"
+echo "[7i] store_replica carries its own refusal proof (selftest): the ghcr client and the package guard of a repository's own store fire against an in-process registry (DN-142.D31 (3))"
 replica_selftest_output="$(timeout 120 python3 "$MALF_ROOT/store_replica.py" selftest 2>&1)"
 replica_selftest_status=$?
-check "store_replica selftest: 23 arms, every refusal fired, the one visibility rule both ways (DN-142.D31 (3)), the round trip byte-equal, a cached token reused, and no credential sent off the registry" \
-      "ok" "$([[ $replica_selftest_status -eq 0 ]] && grep -q '^store_replica selftest: 23 arm(s), 0 failure(s)$' <<< "$replica_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$replica_selftest_output")")"
+check "store_replica selftest: 18 arms, every refusal fired, the one visibility rule both ways (DN-142.D31 (3)), the sentinel linking a new package, the round trip byte-equal, a cached token reused, and no credential sent off the registry" \
+      "ok" "$([[ $replica_selftest_status -eq 0 ]] && grep -q '^store_replica selftest: 18 arm(s), 0 failure(s)$' <<< "$replica_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$replica_selftest_output")")"
 
 echo
 
 echo "[7i2] store_transport carries its own proof (selftest): a repository's own store, pushed by its candidate and restored by digest through a cache, the index trusted only through its attestation (DN-142.D31 (3), (4), slice S4)"
 transport_selftest_output="$(timeout 300 python3 "$MALF_ROOT/store_transport.py" selftest 2>&1)"
 transport_selftest_status=$?
-check "store_transport selftest: 98 arms, a cut candidate tag trusted only on main, the runner cache shared across verbs and bounded, the candidate key, push and its ownership filter, publish-index last, the attestation verifier's eight ABSENT reds, the cache judged by digest, the mismatch tag, the one visibility rule and package-check's early read of it, a private package's link read through the peek token, a dependent candidate's upstreams read and checked, a source-only upstream's commit in the key, a private upstream never cloned and known private when unseen, a user-owned fork, the index verb (printed whole, ABSENT at 3), and the prune: a dry run that deletes nothing, an applied prune that leaves the kept closure whole and restorable, a young version kept by the grace bound, a refused delete naming the package setting, and six keep-sets refused before anything is deleted" \
-      "ok" "$([[ $transport_selftest_status -eq 0 ]] && grep -q '^store_transport selftest: 98 arm(s), 0 failure(s)$' <<< "$transport_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$transport_selftest_output")")"
-
-echo
-
-echo "[7j] store_manifest carries its own refusal proof (selftest): a manifest admits only evaluated digests, an entry ships as its own bytes, an object only through its producing record and an image as the archive its step stored, a slice and a destination slice verify only under the writer's key and only as their own format, the seal is kept once, and DN-142.D22 (3) binds both directions"
-manifest_selftest_output="$(timeout 120 python3 "$MALF_ROOT/store_manifest.py" selftest 2>&1)"
-manifest_selftest_status=$?
-check "store_manifest selftest: 68 arms, every refusal fired, the system reading over every record kind (DN-142.D30 E4), the green manifest, slices, destination slices, objects, seal, signature and extraction intact" \
-      "ok" "$([[ $manifest_selftest_status -eq 0 ]] && grep -q '^store_manifest selftest: 68 arm(s), 0 failure(s)$' <<< "$manifest_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$manifest_selftest_output")")"
+check "store_transport selftest: 96 arms, a cut candidate tag trusted only on main, the runner cache shared across verbs and bounded, the candidate key, push and its ownership filter, publish-index last, the attestation verifier's eight ABSENT reds, the cache judged by digest, the mismatch tag, the one visibility rule and package-check's early read of it, a private package's link read through the peek token, a dependent candidate's upstreams read and checked, a source-only upstream's commit in the key, a private upstream never cloned and known private when unseen, a user-owned fork, the index verb (printed whole, ABSENT at 3), and the prune: a dry run that deletes nothing, an applied prune that leaves the kept closure whole and restorable, a young version kept by the grace bound, a refused delete naming the package setting, and six keep-sets refused before anything is deleted" \
+      "ok" "$([[ $transport_selftest_status -eq 0 ]] && grep -q '^store_transport selftest: 96 arm(s), 0 failure(s)$' <<< "$transport_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$transport_selftest_output")")"
 
 echo
 
@@ -448,19 +440,19 @@ check "malf_closure selftest: 35 arms, 0 failed" \
 
 echo
 
-echo "[7j0] artefact_store's object producers carry their own refusal proof (selftest): the objects convention resolves step -> record -> output -> member, the tracked step is keyed on blob ids at a commit, and the ingestion write refuses a printed digest that is not the bytes, a record without its seat or dated exception, a PE carrying a symbol table or a CodeView entry, and records a divergence at an equal inputs_key, never a red (DN-142.D20 (2), DN-142.D25)"
+echo "[7j0] artefact_store's object producers carry their own refusal proof (selftest): the objects convention resolves step -> record -> output -> member, the tracked step is keyed on blob ids at a commit, a package member is extracted from its transport only at its digest, and a candidate's ingestion refuses a declared class its bytes contradict and a PE carrying a symbol table or a CodeView entry (DN-142.D25, DN-142.D33 (3))"
 objects_selftest_output="$(timeout 120 python3 "$MALF_ROOT/artefact_store.py" selftest 2>&1)"
 objects_selftest_status=$?
-check "artefact_store selftest: 58 arms, every refusal fired, the system member refused outside the build environment, the ingestion record and its class, the tracked record, a candidate's ingestion of its own run's artifact, a candidate verdict stored only when it passed and only from a candidate_verdicts row of its shape, the divergence event, the bench verdict, the test_package member, the restore and the reuse decision intact" \
-      "ok" "$([[ $objects_selftest_status -eq 0 ]] && grep -q '^artefact_store selftest: 58 arm(s), 0 failure(s)$' <<< "$objects_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$objects_selftest_output")")"
+check "artefact_store selftest: 45 arms, every refusal fired, the system member refused outside the build environment, the transport extraction, the tracked record, a candidate's ingestion of its own run's artifact and its class, a candidate verdict stored only when it passed and only from a candidate_verdicts row of its shape, the bench verdict, the test_package member, the restore and the reuse decision intact" \
+      "ok" "$([[ $objects_selftest_status -eq 0 ]] && grep -q '^artefact_store selftest: 45 arm(s), 0 failure(s)$' <<< "$objects_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$objects_selftest_output")")"
 
 echo
 
-echo "[7j1] store_image carries its own refusal proof (selftest): an image is built from stored entries (step 0's run, or a candidate's ship-form creates) and a resolved runtime, judged as one linux/amd64 OCI image, and stored once per run (DN-142.D9, DN-142.D33 (3))"
+echo "[7j1] store_image carries its own refusal proof (selftest): an image is built from a candidate's ship-form creates and a resolved runtime, judged as one linux/amd64 OCI image, and stored once per run (DN-142.D9, DN-142.D33 (3))"
 image_selftest_output="$(timeout 120 python3 "$MALF_ROOT/store_image.py" selftest 2>&1)"
 image_selftest_status=$?
-check "store_image selftest: 17 arms, every refusal fired, the staged context and the stored record intact, the candidate's image from its one ship-form create" \
-      "ok" "$([[ $image_selftest_status -eq 0 ]] && grep -q '^store_image selftest: 17 arm(s), 0 failure(s)$' <<< "$image_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$image_selftest_output")")"
+check "store_image selftest: 15 arms, every refusal fired, the staged context and the stored record intact, the candidate's image from its one ship-form create" \
+      "ok" "$([[ $image_selftest_status -eq 0 ]] && grep -q '^store_image selftest: 15 arm(s), 0 failure(s)$' <<< "$image_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$image_selftest_output")")"
 
 echo
 
@@ -5271,24 +5263,6 @@ print(twin.source_entries(cmake, "4"), twin.source_entries(macos_only, "4"), twi
 PY
 )"
 
-# package_relocate's scan: a producer path is a finding; the variable-anchored prefix, CMake's own
-# lone-root guard and a path inside a comment are not.
-rs_tmp="$(mktemp -d)"
-mkdir -p "$rs_tmp/lib/cmake/p"
-cat > "$rs_tmp/lib/cmake/p/pTargets.cmake" <<'CMK'
-# the host's /dev/shm is named in prose here
-if(_IMPORT_PREFIX STREQUAL "/")
-  set_target_properties(p PROPERTIES
-    INTERFACE_INCLUDE_DIRECTORIES "${_IMPORT_PREFIX}/include"
-    IMPORTED_CXX_MODULES_INCLUDE_DIRECTORIES "/home/ghrunner/_work/p/.conan2/p/b/p0123/b/src"
-    IMPORTED_CXX_MODULES_COMPILE_OPTIONS "-fmacro-prefix-map=/tmp/producer/b=.")
-CMK
-check "package_relocate's scan names each producer path, and nothing a variable, the lone root or a comment holds" \
-      "p: lib/cmake/p/pTargets.cmake:5 names the absolute path /home/ghrunner/_work/p/.conan2/p/b/p0123/b/src|p: lib/cmake/p/pTargets.cmake:6 names the absolute path /tmp/producer/b=.|" \
-      "$(python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import package_relocate as r; from pathlib import Path; print("".join(f + "|" for f in r.scan([("p", "p/1", Path(sys.argv[2]))])))' "$MALF_ROOT" "$rs_tmp")"
-rm -rf "$rs_tmp"
-echo
-
 echo "[7q7e] a recipe exports its git-TRACKED files: the helper narrows the export, the gate compares desk and fresh clone (DN-142.D4 (b))"
 # A git repository with one package: tracked sources under the declared root and one outside it, an
 # ignored build tree and an untracked draft under the root — the two kinds of file insight-eidos's
@@ -6610,90 +6584,17 @@ check "a home holding only an OLDER revision than the lock: the act fails, namin
       "rc=1 1" "$(ls_step lock-b ls_top | cut -d' ' -f1) $(grep -c "Package 'tpdep/1.0' not resolved" "$ls_tmp/create.log")"
 check "no malf/conan.lock: the act refuses at exit 2 naming the file, and no create runs" \
       "rc=2 tpdep=no-graph 1" "$(ls_step no-lock ls_top) $(grep -c "resolves only against $ls_tmp/no-lock/conan.lock" "$ls_tmp/refusal.log")"
-# relocate-verify's closure is the graph the lock resolves, plus the package under judgement: the
-# producer home holds both tpdep revisions, and the fresh home receives the lock's alone.
-ls_conan remove "ls_top/*" -c
-ls_conan create "$ls_tmp/tpdep" -pr:a fixture
-ls_conan create "$ls_tmp/ls_top" -pr:a fixture --lockfile="$ls_tmp/lock-a/conan.lock"
-printf 'ls_top\t%s\t\n' "$ls_tmp/ls_top" > "$ls_tmp/released.tsv"
-check "relocate-verify's fresh home receives the locked tpdep revision, never the producer home's latest" \
-      "a" "$(python3 -I -c 'import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import package_relocate as r
-source, fresh, lock = Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4])
-rows = r.released_refs(source, Path(sys.argv[5]), "")
-(fresh / "locks").mkdir(parents=True)
-r.seed(source, fresh, "fixture", rows, r.subject_locks(source, lock, rows, fresh / "locks"))' "$MALF_ROOT" "$ls_home" "$ls_tmp/fresh" "$ls_tmp/lock-a/conan.lock" "$ls_tmp/released.tsv" > /dev/null 2>&1
-         CONAN_HOME="$ls_tmp/fresh" conan list 'tpdep/1.0#*' --format=json 2>/dev/null | python3 -c 'import json, sys; print(" ".join(r for v in json.load(sys.stdin)["Local Cache"].values() for r in v.get("revisions", {})) or "none")' | ls_name)"
-# relocate-verify over an APPLICATION: measured 2026-10-10, the 1.10.7 step 0 redded on
-# insight_sift_tools (the `sift` CLI), whose graph holds a static library its consumer SKIPS. The seed
-# saved no recipe beside a skipped binary, so the fresh home's install failed "insight_sift not
-# resolved"; and an application ships no CMake config, so linking a consumer imported no target.
-# The fixture: an application requiring a static library, a lock naming the library, and two
-# executables — /bin/true, and one whose RUNPATH names a producer directory made unreadable.
-mkdir -p "$ls_tmp/ls_lib" "$ls_tmp/ls_app" "$ls_tmp/lock-app" "$ls_tmp/producer" "$ls_tmp/empty/bin" "$ls_tmp/bad/bin"
-printf 'from conan import ConanFile\n\n\nclass LsLib(ConanFile):\n    name = "ls_lib"\n    version = "0.1"\n    package_type = "static-library"\n    settings = "os", "arch", "build_type"\n' \
-       > "$ls_tmp/ls_lib/conanfile.py"
-printf 'from conan import ConanFile\nfrom conan.tools.files import copy\n\n\nclass LsApp(ConanFile):\n    name = "ls_app"\n    version = "0.1"\n    package_type = "application"\n    settings = "os", "arch", "build_type"\n    requires = "ls_lib/0.1"\n    exports_sources = "ls_app"\n\n    def package(self):\n        copy(self, "ls_app", self.source_folder, self.package_folder + "/bin")\n' \
-       > "$ls_tmp/ls_app/conanfile.py"
-cp /bin/true "$ls_tmp/ls_app/ls_app"
-ls_conan create "$ls_tmp/ls_lib" -pr:a fixture
-ls_conan lock create "$ls_tmp/ls_app" -pr:a fixture --lockfile-out="$ls_tmp/lock-app/conan.lock"
-ls_conan create "$ls_tmp/ls_app" -pr:a fixture --lockfile="$ls_tmp/lock-app/conan.lock"
-printf 'ls_app\t%s\t\n' "$ls_tmp/ls_app" > "$ls_tmp/released-app.tsv"
-check "relocate-verify's fresh home of an application holds the recipe of the static library it skips, and its install resolves there" \
-      "{'ls_app': 'application'} ls_lib=1 install=0" \
-      "$(python3 -I -c 'import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import package_relocate as r
-source, fresh, lock = Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4])
-rows = r.released_refs(source, Path(sys.argv[5]), "")
-(fresh / "locks").mkdir(parents=True)
-locks = r.subject_locks(source, lock, rows, fresh / "locks")
-print(r.seed(source, fresh, "fixture", rows, locks))' "$MALF_ROOT" "$ls_home" "$ls_tmp/fresh-app" "$ls_tmp/lock-app/conan.lock" "$ls_tmp/released-app.tsv" 2>/dev/null | tail -1) ls_lib=$(CONAN_HOME="$ls_tmp/fresh-app" conan list 'ls_lib/0.1#*' --format=json 2>/dev/null | python3 -c 'import json, sys; print(sum(len(v.get("revisions", {})) for v in json.load(sys.stdin)["Local Cache"].values()))') install=$(CONAN_HOME="$ls_tmp/fresh-app" conan install --requires=ls_app/0.1 -pr:a fixture --lockfile="$ls_tmp/fresh-app/locks/ls_app.lock" --build=never -of "$ls_tmp/fresh-app/consumer" > /dev/null 2>&1; echo $?)"
-printf 'int gone(void) { return 0; }\n' > "$ls_tmp/gone.c"
-printf 'int gone(void);\nint main(void) { return gone(); }\n' > "$ls_tmp/main.c"
-cc -shared -fPIC -o "$ls_tmp/producer/libgone.so" "$ls_tmp/gone.c" \
-    && cc -o "$ls_tmp/bad/bin/app" "$ls_tmp/main.c" -L"$ls_tmp/producer" -lgone -Wl,-rpath,"$ls_tmp/producer"
-chmod 0 "$ls_tmp/producer"
-check "an application's executables resolve through the loader: /bin/true passes, a RUNPATH into an unreadable producer directory is named, a package with no executable is named" \
-      "None|ls_app: bin/app does not resolve its shared libraries from the fresh home|ls_app: an application package with no executable under $ls_tmp/empty/bin" \
-      "$(python3 -I -c 'import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import package_relocate as r
-print(r.loads("ls_app", r.binary_of(Path(sys.argv[2]), "ls_app")[1]), (r.loads("ls_app", Path(sys.argv[3])) or "").split(" (")[0], r.loads("ls_app", Path(sys.argv[4])), sep="|")' "$MALF_ROOT" "$ls_home" "$ls_tmp/bad" "$ls_tmp/empty" 2>&1)"
-chmod 755 "$ls_tmp/producer"
-# relocate-verify's consumer install names no remote (DN-142.D30 (10) R12): measured 2026-10-19, all 21
-# consumers refused in the build environment, whose container has no network, because conan checks a
-# build tool's binary against every remote before it marks the tool skipped. The fixture: an application
-# whose recipe tool_requires lr_tool, a fresh home holding the application's binary and the tool's recipe
-# alone, and one remote that cannot be reached.
-mkdir -p "$ls_tmp/lr_tool" "$ls_tmp/lr_app" "$ls_tmp/lr-fresh/profiles" "$ls_tmp/lr-scratch"
-printf 'from conan import ConanFile\n\n\nclass LrTool(ConanFile):\n    name = "lr_tool"\n    version = "0.1"\n    package_type = "application"\n    settings = "os", "arch", "build_type"\n' \
-       > "$ls_tmp/lr_tool/conanfile.py"
-printf 'from conan import ConanFile\nfrom conan.tools.files import copy\n\n\nclass LrApp(ConanFile):\n    name = "lr_app"\n    version = "0.1"\n    package_type = "application"\n    settings = "os", "arch", "build_type"\n    tool_requires = "lr_tool/0.1"\n    exports_sources = "lr_app"\n\n    def package(self):\n        copy(self, "lr_app", self.source_folder, self.package_folder + "/bin")\n' \
-       > "$ls_tmp/lr_app/conanfile.py"
-cp /bin/true "$ls_tmp/lr_app/lr_app"
-ls_conan create "$ls_tmp/lr_tool" -pr:a fixture
-ls_conan create "$ls_tmp/lr_app" -pr:a fixture --build=missing
-ls_conan lock create --requires=lr_app/0.1 -pr:a fixture --lockfile-out="$ls_tmp/lr.lock"
-CONAN_HOME="$ls_home" conan list 'lr_app/0.1#*:*#*' --format=json > "$ls_tmp/lr-app.json" 2>/dev/null
-CONAN_HOME="$ls_home" conan list 'lr_tool/0.1#*' --format=json > "$ls_tmp/lr-tool.json" 2>/dev/null
-CONAN_HOME="$ls_home" conan pkglist merge -l "$ls_tmp/lr-app.json" -l "$ls_tmp/lr-tool.json" --format=json > "$ls_tmp/lr.json" 2>/dev/null
-ls_conan cache save --list="$ls_tmp/lr.json" --file="$ls_tmp/lr.tgz"
-cp "$ls_home/profiles/fixture" "$ls_tmp/lr-fresh/profiles/fixture"
-CONAN_HOME="$ls_tmp/lr-fresh" conan cache restore "$ls_tmp/lr.tgz" > /dev/null 2>&1
-CONAN_HOME="$ls_tmp/lr-fresh" conan remote remove '*' > /dev/null 2>&1
-CONAN_HOME="$ls_tmp/lr-fresh" conan remote add unreachable http://127.0.0.1:9 > /dev/null 2>&1
-check "RED — relocate-verify's consumer install of a package whose graph holds a skipped build tool, with no binary of it in the fresh home, is green with an unreachable remote configured: it names no remote" \
-      "tool-binaries=0 None" \
-      "tool-binaries=$(CONAN_HOME="$ls_tmp/lr-fresh" conan list 'lr_tool/0.1:*' --format=json 2>/dev/null | python3 -c 'import json, sys; print(sum(len(r.get("packages", {})) for v in json.load(sys.stdin)["Local Cache"].values() for r in v.get("revisions", {}).values()))') $(python3 -I -c 'import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import package_relocate as r
-print(r.consume(Path(sys.argv[2]), "fixture", "lr_app", "lr_app/0.1", Path(sys.argv[3]), Path(sys.argv[4]), "", "application"))' "$MALF_ROOT" "$ls_tmp/lr-fresh" "$ls_tmp/lr.lock" "$ls_tmp/lr-scratch" 2>&1 | tail -1)"
 # Every other resolution of the ship leg splices the same arguments, read from malf's source: the
-# stored: false step's build, and the lockfile twin-verify's probe and relocate-verify
-# resolve against. Each verb takes it before its first conan call and refuses without it.
+# stored: false step's build, and the lockfile twin-verify's probe resolves against. Each verb
+# takes it before its first conan call and refuses without it.
 ls_body() { awk "/^$1\\(\\)/,/^}/" "$MALF_BIN"; }
 check "store-create's create and its stored: false build splice the ship lockfile, and malf passes --lockfile-partial nowhere on the ship leg" \
       "1 1 0" \
-      "$(ls_body _malf_store_create_step | grep -c '"${_MALF_SHIP_LOCK\[@\]}"') $(ls_body _malf_store_build_in | grep -c '"${_MALF_SHIP_LOCK\[@\]}"') $(for fn in cmd_store_create _malf_store_create_step _malf_store_build_one _malf_store_build_in cmd_twin_verify cmd_relocate_verify; do ls_body "$fn"; done | grep -c -- '--lockfile-partial')"
-check "store-create, twin-verify and relocate-verify each take the ship lockfile and refuse without it" \
-      "3" "$(for fn in cmd_store_create cmd_twin_verify cmd_relocate_verify; do ls_body "$fn" | grep -cE '_malf_ship_lock_args \|\| (return|exit)'; done | awk '{n += $1} END {print n}')"
-check "twin-verify's probe and relocate-verify resolve against the lockfile malf took" \
-      "1 1" "$(ls_body cmd_twin_verify | grep -c 'package_twin.py" missing .*"${_MALF_SHIP_LOCK\[0\]#--lockfile=}"') $(ls_body cmd_relocate_verify | grep -c '"${_MALF_SHIP_LOCK\[0\]#--lockfile=}"')"
+      "$(ls_body _malf_store_create_step | grep -c '"${_MALF_SHIP_LOCK\[@\]}"') $(ls_body _malf_store_build_in | grep -c '"${_MALF_SHIP_LOCK\[@\]}"') $(for fn in cmd_store_create _malf_store_create_step _malf_store_build_one _malf_store_build_in cmd_twin_verify; do ls_body "$fn"; done | grep -c -- '--lockfile-partial')"
+check "store-create and twin-verify each take the ship lockfile and refuse without it" \
+      "2" "$(for fn in cmd_store_create cmd_twin_verify; do ls_body "$fn" | grep -cE '_malf_ship_lock_args \|\| (return|exit)'; done | awk '{n += $1} END {print n}')"
+check "twin-verify's probe resolves against the lockfile malf took" \
+      "1" "$(ls_body cmd_twin_verify | grep -c 'package_twin.py" missing .*"${_MALF_SHIP_LOCK\[0\]#--lockfile=}"')"
 rm -rf "$ls_tmp"
 echo
 

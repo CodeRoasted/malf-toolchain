@@ -15,15 +15,9 @@ name: CodeRoast Golden Proof
 # resolved ref, and metalog-spec's ref resolved for the compare's SPEC §8 gate).
 #
 # WHICH insight-canon AND metalog-spec A TOWER READS — `subjects` resolves them, in this order:
-#   0. `record-run` — the pre-tag reading, which step 0 dispatches itself after its A1 stage recorded
-#      the commits (the Founder, 2026-10-13, the N360 plan's ruling R-12 (a)): `record-commits`
-#      carries them as `<repository>=<40-hex>` words, the caller's own commit must be the one named
-#      for `record-self`, and a missing or malformed commit refuses — never a fallback to `main`.
-#      The caller's run title carries `record-commits` verbatim, so step 0 reads back, through
-#      GitHub's own rendering of the inputs, which commits the run was handed;
-#   1. `canon-ref` — a manual dispatch naming a ref (an epic branch);
-#   2. the caller's tag on a tag run (the cut tags canon in an earlier wave, so it exists);
-#   3. `main`. metalog-spec is `main` off the reading: it never carries the uniform tag.
+#   1. `canon-ref` — the ref the caller names;
+#   2. the caller's tag on a tag run;
+#   3. `main`. metalog-spec is `main`: it never carries the uniform tag.
 #
 # PUBLIC CALLERS, HOSTED RUNNERS. The Linux legs run on hosted ubuntu images and the MSVC leg on
 # `windows-runner`, whose default is the hosted windows-2025-vs2026: a self-hosted runner a public
@@ -65,21 +59,6 @@ on:
         type: string
         required: false
         default: ''
-      record-run:
-        description: 'The pre-tag reading: the pharos-build run of this cut''s step 0, which dispatched this run.'
-        type: string
-        required: false
-        default: ''
-      record-commits:
-        description: 'The commits step 0 recorded, as `<repository>=<40-hex>` words (required with `record-run`).'
-        type: string
-        required: false
-        default: ''
-      record-self:
-        description: 'The caller''s repository name among `record-commits` (required with `record-run`).'
-        type: string
-        required: false
-        default: ''
       windows-runner:
         description: 'The MSVC leg''s runner. Public callers omit it (hosted windows-2025-vs2026).'
         type: string
@@ -102,43 +81,20 @@ permissions:
 jobs:
   subjects:
     name: Resolve the insight-canon and metalog-spec this run reads
-    # Hosted, and nothing else runs in it. It holds no credential: step 0 hands it the commits.
+    # Hosted, and nothing else runs in it. It holds no credential.
     runs-on: ubuntu-24.04
     outputs:
       canon: ${{ steps.resolve.outputs.canon }}
       spec: ${{ steps.resolve.outputs.spec }}
     steps:
-      - name: Resolve (GATING — on the pre-tag reading a missing recorded commit refuses, never main)
+      - name: Resolve
         id: resolve
         env:
-          RECORD_RUN: ${{ inputs.record-run }}
-          RECORD_COMMITS: ${{ inputs.record-commits }}
-          RECORD_SELF: ${{ inputs.record-self }}
           NAMED_REF: ${{ inputs.canon-ref || (github.ref_type == 'tag' && github.ref_name) || 'main' }}
         run: |
           set -euo pipefail
-          if [ -z "$RECORD_RUN" ]; then
-            printf 'canon=%s\nspec=main\n' "$NAMED_REF" >> "$GITHUB_OUTPUT"
-            echo "insight-canon at $NAMED_REF, metalog-spec at main"
-            exit 0
-          fi
-          python3 - >> "$GITHUB_OUTPUT" <<'PY'
-          import os, re, sys
-          run, me = os.environ["RECORD_RUN"], os.environ["RECORD_SELF"]
-          words = os.environ["RECORD_COMMITS"].split()
-          commits = dict(word.partition("=")[::2] for word in words)
-          if not me or len(commits) != len(words):
-              sys.exit(f"step 0 run {run}: record-self {me!r} and record-commits {os.environ['RECORD_COMMITS']!r} do not name each repository once")
-          wanted = {name: commits.get(name) for name in (me, "insight-canon", "metalog-spec")}
-          for name, sha in wanted.items():
-              if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
-                  sys.exit(f"step 0 run {run} handed no recorded commit for {name}")
-          if wanted[me] != os.environ["GITHUB_SHA"]:
-              sys.exit(f"step 0 run {run} recorded {me} at {wanted[me]} and this run is at {os.environ['GITHUB_SHA']}: main moved after step 0's A1, so this reading would judge a commit no tag will carry")
-          print(f"canon={wanted['insight-canon']}")
-          print(f"spec={wanted['metalog-spec']}")
-          print(f"the pre-tag reading of step 0 run {run}: insight-canon {wanted['insight-canon']}, metalog-spec {wanted['metalog-spec']}", file=sys.stderr)
-          PY
+          printf 'canon=%s\nspec=main\n' "$NAMED_REF" >> "$GITHUB_OUTPUT"
+          echo "insight-canon at $NAMED_REF, metalog-spec at main"
 
   guards:
     # The caller's cheap guards, through the one script-gate job: a red here stops every leg before

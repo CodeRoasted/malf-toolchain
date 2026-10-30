@@ -10,7 +10,7 @@ description: |
   database and the tests come from one build, and a lint never pays for a compile of its own.
 
   Run after `actions/checkout`. Provisions clang-21 and clang-tidy through `setup-clang21-tools`, the
-  one provisioning surface the format gate and step 0 also use, then the build environment for the
+  one provisioning surface the format gate and the cut also use, then the build environment for the
   clang profile.
 
   CROSS-REPO FIRST-PARTY REQUIREMENTS come from `siblings`. With it empty, the checkout IS the

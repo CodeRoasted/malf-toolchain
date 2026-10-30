@@ -9,7 +9,7 @@
 #
 # WHY. The rootful daemon's socket is root:docker 0660, and `docker run -v /:/host` is root on the
 # host, so membership of `docker` made every process of the desk account — every agent lane
-# included — root without a password: it could read the release runner's store-writer credential
+# included — root without a password: it could read the release runner's registration credential
 # in ~ghrelease, whatever that home's mode (DN-142.D6, R1). A rootless daemon maps a container's root
 # to this account and its subordinate ids, so a bind mount reaches only what the account can read.
 #
@@ -56,7 +56,7 @@ BASHRC="$HOME/.bashrc"
 MARK_BEGIN="# >>> coderoast desk rootless docker (malf/runner/desk-rootless-docker.sh) >>>"
 MARK_END="# <<< coderoast desk rootless docker <<<"
 ROOTFUL_SOCK=/var/run/docker.sock
-WRITER_TOKEN=/home/ghrelease/.config/coderoast/STORE_WRITER_TOKEN
+RUNNER_CREDENTIAL=/home/ghrelease/actions-runner-release/.credentials
 # Public mirror (no Docker Hub pull), the digest coderoast-server's redis fixture and the runner
 # isolation script pin.
 SMOKE_IMAGE="ghcr.io/coderoasted/mirror/library/redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499"
@@ -143,7 +143,7 @@ prove() {
     rm -rf "$own"
     [[ "$got" == READ ]] || { say "FAILED control: a container could not read the account's own file through a bind mount ($got)"; return 1; }
     say "control: a container reads the account's own file through a bind mount"
-    # Each source is one door; the writer's credential and the shadow file are the targets. Nothing
+    # Each source is one door; the release runner's credential and the shadow file are the targets. Nothing
     # read is printed: a success prints its byte count only.
     local src priv
     for src in /home/ghrelease /; do
@@ -152,7 +152,7 @@ prove() {
             # shellcheck disable=SC2016  # expanded by the container's shell
             got="$(rdocker run "${flags[@]}" "$SMOKE_IMAGE" sh -c \
                 'for f in "$@"; do n=$(cat "$f" 2>/dev/null | wc -c); [ "$n" -gt 0 ] && { echo "READ $f ($n bytes)"; exit 0; }; done; echo REFUSED' \
-                probe /probe/.config/coderoast/STORE_WRITER_TOKEN "/probe$WRITER_TOKEN" /probe/etc/shadow 2>&1)" \
+                probe /probe/actions-runner-release/.credentials "/probe$RUNNER_CREDENTIAL" /probe/etc/shadow 2>&1)" \
                 || got="REFUSED (docker run failed: ${got//$'\n'/ })"
             if [[ "$got" == REFUSED* ]]; then say "closed: -v $src:/probe ($priv) -> $got"
             else say "OPEN: -v $src:/probe ($priv) -> $got"; fail=1; fi
