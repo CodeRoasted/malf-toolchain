@@ -5603,8 +5603,11 @@ _malf_writer_create_args() {
     # THE FORM'S OWN CONF SET (DN-142.D31 (1)) rides the first-party create and the resolve of its key
     # alone, never a third-party phase: a third-party binary is one act whatever form consumes it.
     [[ "${MALF_STEP_FORM:-}" == writer ]] && return 0
-    listed="$(python3 "$MALF_DIR/malf_recipe_tests.py" create-args "${MALF_STEP_FORM:-}")" \
-        || { echo "malf: the conf set of the form '${MALF_STEP_FORM:-}' could not be read from malf_recipe_tests.py" >&2; return 1; }
+    local conf_set="${MALF_STEP_FORM:-}"
+    # The cut's bench measurement over a ship-form walk configures the bench targets and runs only them.
+    [[ "$conf_set" == ship && -n "${MALF_BENCH:-}" ]] && conf_set=ship-bench
+    listed="$(python3 "$MALF_DIR/malf_recipe_tests.py" create-args "$conf_set")" \
+        || { echo "malf: the conf set '$conf_set' could not be read from malf_recipe_tests.py" >&2; return 1; }
     [[ -z "$listed" ]] || mapfile -t _MALF_FORM_ARGS <<< "$listed"
 }
 
@@ -5824,9 +5827,12 @@ _malf_store_walk_backends() {   # <out> [<package>...]
 # writer-form record of one package never share a key, a verdict or an outcome, and neither form is ever
 # served for the other; a ship-form create that leaves a result of its own tests is refused. Its outcome
 # expects the package, and a test verdict only when the recipe tracks a test_package. A `stored: false`
-# step has nothing to create in this form and is left out of the walk, printed; corpus gates and
-# benchmarks (MALF_CORPUS_GATES, MALF_BENCH) run inside writer-form creates, so naming one under
-# `--ship` is refused. The third-party phases run under the writer's set in both forms: one act.
+# step has nothing to create in this form and is left out of the walk, printed; the corpus gates
+# (MALF_CORPUS_GATES) run inside writer-form creates, so naming them under `--ship` is refused. MALF_BENCH
+# under `--ship` is the cut's bench measurement (DN-142.D33): each create takes the ship-bench conf set
+# (malf_recipe_tests.py), configuring its bench targets and running only the benchmarks, and stores its
+# bench verdict beside the package; its walk's store is the cut's scratch, never a candidate's. The
+# third-party phases run under the writer's set in both forms: one act.
 #
 # THE CORPUS GATES (DN-142.D21): MALF_CORPUS_GATES, when set, names the parameter document step 0's
 # Pharos writes. Every create then carries `-c user.malf:corpus_gates=<document>`, so the package the
@@ -5865,10 +5871,14 @@ cmd_store_create() {
         esac
     done
     set -- "${names[@]}"
-    if [[ "$form" == ship && ( -n "${MALF_CORPUS_GATES:-}" || -n "${MALF_BENCH:-}" ) ]]; then
-        echo "malf store-create: REFUSED — --ship runs no gate of its own: the corpus legs and the benchmarks run inside step 0's writer-form creates, and MALF_CORPUS_GATES='${MALF_CORPUS_GATES:-}' MALF_BENCH='${MALF_BENCH:-}' name some (DN-142.D31 (1))" >&2
+    if [[ "$form" == ship && -n "${MALF_CORPUS_GATES:-}" ]]; then
+        echo "malf store-create: REFUSED — --ship runs no corpus gate: the corpus legs run inside writer-form creates, and MALF_CORPUS_GATES='${MALF_CORPUS_GATES:-}' names some (DN-142.D31 (1))" >&2
         return 2
     fi
+    # A BENCH WALK SERVES NO STEP: a benchmark measures an execution, and a stored outcome (the candidate the cut
+    # restored holds one at the ship form's key) would be served with no benchmark run; every step executes and
+    # is compared with its record instead.
+    [[ -z "${MALF_BENCH:-}" ]] || export MALF_STORE_REJUDGE=1
     if [[ -z "${MALF_SYSTEM:-}" ]]; then
         _malf_store_create_in_environment "$form" "$@"
         return

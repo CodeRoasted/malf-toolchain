@@ -1,0 +1,96 @@
+name: CodeRoast prune
+
+# A REPOSITORY PRUNES ITS OWN STORE, ON THE SUPERPROJECT'S KEEP-SET (DN-142.D32 (2)): once every release of a cut is
+# green, `pharos cut` dispatches each candidate repository's `prune.yml`, which calls this workflow with the cut run
+# that computed the keep-set and the keep-set's sha256. The repository is driven, never reading the superproject's
+# decision from anywhere else (DN-142.D31): this job downloads the artifact `cut-keep-set` of THAT run with
+# BUILD_RECORD_READ_TOKEN (the token attest reads the cut with), refuses unless the run is a successful `cut.yml`
+# run of the superproject and the file's sha256 is the one the dispatcher read from the same artifact (two
+# producers of one digest), then `store_transport.py prune` deletes, with the repository's OWN token, every
+# version of `store-<repository>` the keep-set's closure does not name.
+#
+# THE FIRST RUN IS A DRY RUN: `apply` defaults to false, and a dry run prints each version it would delete.
+#
+# THE TOKEN'S RIGHT TO DELETE (GitHub's "Deleting and restoring a package", read 2026-10-30): a GITHUB_TOKEN deletes a
+# package version through the REST API only when its repository holds the Admin role on the package, granted by
+# default to the repository whose workflow first published it; a package first published otherwise needs that
+# role granted in the package's settings (Manage Actions access). The capability is a GitHub public preview.
+
+on:
+  workflow_call:
+    inputs:
+      cut-run:
+        description: 'The superproject cut.yml run whose artifact `cut-keep-set` holds the keep-set.'
+        type: string
+        required: true
+      keep-set-sha256:
+        description: 'The sha256 of keep-set.json as the dispatcher (pharos cut) read it from that artifact.'
+        type: string
+        required: true
+      apply:
+        description: 'Delete (true) or print what would be deleted (false, the default).'
+        type: boolean
+        required: false
+        default: false
+      runs-on:
+        description: 'Runner label. PUBLIC callers omit it (hosted ubuntu-24.04); PRIVATE callers pass their self-hosted label.'
+        type: string
+        required: false
+        default: 'ubuntu-24.04'
+    secrets:
+      BUILD_RECORD_READ_TOKEN:
+        description: 'Fine-grained PAT, repository access CodeRoasted/coderoast alone, Actions: Read-only: the cut run and its keep-set artifact.'
+        required: true
+
+jobs:
+  prune:
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: read
+      # coderoast-malf-checkout reads the run's referenced workflows for this workflow's commit
+      actions: read
+      # the repository's own store package: list its versions, read its indexes, delete its versions
+      packages: write
+    steps:
+      - name: malf at this workflow's commit, as git (store_transport.py)
+        id: malf
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@589cd6d5ccd2ae0676a39d07f5ed59be748b1d73
+        with:
+          workflow: coderoast-prune.yml
+
+      - name: The pinned gh the cut run is read through
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-gh@589cd6d5ccd2ae0676a39d07f5ed59be748b1d73
+
+      - name: The keep-set of a successful superproject cut run, held to the dispatcher's digest (GATING)
+        env:
+          GH_TOKEN: ${{ secrets.BUILD_RECORD_READ_TOKEN }}
+          RECORD_REPO: CodeRoasted/coderoast
+          RUN: ${{ inputs.cut-run }}
+          WANT: ${{ inputs.keep-set-sha256 }}
+        run: |
+          set -euo pipefail
+          [ -n "$GH_TOKEN" ] || { echo "::error::no token reads $RECORD_REPO's cut run $RUN: pass BUILD_RECORD_READ_TOKEN"; exit 1; }
+          [[ "$RUN" =~ ^[0-9]+$ ]] || { echo "::error::cut-run '$RUN' is not a run id"; exit 1; }
+          [[ "$WANT" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::keep-set-sha256 '$WANT' is not a sha256"; exit 1; }
+          read -r path conclusion < <(gh api "repos/$RECORD_REPO/actions/runs/$RUN" --jq '[.path, .conclusion] | @tsv')
+          if [ "$path" != ".github/workflows/cut.yml" ] || [ "$conclusion" != "success" ]; then
+            echo "::error::run $RUN of $RECORD_REPO is $path concluded $conclusion, not a successful .github/workflows/cut.yml run: its keep-set is not the cut's"
+            exit 1
+          fi
+          folder="$RUNNER_TEMP/keep-set"
+          rm -rf "$folder"; mkdir -p "$folder"
+          gh run download "$RUN" --repo "$RECORD_REPO" --name cut-keep-set --dir "$folder"
+          got="$(sha256sum "$folder/keep-set.json" | cut -d' ' -f1)"
+          [ "$got" = "$WANT" ] \
+            || { echo "::error::the keep-set.json of run $RUN has sha256 $got, and the dispatcher read $WANT: refused, nothing deleted"; exit 1; }
+          echo "KEEP_SET=$folder/keep-set.json" >> "$GITHUB_ENV"
+
+      - name: Prune this repository's own store (a dry run unless apply)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          APPLY: ${{ inputs.apply }}
+        run: |
+          set -euo pipefail
+          flags=()
+          [ "$APPLY" = true ] && flags=(--apply)
+          python3 "$MALF_CHECKOUT/store_transport.py" prune "$GITHUB_REPOSITORY" "$KEEP_SET" "${flags[@]}"

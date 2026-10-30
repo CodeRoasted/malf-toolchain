@@ -21,7 +21,10 @@ runs the same selection through `run_test_package(self)` and writes a second res
 
 THE THREE CONF SETS OF A `conan create` are defined here and nowhere else (DN-142.D13 (1),
 DN-142.D31 (1)). The WRITER (step 0's `malf store-create`) sets no skip conf: it builds and runs
-every test and every test_package. The SHIP form (a candidate's `malf store-create --ship`) sets
+every test and every test_package. The SHIP-BENCH set is the ship form's when `MALF_BENCH` names a bench
+document (the cut's bench measurement, DN-142.D33): no skip conf, so the test and bench targets are configured,
+and `user.malf:bench_only`, so the build runs no test and only the named benchmarks. The SHIP form (a
+candidate's `malf store-create --ship`) sets
 `tools.build:skip_test=True` and keeps the test folder: the package's own tests are neither built
 nor run (they are judged on clang, by the source verdict), and its test_package is built and run,
 because `user.malf:run_test_package` tells `run_test_package` to run in place of `skip_test`. The
@@ -31,7 +34,7 @@ is built. All three keep conan's default graph, test requirements expanded, so e
 writer's package id. `tools.graph:skip_test` is never set on a path that resolves a first-party
 package: it prunes the test requirements, and a `test_requires` already in the graph merges into
 that node and enters the declaring package's id, so pruning it gives metalog, eidos and sift
-another id. Every caller reads its set through `create-args <writer|ship|consumer>`.
+another id. Every caller reads its set through `create-args <writer|ship|ship-bench|consumer>`.
 
 A TEST LOCATES ITS INPUTS THROUGH A COMPILE DEFINITION, never through the translation unit's own
 name (DN-142.D13 (3)). Inside a create malf's path map (`malf-path-map.cmake`, DN-142.D4 (a)) makes
@@ -115,12 +118,17 @@ PROFILES_DIR = Path(__file__).resolve().parent / "profiles"
 SKIP_PROPERTY = "SKIP_REGULAR_EXPRESSION"
 # DN-142.D31 (1): the conf under which a test_package runs although `tools.build:skip_test` is set.
 TEST_PACKAGE_CONF = "user.malf:run_test_package"
+# DN-142.D33 slice (a) ruling (1): the cut's bench measurement over a ship-form walk. The tree configures its
+# test and bench targets (no `tools.build:skip_test`, whose BUILD_TESTING=OFF configures no bench target) and the
+# build runs no test of its own, only the benchmarks `user.malf:bench` names.
+BENCH_ONLY_CONF = "user.malf:bench_only"
 # DN-142.D13 (1), DN-142.D31 (1): the writer's create sets no skip conf; the ship form builds and runs
 # no test of its own and runs its test_package; the consumer's runs no test and builds no test_package;
 # each on conan's default graph. Never `tools.graph:skip_test`.
 CREATE_ARGS: dict[str, tuple[str, ...]] = {
     "writer": (),
     "ship": ("-c", "tools.build:skip_test=True", "-c", f"{TEST_PACKAGE_CONF}=True"),
+    "ship-bench": ("-c", f"{BENCH_ONLY_CONF}=True", "-c", f"{TEST_PACKAGE_CONF}=True"),
     "consumer": ("-c", "tools.build:skip_test=True", "--test-folder="),
 }
 # DN-142.D13 (3): the directories whose C++ sources are test sources, and the three spellings of a
@@ -413,6 +421,12 @@ def run_tests(conanfile) -> None:
     """
     from conan.errors import ConanException
 
+    if conanfile.conf.get(BENCH_ONLY_CONF, check_type=bool):
+        conanfile.output.info("malf: the ship form's bench measurement runs no test, only the benchmarks "
+                              "user.malf:bench names")
+        run_benches(conanfile, str(conanfile.build_folder), _results_directory(conanfile),
+                    conanfile.info.package_id())
+        return
     if conanfile.conf.get("tools.build:skip_test", check_type=bool):
         conanfile.output.info("malf: tools.build:skip_test is set, so no test runs in this build")
         return
@@ -618,7 +632,7 @@ def _desk_args(argv: list[str]) -> int:
 
 
 def _create_args(argv: list[str]) -> int:
-    """`create-args <writer|ship|consumer>`: the conf set of that `conan create`, one argument per line."""
+    """`create-args <writer|ship|ship-bench|consumer>`: the conf set of that `conan create`, one per line."""
     if len(argv) != 1 or argv[0] not in CREATE_ARGS:
         print(f"usage: malf_recipe_tests.py create-args <{'|'.join(sorted(CREATE_ARGS))}>",
               file=sys.stderr)

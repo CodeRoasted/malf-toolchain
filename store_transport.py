@@ -59,6 +59,17 @@ package's privacy and every read judged by digest.
         package has the repository's visibility and link, or when the token sees no package (the first
         push creates and guards it); 1 refused with the setting to change. Env: GITHUB_TOKEN, and
         MALF_PACKAGE_PEEK_TOKEN for a private package (below).
+    store_transport.py index <owner/repo> <key>
+        the index at candidate-<key>, printed as canonical JSON on stdout, its content checked against its key
+        and no attestation read (the keep-set's upstream closure reads its `upstream`, which the key hashes;
+        a keep decision only spares versions): exit 0, 3 ABSENT. Env: GITHUB_TOKEN for a private store.
+    store_transport.py prune <owner/repo> <keep-set> [--apply]
+        DN-142.D32 (2): every version of store-<repo> the keep-set's closure does not name (each kept index, the
+        records it pins by manifest digest, the objects they name; a version younger than PRUNE_GRACE_SECONDS
+        before the keep-set's `computed_at` is kept too), printed WOULD-DELETE, or deleted with --apply. Refused,
+        deleting nothing, on an unreadable, foreign-schema or empty keep-set and on a kept candidate the store
+        does not hold. Env: GITHUB_TOKEN, the repository's own, whose repository holds the Admin role on the
+        package (granted by default to the repository whose workflow first published it).
     store_transport.py owns-store <checkout> <commit>
         exit 0 when the repository at <commit> carries `.github/workflows/candidate.yml` (it owns its
         store, DN-142.D31 (3)), 3 when it does not
@@ -80,6 +91,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
+import io
 import hashlib
 import json
 import os
@@ -744,6 +757,169 @@ def publish_index(registry: Registry, out: Path, say: Callable[[str], None]) -> 
     return 0
 
 
+# ── the prune (DN-142.D32 (2)) ─────────────────────────────────────────────────────────────────────
+
+# THE STORE NEVER DELETES ON ITS OWN READING: the superproject decides the keep-set once every release of a cut
+# is green, and each repository deletes, with its own token, every version of its own store that the keep-set's
+# CLOSURE does not name. The closure is derived from the kept indexes, never listed: a kept index, every record
+# it pins by manifest digest (under its `record-<key>` tag or untagged, an EQUAL-RESULT push), and every object
+# such a record names (`sha256-<hex>`). A keep-set naming a candidate this store does not hold is refused whole,
+# as is an empty, unparseable or foreign one: a vacuous input must not wipe a store.
+KEEP_SET_SCHEMA = "pharos-keep-set/1"
+# A candidate run pushes its records before it publishes its index, and a run takes up to six hours (Pharos's
+# WAIT_SECONDS for one wave), so a version created within that bound before the keep-set was computed may belong
+# to a candidate still running, which no keep-set of that moment could name: it is kept.
+PRUNE_GRACE_SECONDS = 6 * 3600
+PRUNE_PAGE = 100
+STAMP = re.compile(r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|\+00:00)$")
+
+
+@dataclass(frozen=True)
+class Version:
+    """One version of a container package as the packages API lists it: its id, manifest digest, tags, birth."""
+
+    id: int
+    digest: str
+    tags: tuple[str, ...]
+    created: int
+
+
+def utc_seconds(text: object) -> int:
+    """Seconds since the epoch of a UTC ISO-8601 stamp (`...Z` or `...+00:00`), refusing any other shape."""
+    import calendar
+
+    matched = STAMP.match(str(text))
+    if matched is None:
+        raise Refused(f"{text!r} is not a UTC ISO-8601 stamp")
+    return calendar.timegm(tuple(int(part) for part in matched.groups()) + (0, 0, 0))
+
+
+def read_keep_set(path: Path, repository: str) -> tuple[list[str], int]:
+    """(the kept candidate keys of `repository`, sorted; the keep-set's computation time). Refused when the file
+    is unreadable, not a `pharos-keep-set/1` document, or names no key of this repository."""
+    _owner, name = full_name(repository)
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as unread:
+        raise Refused(f"the keep-set {path} is unreadable ({unread}): it is never read as keep nothing") from unread
+    if not isinstance(document, dict) or document.get("schema") != KEEP_SET_SCHEMA:
+        raise Refused(f"the keep-set {path} is not a {KEEP_SET_SCHEMA} document")
+    computed = utc_seconds(document.get("computed_at"))
+    keys = (document.get("repositories") or {}).get(name) if isinstance(document.get("repositories"), dict) else None
+    if not isinstance(keys, list) or not keys:
+        raise Refused(f"the keep-set {path} names no candidate of {name}: an empty keep-set is never read as keep "
+                      f"nothing")
+    bad = [key for key in keys if not isinstance(key, str) or not HEX64.match(key)]
+    if bad:
+        raise Refused(f"the keep-set {path} names {bad!r} for {name}, which are not candidate keys (64 hex)")
+    return sorted(set(keys)), computed
+
+
+def kept_closure(reader: Reader, repository: str, keys: list[str]) -> tuple[set[str], set[str]]:
+    """(every manifest digest, every tag) the kept candidates' closure names in this store: each index, each
+    record it pins, each object such a record names. A kept key whose index is absent or off its shape refuses
+    the prune: what it would have kept cannot be derived, so nothing is deleted."""
+    digests: set[str] = set()
+    tags: set[str] = set()
+    for key in keys:
+        try:
+            manifest_hex = reader.tagged(candidate_tag(key))
+            # note: no attestation is read: the index's key derivation is checked, and a keep decision only spares
+            index = trusted_index(reader, repository, key, None)
+        except Absent as absent:
+            raise Refused(f"the keep-set keeps candidate-{key}, and the store answers: {absent}") from absent
+        digests.add(manifest_hex)
+        tags.add(candidate_tag(key))
+        for entry in index["records"]:
+            digests.add(entry["manifest"])
+            tags.add(record_tag(entry["key"]))
+            record = judged_record(reader.layer(entry["manifest"], RECORD_MEDIA), entry["key"])
+            tags.update(object_tag(hex_digest) for hex_digest in record_objects(record))
+    return digests, tags
+
+
+def prune_plan(versions: list[Version], digests: set[str], tags: set[str], computed: int
+               ) -> tuple[list[Version], list[Version]]:
+    """(kept, deleted): a version is kept when the closure names its digest or one of its tags, or when it was
+    created within PRUNE_GRACE_SECONDS before the keep-set was computed, or after."""
+    kept, deleted = [], []
+    for version in sorted(versions, key=lambda each: each.id):
+        named = version.digest in digests or bool(tags.intersection(version.tags))
+        (kept if named or version.created >= computed - PRUNE_GRACE_SECONDS else deleted).append(version)
+    return kept, deleted
+
+
+def prune(reader: Reader, repository: str, keep_set: Path, versions: Callable[[], list[Version]],
+          delete: Callable[[int], int], apply: bool, say: Callable[[str], None]) -> int:
+    """`prune`: the plan over the store's versions, printed; with `apply`, each deleted version removed through
+    `delete` (its id -> HTTP status), every non-204 answer named and the exit 1. Without `apply`, a dry run."""
+    owner, name = full_name(repository)
+    keys, computed = read_keep_set(keep_set, repository)
+    digests, tags = kept_closure(reader, f"{owner}/{name}", keys)
+    listed = versions()
+    if not listed:
+        raise Refused(f"{package_name(name)} lists no version, and the keep-set keeps {len(keys)} candidate(s) of it")
+    kept, deleted = prune_plan(listed, digests, tags, computed)
+    verb = "DELETE" if apply else "WOULD-DELETE"
+    for version in deleted:
+        say(f"store_transport: {verb} {package_name(name)} version {version.id} sha256:{version.digest} "
+            f"tags {', '.join(version.tags) or '(untagged)'}")
+    failed = []
+    if apply:
+        for version in deleted:
+            status = delete(version.id)
+            if status != 204:
+                failed.append(f"version {version.id} (sha256:{version.digest}): HTTP {status}")
+    say(f"store_transport: PRUNE {owner}/{name} {'applied' if apply else 'dry run'}: {len(keys)} kept candidate(s), "
+        f"{len(kept)} version(s) kept, {len(deleted)} {'deleted' if apply else 'to delete'}"
+        + (f", {len(failed)} refused by the API" if failed else ""))
+    for line in failed:
+        say(f"store_transport: DELETE-REFUSED {line}: the repository's token needs the Admin role on the package "
+            f"(its settings, Manage Actions access)")
+    return 1 if failed else 0
+
+
+def live_versions(api: str, token: str, owner: str, package: str,
+                  get: Callable[[str], "tuple[int, dict]"]) -> Callable[[], list[Version]]:
+    """The packages API's version listing of `owner`'s container `package`, every page."""
+    def listed() -> list[Version]:
+        status, user = get(f"users/{owner}")
+        if status != 200:
+            raise Refused(f"the API answered HTTP {status} for the owner {owner}")
+        scope = "orgs" if user.get("type") == "Organization" else "users"
+        found: list[Version] = []
+        page = 1
+        while True:
+            status, body = api_get(api, f"{scope}/{owner}/packages/container/{package}/versions"
+                                        f"?per_page={PRUNE_PAGE}&page={page}", token)
+            if status != 200 or not isinstance(body, list):
+                raise Refused(f"the packages API answered HTTP {status} listing {package}'s versions (page {page})")
+            for entry in body:
+                digest = str(entry.get("name") or "")
+                if not digest.startswith("sha256:") or not HEX64.match(digest[7:]):
+                    raise Refused(f"{package} version {entry.get('id')} is named {digest!r}, not a manifest digest")
+                tags = ((entry.get("metadata") or {}).get("container") or {}).get("tags") or []
+                found.append(Version(int(entry["id"]), digest[7:], tuple(sorted(str(tag) for tag in tags)),
+                                     utc_seconds(entry.get("created_at"))))
+            if len(body) < PRUNE_PAGE:
+                return found
+            page += 1
+    return listed
+
+
+def live_delete(api: str, token: str, owner: str, package: str,
+                get: Callable[[str], "tuple[int, dict]"]) -> Callable[[int], int]:
+    def delete(version_id: int) -> int:
+        _status, user = get(f"users/{owner}")
+        scope = "orgs" if user.get("type") == "Organization" else "users"
+        request = urllib.request.Request(f"{api}/{scope}/{owner}/packages/container/{package}/versions/{version_id}",
+                                         method="DELETE")
+        request.add_header("Accept", "application/vnd.github+json")
+        request.add_header("Authorization", f"Bearer {token}")
+        return store_replica._send(request).status
+    return delete
+
+
 # ── the live readers ───────────────────────────────────────────────────────────────────────────────
 
 
@@ -1300,6 +1476,103 @@ def selftest() -> int:
             expect("the fork's index names the fork, and its key is the fork's",
                    json.loads((root / "out8" / "index.json").read_bytes())["candidate"],
                    candidate_key("someone/coderoast-ipc", tree, {}))
+
+            # -- the prune (DN-142.D32 (2)): a published candidate, then an unindexed record and its object.
+            fake, kept_registry = scene()
+            push(kept_registry, package_guard(get_from(api), get_from(api), kept_registry, repository, quiet.append),
+                 store, repository, checkout, {}, malf_dir, {}, root / "prune-out", quiet.append)
+            publish_index(kept_registry, root / "prune-out", quiet.append)
+            stale_store = root / "stale-store"
+            stale_object = _put_object(stale_store, b"a superseded transport\n")
+            stale = _put_record(stale_store, {"step": {"kind": "conan-create", "package": "ipc_core", "form": "old"}},
+                                {"package": {"alias": "ipc_core/0", "content": "f" * 64, "transport": stale_object}})
+            push_record(kept_registry, stale_store, stale_store / "records" / f"{stale}.json", Pushed(), quiet.append)
+            computed = utc_seconds("2026-10-30T12:00:00Z")
+            young = {fake.tags[record_tag(stale)][7:]}
+
+            def store_versions() -> list[Version]:
+                return [Version(number, digest[7:], tuple(sorted(tag for tag, held in fake.tags.items() if held == digest)),
+                                computed - (60 if digest[7:] in young else 7 * 3600))
+                        for number, digest in enumerate(sorted(fake.manifests), start=1)
+                        if digest[7:] != sha256(store_replica.EMPTY_BYTES)]
+
+            def remove(answer: int) -> Callable[[int], int]:
+                def delete(version_id: int) -> int:
+                    if answer == 204:
+                        digest = sorted(fake.manifests)[version_id - 1]
+                        for tag in [tag for tag, held in fake.tags.items() if held == digest]:
+                            del fake.tags[tag]
+                    return answer
+                return delete
+
+            def keep_set(name: str, document: object) -> Path:
+                path = root / name
+                path.write_text(document if isinstance(document, str) else json.dumps(document), encoding="utf-8")
+                return path
+
+            saved = {name: os.environ.get(name) for name in (REGISTRY_ENV, "GITHUB_TOKEN", TRANSPORT_CACHE_ENV)}
+            os.environ.update({REGISTRY_ENV: kept_registry.base, "GITHUB_TOKEN": "token",
+                               TRANSPORT_CACHE_ENV: str(root / "index-cache")})
+            printed = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(printed):
+                    code = main(["index", repository, key])
+                    absent = main(["index", repository, "8" * 64])
+            finally:
+                for name, value in saved.items():
+                    os.environ.pop(name, None) if value is None else os.environ.__setitem__(name, value)
+            expect("index prints the candidate's index whole, checked against its key, and exits 3 on an absent one",
+                   (code, json.loads(printed.getvalue().splitlines()[0])["candidate"], absent), (0, key, ABSENT))
+            kept_file = keep_set("keep.json", {"schema": KEEP_SET_SCHEMA, "computed_at": "2026-10-30T12:00:00Z",
+                                               "repositories": {"coderoast-ipc": [key]}})
+            prune_reader = Reader(kept_registry, root / "prune-cache", quiet.append)
+            lines: list[str] = []
+            before = dict(fake.tags)
+            expect("prune, dry run: exit 0, the store unchanged, the unindexed object WOULD-DELETE and the young "
+                   "record kept by the grace bound",
+                   (prune(prune_reader, repository, kept_file, store_versions, remove(204), False, lines.append),
+                    fake.tags == before, [line.split(" sha256:")[0] for line in lines if "WOULD-DELETE" in line],
+                    [line for line in lines if "WOULD-DELETE" in line and object_tag(stale_object) not in line]),
+                   (0, True, ["store_transport: WOULD-DELETE store-coderoast-ipc version "
+                              f"{sorted(fake.manifests).index(fake.tags[object_tag(stale_object)]) + 1}"], []))
+            young.clear()
+            lines.clear()
+            closure_tags = kept_closure(prune_reader, "coderoasted/coderoast-ipc", [key])[1]
+            expect("prune --apply: every version outside the kept closure deleted, the candidate's closure whole",
+                   (prune(prune_reader, repository, kept_file, store_versions, remove(204), True, lines.append),
+                    sorted(tag for tag in before if tag not in fake.tags),
+                    sorted(closure_tags - set(fake.tags)), candidate_tag(key) in fake.tags,
+                    sorted(tag.split("-")[0] for tag in closure_tags)),
+                   (0, sorted([record_tag(stale), object_tag(stale_object)]), [], True,
+                    ["candidate"] + ["record"] * len(json.loads((root / "prune-out" / "index.json").read_bytes())["records"]) + ["sha256"] * 2))
+            arm("after the prune the kept candidate restores whole from the store",
+                lambda: restore(Reader(kept_registry, root / "prune-cache-2", quiet.append), root / "restored",
+                                "coderoasted/coderoast-ipc", key, None, quiet.append), None)
+            push_record(kept_registry, stale_store, stale_store / "records" / f"{stale}.json", Pushed(), quiet.append)
+            expect("RED: a delete the API refuses exits 1 and names the package setting",
+                   (prune(prune_reader, repository, kept_file, store_versions, remove(403), True, lines.append),
+                    any("DELETE-REFUSED" in line and "Manage Actions access" in line for line in lines)), (1, True))
+            for label, document, refusal in (
+                    ("an empty keep-set", {"schema": KEEP_SET_SCHEMA, "computed_at": "2026-10-30T12:00:00Z",
+                                           "repositories": {"coderoast-ipc": []}}, "names no candidate"),
+                    ("a keep-set naming only another repository",
+                     {"schema": KEEP_SET_SCHEMA, "computed_at": "2026-10-30T12:00:00Z",
+                      "repositories": {"insight-canon": [key]}}, "names no candidate"),
+                    ("an unparseable keep-set", "{not json", "unreadable"),
+                    ("a keep-set of another schema", {"schema": "x/1", "repositories": {"coderoast-ipc": [key]}},
+                     "is not a pharos-keep-set/1"),
+                    ("a keep-set with no UTC computation time",
+                     {"schema": KEEP_SET_SCHEMA, "computed_at": "yesterday", "repositories": {"coderoast-ipc": [key]}},
+                     "UTC ISO-8601"),
+                    ("a keep-set keeping a candidate the store does not hold",
+                     {"schema": KEEP_SET_SCHEMA, "computed_at": "2026-10-30T12:00:00Z",
+                      "repositories": {"coderoast-ipc": [key, "9" * 64]}}, "the store answers")):
+                tags_before = dict(fake.tags)
+                arm(f"RED: prune refuses {label} and deletes nothing",
+                    lambda document=document, label=label: prune(
+                        prune_reader, repository, keep_set(f"keep-{len(label)}.json", document), store_versions,
+                        remove(204), True, quiet.append), refusal)
+                expect(f"{label}: the store is unchanged", fake.tags == tags_before, True)
     except (OSError, KeyError, ValueError, subprocess.CalledProcessError) as crashed:
         failures.append(f"the selftest stopped: {type(crashed).__name__} {crashed}")
     finally:
@@ -1450,6 +1723,10 @@ def main(argv: list[str]) -> int:
     verb.add_argument("repository")
     verb = verbs.add_parser("owns-store")
     verb.add_argument("checkout"), verb.add_argument("commit")
+    verb = verbs.add_parser("index")
+    verb.add_argument("repository"), verb.add_argument("key")
+    verb = verbs.add_parser("prune")
+    verb.add_argument("repository"), verb.add_argument("keep_set"), verb.add_argument("--apply", action="store_true")
     for name, positional in (("candidate-present", ("repository", "key")),
                              ("restore", ("repository", "key", "cache", "store")),
                              ("pull-record", ("repository", "key", "cache", "store")),
@@ -1489,9 +1766,23 @@ def main(argv: list[str]) -> int:
         if args.verb == "package-check":
             package_check(get, peek, args.repository, say)
             return 0
-        if args.verb in ("push", "publish-index") and not token:
-            raise Refused("GITHUB_TOKEN is unset: a candidate writes its store with its own repository's token")
+        if args.verb in ("push", "publish-index", "prune") and not token:
+            raise Refused("GITHUB_TOKEN is unset: a repository writes and prunes its store with its own token")
         registry = _registry(args.repository, token)
+        if args.verb == "index":
+            if not HEX64.match(args.key):
+                raise Refused(f"{args.key!r} is not a candidate key (64 hex)")
+            owner, name = full_name(args.repository)
+            # note: no attestation is read: index_defects binds the printed upstream to the key by its hash
+            print(canonical(trusted_index(Reader(registry, transport_cache(), lambda _line: None), f"{owner}/{name}",
+                                          args.key, None)).decode("utf-8"))
+            prune_named_cache(lambda _line: None)
+            return 0
+        if args.verb == "prune":
+            owner, name = full_name(args.repository)
+            return prune(Reader(registry, transport_cache(), say), args.repository, Path(args.keep_set),
+                         live_versions(api, token, owner, package_name(name), get),
+                         live_delete(api, token, owner, package_name(name), get), args.apply, say)
         if args.verb == "push":
             extra = json.loads(Path(args.extra).read_text(encoding="utf-8")) if args.extra else {}
             return push(registry, package_guard(get, peek, registry, args.repository, say), Path(args.store),

@@ -381,8 +381,8 @@ echo
 echo "[7i2] store_transport carries its own proof (selftest): a repository's own store, pushed by its candidate and restored by digest through a cache, the index trusted only through its attestation (DN-142.D31 (3), (4), slice S4)"
 transport_selftest_output="$(timeout 300 python3 "$MALF_ROOT/store_transport.py" selftest 2>&1)"
 transport_selftest_status=$?
-check "store_transport selftest: 81 arms, a cut candidate tag trusted only on main, the runner cache shared across verbs and bounded, the candidate key, push and its ownership filter, publish-index last, the attestation verifier's eight ABSENT reds, the cache judged by digest, the mismatch tag, the one visibility rule and package-check's early read of it, a private package's link read through the peek token, a dependent candidate's upstreams read and checked, a source-only upstream's commit in the key, a private upstream never cloned and known private when unseen, and a user-owned fork" \
-      "ok" "$([[ $transport_selftest_status -eq 0 ]] && grep -q '^store_transport selftest: 81 arm(s), 0 failure(s)$' <<< "$transport_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$transport_selftest_output")")"
+check "store_transport selftest: 98 arms, a cut candidate tag trusted only on main, the runner cache shared across verbs and bounded, the candidate key, push and its ownership filter, publish-index last, the attestation verifier's eight ABSENT reds, the cache judged by digest, the mismatch tag, the one visibility rule and package-check's early read of it, a private package's link read through the peek token, a dependent candidate's upstreams read and checked, a source-only upstream's commit in the key, a private upstream never cloned and known private when unseen, a user-owned fork, the index verb (printed whole, ABSENT at 3), and the prune: a dry run that deletes nothing, an applied prune that leaves the kept closure whole and restorable, a young version kept by the grace bound, a refused delete naming the package setting, and six keep-sets refused before anything is deleted" \
+      "ok" "$([[ $transport_selftest_status -eq 0 ]] && grep -q '^store_transport selftest: 98 arm(s), 0 failure(s)$' <<< "$transport_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$transport_selftest_output")")"
 
 echo
 
@@ -3413,9 +3413,41 @@ sed -i 's/^    "ship": (.*),$/    "ship": ("-c", "user.probe:ship=1"),/' "$cs_tm
 check "the ship form's set is READ from the helper and rides the create alone: the writer's set is untouched, the third-party phases run it" \
       "-c|user.malf:profile=linux-gcc16-release / -c|user.probe:ship=1" \
       "$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; MALF_PROFILE_NAME=linux-gcc16-release MALF_STEP_FORM=ship _malf_writer_create_args && echo "$(printf "%s\n" "${_MALF_WRITER_ARGS[@]}" | paste -sd"|") / $(printf "%s\n" "${_MALF_FORM_ARGS[@]}" | paste -sd"|")"' _ "$cs_tmp/shipmutant/malf")"
-check "store-create --ship refuses the corpus gates and the benchmarks before anything runs (exit 2), and an unknown option still" \
+check "store-create --ship refuses the corpus gates before anything runs (exit 2), and an unknown option still" \
       "rc=2 1 rc=1" \
-      "$(MALF_BENCH=/nonexistent bash "$MALF_BIN" store-create --ship > "$cs_tmp/ship.log" 2>&1; echo "rc=$?") $(grep -c 'REFUSED — --ship runs no gate of its own' "$cs_tmp/ship.log") $(bash "$MALF_BIN" store-create --writer > /dev/null 2>&1; echo "rc=$?")"
+      "$(MALF_CORPUS_GATES=/nonexistent bash "$MALF_BIN" store-create --ship > "$cs_tmp/ship.log" 2>&1; echo "rc=$?") $(grep -c 'REFUSED — --ship runs no corpus gate' "$cs_tmp/ship.log") $(bash "$MALF_BIN" store-create --writer > /dev/null 2>&1; echo "rc=$?")"
+check "DN-142.D33 (the cut's bench measurement): the ship-bench conf set configures the bench targets (no skip_test) and runs only the benchmarks" \
+      "rc=0 -c|user.malf:bench_only=True|-c|user.malf:run_test_package=True" \
+      "$(out="$(python3 "$MALF_ROOT/malf_recipe_tests.py" create-args ship-bench)"; echo "rc=$? $(paste -sd'|' <<< "$out")")"
+check "a ship-form walk naming MALF_BENCH takes the ship-bench set, one without it the ship set" \
+      "-c|user.malf:bench_only=True|-c|user.malf:run_test_package=True / -c|tools.build:skip_test=True|-c|user.malf:run_test_package=True" \
+      "$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; MALF_PROFILE_NAME=linux-gcc16-release MALF_STEP_FORM=ship MALF_BENCH=/b _malf_writer_create_args && printf "%s\n" "${_MALF_FORM_ARGS[@]}" | paste -sd"|"' _ "$MALF_BIN") / $(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; MALF_PROFILE_NAME=linux-gcc16-release MALF_STEP_FORM=ship _malf_writer_create_args && printf "%s\n" "${_MALF_FORM_ARGS[@]}" | paste -sd"|"' _ "$MALF_BIN")"
+check "under user.malf:bench_only a create's build runs the benchmarks and no test (no ctest command)" \
+      "bench" \
+      "$(python3 - "$MALF_ROOT" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import malf_recipe_tests as tests
+calls = []
+tests.run_benches = lambda conanfile, build, results, package_id: calls.append("bench")
+tests._results_directory = lambda conanfile: "/nonexistent"
+class Conf:
+    def get(self, name, check_type=None):
+        return name == tests.BENCH_ONLY_CONF
+class Info:
+    def package_id(self):
+        return "pid"
+class Output:
+    def info(self, line):
+        return None
+class Conanfile:
+    conf, info, output, name, build_folder = Conf(), Info(), Output(), "p", "/nonexistent"
+    def run(self, *args, **kwargs):
+        calls.append("ctest")
+tests.run_tests(Conanfile())
+print(",".join(calls))
+PY
+)"
 check "the writer conf set is empty, and an unknown set is a usage error (exit 2)" \
       "rc=0 0 rc=2" \
       "$(out="$(python3 "$MALF_ROOT/malf_recipe_tests.py" create-args writer)"; echo "rc=$? ${#out}") $(python3 "$MALF_ROOT/malf_recipe_tests.py" create-args vendor 2>/dev/null; echo "rc=$?")"
