@@ -151,6 +151,14 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
         declares in packages.yml at <commit>, read as a git blob at that commit and kept as an
         object; keyed on the blob ids, stored when the key is new, matched when it is not; exit 1
         refusing a member that is no blob there, or a package declaring no tracked object
+    artefact_store.py ingest-rows <repository dir> <commit>
+        each `ingest:` row of packages.yml at <commit>, `<workflow>\t<artifact>\t<member>\t<class>` per line
+    artefact_store.py candidate-ingest <store> <repository dir> <commit> <workflow file> <artifact dir> <run id> <attempt> <GitHub artifact digest>
+        a CANDIDATE's ingestion (DN-142.D33 (3)): the row's member, read from the artifact a job of this candidate's
+        own run uploaded, stored as an object and the record `<repository>/ingest.<stem>`; prints its key
+    artefact_store.py tracked-packages <repository dir> <commit>
+        each package declaring a `tracked/<member>` object in packages.yml at <commit>, one per line,
+        sorted: the packages a candidate's store job runs `tracked-step` for (DN-142.D33 (3))
     artefact_store.py ingest <store> <step-0 run id> <reading.json>  < <the object's bytes>
         THE ONE INGESTION WRITE (DN-142.D20 (2), DN-142.D25 (3)), B5's alone: the bytes on stdin
         and what B5 read about them, `{repository, workflow, artefact, member, class, job, run: {id,
@@ -2930,6 +2938,16 @@ def declared_tracked(repository: Path, commit: str, package: str) -> tuple[str, 
     return str(entry.get("path", ".")), members
 
 
+def tracked_packages(repository: Path, commit: str) -> list[str]:
+    """Every package whose `packages.yml` entry at `commit` declares a `tracked/<member>` object, sorted:
+    the packages a candidate's store job runs `tracked-step` for (DN-142.D33 (3))."""
+    import yaml
+
+    document = yaml.safe_load(_git_bytes(repository, ["show", f"{commit}:packages.yml"])) or {}
+    return sorted(package for package, entry in (document.get("packages") or {}).items()
+                  if any(str(named).startswith(TRACKED_PREFIX) for named in ((entry or {}).get(OBJECTS_FIELD) or {})))
+
+
 def ingest_step_id(repository: str, workflow: str) -> str:
     """`<repository>/ingest.<workflow stem>` (DN-142.D25 (1)), from `.github/workflows/<stem>.yml`."""
     matched = WORKFLOW_PATH.match(workflow)
@@ -3070,6 +3088,73 @@ def ingest(store: Path, step0_run: str, reading: dict, body: bytes, malf_dir: Pa
                       f"is already recorded at {key} with other outputs")
     _record_divergence(local, key, document, output)
     return key
+
+
+CANDIDATE_INGEST_KEYS = {"artifact", "commits", "after", "published"}
+
+
+def ingest_rows(repository: Path, commit: str) -> list[tuple[str, str, str, str]]:
+    """Every `ingest:` row packages.yml declares at `commit`, as (workflow file, artifact, member, class),
+    sorted: the hosted outputs a candidate's store job ingests from its own run (DN-142.D33 (3))."""
+    import yaml
+
+    document = yaml.safe_load(_git_bytes(repository, ["show", f"{commit}:packages.yml"])) or {}
+    rows = []
+    for workflow, row in sorted((document.get("ingest") or {}).items()):
+        classes = [klass for klass in INGEST_CLASSES if isinstance(row, dict) and klass in row]
+        if len(classes) != 1 or not isinstance(row.get("artifact"), str) \
+                or set(row) - CANDIDATE_INGEST_KEYS - set(INGEST_CLASSES):
+            raise Refused(f"packages.yml ingest {workflow}: an ingest row is {{artifact, executable | object, commits, "
+                          f"after, published}}, its member under exactly one class, not {row!r}")
+        rows.append((str(workflow), row["artifact"], str(row[classes[0]]), classes[0]))
+    return rows
+
+
+def candidate_ingest(store: Path, repository: Path, commit: str, workflow: str, artifact_dir: Path,
+                     run: dict, github_digest: str) -> str:
+    """A CANDIDATE's ingestion (DN-142.D33 (3)): the member packages.yml's `ingest:` row for `workflow` declares,
+    read from the artifact `artifact_dir` holds, which a job of THIS candidate's own run produced (the golden,
+    insight-eidos's Windows leg), becomes an object and the record of the step `<repository>/ingest.<stem>`.
+    Its key document is `{step: {kind: ingest, repository, artefact, workflow, class}, run: {id, attempt},
+    commit, workflow_blob}`: the run is in it, an ingestion being an observation, never reused. Its output
+    `{ingest: {objects: {<member>: <sha256>}, class, producers: {github_artifact_digest, writer_recomputed}}}`.
+    Refused, storing nothing, on a row packages.yml does not declare, a member the artifact lacks, a declared
+    class the bytes contradict (DN-142.D25 (4) A), an executable not in the published form (DN-142.D22 (4)), a
+    digest GitHub did not answer, or other outputs at the same key. post: the record key."""
+    matched = WORKFLOW_PATH.match(f".github/workflows/{workflow}")
+    rows = {row[0]: row for row in ingest_rows(repository, commit)}
+    if matched is None or workflow not in rows:
+        raise Refused(f"packages.yml at {commit} declares no `ingest:` row for {workflow}")
+    _workflow, artefact, member, klass = rows[workflow]
+    if member_defect(member) or not GITHUB_DIGEST.match(github_digest):
+        raise Refused(f"ingest {workflow}: the member {member!r} or GitHub's artifact digest {github_digest!r} is off "
+                      f"its shape")
+    if not isinstance(run.get("id"), int) or not isinstance(run.get("attempt"), int):
+        raise Refused(f"ingest {workflow}: the run {run!r} is not {{id, attempt}} integers")
+    path = artifact_dir / member
+    if not path.is_file():
+        raise Refused(f"ingest {workflow}: the artifact {artefact} holds no {member}")
+    body = path.read_bytes()
+    if bytes_class(body) != klass:
+        raise Refused(f"ingest {workflow}: {member} is declared {klass}, and its bytes are "
+                      + ("a PE executable or a linked ELF file" if klass == "object"
+                         else "neither a PE executable nor a linked ELF file")
+                      + ": a row's kind follows its bytes (DN-142.D25 (4) A)")
+    defects = ingested_defects(body) if klass == "executable" else []
+    if defects:
+        raise Refused(f"ingest {workflow}: {member}: " + "; ".join(defects))
+    name = repository.resolve().name
+    blob = _git_bytes(repository, ["rev-parse", f"{commit}:.github/workflows/{workflow}"]).decode().strip()
+    document = {"step": {"kind": INGEST_KIND, "repository": name, "artefact": artefact,
+                         "workflow": f".github/workflows/{workflow}", "class": klass},
+                "run": {"id": run["id"], "attempt": run["attempt"]}, "commit": commit, "workflow_blob": blob}
+    local = LocalStore(store)
+    digest = local.put_bytes(body)
+    output = {OBJECTS_FIELD: {member: digest}, "class": klass,
+              "producers": {"github_artifact_digest": github_digest, "writer_recomputed": digest}}
+    if local.commit(document, {INGEST_OUTPUT: output}, {}, subject=ingest_step_id(name, f".github/workflows/{workflow}")):
+        raise Refused(f"ingest {workflow}: run {run['id']} attempt {run['attempt']} is already recorded with other outputs")
+    return key_of(document)
 
 
 def _record_divergence(local: LocalStore, key: str, document: dict, output: dict) -> None:
@@ -3473,6 +3558,7 @@ def selftest() -> int:
         if tracked:
             arm("RED: an output named `package` never resolves an object",
                 lambda: output_object(tstore, tracked, PACKAGE_OUTPUT, "sbom.cdx.json"), "never objects")
+
             arm("RED: a member the output does not hold is refused",
                 lambda: output_object(tstore, tracked, TRACKED_OUTPUT, "absent.json"), "holds no object")
             arm("RED: an absent record is refused",
@@ -3484,6 +3570,59 @@ def selftest() -> int:
                 lambda: output_object(tstore, tracked, TRACKED_OUTPUT, "sbom.cdx.json"), "does not hold")
 
     with tempfile.TemporaryDirectory(prefix="artefact_store.selftest.") as scratch:
+        crepo = root / "canon"
+        (crepo / ".github" / "workflows").mkdir(parents=True)
+        cgit = ["git", "-C", str(crepo), "-c", "user.email=t@t", "-c", "user.name=t"]
+        (crepo / "packages.yml").write_text(
+            "packages:\n  core: {release: true, version: 1.0.0}\ningest:\n"
+            "  golden.yaml: {artifact: determinism-golden, object: determinism-golden.txt, commits: [canon],\n"
+            "                published: {assets: [{name: canon.golden.txt}]}}\n"
+            "  windows.yml: {artifact: win, executable: win.exe, commits: [canon]}\n")
+        (crepo / ".github" / "workflows" / "golden.yaml").write_text("on: workflow_call\n")
+        (crepo / ".github" / "workflows" / "windows.yml").write_text("on: workflow_call\n")
+        subprocess.run(["git", "init", "-q", str(crepo)], check=True)
+        subprocess.run([*cgit, "add", "-A"], check=True)
+        subprocess.run([*cgit, "commit", "-qm", "one"], check=True)
+        ccommit = _run(["git", "-C", str(crepo), "rev-parse", "HEAD"]).strip()
+        artifact = root / "golden-artifact"
+        artifact.mkdir()
+        (artifact / "determinism-golden.txt").write_bytes(b"agreed golden digest\n")
+        cstore = root / "candidate-ingest-store"
+        zipped = "sha256:" + "a" * 64
+        rows, _out = arm("CANDIDATE INGEST: packages.yml's ingest rows, each with its artifact, member and class",
+                         lambda: ingest_rows(crepo, ccommit), None)
+        expect("the ingest rows", rows, [("golden.yaml", "determinism-golden", "determinism-golden.txt", "object"),
+                                         ("windows.yml", "win", "win.exe", "executable")])
+        ckey, _out = arm("CANDIDATE INGEST: the golden a job of the candidate's own run uploaded is stored as the record "
+                         "`<repository>/ingest.golden`",
+                         lambda: candidate_ingest(cstore, crepo, ccommit, "golden.yaml", artifact,
+                                                  {"id": 41, "attempt": 1}, zipped), None)
+        if ckey:
+            crecord = json.loads((cstore / "records" / f"{ckey}.json").read_text())
+            expect("the candidate ingestion's step, run and object",
+                   (crecord["inputs"]["step"], crecord["inputs"]["run"],
+                    crecord["outputs"][INGEST_OUTPUT][OBJECTS_FIELD]),
+                   ({"kind": "ingest", "repository": "canon", "artefact": "determinism-golden",
+                     "workflow": ".github/workflows/golden.yaml", "class": "object"}, {"id": 41, "attempt": 1},
+                    {"determinism-golden.txt": hashlib.sha256(b"agreed golden digest\n").hexdigest()}))
+        arm("RED: a workflow packages.yml declares no ingest row for is refused",
+            lambda: candidate_ingest(cstore, crepo, ccommit, "ci.yml", artifact, {"id": 41, "attempt": 1}, zipped),
+            "declares no `ingest:` row for ci.yml")
+        arm("RED: an artifact missing the declared member is refused",
+            lambda: candidate_ingest(cstore, crepo, ccommit, "windows.yml", artifact, {"id": 41, "attempt": 1}, zipped),
+            "holds no win.exe")
+        (artifact / "win.exe").write_bytes(b"not an executable\n")
+        arm("RED: a member declared an executable whose bytes are not one is refused (its kind follows its bytes)",
+            lambda: candidate_ingest(cstore, crepo, ccommit, "windows.yml", artifact, {"id": 41, "attempt": 1}, zipped),
+            "neither a PE executable nor a linked ELF file")
+        (artifact / "determinism-golden.txt").write_bytes(b"other bytes\n")
+        arm("RED: the same run re-ingested with other bytes is refused (one run, one observation)",
+            lambda: candidate_ingest(cstore, crepo, ccommit, "golden.yaml", artifact, {"id": 41, "attempt": 1}, zipped),
+            "already recorded with other outputs")
+        arm("RED: a GitHub artifact digest off its shape is refused",
+            lambda: candidate_ingest(cstore, crepo, ccommit, "golden.yaml", artifact, {"id": 42, "attempt": 1}, "zip"),
+            "is off its shape")
+
         bstore, results, build_key = Path(scratch) / "store", Path(scratch) / "results", "b" * 64
         named = Path(scratch) / "bench.json"
         named.write_text(json.dumps({"packages": ["logcraft_core"]}))
@@ -3921,6 +4060,18 @@ def main(argv: list[str]) -> int:
         if len(argv) == 4 and argv[0] == "ingest":
             ingest(Path(argv[1]), argv[2], json.loads(Path(argv[3]).read_text()), sys.stdin.buffer.read(),
                    Path(__file__).resolve().parent)
+            return 0
+        if len(argv) == 3 and argv[0] == "ingest-rows":
+            for workflow, artefact, member, klass in ingest_rows(Path(argv[1]), argv[2]):
+                print(f"{workflow}\t{artefact}\t{member}\t{klass}")
+            return 0
+        if len(argv) == 9 and argv[0] == "candidate-ingest":
+            print(candidate_ingest(Path(argv[1]), Path(argv[2]), argv[3], argv[4], Path(argv[5]),
+                                   {"id": int(argv[6]), "attempt": int(argv[7])}, argv[8]))
+            return 0
+        if len(argv) == 3 and argv[0] == "tracked-packages":
+            for package in tracked_packages(Path(argv[1]), argv[2]):
+                print(package)
             return 0
         if len(argv) == 5 and argv[0] == "tracked-step":
             path, members = declared_tracked(Path(argv[2]), argv[3], argv[4])

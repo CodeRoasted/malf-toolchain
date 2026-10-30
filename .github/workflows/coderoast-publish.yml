@@ -1,42 +1,41 @@
 name: CodeRoast publish
 
-# A RELEASE IS A PUBLICATION (DN-142.D9; N360 plan B1): the tag attaches the bytes step 0 built,
-# judged and stored, by digest, and builds nothing. The caller's `attest` job (coderoast-attest.yml,
-# the first job of every release workflow, pin_coherence INV-22) proves the tagged commit is the
-# commit the step-0 record judged and hands on `record-sha256`, the digest of the record it attested;
-# this workflow's one job, `publish`, takes that digest as its input:
-#   store_publish.py reads THIS repository's slice for that record from its private ghcr store
-#   package (`store-<repository>`, read with the job's own GITHUB_TOKEN, granted Read on that one
-#   package, DN-142.D6 R5), verifies the writer's signature against
-#   `keys/store-writer.allowed_signers` at this workflow's own revision, refuses a slice that names
-#   any other step-0 record or another visibility than the repository's own now (DN-142.D24),
-#   fetches every object by its digest (a single-file asset's object is that file's own bytes, never
-#   its package's transport, so no private package's sources reach this repository's store
-#   package), then attaches the staged files and the signed slice to the Release, and reads the
-#   Release back: its assets equal the staged files, both ways. A slice or an object that does not
-#   verify stages nothing, and the Release is not created. An image the slice lists is no Release
-#   file: `coderoast-publish-image.yml` pushes it.
+# A RELEASE PUBLISHES FROM ITS REPOSITORY'S CANDIDATE (DN-142.D33 (3); DN-142.D9: a tag publishes and builds
+# nothing). The caller's `attest` job (coderoast-attest.yml, the first job of every release workflow,
+# pin_coherence INV-22) proves the tagged commit is the commit the cut's record names for this repository
+# and hands on `key`, the candidate key the record names for it, with the cut `run` and the record's
+# `record-sha256`; this workflow's one job, `publish`, takes the three as its inputs:
+#   store_publish.py `stage` reads the candidate from THIS repository's own store package
+#   (`store-<repository>`, candidate-<key>) through store_transport's one trusted reader: a public store
+#   through its GitHub artifact attestations, signed by malf's coderoast-candidate.yml at THIS workflow's
+#   malf commit (the tagged tree pins one malf for its candidate and its release); a private one through
+#   its privacy and the job's own token. It refuses a candidate whose tree is not the tag's, derives the
+#   Release's rows from packages.yml at the candidate's commit, and refuses unless EVERY row resolves in
+#   the candidate (a row the candidate holds no producer of is never dropped, never fetched elsewhere) —
+#   except a benchmark, which is the CUT's: measured on the release seat and read from the cut run's
+#   artifact `cut-bench-<repository>`, held to the digest the attested record names.
+#   It stages the files and the Release's publication document, then this job attaches them and reads the
+#   Release back: its assets equal the staged files, both ways. An image is no Release file:
+#   `coderoast-publish-image.yml` pushes it.
 #
-# A ROW DESTINED TO A FOREIGN RELEASE (DN-142.D25 (2)) is published by its OWNER's job, from the
-# owner's store package: `stage-destinations` fetches the destination slice and its signature by the
-# digests the verified owner slice binds, verifies them (the writer's signature; the owner slice's
-# record, manifest, version and tag; its rows the projection of the owner's rows), fetches every
-# object, and stages them. The publication into the destination runs with the DESTINATION credential
-# only (`destination-token`, `contents: write` on that one repository; the job's own token never
-# writes there and the destination token never reads the store): mint the annotated tag at the
-# destination's default head if missing and read it back as an annotated object (ADR-2.D1), create
-# the Release `--verify-tag --latest=false`, attach, then read it back — its assets equal the
-# destination slice's files both ways, it is not Latest, and the destination's visibility is the one
-# step 0 read (two producers of one fact). An owner slice binding no destination skips this, by its
-# own content, never by a flag.
+# A ROW DESTINED TO A FOREIGN RELEASE (DN-142.D25 (2)) is published by its OWNER's job, from the owner's
+# candidate: `stage` writes each destination's files and its projected publication document under
+# destinations/<destination>/. The publication into the destination runs with the DESTINATION credential
+# only (`destination-token`, `contents: write` on that one repository; the job's own token never writes
+# there and the destination token never reads the store): mint the annotated tag at the destination's
+# default head if missing and read it back as an annotated object (ADR-2.D1), create the Release
+# `--verify-tag --latest=false`, attach, then read it back — its assets equal the staged files both ways,
+# and it is not Latest. A repository binding no destination skips this, by its own packages.yml, never by a
+# flag.
 #
-# NOTHING HERE CHECKS OUT THE CALLER'S SOURCE, PROVISIONS A TOOLCHAIN, COMPILES, TESTS OR PACKS:
-# stage-malf copies this revision's own tree (the tools and the writer's public key), and the only
-# other commands are the publication itself. With no checkout there is no git remote, so every `gh`
-# that acts on a repository names it with `--repo` (coderoast-security run 38803900222 died
-# `fatal: not a git repository` at the v1.10.7 tag without it; workflow_source's repository arm). `--verify-tag` keeps the Release command from ever
-# minting a tag; the tag is the Founder's act (ADR-2.D1). A Release that already exists (a re-cut
-# force-moved its tag, which re-fires this workflow) is re-published, never re-created: see the step.
+# NOTHING HERE CHECKS OUT THE CALLER'S SOURCE, PROVISIONS A TOOLCHAIN, COMPILES, TESTS OR PACKS: malf is
+# checked out at this workflow's commit (its tools; the commit is the attestation's signer digest), and
+# the only other commands are the publication itself. With no checkout there is no git remote, so every
+# `gh` that acts on a repository names it with `--repo` (coderoast-security run 38803900222 died
+# `fatal: not a git repository` at the v1.10.7 tag without it; workflow_source's repository arm).
+# `--verify-tag` keeps the Release command from ever minting a tag; the tag is the Founder's act
+# (ADR-2.D1). A Release that already exists (a re-cut force-moved its tag, which re-fires this workflow)
+# is re-published, never re-created: see the step.
 
 on:
   workflow_call:
@@ -46,69 +45,120 @@ on:
         type: string
         required: false
         default: 'ubuntu-24.04'
+      candidate-key:
+        description: 'The candidate key the cut''s record names for this repository (the caller''s attest job''s `key` output).'
+        type: string
+        required: true
+      cut-run:
+        description: 'The cut run whose record attest attested (the caller''s attest job''s `run` output): its record and its benchmarks.'
+        type: string
+        required: true
       record-sha256:
-        description: 'The digest of the step-0 record the caller''s attest job attested (its `record-sha256` output).'
+        description: 'The sha256 of the cut-record.json attest attested (its `record-sha256` output).'
         type: string
         required: true
     secrets:
+      BUILD_RECORD_READ_TOKEN:
+        description: 'The token attest read the cut with (Actions: Read-only on the superproject): the cut run''s record and benchmark artifacts.'
+        required: true
       destination-token:
-        description: 'The OWNER repository''s secret with `contents: write` on the one foreign repository its slice binds (DN-142.D25 (2)); required exactly when the slice binds a destination.'
+        description: 'The OWNER repository''s secret with `contents: write` on the one foreign repository its packages.yml binds (DN-142.D25 (2)); required exactly when it binds a destination.'
         required: false
 
 jobs:
   publish:
     runs-on: ${{ inputs.runs-on }}
     permissions:
-      contents: write   # create the Release (never the tag: --verify-tag) and upload its assets
-      packages: read    # this repository's own store package, the only one it is granted
+      contents: write      # create the Release (never the tag: --verify-tag) and upload its assets
+      packages: read       # this repository's own store package, the only one it is granted
+      actions: read        # coderoast-malf-checkout reads the run's referenced workflows for this workflow's commit
+      attestations: read   # a public store's candidate is trusted through its attestations
     steps:
-      - name: Stage malf-toolchain at this workflow's revision (the tools and the writer's public key)
-        uses: CodeRoasted/malf-toolchain/.github/actions/stage-malf@945ec1bb2f90860e1fbc79bb0f5bdd58d1dbcdb3
+      - name: malf at this workflow's commit, as git (its tools, and the attestation's signer digest)
+        id: malf
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@945ec1bb2f90860e1fbc79bb0f5bdd58d1dbcdb3
         with:
-          path: .malf
+          workflow: coderoast-publish.yml
 
-      - name: Fetch, verify and stage this repository's slice of the attested record (GATING)
+      - name: The pinned gh the attestation reads run through
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-gh@945ec1bb2f90860e1fbc79bb0f5bdd58d1dbcdb3
+
+      - name: The cut's record attest attested, and this repository's benchmarks the cut measured (GATING)
+        # A BENCHMARK IS THE CUT'S (DN-142.D33, slice (a)'s ruling (1)): measured on the release seat from this
+        # very candidate and kept in the cut run's artifact `cut-bench-<repository>`, never in a store. Read with
+        # the token attest read the run with; stage holds every file to the digest the attested record names.
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-          RECORD: ${{ inputs.record-sha256 }}
-          # The second producer of the repository's visibility (DN-142.D24): step 0 read it from the
-          # API into the slice, and the job's own event context says what it is now.
-          VISIBILITY: ${{ github.event.repository.visibility }}
+          GH_TOKEN: ${{ secrets.BUILD_RECORD_READ_TOKEN }}
+          RECORD_REPO: CodeRoasted/coderoast
+          RUN: ${{ inputs.cut-run }}
+          RECORD_SHA256: ${{ inputs.record-sha256 }}
         run: |
           set -euo pipefail
-          python3 .malf/store_publish.py stage "${GITHUB_REPOSITORY#*/}" "$VISIBILITY" "$RECORD" \
-            .malf/keys/store-writer.allowed_signers "$RUNNER_TEMP/assets"
+          [ -n "$GH_TOKEN" ] || { echo "::error::no token reads $RECORD_REPO's cut run $RUN: pass BUILD_RECORD_READ_TOKEN"; exit 1; }
+          cut="$RUNNER_TEMP/cut"
+          rm -rf "$cut"; mkdir -p "$cut/record" "$cut/bench"
+          gh run download "$RUN" --repo "$RECORD_REPO" --name cut-record --dir "$cut/record"
+          got="$(sha256sum "$cut/record/cut-record.json" | cut -d' ' -f1)"
+          [ "$got" = "$RECORD_SHA256" ] || { echo "::error::the cut-record.json of run $RUN has sha256 $got, and attest attested $RECORD_SHA256"; exit 1; }
+          name="${GITHUB_REPOSITORY#*/}"
+          if python3 -c 'import json, sys; sys.exit(0 if sys.argv[2] in (json.load(open(sys.argv[1])).get("benchmarks") or {}) else 3)' \
+               "$cut/record/cut-record.json" "$name"; then
+            gh run download "$RUN" --repo "$RECORD_REPO" --name "cut-bench-$name" --dir "$cut/bench"
+          else
+            echo "the cut's record names no benchmark of $name"
+          fi
+
+      - name: Read this repository's candidate from its own store, and stage every file its Release and its foreign Releases carry (GATING)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          KEY: ${{ inputs.candidate-key }}
+          RECORD_SHA256: ${{ inputs.record-sha256 }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          PRIVATE: ${{ github.event.repository.private }}
+          SIGNER_WORKFLOW: ${{ steps.malf.outputs.signer-workflow }}
+          SIGNER_DIGEST: ${{ steps.malf.outputs.commit }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::tag '$TAG' is not vMAJOR.MINOR.PATCH"; exit 1; }
+          if [ "$PRIVATE" = true ]; then
+            trust=(--private)
+          else
+            trust=(--signer-workflow "$SIGNER_WORKFLOW" --signer-digest "$SIGNER_DIGEST")
+          fi
+          python3 "$MALF_CHECKOUT/store_publish.py" stage "$GITHUB_REPOSITORY" "$TAG" "$KEY" \
+            "$RUNNER_TEMP/cut/record/cut-record.json" "$RECORD_SHA256" "$RUNNER_TEMP/cut/bench" "$RUNNER_TEMP/staged" "${trust[@]}"
 
       - name: Create the Release at the existing tag, or re-publish the one a moved tag left, and attach the staged assets
         # A RE-CUT FORCE-MOVES THE TAG (ADR-2.D1) AND THE MOVE RE-FIRES THIS WORKFLOW over the Release a
         # previous run published, so `create` would fail "already exists". An existing Release is
-        # re-published instead: its notes name the new record, the staged files replace their namesakes
-        # (`--clobber`), every asset the new slice does not list is removed (store_publish.py
+        # re-published instead: its notes name the new candidate, the staged files replace their namesakes
+        # (`--clobber`), every asset the new staging does not list is removed (store_publish.py
         # stale-assets), and a draft (a deleted-and-recreated tag) is published. The read-back below
-        # then holds it to the new slice, both ways, exactly as after a create.
+        # then holds it to the staged files, both ways, exactly as after a create.
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
-          RECORD: ${{ inputs.record-sha256 }}
+          KEY: ${{ inputs.candidate-key }}
         run: |
           set -euo pipefail
-          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::tag '$TAG' is not vMAJOR.MINOR.PATCH"; exit 1; }
-          notes="Published from the CodeRoast store by digest: the bytes step 0 built and judged in the run whose record has sha256 $RECORD. The attached slice and its signature list every asset's digest."
+          release="$RUNNER_TEMP/staged/release"
+          notes="Published from this repository's candidate $KEY by digest: the bytes its candidate built, judged and stored. The attached publication document lists every asset's digest and the record that produced it."
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets > "$RUNNER_TEMP/existing.json"; then
-            echo "the Release $TAG exists (a moved tag re-fired it): re-publishing it from record $RECORD"
+            echo "the Release $TAG exists (a moved tag re-fired it): re-publishing it from candidate $KEY"
             gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes "$notes" --draft=false
-            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "$RUNNER_TEMP"/assets/*
-            python3 .malf/store_publish.py stale-assets "$RUNNER_TEMP/assets" "$RUNNER_TEMP/existing.json" > "$RUNNER_TEMP/stale.txt"
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "$release"/*
+            python3 "$MALF_CHECKOUT/store_publish.py" stale-assets "$release" "$RUNNER_TEMP/existing.json" > "$RUNNER_TEMP/stale.txt"
             while IFS= read -r name; do
-              echo "removing $name: the slice of record $RECORD does not list it"
+              echo "removing $name: candidate $KEY's publication does not list it"
               gh release delete-asset "$TAG" "$name" --repo "$GITHUB_REPOSITORY" --yes
             done < "$RUNNER_TEMP/stale.txt"
           else
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --notes "$notes" \
-              "$RUNNER_TEMP"/assets/*
+              "$release"/*
           fi
 
-      - name: Read the Release back — it holds exactly the slice's assets, both ways (GATING)
+      - name: Read the Release back — it holds exactly the staged files, both ways (GATING)
         # DN-142.D24 (3): a hand-edited workflow that attached one more file would otherwise drift
         # unseen; the reading is made from outside, after the upload, on the Release itself.
         env:
@@ -117,40 +167,29 @@ jobs:
         run: |
           set -euo pipefail
           gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets > "$RUNNER_TEMP/release.json"
-          python3 .malf/store_publish.py check-release "$RUNNER_TEMP/assets" "$RUNNER_TEMP/release.json"
-
-      - name: Fetch, verify and stage every destination Release the slice binds (GATING)
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          RECORD: ${{ inputs.record-sha256 }}
-          VISIBILITY: ${{ github.event.repository.visibility }}
-        run: |
-          set -euo pipefail
-          python3 .malf/store_publish.py stage-destinations "${GITHUB_REPOSITORY#*/}" "$VISIBILITY" "$RECORD" \
-            .malf/keys/store-writer.allowed_signers "$RUNNER_TEMP/destinations"
+          python3 "$MALF_CHECKOUT/store_publish.py" check-release "$RUNNER_TEMP/staged/release" "$RUNNER_TEMP/release.json"
 
       - name: Publish each destination Release with the destination credential, then read it back (GATING)
         env:
           GH_TOKEN: ${{ secrets.destination-token }}
           OWNER: ${{ github.repository }}
-          RECORD: ${{ inputs.record-sha256 }}
+          KEY: ${{ inputs.candidate-key }}
         run: |
           set -euo pipefail
-          listed="$RUNNER_TEMP/destinations/destinations.tsv"
+          listed="$RUNNER_TEMP/staged/destinations/destinations.tsv"
           if [ ! -s "$listed" ]; then
-            echo "the slice binds no destination Release"
+            echo "$OWNER's packages.yml binds no destination Release"
             exit 0
           fi
-          [ -n "$GH_TOKEN" ] || { echo "::error::the slice binds a destination Release and the caller passed no destination-token"; exit 1; }
-          while IFS=$'\t' read -r destination tag visibility; do
-            repo="CodeRoasted/$destination"
-            seen="$(gh api "repos/$repo" --jq .visibility)"
-            [ "$seen" = "$visibility" ] || { echo "::error::$repo is $seen now, and step 0 read it $visibility"; exit 1; }
+          [ -n "$GH_TOKEN" ] || { echo "::error::$OWNER binds a destination Release and the caller passed no destination-token"; exit 1; }
+          while IFS=$'\t' read -r destination tag; do
+            repo="${OWNER%%/*}/$destination"
+            staged="$RUNNER_TEMP/staged/destinations/$destination"
             if ! gh api "repos/$repo/git/ref/tags/$tag" >/dev/null 2>&1; then
               default="$(gh api "repos/$repo" --jq .default_branch)"
               head="$(gh api "repos/$repo/commits/$default" --jq .sha)"
               object="$(gh api "repos/$repo/git/tags" -f tag="$tag" -f type=commit -f object="$head" \
-                          -f message="Assets of $OWNER, published from the CodeRoast store by digest (step-0 record sha256 $RECORD)." \
+                          -f message="Assets of $OWNER, published from its candidate $KEY by digest." \
                           --jq .sha)"
               gh api "repos/$repo/git/refs" -f ref="refs/tags/$tag" -f sha="$object" >/dev/null
             fi
@@ -158,23 +197,23 @@ jobs:
               kind=MISSING
             fi
             [ "$kind" = "tag" ] || { echo "::error::refs/tags/$tag on $repo is '$kind', not an annotated tag (ADR-2.D1)"; exit 1; }
-            notes="Assets of $OWNER, published from the CodeRoast store by digest: the bytes step 0 judged in the run whose record has sha256 $RECORD. The attached destination slice and its signature list every asset's digest."
+            notes="Assets of $OWNER, published from its candidate $KEY by digest. The attached publication document lists every asset's digest and the record that produced it."
             if gh release view "$tag" --repo "$repo" --json assets > "$RUNNER_TEMP/destination-existing.json"; then
               echo "the destination Release $tag on $repo exists (the owner's moved tag re-fired it): re-publishing it"
               gh release edit "$tag" --repo "$repo" --title "$tag" --notes "$notes" --draft=false
-              gh release upload "$tag" --repo "$repo" --clobber "$RUNNER_TEMP/destinations/$destination"/*
-              python3 .malf/store_publish.py stale-assets "$RUNNER_TEMP/destinations/$destination" \
+              gh release upload "$tag" --repo "$repo" --clobber "$staged"/*
+              python3 "$MALF_CHECKOUT/store_publish.py" stale-assets "$staged" \
                 "$RUNNER_TEMP/destination-existing.json" > "$RUNNER_TEMP/destination-stale.txt"
               while IFS= read -r name; do
-                echo "removing $name from $repo $tag: the destination slice does not list it"
+                echo "removing $name from $repo $tag: the owner's candidate does not publish it there"
                 gh release delete-asset "$tag" "$name" --repo "$repo" --yes
               done < "$RUNNER_TEMP/destination-stale.txt"
             else
               gh release create "$tag" --repo "$repo" --verify-tag --latest=false --title "$tag" --notes "$notes" \
-                "$RUNNER_TEMP/destinations/$destination"/*
+                "$staged"/*
             fi
             gh release view "$tag" --repo "$repo" --json assets > "$RUNNER_TEMP/destination-release.json"
             gh release list --repo "$repo" --limit 1000 --json tagName,isLatest > "$RUNNER_TEMP/destination-releases.json"
-            python3 .malf/store_publish.py check-destination "$RUNNER_TEMP/destinations/$destination" \
+            python3 "$MALF_CHECKOUT/store_publish.py" check-destination "$staged" \
               "$RUNNER_TEMP/destination-release.json" "$RUNNER_TEMP/destination-releases.json" "$tag"
           done < "$listed"

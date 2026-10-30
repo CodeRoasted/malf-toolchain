@@ -436,24 +436,24 @@ echo
 echo "[7j0] artefact_store's object producers carry their own refusal proof (selftest): the objects convention resolves step -> record -> output -> member, the tracked step is keyed on blob ids at a commit, and the ingestion write refuses a printed digest that is not the bytes, a record without its seat or dated exception, a PE carrying a symbol table or a CodeView entry, and records a divergence at an equal inputs_key, never a red (DN-142.D20 (2), DN-142.D25)"
 objects_selftest_output="$(timeout 120 python3 "$MALF_ROOT/artefact_store.py" selftest 2>&1)"
 objects_selftest_status=$?
-check "artefact_store selftest: 46 arms, every refusal fired, the system member refused outside the build environment, the ingestion record and its class, the tracked record, the divergence event, the bench verdict, the test_package member, the restore and the reuse decision intact" \
-      "ok" "$([[ $objects_selftest_status -eq 0 ]] && grep -q '^artefact_store selftest: 46 arm(s), 0 failure(s)$' <<< "$objects_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$objects_selftest_output")")"
+check "artefact_store selftest: 53 arms, every refusal fired, the system member refused outside the build environment, the ingestion record and its class, the tracked record, a candidate's ingestion of its own run's artifact, the divergence event, the bench verdict, the test_package member, the restore and the reuse decision intact" \
+      "ok" "$([[ $objects_selftest_status -eq 0 ]] && grep -q '^artefact_store selftest: 53 arm(s), 0 failure(s)$' <<< "$objects_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$objects_selftest_output")")"
 
 echo
 
-echo "[7j1] store_image carries its own refusal proof (selftest): an image is built from this run's stored entries and a resolved runtime, judged as one linux/amd64 OCI image, and stored once per run (DN-142.D9)"
+echo "[7j1] store_image carries its own refusal proof (selftest): an image is built from stored entries (step 0's run, or a candidate's ship-form creates) and a resolved runtime, judged as one linux/amd64 OCI image, and stored once per run (DN-142.D9, DN-142.D33 (3))"
 image_selftest_output="$(timeout 120 python3 "$MALF_ROOT/store_image.py" selftest 2>&1)"
 image_selftest_status=$?
-check "store_image selftest: 11 arms, every refusal fired, the staged context and the stored record intact" \
-      "ok" "$([[ $image_selftest_status -eq 0 ]] && grep -q '^store_image selftest: 11 arm(s), 0 failure(s)$' <<< "$image_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$image_selftest_output")")"
+check "store_image selftest: 17 arms, every refusal fired, the staged context and the stored record intact, the candidate's image from its one ship-form create" \
+      "ok" "$([[ $image_selftest_status -eq 0 ]] && grep -q '^store_image selftest: 17 arm(s), 0 failure(s)$' <<< "$image_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$image_selftest_output")")"
 
 echo
 
 echo "[7j1b] consumer_verdict carries its own refusal proof (selftest): every row reds on an executable built here or a fixture probe capture, a probe that cannot run is never a pass (N360 plan A2(d)), and its record attests the build environment's image (DN-142.D30 (11) R21)"
 consumer_selftest_output="$(timeout 120 python3 "$MALF_ROOT/consumer_verdict.py" selftest 2>&1)"
 consumer_selftest_status=$?
-check "consumer_verdict selftest: 23 arms, every row red on its fixture and green on a C executable, the record attesting {image: <pin>}, no docker argv built outside the launcher" \
-      "ok" "$([[ $consumer_selftest_status -eq 0 ]] && grep -q '^consumer_verdict selftest: 23 arm(s), 0 failure(s)$' <<< "$consumer_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$consumer_selftest_output")")"
+check "consumer_verdict selftest: 26 arms, every row red on its fixture and green on a C executable, the record attesting {image: <pin>}, no docker argv built outside the launcher, a candidate's verdicts through the launcher over its one ship-form create" \
+      "ok" "$([[ $consumer_selftest_status -eq 0 ]] && grep -q '^consumer_verdict selftest: 26 arm(s), 0 failure(s)$' <<< "$consumer_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$consumer_selftest_output")")"
 
 echo
 

@@ -120,8 +120,8 @@ MISMATCH_HEX = 54
 ABSENT = 3
 THIRD_PARTY_KINDS = ("third-party-create",)
 # The output fields a record names objects by (artefact_store's commit: a package's transport, a
-# verdict's log, the objects convention's map).
-OBJECT_FIELDS = (artefact_store.TRANSPORT_FIELD, "log")
+# verdict's log, an image step's OCI archive (store_image.py), the objects convention's map).
+OBJECT_FIELDS = (artefact_store.TRANSPORT_FIELD, "log", "archive")
 # Fields two records at one key may differ in and still be one result: what LocalStore.commit never
 # compares (the stored bytes' indexes and the objects a step's run produced around its verdict).
 UNCOMPARED = {"entries", "build_ids", artefact_store.TRANSPORT_FIELD, "log"}

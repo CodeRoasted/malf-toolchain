@@ -1,23 +1,24 @@
 name: CodeRoast publish image
 
-# AN IMAGE IS PUBLISHED AS IT WAS STORED (DN-142.D9; N360 plan C1): step 0 built it once from
-# stored bytes (store_image.py) and stored its OCI archive; the tag COPIES that archive to
-# ghcr.io/coderoasted/<image> by digest and builds nothing. The caller's `attest` job hands on
-# `record-sha256`, the digest of the record it attested, and the caller names the image its
-# repository's packages.yml declares under `images:` (pin_coherence holds the two equal):
-#   store_publish.py image reads the repository's slice of that record from its store package,
-#   verifies the writer's signature at this workflow's own revision, the record and the
-#   repository's visibility now, fetches the image's archive by its object digest, judges it
-#   (one linux/amd64 image whose manifest digest is the slice's), pushes every blob and the
-#   manifest verbatim, so the registry's digest is the one step 0 stored, and tags it with the
+# AN IMAGE IS PUBLISHED AS ITS CANDIDATE STORED IT (DN-142.D33 (3); DN-142.D9): the repository's candidate
+# store job built it once from the ship form's stored binary (store_image.py `candidate`) and stored its OCI
+# archive under a record of the candidate; the tag COPIES that archive to ghcr.io/<owner>/<image> by digest
+# and builds nothing. The caller's `attest` job hands on `key`, the candidate key the cut's record names for
+# the repository, and the caller names the image its repository's packages.yml declares under `images:`
+# (pin_coherence holds the two equal):
+#   store_publish.py image reads the candidate through store_transport's one trusted reader (a public
+#   store through its attestations at this workflow's malf commit, a private one through its privacy and
+#   the job's token), refuses a candidate whose tree is not the tag's, takes the image's ONE record (its
+#   executables the ones packages.yml sites, at the digests of the candidate's own ship-form creates),
+#   judges its archive (one linux/amd64 image whose manifest digest is the record's), pushes every blob and
+#   the manifest verbatim, so the registry's digest is the one the candidate stored, and tags it with the
 #   release tag. A tag already naming another digest is refused, never moved.
 #
 # ITS OWN WORKFLOW, NOT A JOB OF coderoast-publish.yml, BECAUSE OF ONE PERMISSION: pushing the image
 # needs `packages: write`, and a called workflow's permissions must be granted by every caller. In
 # the publish workflow that grant would reach every releasing repository, public ones included, for
-# a write only the image's repository makes. The token cannot write a store package (DN-142.D6 R4:
-# a `packages: write` token's manifest PUT on a store package was refused, measured 2026-10-11),
-# and the image's package is linked to its repository by the Dockerfile's source label.
+# a write only the image's repository makes. The image's package is linked to its repository by the
+# Dockerfile's source label.
 #
 # NOTHING HERE CHECKS OUT THE CALLER'S SOURCE, PROVISIONS A TOOLCHAIN, BUILDS OR PACKS: no docker,
 # no buildx; the push is store_publish.py's own registry client.
@@ -25,8 +26,8 @@ name: CodeRoast publish image
 on:
   workflow_call:
     inputs:
-      record-sha256:
-        description: 'The digest of the step-0 record the caller''s attest job attested (its `record-sha256` output).'
+      candidate-key:
+        description: 'The candidate key the cut''s record names for this repository (the caller''s attest job''s `key` output).'
         type: string
         required: true
       image:
@@ -44,22 +45,35 @@ jobs:
     runs-on: ${{ inputs.runs-on }}
     permissions:
       contents: read
-      packages: write   # the image's own package; the store package is read with the same token, which no store package grants more
+      packages: write      # the image's own package; the store package is read with the same token
+      actions: read        # coderoast-malf-checkout reads the run's referenced workflows for this workflow's commit
+      attestations: read   # a public store's candidate is trusted through its attestations
     steps:
-      - name: Stage malf-toolchain at this workflow's revision (the tools and the writer's public key)
-        uses: CodeRoasted/malf-toolchain/.github/actions/stage-malf@945ec1bb2f90860e1fbc79bb0f5bdd58d1dbcdb3
+      - name: malf at this workflow's commit, as git (its tools, and the attestation's signer digest)
+        id: malf
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@945ec1bb2f90860e1fbc79bb0f5bdd58d1dbcdb3
         with:
-          path: .malf
+          workflow: coderoast-publish-image.yml
 
-      - name: Fetch, verify and push the stored image, tagged with the release tag (GATING)
+      - name: The pinned gh the attestation reads run through
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-gh@945ec1bb2f90860e1fbc79bb0f5bdd58d1dbcdb3
+
+      - name: Read the candidate's image, and push it tagged with the release tag (GATING)
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          RECORD: ${{ inputs.record-sha256 }}
+          GH_TOKEN: ${{ github.token }}
+          KEY: ${{ inputs.candidate-key }}
           IMAGE: ${{ inputs.image }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
-          VISIBILITY: ${{ github.event.repository.visibility }}
+          PRIVATE: ${{ github.event.repository.private }}
+          SIGNER_WORKFLOW: ${{ steps.malf.outputs.signer-workflow }}
+          SIGNER_DIGEST: ${{ steps.malf.outputs.commit }}
         run: |
           set -euo pipefail
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::tag '$TAG' is not vMAJOR.MINOR.PATCH"; exit 1; }
-          python3 .malf/store_publish.py image "${GITHUB_REPOSITORY#*/}" "$VISIBILITY" "$RECORD" \
-            .malf/keys/store-writer.allowed_signers "$IMAGE" "$TAG"
+          if [ "$PRIVATE" = true ]; then
+            trust=(--private)
+          else
+            trust=(--signer-workflow "$SIGNER_WORKFLOW" --signer-digest "$SIGNER_DIGEST")
+          fi
+          python3 "$MALF_CHECKOUT/store_publish.py" image "$GITHUB_REPOSITORY" "$TAG" "$KEY" "$IMAGE" "${trust[@]}"

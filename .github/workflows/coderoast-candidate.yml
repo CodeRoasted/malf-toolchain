@@ -161,6 +161,69 @@ jobs:
             bash "$MALF_CHECKOUT/malf" store-create --ship "${shipped[@]}"
           python3 "$MALF_CHECKOUT/artefact_store.py" bound "$store" "${shipped[@]}"
 
+      # A RELEASE PUBLISHES FROM ITS CANDIDATE (DN-142.D33 (3)): every byte a Release attaches, a benchmark
+      # alone excepted (the cut measures it), is a record of this store, so what no ship-form create holds is
+      # stored here: the tracked files, the hosted outputs of this run's own jobs, the consumer verdicts and the
+      # images.
+      - name: The tracked files a release publishes (packages.yml `tracked/<member>` objects), read from git at this commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          store="$RUNNER_TEMP/candidate-store"
+          commit="$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
+          mapfile -t tracked < <(python3 "$MALF_CHECKOUT/artefact_store.py" tracked-packages "$GITHUB_WORKSPACE" "$commit")
+          if [ "${#tracked[@]}" -eq 0 ]; then
+            echo "$GITHUB_REPOSITORY publishes no tracked file at $commit"
+            exit 0
+          fi
+          cd "$GITHUB_WORKSPACE"
+          for package in "${tracked[@]}"; do
+            python3 "$MALF_CHECKOUT/build_environment.py" run --mount "$store" --mount "$GITHUB_WORKSPACE" \
+              --read-only-mount "$MALF_CHECKOUT" -- \
+              python3 "$MALF_CHECKOUT/artefact_store.py" tracked-step "$store" "$GITHUB_WORKSPACE" "$commit" "$package"
+          done
+
+      - name: The hosted outputs a release publishes (packages.yml `ingest:` rows), from the jobs of THIS candidate's run
+        # note: a golden's report and insight-eidos's Windows engine are jobs of the caller's candidate.yml, which the store job needs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          store="$RUNNER_TEMP/candidate-store"
+          commit="$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
+          mapfile -t rows < <(python3 "$MALF_CHECKOUT/artefact_store.py" ingest-rows "$GITHUB_WORKSPACE" "$commit")
+          if [ "${#rows[@]}" -eq 0 ]; then
+            echo "$GITHUB_REPOSITORY publishes no hosted output at $commit"
+            exit 0
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" > "$RUNNER_TEMP/run-artifacts.json"
+          for row in "${rows[@]}"; do
+            IFS=$'\t' read -r workflow artifact _member _class <<<"$row"
+            digest="$(python3 -c 'import json, sys; found = [a["digest"] for a in json.load(open(sys.argv[1]))["artifacts"] if a["name"] == sys.argv[2] and a.get("digest")]; print(found[0] if len(found) == 1 else "")' "$RUNNER_TEMP/run-artifacts.json" "$artifact")"
+            [ -n "$digest" ] || { echo "::error::this candidate's run carries no one artifact '$artifact' with a digest, which packages.yml's ingest row for $workflow publishes: its job must run in candidate.yml before the store job"; exit 1; }
+            folder="$RUNNER_TEMP/ingest/$artifact"
+            rm -rf "$folder"; mkdir -p "$folder"
+            gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$artifact" --dir "$folder"
+            python3 "$MALF_CHECKOUT/artefact_store.py" candidate-ingest "$store" "$GITHUB_WORKSPACE" "$commit" "$workflow" \
+              "$folder" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$digest"
+          done
+
+      - name: Every consumer verdict packages.yml names, over the ship form's stored entry, in the image
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$MALF_CHECKOUT/consumer_verdict.py" candidate "$RUNNER_TEMP/candidate-store" "$GITHUB_WORKSPACE" \
+            "$RUNNER_TEMP/candidate-verdicts"
+
+      - name: Every image packages.yml declares, built from the ship form's stored binary and stored with the candidate
+        # note: an image build is declared NON-REPRODUCIBLE (DN-142.D9), so its record is addressed by this run and attempt
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$MALF_CHECKOUT/store_image.py" candidate "$RUNNER_TEMP/candidate-store" "$GITHUB_WORKSPACE" \
+            "$GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT" "$RUNNER_TEMP/candidate-image"
+
       # The committed SBOM is a projection of the graph this job just resolved for the ship form, so it is checked
       # here, in that job's home, before anything is stored.
       - name: The committed SBOM matches the ship form's resolved graph

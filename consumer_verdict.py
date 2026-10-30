@@ -49,6 +49,10 @@ are key members, so a new baseline re-keys the verdict.
         stored (output `consumer`, step id `<package>/consumer`) under the `system` and `toolchain` the
         member file names, the system refused unless it is this container's MALF_SYSTEM; exit 0 when it
         passed and agrees with its record, 1 on a fail, a mismatch or a refusal
+    consumer_verdict.py candidate <store> <repository dir> <scratch>
+        a repository's CANDIDATE store job (DN-142.D33): every consumer verdict packages.yml at HEAD names, over the
+        store's ONE ship-form create of its package: prepare and conclude in the build environment, the probe through
+        the launcher, the toolchain member measured in the image; exit 0 when each passed and was stored
     consumer_verdict.py selftest
         every row red on a fixture executable built here, the container rows over fixture captures
 
@@ -69,6 +73,7 @@ import tarfile
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import artefact_store  # noqa: E402 — a sibling module, located from this file
@@ -372,6 +377,95 @@ def conclude(store: Path, scratch: Path, member: dict, environ: dict) -> int:
     return 0 if stored == 0 and verdict == "pass" else 1
 
 
+# ── a CANDIDATE's consumer verdicts (DN-142.D33, slice (a)'s rulings) ─────────────────────────────────
+#
+# The repository's candidate store job runs the verdict over its own ship-form entry, the act step 0's B2
+# act 5 ran: `prepare` and `conclude` in the pinned image through malf's launcher (`build_environment.py
+# run`, the system attested to `--attest`), the consumer container as the launcher's `probe`, and the
+# `toolchain` member measured in that image, of the one tool the act runs, its python3.
+TOOLCHAIN_PROBE = ("import hashlib, json, os, sys; real = os.path.realpath(sys.executable); "
+                   "print('consumer-toolchain: ' + json.dumps({'python3': {'version': sys.version.split()[0], "
+                   "'executable': hashlib.sha256(open(real, 'rb').read()).hexdigest()}}, sort_keys=True))")
+TOOLCHAIN_MARK = "consumer-toolchain: "
+
+
+def verdict_sites(repository: Path, commit: str) -> list[tuple[str, str, str]]:
+    """(package, entry, package path) of every `published` executable whose `assets` site names the `consumer`
+    verdict in packages.yml at `commit`, sorted."""
+    import yaml
+
+    shown = subprocess.run(["git", "-C", str(repository), "show", f"{commit}:packages.yml"], capture_output=True,
+                           text=True, check=False)
+    if shown.returncode != 0:
+        raise Refused(f"{repository} holds no packages.yml at {commit}: {shown.stderr.strip()}")
+    found = set()
+    for package, row in ((yaml.safe_load(shown.stdout) or {}).get("packages") or {}).items():
+        for entry, kind in ((row or {}).get("executables") or {}).items():
+            sites = (kind.get("published") or {}).get("assets") if isinstance(kind, dict) else None
+            if any(NAME in (site.get("verdicts") or []) for site in sites or [] if isinstance(site, dict)):
+                found.add((package, entry, str((row or {}).get("path", "."))))
+    return sorted(found)
+
+
+def candidate(store: Path, repository: Path, scratch: Path, run: Callable[[list[str], Path], "tuple[int, str]"],
+              say: Callable[[str], None] = print) -> int:
+    """Every consumer verdict packages.yml names, over the candidate store's ONE ship-form create of the package;
+    0 when each passed and was stored, the count of verdicts that did not otherwise. Each act's refusal raises."""
+    commit = subprocess.run(["git", "-C", str(repository), "rev-parse", "HEAD"], capture_output=True, text=True,
+                            check=False).stdout.strip()
+    sites = verdict_sites(repository, commit)
+    if not sites:
+        say(f"consumer_verdict: {repository.resolve().name} names no consumer verdict at {commit}")
+        return 0
+    malf = Path(__file__).resolve().parent
+    launcher = [sys.executable, str(malf / "build_environment.py")]
+    records = [artefact_store.LocalStore(store).record(path.stem) for path in sorted((store / "records").glob("*.json"))]
+    failed = 0
+    for package, entry, package_path in sites:
+        creates = [body for body in records if body and body["inputs"]["step"].get("kind") == "conan-create"
+                   and body["inputs"]["step"].get("form") == "ship" and body["inputs"]["step"].get("package") == package]
+        if len(creates) != 1:
+            raise Refused(f"the candidate store holds {len(creates)} ship-form create(s) of {package}, not one")
+        judging = (scratch / f"{package}-{NAME}").resolve()
+        judging.mkdir(parents=True)
+        (judging / "steps.json").write_text(json.dumps([{"id": f"{package}/package", "key": creates[0]["key"]}]))
+        mounts = [arg for path in (store.resolve(), repository.resolve(), judging, malf) for arg in ("--mount", str(path))]
+
+        def act(argv: list[str], attest: Path | None = None) -> str:
+            code, output = run([*launcher, "run", *mounts, *(["--attest", str(attest)] if attest else []), "--",
+                                *argv], judging)
+            if code != 0:
+                raise Refused(f"`{' '.join(argv[:3])}` in the build environment exited {code}: {output.strip()[-600:]}")
+            return output
+
+        attest = judging / "attest.json"
+        act(["python3", str(malf / "consumer_verdict.py"), "prepare", str(store.resolve()), str(judging / "steps.json"),
+             package, entry, str(repository.resolve()), commit, package_path, str(judging)], attest)
+        system = json.loads(attest.read_text())["image"]
+        measured = next((line.removeprefix(TOOLCHAIN_MARK) for line in act(["python3", "-I", "-c", TOOLCHAIN_PROBE])
+                         .splitlines() if line.startswith(TOOLCHAIN_MARK)), None)
+        if measured is None:
+            raise Refused("the build environment's python3 printed no toolchain measurement")
+        probe = json.loads((judging / PROBE).read_text())
+        code, output = run([*launcher, "probe", "--image", str(probe["image"]), "--stdin", str(judging / WORK_TAR),
+                            "--capture", str(judging / CAPTURE), "--", *probe["argv"]], judging)
+        if code != 0:
+            raise Refused(f"the launcher's probe of {probe['image']} exited {code}: {output.strip()[-600:]}")
+        (judging / "member.json").write_text(json.dumps({"system": {"image": system}, "toolchain": json.loads(measured)},
+                                                        sort_keys=True))
+        concluded, output = run([*launcher, "run", *mounts, "--", "python3", str(malf / "consumer_verdict.py"),
+                                 "conclude", str(store.resolve()), str(judging), str(judging / "member.json")], judging)
+        say(output.rstrip())
+        failed += 1 if concluded != 0 else 0
+    return failed
+
+
+def live_run(argv: list[str], cwd: Path) -> tuple[int, str]:
+    done = subprocess.run(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          text=True, check=False)
+    return done.returncode, done.stdout
+
+
 # ── the selftest ─────────────────────────────────────────────────────────────────────────────────
 
 
@@ -380,6 +474,61 @@ def _built(root: Path, name: str, source: str, compiler: str, *flags: str) -> by
     (root / f"{name}{suffix}").write_text(source)
     subprocess.run([compiler, "-O1", "-o", str(root / name), str(root / f"{name}{suffix}"), *flags], check=True)
     return (root / name).read_bytes()
+
+
+def _candidate_arms(arm: Callable, root: Path) -> None:
+    """The candidate verb (DN-142.D33): the sites read from packages.yml, the four acts in their order through
+    the launcher over the ONE ship-form create, the member measured in the image, and the refusals."""
+    repository = root / "repo"
+    repository.mkdir(parents=True)
+    (repository / "packages.yml").write_text(
+        "packages:\n  tools:\n    release: true\n    path: tools\n    executables:\n"
+        "      bin/tool: {published: {assets: [{destination: dest, name: tool-linux-x64, verdicts: [consumer]}]}}\n"
+        "  quiet:\n    release: true\n")
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+           "GIT_COMMITTER_EMAIL": "t@t", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+    for argv in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "fixture"]):
+        subprocess.run(["git", "-C", str(repository), *argv], check=True, env=env, capture_output=True)
+    commit = subprocess.run(["git", "-C", str(repository), "rev-parse", "HEAD"], capture_output=True, text=True,
+                            check=True).stdout.strip()
+    arm("CANDIDATE: the consumer verdict sites are the `published` entries whose assets site names it",
+        verdict_sites(repository, commit), [("tools", "bin/tool", "tools")])
+    store = root / "store"
+    (store / "records").mkdir(parents=True)
+    document = {"step": {"kind": "conan-create", "package": "tools", "form": "ship"}}
+    key = artefact_store.key_of(document)
+    (store / "records" / f"{key}.json").write_text(json.dumps({"key": key, "inputs": document, "outputs": {}}))
+    calls: list[list[str]] = []
+
+    def fake(argv: list[str], _cwd: Path) -> tuple[int, str]:
+        calls.append(argv)
+        if "prepare" in argv:
+            judging = Path(argv[-1])
+            Path(argv[argv.index("--attest") + 1]).write_text(json.dumps({"image": "sha256:" + "a" * 64}))
+            (judging / PROBE).write_text(json.dumps({"image": "consumer@sha256:" + "b" * 64, "argv": ["sh", "-c", "x"]}))
+            steps = json.loads(Path(argv[argv.index("prepare") + 2]).read_text())
+            return (0, "") if steps == [{"id": "tools/package", "key": key}] else (1, f"steps {steps}")
+        if "-c" in argv and argv[argv.index("-c") + 1] == TOOLCHAIN_PROBE:
+            return 0, TOOLCHAIN_MARK + json.dumps({"python3": {"version": "3", "executable": "c" * 64}}) + "\n"
+        return 0, "consumer_verdict: PASSED"
+
+    failed = candidate(store, repository, root / "scratch", fake, lambda _line: None)
+    acts = [next(word for word in argv if word in ("prepare", "-c", "probe", "conclude")) for argv in calls]
+    member = json.loads((root / "scratch" / "tools-consumer" / "member.json").read_text())
+    arm("CANDIDATE: prepare and conclude run in the image through the launcher (prepare attested), the toolchain is "
+        "measured there, the consumer container is the launcher's probe, and the member names both",
+        (failed, acts, all(argv[2] == "run" for argv in calls if "prepare" in argv or "conclude" in argv),
+         member), (0, ["prepare", "-c", "probe", "conclude"], True,
+                   {"system": {"image": "sha256:" + "a" * 64},
+                    "toolchain": {"python3": {"version": "3", "executable": "c" * 64}}}))
+    (store / "records" / f"{key}.json").unlink()
+    try:
+        candidate(store, repository, root / "scratch-2", fake, lambda _line: None)
+        refusal = "NOT REFUSED"
+    except Refused as refused:
+        refusal = str(refused)
+    arm("RED: a candidate store holding no ship-form create of the package is refused before any act",
+        refusal, "the candidate store holds 0 ship-form create(s) of tools, not one")
 
 
 def selftest() -> int:
@@ -510,6 +659,8 @@ def selftest() -> int:
         arm("RED: no `docker` argv is built here: the consumer container is the launcher's probe (DN-142.D30 (11) R21)",
             built, [])
 
+        _candidate_arms(arm, root / "candidate")
+
     for failure in failures:
         print(f"consumer_verdict selftest FAILED: {failure}")
     print(f"consumer_verdict selftest: {armed[0]} arm(s), {len(failures)} failure(s)")
@@ -523,6 +674,8 @@ def main(argv: list[str]) -> int:
         if len(argv) == 9 and argv[0] == "prepare":
             return prepare(Path(argv[1]), json.loads(Path(argv[2]).read_text()), argv[3], argv[4], Path(argv[5]),
                            argv[6], argv[7], Path(argv[8]))
+        if len(argv) == 4 and argv[0] == "candidate":
+            return 1 if candidate(Path(argv[1]), Path(argv[2]), Path(argv[3]), live_run) else 0
         if len(argv) == 4 and argv[0] == "conclude":
             return conclude(Path(argv[1]), Path(argv[2]), _read(Path(argv[3]), "the act's member"), dict(os.environ))
     except Refused as refused:
