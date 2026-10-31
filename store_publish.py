@@ -11,8 +11,8 @@ names for this repository and handed on that candidate's KEY:
    by its digest;
 2. the tag's tree, read from the API, must be the tree the candidate's index was built from;
 3. the repository's packages.yml at the commit the index records (read through the API: nothing is
-   checked out) DERIVES the Release's rows, the rules `scripts/pharos/publication.py` applies to the whole
-   reach (DN-142.D24 (2), DN-142.D25): a `release: true` package's transport `<package>-<version>.tgz`,
+   checked out) DERIVES the Release's rows, `release_rows` being the one derivation of them (DN-142.D24 (2),
+   DN-142.D25): a `release: true` package's transport `<package>-<version>.tgz`,
    an `assets` site of a `published` executable (the entry's own bytes, with a `.sha256` written from its
    digest, and every verdict the site names, e.g. `consumer`, a passing record of the candidate), an
    `objects:` site (a member of the record that produced it: a tracked step or a verdict that passed; a
@@ -21,7 +21,10 @@ names for this repository and handed on that candidate's KEY:
    Windows engine); and every image `images:` declares;
 4. EVERY row and image must resolve in the candidate, or nothing is staged and the refusal names each one:
    a row the candidate holds no producer of (a hosted output, a verdict the candidate never ran) is never
-   dropped silently, and never fetched from anywhere else;
+   dropped silently, and never fetched from anywhere else; every published executable derives its notices
+   companion `<asset>.THIRD-PARTY-NOTICES.txt` (DN-142.D39 (7)), and every code-carrying row of a PUBLIC
+   destination (its visibility read from GitHub) has each component of its notices judged by DN-142.D38's
+   public-seat licence predicate;
 5. the files are staged with the Release's PUBLICATION DOCUMENT, `<repository>-<version>.publication.json`
    (the candidate key, commit and tree, every row's object digest and record key, every image's manifest
    and executables), and each foreign Release the repository binds (DN-142.D25 (2)) with its own,
@@ -109,6 +112,13 @@ SHIP_KIND, SHIP_FORM = "conan-create", "ship"
 ENTRY_SITE_KEYS = {"destination", "name", "verdicts"}
 OBJECT_SITE_KEYS = {"destination", "name"}
 INGEST_CLASSES = {"executable": ENTRY_KIND, "object": OBJECT_KIND}
+# EVERY PUBLISHED EXECUTABLE CARRIES ITS NOTICES (DN-142.D39 (7a), (7b)): an entry row, and an ingested executable's
+# row, each derive a companion object row `<asset name>.THIRD-PARTY-NOTICES.txt` at the same destination, whose bytes
+# are the package's `licenses/THIRD-PARTY-NOTICES.txt` (an entry's) or the ingestion record's second member (an
+# ingested one's). Derived, never declared: packages.yml cannot forget it, and check-release covers it as a staged
+# file. A transport gets none: the member is inside the `.tgz` at conan's own path.
+NOTICES_SUFFIX = ".THIRD-PARTY-NOTICES.txt"
+NOTICES_ENTRY = store_transport.NOTICES_MEMBER
 # A GitHub API read: path -> (HTTP status, JSON body), as store_transport.api_get answers it.
 Get = Callable[[str], "tuple[int, dict]"]
 
@@ -173,10 +183,10 @@ def read_candidate(reader: store_transport.Reader, store: Path, repository: str,
 
 def release_rows(declared: dict, owner: str, version: str) -> tuple[list[dict], dict[str, str], list[str]]:
     """(every Release row the repository's packages.yml declares, {foreign destination: its tag}, findings),
-    derived as `scripts/pharos/publication.py` derives one owner's part of the cut's plan (DN-142.D24 (2),
-    DN-142.D25): a `release: true` package's transport `<package>-<version>.tgz`, each `assets` site of a
+    the one derivation of a repository's Release rows (DN-142.D24 (2), DN-142.D25): a `release: true` package's transport `<package>-<version>.tgz`, each `assets` site of a
     `published` executable an entry row, each `objects:` site an object row, each `ingest:` site a row of its
-    declared class; a site's destination is the owner unless `destinations:` declares the foreign one."""
+    declared class; a site's destination is the owner unless `destinations:` declares the foreign one. Every
+    executable row (an entry, an ingested executable) derives its notices companion row (NOTICES_SUFFIX)."""
     findings: list[str] = []
     destinations: dict[str, str] = {}
     for destination, row in sorted((declared.get("destinations") or {}).items()):
@@ -206,6 +216,12 @@ def release_rows(declared: dict, owner: str, version: str) -> tuple[list[dict], 
             used.add(destination)
             rows.append({**base, "name": site["name"], "destination": destination,
                          "verdicts": sorted(site.get("verdicts") or [])})
+            if base["kind"] == ENTRY_KIND:
+                companion = ({"ingest": base["ingest"], "artifact": base["artifact"],
+                              "member": artefact_store.INGEST_NOTICES} if "ingest" in base
+                             else {"package": base["package"]})
+                rows.append({**companion, "kind": OBJECT_KIND, "notices": site["name"],
+                             "name": f"{site['name']}{NOTICES_SUFFIX}", "destination": destination, "verdicts": []})
 
     for package, row in sorted((declared.get("packages") or {}).items()):
         row = row or {}
@@ -356,9 +372,23 @@ def benchmarked(candidate: Candidate, row: dict, measured: Measured | None) -> d
 def resolved(candidate: Candidate, row: dict, scratch: Path, measured: Measured | None = None) -> dict:
     """One Release row resolved in the candidate: {object, record, verdicts, path} — the bytes at `path`,
     whole. Raises Refused naming the link the candidate does not hold."""
+    if "notices" in row and "package" in row:
+        record = ship_create(candidate, row["package"])
+        output = record["outputs"]["package"]
+        held = {path: digest for path, _mode, digest in output.get("entries") or []}
+        if NOTICES_ENTRY not in held:
+            raise Refused(f"{row['package']} holds no {NOTICES_ENTRY}, and the executable {row['notices']} is published "
+                          f"with its third-party notices (DN-142.D39 (7a))")
+        target = scratch / held[NOTICES_ENTRY]
+        try:
+            artefact_store.extract(candidate.store / "objects" / output[artefact_store.TRANSPORT_FIELD], NOTICES_ENTRY,
+                                   held[NOTICES_ENTRY], target)
+        except artefact_store.Refused as refused:
+            raise Refused(str(refused)) from refused
+        return {"object": held[NOTICES_ENTRY], "record": record["key"], "verdicts": [], "path": target}
     if "ingest" in row:
         owner = candidate.repository.split("/", 1)[1]
-        klass = {value: key for key, value in INGEST_CLASSES.items()}[row["kind"]]
+        klass = "executable" if "notices" in row else {value: key for key, value in INGEST_CLASSES.items()}[row["kind"]]
         record = _one([body for body in candidate.records.values()
                        if body["inputs"]["step"] == {"kind": artefact_store.INGEST_KIND, "repository": owner,
                                                      "artefact": row["artifact"],
@@ -451,10 +481,95 @@ def image_rows(candidate: Candidate, declared: dict) -> list[dict]:
     return images
 
 
-def publication(candidate: Candidate, declared: dict, version: str, tag: str, scratch: Path,
+# A PUBLIC SEAT JUDGES THE CLOSURE (DN-142.D39 (7c)): every row that carries code (a transport, an entry, an ingested
+# executable) whose destination Release is public has each component of its package's notices judged by
+# DN-142.D38's predicate, unchanged and imported (`store_transport.licence_findings`), on the third-party record and
+# transport the candidate holds for it; a component the candidate holds no record of is a refusal. An ingested
+# executable has no record to judge: its components are judged from its notices file alone (identifiers against
+# PERMISSIVE; an Apache-2.0 component needs a `NOTICE*` file row or a NOTICE_ABSENT row by name and version). A
+# public STORE needs none of this: its push already judged every third-party record in it.
+Visibility = Callable[[str], str]
+
+
+def _notices_bytes(candidate: Candidate, row: dict) -> bytes:
+    """The notices a code-carrying row's package (or ingestion) carries."""
+    if "ingest" in row:
+        objects = (candidate.records[row["record"]]["outputs"].get(artefact_store.INGEST_OUTPUT) or {}).get(
+            artefact_store.OBJECTS_FIELD) or {}
+        digest = objects.get(artefact_store.INGEST_NOTICES)
+        if digest is None:
+            raise Refused(f"its ingestion record {row['record']} holds no {artefact_store.INGEST_NOTICES}")
+        return (candidate.store / "objects" / str(digest)).read_bytes()
+    output = ship_create(candidate, row["package"])["outputs"]["package"]
+    held = {path: digest for path, _mode, digest in output.get("entries") or []}
+    data = store_transport._package_member(candidate.store / "objects" / output[artefact_store.TRANSPORT_FIELD],
+                                           NOTICES_ENTRY)
+    if NOTICES_ENTRY not in held or data is None or hashlib.sha256(data).hexdigest() != held[NOTICES_ENTRY]:
+        raise Refused(f"{row['package']} holds no {NOTICES_ENTRY} at its entry's digest")
+    return data
+
+
+def _file_findings(component) -> list[str]:
+    """DN-142.D38's predicate as far as a notices file alone answers it (an ingested executable's components)."""
+    outside = [identifier for identifier in store_transport.spdx_licence.identifiers_of(component.licence)
+               if identifier not in store_transport.PERMISSIVE]
+    findings = [f"licence {component.licence} names {', '.join(outside)} outside the permissive allowlist "
+                f"{', '.join(store_transport.PERMISSIVE)}"] if outside else []
+    if not any(each.size for each in component.files):
+        findings.append("no licence notice: the component lists no non-empty licence file")
+    name, _slash, version = component.key.split("#", 1)[0].partition("/")
+    if store_transport.APACHE in store_transport.spdx_licence.identifiers_of(component.licence) \
+            and not any(Path(each.path).name.startswith("NOTICE") for each in component.files) \
+            and (name, version) not in store_transport.NOTICE_ABSENT:
+        findings.append(f"{store_transport.APACHE} without NOTICE: the component lists none and {name}/{version} is "
+                        f"not a verified NOTICE-absent version")
+    return findings
+
+
+def public_seat_findings(candidate: Candidate, placed: list[tuple[dict, Path]], visibility: Visibility) -> list[str]:
+    """`<destination>/<row>: <component>: <reason>` for every component of a public row's notices that breaks
+    DN-142.D38's predicate, or that the candidate holds no third-party record of."""
+    module = store_transport._notices_module()
+    third_party: dict[str, list[dict]] = {}
+    for body in candidate.records.values():
+        if body["inputs"]["step"].get("kind") in store_transport.THIRD_PARTY_KINDS:
+            alias = str((body["outputs"].get("package") or {}).get("alias") or "")
+            third_party.setdefault(alias.split(":", 1)[0], []).append(body)
+    findings: list[str] = []
+    for row, _path in placed:
+        if row["kind"] not in (TRANSPORT_KIND, ENTRY_KIND) or "notices" in row \
+                or visibility(row["destination"]) != "public":
+            continue
+        at = f"{row['destination']}/{row['name']}"
+        try:
+            notices = module.parse(_notices_bytes(candidate, row))
+        except (Refused, module.NoticesRefused) as unread:
+            findings.append(f"{at}: notices unreadable: {unread}")
+            continue
+        for component in notices.components:
+            if "ingest" in row:
+                findings += [f"{at}: {component.key}: {reason}" for reason in _file_findings(component)]
+                continue
+            records = third_party.get(component.key, [])
+            if not records:
+                findings.append(f"{at}: {component.key}: the candidate holds no third-party record of it")
+            for record in records:
+                for hex_digest in store_transport.record_transports(record):
+                    transport = candidate.store / "objects" / hex_digest
+                    if not transport.is_file():
+                        findings.append(f"{at}: {component.key}: its transport {hex_digest} is not in the candidate")
+                        continue
+                    findings += [f"{at}: {component.key}: {reason}"
+                                 for reason in store_transport.licence_findings(record, transport.read_bytes())]
+    return sorted(set(findings))
+
+
+def publication(candidate: Candidate, declared: dict, version: str, tag: str, scratch: Path, visibility: Visibility,
                 measured: Measured | None = None) -> tuple[dict, dict[str, str], list[tuple[dict, Path]]]:
     """(the Release's publication document, {destination: tag}, every row with its staged bytes), once EVERY
-    declared row and image resolves in the candidate; else Refused naming each that does not, nothing staged."""
+    declared row and image resolves in the candidate and every public row's closure passes DN-142.D38's predicate;
+    else Refused naming each that does not, nothing staged. `visibility` answers a destination's (a repository name
+    of the candidate's owner) `public` or `private`, read from GitHub."""
     owner = candidate.repository.split("/", 1)[1]
     rows, destinations, findings = release_rows(declared, owner, version)
     placed: list[tuple[dict, Path]] = []
@@ -465,8 +580,13 @@ def publication(candidate: Candidate, declared: dict, version: str, tag: str, sc
             findings.append(f"{row['destination']}/{row['name']}: {refused}")
             continue
         path = found.pop("path")
-        placed.append(({key: value for key, value in row.items() if key not in ("output", "member", "ingest", "artifact")}
+        placed.append(({key: value for key, value in row.items() if key not in ("output", "member", "artifact")}
                        | found, path))
+    if not findings:
+        broken = public_seat_findings(candidate, placed, visibility)
+        if broken:
+            findings += broken + [store_transport.LICENCE_REMEDY]
+    placed = [({key: value for key, value in row.items() if key != "ingest"}, path) for row, path in placed]
     try:
         images = image_rows(candidate, declared)
     except Refused as refused:
@@ -495,7 +615,7 @@ def _write(out: Path, name: str, data: bytes, entry: bool) -> list[str]:
 
 
 def stage(candidate: Candidate, declared: dict, version: str, tag: str, out: Path,
-          say: Callable[[str], None], measured: Measured | None = None
+          say: Callable[[str], None], visibility: Visibility, measured: Measured | None = None
           ) -> tuple[list[str], list[tuple[str, str, list[str]]]]:
     """Every file of this repository's Release staged under `out/release`, and of each foreign Release it
     binds under `out/destinations/<destination>` with `out/destinations/destinations.tsv`
@@ -505,7 +625,8 @@ def stage(candidate: Candidate, declared: dict, version: str, tag: str, out: Pat
     if not TAG.match(tag) or tag != f"v{version}":
         raise Refused(f"{tag!r} is not the release tag v{version}")
     with tempfile.TemporaryDirectory(prefix="store_publish.") as scratch:
-        document, destinations, placed = publication(candidate, declared, version, tag, Path(scratch), measured)
+        document, destinations, placed = publication(candidate, declared, version, tag, Path(scratch), visibility,
+                                                     measured)
         owner = candidate.repository.split("/", 1)[1]
         release = out / "release"
         release.mkdir(parents=True)
@@ -639,6 +760,21 @@ def released_candidate(reader: store_transport.Reader, store: Path, repository: 
     return candidate, declared_at(get, repository, str(candidate.index.get("commit")))
 
 
+def destination_visibility(get: Get, repository: str) -> Visibility:
+    """A destination's visibility as GitHub answers the release job's token: the repository itself or a foreign
+    destination of its owner (DN-142.D24). An answer that names neither is a refusal: a seat whose visibility is
+    unknown is never judged as private."""
+    owner = repository.split("/", 1)[0]
+
+    def visibility(destination: str) -> str:
+        status, seen = get(f"repos/{owner}/{destination}")
+        if status != 200 or seen.get("visibility") not in store_replica.VISIBILITIES:
+            raise Refused(f"the API answered HTTP {status} and visibility {seen.get('visibility')!r} for the destination "
+                          f"{owner}/{destination}, so its public-seat licence rule cannot be judged")
+        return seen["visibility"]
+    return visibility
+
+
 def check_release(out: Path, release: dict) -> None:
     """The Release holds exactly the staged files: one more is an act nothing staged, one fewer a
     publication that did not happen."""
@@ -718,10 +854,11 @@ def _transport(entries: dict[str, bytes]) -> bytes:
 
 
 def _candidate_scene(root: Path, packages: str = CANDIDATE_PACKAGES, perf_verdict: str = "pass",
-                     image: bool = True) -> dict:
-    """A repository `pub-repo` at a commit, its candidate store (three ship-form creates, a tracked step, a perf
-    verdict, the golden's ingestion and the image store_image's candidate verb builds) pushed to an in-process
-    registry and its index published, the cut's benchmark of it, and the API answers a release job reads."""
+                     image: bool = True, store_visibility: str = "public", tool_licence: str = '"MIT"') -> dict:
+    """A repository `pub-repo` at a commit, its candidate store (three ship-form creates each carrying its third-party
+    notices, `tools` linking one third-party package under `tool_licence`, a tracked step, a perf verdict, the
+    golden's ingestion and the image store_image's candidate verb builds) pushed to an in-process registry at
+    `store_visibility` and its index published, the cut's benchmark of it, and the API answers a release job reads."""
     env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
            "GIT_COMMITTER_EMAIL": "t@t", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
 
@@ -736,26 +873,39 @@ def _candidate_scene(root: Path, packages: str = CANDIDATE_PACKAGES, perf_verdic
 
     checkout = repository(root / "pub-repo", {"packages.yml": packages, "tools/sbom.json": '{"bom": 1}\n',
                                               "docker/Dockerfile": "FROM scratch\n"})
-    malf = repository(root / "malf", {"README": "malf\n"})
+    malf = repository(root / "malf", {"README": "malf\n",
+                                      str(store_transport.RECIPE_NOTICE): "the recipes' MIT notice, a fixture\n"})
     store = root / "store"
     put_object = store_transport._put_object
     put_record = store_transport._put_record
     tool, server = b"\x7fELF tool bytes", b"\x7fELF server bytes"
     keys = {}
+    linked = store_transport._put_third_party(store, "tpdep", "2.0", tool_licence)
+    linked_member = store_transport._third_party_member(store, linked, False)
+    records = store_transport.Records.of(store, [json.loads((store / "records" / f"{linked}.json").read_text())])
     for package, entries, build_ids in (("lib_a", {}, {}), ("tools", {"bin/tool": tool}, {}),
                                         ("server", {"bin/server": server}, {"bin/server": "b" * 40})):
-        transport = put_object(store, _transport(entries))
+        inputs = {"step": {"kind": "conan-create", "package": package, "form": "ship", "profile": "linux-gcc16-release"},
+                  "upstream": {}, "third_party": {"tpdep/host": linked_member} if package == "tools" else {}}
+        alias = f"{package}/9.9.9#r:p#v"
+        notices = store_transport.records_notices(records, {"key": package, "inputs": inputs,
+                                                            "outputs": {"package": {"alias": alias}}}, None)
+        transport = put_object(store, _transport({**entries, NOTICES_ENTRY: notices}))
         listed = [[entry, "executable", hashlib.sha256(data).hexdigest()] for entry, data in sorted(entries.items())]
-        keys[package] = put_record(store, {"step": {"kind": "conan-create", "package": package, "form": "ship",
-                                                    "profile": "linux-gcc16-release"}},
-                                   {"package": {"content": "c" * 64, "entries": listed, "transport": transport,
-                                                "build_ids": build_ids}})
+        listed.append([NOTICES_ENTRY, "file", hashlib.sha256(notices).hexdigest()])
+        keys[package] = put_record(store, inputs,
+                                   {"package": {"alias": alias, "content": hashlib.sha256(package.encode()).hexdigest(),
+                                                "entries": listed, "transport": transport, "build_ids": build_ids}})
     proof = b"\x7fELF proof bytes"
+    proof_notices = store_transport._notices_module().render(store_transport._notices_module().Notices("proof/9.9.9", ()))
     keys["proof"] = put_record(store, {"step": {"kind": "conan-create", "package": "proof", "form": "ship",
                                                 "profile": "linux-gcc16-release",
                                                 "executables": {"bin/proof": RUN_FROM_CACHE}}},
-                               {"package": {"content": "d" * 64, "transport": put_object(store, _transport({"bin/proof": proof})),
-                                            "entries": [["bin/proof", "executable", hashlib.sha256(proof).hexdigest()]],
+                               {"package": {"alias": "proof/9.9.9#r:p#v", "content": "d" * 64,
+                                            "transport": put_object(store, _transport({"bin/proof": proof,
+                                                                                       NOTICES_ENTRY: proof_notices})),
+                                            "entries": [["bin/proof", "executable", hashlib.sha256(proof).hexdigest()],
+                                                        [NOTICES_ENTRY, "file", hashlib.sha256(proof_notices).hexdigest()]],
                                             "build_ids": {}}})
     sbom = put_object(store, b'{"bom": 1}\n')
     keys["tracked"] = put_record(store, {"step": {"kind": "tracked", "repository": "pub-repo", "package": "tools"}},
@@ -776,7 +926,7 @@ def _candidate_scene(root: Path, packages: str = CANDIDATE_PACKAGES, perf_verdic
     server_handle, base = store_replica._fake_server(fake)
     registry = store_replica.Registry(base, "coderoasted/store-pub-repo", ("x-access-token", "token"))
     out = root / "push"
-    guard = store_transport.Guard(lambda: store_replica.expected_package("coderoasted", "pub-repo", "public"),
+    guard = store_transport.Guard(lambda: store_replica.expected_package("coderoasted", "pub-repo", store_visibility),
                                   lambda _expected: None)
     pushed = store_transport.push(registry, guard, store, "CodeRoasted/pub-repo", checkout, {}, malf, {}, out,
                                   lambda _line: None)
@@ -801,6 +951,7 @@ def candidate_arms(arm: Callable, failures: list[str], root: Path, servers: list
     from the repository's own store, staged with its publication document; a row the candidate does not hold,
     a tree that is not the tag's, an unpassed producer and a moved image tag refused before anything lands."""
     quiet: Callable[[str], None] = lambda _line: None  # noqa: E731 — a sink for the lines
+    seen: Visibility = lambda _destination: "public"  # noqa: E731 — every destination of the fixture public
 
     def opened(scene: dict, label: str, answers: dict | None = None, key: str | None = None
                ) -> tuple[Candidate, dict]:
@@ -824,10 +975,11 @@ def candidate_arms(arm: Callable, failures: list[str], root: Path, servers: list
     measured = scene["measured"]
     result = arm("CANDIDATE: every declared row resolves — the benchmark in the cut's, the rest in the candidate — "
                  "and is staged with the publication document",
-                 lambda: stage(candidate, declared, "9.9.9", "v9.9.9", out, quiet, measured), None)
+                 lambda: stage(candidate, declared, "9.9.9", "v9.9.9", out, quiet, seen, measured), None)
     want_own = ["lib-a-benchmark.json", "lib-a-perf.json", "lib_a-9.9.9.tgz", "pub.golden.txt", "sbom.json",
                 "tools-9.9.9.tgz", "pub-repo-9.9.9.publication.json"]
-    want_destination = ["tool-linux-x64", "tool-linux-x64.sha256", "dest-repo-engine-v9.9.9.publication.json"]
+    want_destination = ["tool-linux-x64", "tool-linux-x64.sha256", "tool-linux-x64.THIRD-PARTY-NOTICES.txt",
+                        "dest-repo-engine-v9.9.9.publication.json"]
     if result is not None:
         staged, done = result
         if staged != want_own or done != [("dest-repo", "engine-v9.9.9", want_destination)]:
@@ -878,6 +1030,51 @@ def candidate_arms(arm: Callable, failures: list[str], root: Path, servers: list
             arm("RED: a destination Release wearing the Latest badge reds its after-reading",
                 lambda: check_destination(destination, hosted, [{"tagName": "engine-v9.9.9", "isLatest": True}],
                                           "engine-v9.9.9"), "never claims its repository's badge")
+    if result is not None:
+        companion = out / "destinations" / "dest-repo" / f"tool-linux-x64{NOTICES_SUFFIX}"
+        destination_document = json.loads(
+            (out / "destinations" / "dest-repo" / "dest-repo-engine-v9.9.9.publication.json").read_bytes())
+        member = store_transport._package_member(
+            candidate.store / "objects" / candidate.records[scene["keys"]["tools"]]["outputs"]["package"]["transport"],
+            NOTICES_ENTRY)
+        listed_rows = {row["name"]: row for row in destination_document["assets"]}
+        if not companion.is_file() or companion.read_bytes() != member or \
+                listed_rows.get(companion.name, {}).get("object") != hashlib.sha256(member or b"").hexdigest() or \
+                b"tpdep/2.0#rrev licence: MIT" not in (member or b""):
+            failures.append(f"NOTICES: the entry's companion {companion.name} is not the package's member, or the "
+                            f"destination's publication document does not list it: {listed_rows.get(companion.name)}")
+        else:
+            arm("NOTICES: the companion row derived from an entry is listed, and check-release passes with it "
+                "(DN-142.D39 (7a))", lambda: check_release(
+                    out / "destinations" / "dest-repo", {"assets": [{"name": name} for name in want_destination]}), None)
+    stripped = Candidate(candidate.repository, candidate.key, candidate.index, candidate.store,
+                         json.loads(json.dumps(candidate.records)))
+    tools_output = stripped.records[scene["keys"]["tools"]]["outputs"]["package"]
+    tools_output["entries"] = [row for row in tools_output["entries"] if row[0] != NOTICES_ENTRY]
+    arm("RED: an entry whose package holds no licenses/THIRD-PARTY-NOTICES.txt refuses, nothing staged",
+        lambda: stage(stripped, declared, "9.9.9", "v9.9.9", root / "no-notices", quiet, seen, measured),
+        f"tools holds no {NOTICES_ENTRY}, and the executable tool-linux-x64 is published with its third-party notices")
+    if (root / "no-notices").exists():
+        failures.append("NOTICES: a publication refused for a missing notices member staged files")
+    closed = _candidate_scene(root / "bsl", store_visibility="private", tool_licence='"BSL-1.0"')
+    servers.append(closed["server"])
+    closed_found = arm("CANDIDATE: a PRIVATE store holding a BSL-1.0 third-party record is pushed (a private store "
+                       "is not judged) and read", lambda: opened(closed, "bsl"), None)
+    if closed_found is not None:
+        closed_measured = Measured(closed["key"], measured.packages, measured.folder)
+        arm("RED: a public destination refuses a component whose third-party record fails DN-142.D38's predicate "
+            "(DN-142.D39 (7c)), naming row, component and reason, nothing staged",
+            lambda: stage(*closed_found, "9.9.9", "v9.9.9", root / "bsl-public", quiet,
+                          lambda destination: "public" if destination == "dest-repo" else "private", closed_measured),
+            "dest-repo/tool-linux-x64: tpdep/2.0#rrev: licence BSL-1.0 names BSL-1.0 outside the permissive allowlist")
+        if (root / "bsl-public").exists():
+            failures.append("NOTICES: a publication refused by the public-seat rule staged files")
+        arm("NOTICES: the same rows to private destinations stage: only a public seat judges the allowlist",
+            lambda: stage(*closed_found, "9.9.9", "v9.9.9", root / "bsl-private", quiet,
+                          lambda _destination: "private", closed_measured), None)
+    arm("RED: a destination whose visibility GitHub does not answer is refused, never judged private",
+        lambda: destination_visibility(lambda path: (404, {}), "coderoasted/pub-repo")("dest-repo"),
+        "so its public-seat licence rule cannot be judged")
     extracted = root / "cut-tool" / "proof"
     extracted.parent.mkdir()
     tool_found = arm("CUT TOOL: a cut tool's run-from-cache entry is extracted from the candidate by its digest, "
@@ -901,28 +1098,28 @@ def candidate_arms(arm: Callable, failures: list[str], root: Path, servers: list
     released_tool["packages"]["proof"]["release"] = True
     released_tool["packages"]["proof"]["version"] = "9.9.9"
     arm("RED: a cut tool declared `release: true` derives no row: a cut tool is never released",
-        lambda: stage(candidate, released_tool, "9.9.9", "v9.9.9", root / "released-tool", quiet, measured),
+        lambda: stage(candidate, released_tool, "9.9.9", "v9.9.9", root / "released-tool", quiet, seen, measured),
         "proof: a cut tool is never released")
     arm("RED: a tag that is not v<version> stages nothing",
-        lambda: stage(candidate, declared, "9.9.9", "v9.9.8", root / "wrong-tag", quiet, measured),
+        lambda: stage(candidate, declared, "9.9.9", "v9.9.8", root / "wrong-tag", quiet, seen, measured),
         "is not the release tag v9.9.9")
     ingesting = json.loads(json.dumps(declared))
     ingesting["ingest"]["windows.yml"] = {"artifact": "win", "executable": "win.exe",
                                           "published": {"assets": [{"name": "win.exe"}]}}
     arm("RED: a declared hosted output the candidate holds no ingestion of is refused by name, and nothing is staged",
-        lambda: stage(candidate, ingesting, "9.9.9", "v9.9.9", root / "ingest", quiet, measured),
+        lambda: stage(candidate, ingesting, "9.9.9", "v9.9.9", root / "ingest", quiet, seen, measured),
         "pub-repo/win.exe: the candidate holds 0 ingestion record(s) of windows.yml's win")
     arm("RED: a benchmark row with no cut benchmark of the repository is refused, never taken from the candidate",
-        lambda: stage(candidate, declared, "9.9.9", "v9.9.9", root / "unmeasured", quiet),
+        lambda: stage(candidate, declared, "9.9.9", "v9.9.9", root / "unmeasured", quiet, seen),
         "pub-repo/lib-a-benchmark.json: it is a benchmark, and the cut's record names no benchmark")
     arm("RED: the cut's benchmark of another candidate is refused",
-        lambda: stage(candidate, declared, "9.9.9", "v9.9.9", root / "other-key", quiet,
+        lambda: stage(candidate, declared, "9.9.9", "v9.9.9", root / "other-key", quiet, seen,
                       Measured("e" * 64, measured.packages, measured.folder)), f"the cut measured candidate-{'e' * 64}")
     tampered_bench = root / "tampered-bench" / "lib_a"
     tampered_bench.mkdir(parents=True)
     (tampered_bench / "lib_a_bench.json").write_bytes(b"other numbers\n")
     arm("RED: a benchmark file that does not hash to the digest the attested record names is refused",
-        lambda: stage(candidate, declared, "9.9.9", "v9.9.9", root / "tampered", quiet,
+        lambda: stage(candidate, declared, "9.9.9", "v9.9.9", root / "tampered", quiet, seen,
                       Measured(measured.key, measured.packages, tampered_bench.parent)), "does not hash to the record's")
     cut_record = json.dumps({"schema": CUT_RECORD_SCHEMA, "cuttable": True, "benchmarks": {"pub-repo": {
         "key": measured.key, "packages": measured.packages}}}).encode()
@@ -936,12 +1133,12 @@ def candidate_arms(arm: Callable, failures: list[str], root: Path, servers: list
     judged = json.loads(json.dumps(declared))
     judged["packages"]["tools"]["executables"]["bin/tool"]["published"]["assets"][0]["verdicts"] = ["consumer"]
     arm("RED: an entry whose declared verdict the candidate holds no pass of is refused",
-        lambda: stage(candidate, judged, "9.9.9", "v9.9.9", root / "verdict", quiet, measured),
+        lambda: stage(candidate, judged, "9.9.9", "v9.9.9", root / "verdict", quiet, seen, measured),
         "0 passing `consumer` verdict(s) of tools")
     foreign = json.loads(json.dumps(declared))
     foreign["packages"]["lib_a"]["objects"]["perf/lib_a_perf.json"]["published"]["assets"][0]["destination"] = "elsewhere"
     arm("RED: a site naming a foreign destination no `destinations:` row declares is refused",
-        lambda: stage(candidate, foreign, "9.9.9", "v9.9.9", root / "foreign", quiet, measured),
+        lambda: stage(candidate, foreign, "9.9.9", "v9.9.9", root / "foreign", quiet, seen, measured),
         "declares no `destinations:` row")
     moved = {**scene["answers"], "repos/coderoasted/pub-repo/commits/v9.9.9": {
         "sha": "1" * 40, "commit": {"tree": {"sha": "2" * 40}}}}
@@ -955,14 +1152,14 @@ def candidate_arms(arm: Callable, failures: list[str], root: Path, servers: list
     red_found = arm("CANDIDATE: a candidate whose bench verdict failed is still read", lambda: opened(red, "red"), None)
     if red_found is not None:
         arm("RED: an object whose producing verdict did not pass is refused",
-            lambda: stage(*red_found, "9.9.9", "v9.9.9", root / "red-staged", quiet,
+            lambda: stage(*red_found, "9.9.9", "v9.9.9", root / "red-staged", quiet, seen,
                           Measured(red["key"], measured.packages, measured.folder)), "judged 'fail', not pass")
     bare = _candidate_scene(root / "no-image", image=False)
     servers.append(bare["server"])
     bare_found = arm("CANDIDATE: a candidate stored before its image step is read", lambda: opened(bare, "bare"), None)
     if bare_found is not None:
         arm("RED: a declared image the candidate holds no record of is refused",
-            lambda: stage(*bare_found, "9.9.9", "v9.9.9", root / "bare-staged", quiet,
+            lambda: stage(*bare_found, "9.9.9", "v9.9.9", root / "bare-staged", quiet, seen,
                           Measured(bare["key"], measured.packages, measured.folder)), "0 image record(s) of srv-image")
 
     target_fake = store_replica.Fake()
@@ -1103,7 +1300,7 @@ def main(argv: list[str]) -> int:
                     measured = cut_benchmarks(Path(args.record).read_bytes(), args.record_sha256,
                                               candidate.repository.split("/", 1)[1], Path(args.bench))
                     staged, done = stage(candidate, declared, args.tag.removeprefix("v"), args.tag, Path(args.out), print,
-                                         measured)
+                                         destination_visibility(get, candidate.repository), measured)
                     for name in staged:
                         print(f"store_publish: ASSET {name}")
                     for destination, rendered, names in done:

@@ -180,6 +180,8 @@ runs:
           Copy-Item "$env:MALF_DIR/cmake/malf-path-map.cmake" "$env:HOME_DIR/malf-path-map.cmake"
           Copy-Item "$env:MALF_DIR/malf_recipe_exports.py" "$env:HOME_DIR/malf_recipe_exports.py"
           Copy-Item "$env:MALF_DIR/malf_recipe_tests.py" "$env:HOME_DIR/malf_recipe_tests.py"
+          Copy-Item "$env:MALF_DIR/third_party_notices.py" "$env:HOME_DIR/third_party_notices.py"
+          Copy-Item "$env:MALF_DIR/spdx_licence.py" "$env:HOME_DIR/spdx_licence.py"
         }
 
     - name: Register malf's recipe overlay as the first remote (DN-142.D17 (8))

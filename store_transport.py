@@ -31,7 +31,8 @@ package's privacy and every read judged by digest.
         every OWNED record of <store dir> (this repository's packages, third-party, its tracked steps)
         and the objects it names, then the index's blob; a PUBLIC store's third-party records judged first
         under the public-seat licence rule, the whole push refused on a finding, and malf's recipe notice
-        pushed as one object the index names (DN-142.D38); writes <out dir>/index.json and
+        pushed as one object the index names (DN-142.D38); every store's first-party create records proved to
+        carry complete third-party notices, the whole push refused on a finding (DN-142.D39 (6)); writes <out dir>/index.json and
         <out dir>/subjects.sha256 (`<manifest hex>  <name>`, one line per object, record and the index:
         the attest step's `subject-checksums`). Env: GITHUB_TOKEN (packages: write), required.
     store_transport.py publish-index <owner/repo> <out dir>
@@ -77,6 +78,13 @@ package's privacy and every read judged by digest.
         mismatch- and candidate- tags), each third-party-create one judged with its transport by the push's
         public-seat licence predicate; AUDIT-PASS per passing record, the findings under `AUDIT —` with the
         remedy and exit 1, else `PASSED <n> record(s)` and exit 0. `malf store-transport licence-audit` runs it.
+    store_transport.py notices <store dir> <record key> <out file> [--tests <label>,...]
+        DN-142.D39 (4), RUL-234: the third-party notices of one first-party create record of <store dir> (a
+        version's candidate restored there), rendered by the generator from the records alone, every licence file
+        read from its third-party record's transport. A record written before the test flag (DN-142.D39 (5))
+        carries none: `--tests` is the operator's WHOLE declaration of those records' test labels
+        (`<name>/<context>`, comma-separated, empty for none), every other flagless host label then shipped;
+        without it a flagless record is refused, never guessed. The printed line names what was declared.
     store_transport.py selftest
         every verb against an in-process registry, a fixture API and recorded-shape attestations; no network
 
@@ -628,8 +636,10 @@ def pull_record(reader: Reader, store: Path, key: str, verifier: Verifier | None
 # A PUBLIC store may hold a third-party binary only when every licence its recipe declares is on this allowlist
 # and its package carries its notice; copyleft is never admitted. An allowlist, never a denylist: an identifier
 # outside it is refused, copyleft and an unknown permissive one alike, and a new permissive identifier enters by
-# a ruling recorded in DN-142.D38. Derived from what the three public stores held on 2026-10-31.
-PERMISSIVE = ("Apache-2.0", "BSD-3-Clause", "MIT")
+# a ruling recorded in DN-142.D38. The first three derived from what the three public stores held on 2026-10-31;
+# `curl` and `Zlib` admitted the same day by the Founder (RUL-233), because the published Sift binary links libcurl
+# and zlib.
+PERMISSIVE = ("Apache-2.0", "BSD-3-Clause", "MIT", "curl", "Zlib")
 APACHE = "Apache-2.0"
 # Upstream source archives VERIFIED to ship no NOTICE at their root, so their packages owe Apache-2.0 4(d)'s
 # notice nothing: (name, version) -> (the archive's sha256 as the recipe's conandata.yml names it, the day its
@@ -638,6 +648,7 @@ APACHE = "Apache-2.0"
 NOTICE_ABSENT = {
     ("benchmark", "1.9.5"): ("9631341c82bac4a288bef951f8b26b41f69021794184ece969f8473977eaa340", "2026-10-31"),
     ("simdjson", "4.6.3"): ("bde0c42f43899c4c5c48be826c09abd22500ed537b89f16b3cced5eec477c263", "2026-10-31"),
+    ("openssl", "3.6.5"): ("a2157c2830efdec3788939b00c9b0638306d3f0bbb76dc4832ee503bb397df98", "2026-10-31"),
 }
 # The MIT notice of every conan-center-index recipe copy a transport carries (`<n>/e/conanfile.py`); a public
 # store holding any third-party record holds these bytes as one object its index names (DN-142.D38 (4)).
@@ -814,6 +825,259 @@ def licence_audit(reader: Reader, repository: str, malf_dir: Path, say: Callable
     return 0
 
 
+# ── a first-party package's third-party notices, proved complete at the push (DN-142.D39 (6)) ────────────────
+
+# Every first-party package carries `licenses/THIRD-PARTY-NOTICES.txt` (third_party_notices.py, written inside its
+# create). Every push, to a public or a private store, proves each owned first-party create record's file complete
+# against the RECORDS before its first blob: the closure computed from the records (the record's shipped host
+# `third_party` members, union, through every shipped host `upstream` member, the closure of the record that
+# produced that member's content) must equal the file's component set both ways, each component's licence files
+# must equal the `licenses/` entries of the third-party record holding its content, and its licence the expression
+# that record's transport recipe declares. The records are signed and graph-derived, first-party by the store's
+# prefixes; the file is the create's, first-party by its bytes: two producers of one fact, so this is a check, not
+# an echo (MEM:integrity-check-provenance-two-producers).
+NOTICES_MEMBER = "licenses/THIRD-PARTY-NOTICES.txt"
+NOTICES_REMEDY = ("re-create the package with malf's notices helper called at the end of its recipe's package() "
+                  "(DN-142.D39 (3))")
+HOST_SUFFIX = "/host"
+
+
+def _notices_module():
+    import third_party_notices
+
+    return third_party_notices
+
+
+def _package_member(transport: Path, entry: str) -> bytes | None:
+    """The one package member `entry` of a `conan cache save` transport, None when it holds none or several."""
+    import tarfile
+
+    with tarfile.open(transport, "r:*") as bundle:
+        members = [member for member in bundle.getmembers()
+                   if member.isfile() and re.fullmatch(rf"b/[^/]+/p/{re.escape(entry)}", member.name)]
+        if len(members) != 1:
+            return None
+        extracted = bundle.extractfile(members[0])
+        return extracted.read() if extracted is not None else None
+
+
+@dataclass
+class Records:
+    """Every record of a store at hand, indexed for the closure: first-party creates and third-party creates by
+    (profile, content)."""
+
+    store: Path
+    creates: dict[tuple[str, str], list[dict]] = field(default_factory=dict)
+    third_party: dict[tuple[str, str], list[dict]] = field(default_factory=dict)
+
+    @staticmethod
+    def of(store: Path, records: list[dict]) -> "Records":
+        indexed = Records(store)
+        for record in records:
+            step, package = record["inputs"]["step"], (record["outputs"].get("package") or {})
+            if not package.get("content"):
+                continue
+            at = (str(step.get("profile")), package["content"])
+            if step.get("kind") in THIRD_PARTY_KINDS:
+                indexed.third_party.setdefault(at, []).append(record)
+            elif step.get("kind") == "conan-create":
+                indexed.creates.setdefault(at, []).append(record)
+        return indexed
+
+
+def _shipped(member: object, label: str, tests: frozenset[str] | None) -> bool | str:
+    """True for a shipped host member, False for a test or build one. A member with no flag (a record written before
+    DN-142.D39 (5)) is read from `tests`, the operator's WHOLE declaration of that record's test labels (a label it
+    names is a test requirement, any other shipped); with no declaration it is a reason, never a guess."""
+    if not label.endswith(HOST_SUFFIX):
+        return False
+    flag = member.get("test") if isinstance(member, dict) else None
+    if flag is None:
+        if tests is None:
+            return (f"{label} carries no test flag (a record written before DN-142.D39 (5)), so its closure cannot "
+                    f"be read")
+        return label not in tests
+    return flag is False
+
+
+def record_closure(records: Records, record: dict, tests: frozenset[str] | None = None,
+                   seen: tuple[str, ...] = ()) -> tuple[dict[str, set[str]], list[str]]:
+    """({component key `<name>/<version>#<rrev>`: its contents}, findings) of a first-party create record, from the
+    records alone. `tests` is an operator's whole declaration of the test labels of records that carry no flag
+    (`notices`, over a version recorded before the flag); the push declares nothing, so a flagless record reds it."""
+    profile = str(record["inputs"]["step"].get("profile"))
+    closure: dict[str, set[str]] = {}
+    findings: list[str] = []
+    for label, member in sorted((record["inputs"].get("third_party") or {}).items()):
+        shipped = _shipped(member, label, tests)
+        if isinstance(shipped, str):
+            findings.append(shipped)
+        elif shipped:
+            closure.setdefault(member["ref"], set()).add(member["content"])
+    for label, member in sorted((record["inputs"].get("upstream") or {}).items()):
+        shipped = _shipped(member, label, tests)
+        if isinstance(shipped, str):
+            findings.append(shipped)
+            continue
+        if not shipped:
+            continue
+        content = artefact_store.upstream_content(member)
+        producers = records.creates.get((profile, content), [])
+        if not producers:
+            findings.append(f"{label}: no conan-create record at {profile} holds its content {content}, so its "
+                            f"closure cannot be read")
+            continue
+        if record["key"] in seen:
+            findings.append(f"{label}: the upstream records form a cycle through {record['key']}")
+            continue
+        for producer in producers:
+            inner, missing = record_closure(records, producer, tests, (*seen, record["key"]))
+            findings += missing
+            for key, contents in inner.items():
+                closure.setdefault(key, set()).update(contents)
+    return closure, sorted(set(findings))
+
+
+def _licence_rows(record: dict) -> set[tuple[str, str]]:
+    """(path, sha256) of every regular file under `licenses/` a third-party record's package entries hold."""
+    return {(str(entry[0]), str(entry[2])) for entry in record["outputs"]["package"].get("entries") or []
+            if isinstance(entry, list) and len(entry) == 3 and entry[1] == "file"
+            and str(entry[0]).startswith("licenses/")}
+
+
+def _recipe_expression(records: Records, record: dict) -> str | None:
+    """The licence expression a third-party record's transport recipe declares, None when it cannot be read."""
+    for hex_digest in record_transports(record):
+        source = records.store / "objects" / hex_digest
+        if not source.is_file():
+            return None
+        import tarfile
+
+        with tarfile.open(source, "r:*") as archive:
+            recipes = [member for member in archive.getmembers() if member.isfile() and RECIPE_MEMBER.match(member.name)]
+            if len(recipes) != 1:
+                return None
+            text = archive.extractfile(recipes[0]).read().decode("utf-8", "replace")
+        try:
+            declared = spdx_licence.recipe_licences(text, recipes[0].name)
+        except SyntaxError:
+            return None
+        return declared[0].expression if len(declared) == 1 and declared[0].literal else None
+    return None
+
+
+def _holder(records: Records, profile: str, key: str, contents: set[str]) -> tuple[dict | None, str | None]:
+    """The third-party record holding a component's content, or the reason there is none (or no single one)."""
+    held = [record for content in sorted(contents) for record in records.third_party.get((profile, content), [])]
+    rows = {frozenset(_licence_rows(record)) for record in held}
+    if not held:
+        return None, f"{key}: no third-party-create record at {profile} holds its content {', '.join(sorted(contents))}"
+    if len(rows) != 1:
+        return None, f"{key}: its {len(contents)} content(s) are held by records with different licenses/ files"
+    return held[0], None
+
+
+def notices_findings(records: Records, record: dict) -> list[str]:
+    """Every way one first-party create record's notices fail DN-142.D39 (6)'s (a) to (f), as its refusal text
+    spells each reason; empty when complete."""
+    module = _notices_module()
+    output = record["outputs"]["package"]
+    held = {str(entry[0]): str(entry[2]) for entry in output.get("entries") or [] if isinstance(entry, list)
+            and len(entry) == 3 and entry[1] == "file"}
+    if NOTICES_MEMBER not in held:
+        return [f"no {NOTICES_MEMBER}"]
+    transport = records.store / "objects" / str(output.get(artefact_store.TRANSPORT_FIELD))
+    data = _package_member(transport, NOTICES_MEMBER) if transport.is_file() else None
+    if data is None or sha256(data) != held[NOTICES_MEMBER]:
+        return [f"notices unreadable: the transport does not hold {NOTICES_MEMBER} at the entry's digest "
+                f"{held[NOTICES_MEMBER]}"]
+    try:
+        notices = module.parse(data)
+    except module.NoticesRefused as unread:
+        return [f"notices unreadable: {unread}"]
+    alias = str(output.get("alias") or "")
+    named = alias.split("#", 1)[0]
+    findings = []
+    if notices.package != named:
+        findings.append(f"notices name {notices.package}, the record is {named}")
+    closure, missing = record_closure(records, record)
+    findings += missing
+    listed = {component.key: component for component in notices.components}
+    findings += [f"notices omit {key}" for key in sorted(set(closure) - set(listed))]
+    findings += [f"notices list {key}, which is outside the closure" for key in sorted(set(listed) - set(closure))]
+    profile = str(record["inputs"]["step"].get("profile"))
+    for key in sorted(set(closure) & set(listed)):
+        holder, reason = _holder(records, profile, key, closure[key])
+        if holder is None:
+            findings.append(reason)
+            continue
+        expected = dict(_licence_rows(holder))
+        written = {each.path: each.sha256 for each in listed[key].files}
+        for path in sorted(set(expected) | set(written)):
+            if expected.get(path) != written.get(path):
+                findings.append(f"{key} {path}: notices {written.get(path, 'absent')}, the record "
+                                f"{expected.get(path, 'absent')}")
+        expression = _recipe_expression(records, holder)
+        if expression != listed[key].licence:
+            findings.append(f"{key}: notices licence {listed[key].licence}, the recipe "
+                            f"{expression if expression is not None else 'unreadable'}")
+    return findings + module.defects(notices)
+
+
+def judge_notices(records: Records, owned: list[dict], repository: str) -> int:
+    """Every owned first-party create record of a push judged by DN-142.D39 (6) before the first blob, public or
+    private store alike; the whole push refused on any finding. Returns the number judged."""
+    owner, name = full_name(repository)
+    creates = [record for record in owned if record["inputs"]["step"].get("kind") == "conan-create"
+               and (record["outputs"].get("package") or {}).get("content")]
+    broken = []
+    for record in creates:
+        step = record["inputs"]["step"]
+        broken += [[f"{step.get('package')} {reference_of(record)} [{step.get('profile') or 'no profile'}]: {reason}"
+                    for reason in notices_findings(records, record)]]
+    broken = [lines for lines in broken if lines]
+    if broken:
+        raise Refused(f"{len(broken)} first-party record(s) of {owner}/{name} carry no complete third-party notices "
+                      f"(DN-142.D39); nothing was pushed:\n"
+                      + "".join(f"  {line}\n" for lines in broken for line in lines) + NOTICES_REMEDY)
+    return len(creates)
+
+
+def records_notices(records: Records, record: dict, tests: frozenset[str] | None) -> bytes:
+    """The notices file the generator renders for one first-party create record from the records alone (RUL-234: a
+    version published before the generator existed): every closure component with its licence files' bytes read
+    from its third-party record's transport. raises Refused naming what the records cannot answer."""
+    module = _notices_module()
+    closure, missing = record_closure(records, record, tests)
+    if missing:
+        raise Refused(f"record {record['key']}: " + "; ".join(missing))
+    profile = str(record["inputs"]["step"].get("profile"))
+    components = []
+    for key in sorted(closure):
+        holder, reason = _holder(records, profile, key, closure[key])
+        if holder is None:
+            raise Refused(reason)
+        transports = record_transports(holder)
+        source = records.store / "objects" / transports[0] if transports else None
+        if source is None or not source.is_file():
+            raise Refused(f"{key}: the store does not hold the transport of its record {holder['key']}")
+        files = []
+        for path, digest in sorted(_licence_rows(holder), key=lambda row: row[0].encode("utf-8")):
+            data = _package_member(source, path)
+            if data is None or sha256(data) != digest:
+                raise Refused(f"{key} {path}: the transport does not hold it at the record's {digest}")
+            files.append(module.LicenceFile.of(path, data))
+        expression = _recipe_expression(records, holder)
+        if expression is None:
+            raise Refused(f"{key}: its transport's recipe declares no literal licence")
+        components.append(module.Component(key, expression, tuple(files)))
+    alias = str(record["outputs"]["package"].get("alias") or "")
+    try:
+        return module.render(module.Notices(alias.split("#", 1)[0], tuple(components)))
+    except module.NoticesRefused as refused:
+        raise Refused(str(refused)) from refused
+
+
 # ── the push (the candidate's writer act) ──────────────────────────────────────────────────────────
 
 
@@ -898,7 +1162,8 @@ def push(registry: Registry, guard: Guard, store: Path, repository: str, checkou
     to attest written to `out`. 1 when a record at an existing key differs (nothing indexed). A PUBLIC store's
     owned third-party records are judged under the public-seat licence rule before the guard writes anything,
     the whole push refused on a finding, and malf's recipe notice joins it as one object the index names
-    (DN-142.D38 (4), (5a)); a private store is not judged."""
+    (DN-142.D38 (4), (5a)); a private store is not judged. Every store's owned first-party create records are
+    judged for complete third-party notices at the same point (DN-142.D39 (6))."""
     owner, name = full_name(repository)
     commit, tree = checkout_identity(checkout)
     key = candidate_key(repository, tree, upstream, sources)
@@ -908,9 +1173,11 @@ def push(registry: Registry, guard: Guard, store: Path, repository: str, checkou
                       f"that ran, and this one did not")
     packages = owned_packages(checkout, commit)
     owned: list[tuple[Path, dict]] = []
+    every: list[dict] = []
     upstream_records = 0
     for path in sorted((store / "records").glob("*.json")):
         record = judged_record(path.read_bytes(), path.stem)
+        every.append(record)
         if record_owned(record, name, packages):
             owned.append((path, record))
         else:
@@ -918,6 +1185,7 @@ def push(registry: Registry, guard: Guard, store: Path, repository: str, checkou
     expected = guard.expected()
     third_party = (judge_public_push(store, [record for _path, record in owned], repository)
                    if expected.visibility == "public" else 0)
+    noticed = judge_notices(Records.of(store, every), [record for _path, record in owned], repository)
     guard.ensure(expected)
     pushed = Pushed()
     for path, _record in owned:
@@ -953,7 +1221,8 @@ def push(registry: Registry, guard: Guard, store: Path, repository: str, checkou
                                          encoding="utf-8")
     guard.ensure(guard.expected())
     say(f"store_transport: PUSHED candidate {key} of {owner}/{name}: {len(pushed.entries)} record(s), "
-        f"{third_party} third-party record(s) judged under the public-seat licence rule, "
+        f"{third_party} third-party record(s) judged under the public-seat licence rule, {noticed} first-party "
+        f"record(s) whose third-party notices were proved complete, "
         f"{upstream_records} upstream record(s) left to their own store, {len(subjects)} subject(s) to attest "
         f"in {out / 'subjects.sha256'}; the index is published by publish-index AFTER the attestation")
     return 0
@@ -1385,6 +1654,41 @@ def _put_third_party(store: Path, package: str, version: str, licence: str, *, c
                                     + [[path, "file", sha256(data)] for path, data in held]}})
 
 
+def _first_party_transport(members: dict[str, bytes]) -> bytes:
+    """A first-party `conan cache save` shape: each package member under `b/pkg/p/`, uncompressed."""
+    import tarfile
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        for name, data in sorted(members.items()):
+            info = tarfile.TarInfo(f"b/pkg/p/{name}")
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def _put_first_party(store: Path, package: str, notices: bytes | None, *, third_party: dict | None = None,
+                     upstream: dict | None = None, form: str = "ship") -> tuple[str, str]:
+    """(key, content) of a first-party `conan-create` record of `package`/1 at linux-gcc16-release whose transport
+    and entries hold `notices` as the member (none when None)."""
+    members = {"lib/lib.a": f"{package} library\n".encode(), **({NOTICES_MEMBER: notices} if notices is not None else {})}
+    transport = _put_object(store, _first_party_transport(members))
+    inputs = {"step": {"kind": "conan-create", "package": package, "profile": "linux-gcc16-release", "form": form},
+              "upstream": upstream or {}, "third_party": third_party or {}}
+    content = sha256(canonical(inputs))
+    key = _put_record(store, inputs, {"package": {"alias": f"{package}/1#r:p#v", "content": content,
+                                                  "transport": transport,
+                                                  "entries": [[path, "file", sha256(data)]
+                                                              for path, data in sorted(members.items())]}})
+    return key, content
+
+
+def _third_party_member(store: Path, key: str, test: bool) -> dict:
+    """A record's `third_party` member naming the `third-party-create` record `key`."""
+    package = json.loads((store / "records" / f"{key}.json").read_text())["outputs"]["package"]
+    return {"ref": package["alias"].split(":", 1)[0], "package_id": "1" * 40, "content": package["content"], "test": test}
+
+
 def selftest() -> int:
     failures: list[str] = []
     armed = [0]
@@ -1441,11 +1745,13 @@ def selftest() -> int:
 
             # -- a run store: two own records with objects, a third-party record, an upstream record.
             store = root / "store"
-            transport = _put_object(store, b"a ship-form transport\n" * 32)
+            empty_notices = _notices_module().render(_notices_module().Notices("ipc_core/1", ()))
+            transport = _put_object(store, _first_party_transport({NOTICES_MEMBER: empty_notices}))
             log = _put_object(store, b"a test log\n")
             own_package = _put_record(store, {"step": {"kind": "conan-create", "package": "ipc_core", "form": "ship"}},
                                       {"package": {"alias": "ipc_core/1#r:p#v", "content": "c" * 64,
-                                                   "transport": transport, "entries": []}})
+                                                   "transport": transport,
+                                                   "entries": [[NOTICES_MEMBER, "file", sha256(empty_notices)]]}})
             own_verdict = _put_record(store, {"step": {"kind": "source-verdict", "package": "ipc_core"},
                                               "definition": {"malf": "m" * 40}},
                                       {"verdict": {"verdict": "pass", "results": [], "log": log}})
@@ -1494,7 +1800,7 @@ def selftest() -> int:
                    ({RECIPE_NOTICE_NAME: notice}, True, True))
             expect("an object's manifest is store_replica's canonical object manifest",
                    fake.tags[object_tag(transport)],
-                   "sha256:" + sha256(store_replica.object_manifest(transport, len(b"a ship-form transport\n" * 32))))
+                   "sha256:" + sha256(store_replica.object_manifest(transport, (store / "objects" / transport).stat().st_size)))
             expect("the index names the commit, tree, key, malf and the image",
                    (index["commit"], index["tree"], index["candidate"], index["malf"]["commit"], index["image"][:7]),
                    (commit, tree, key, _git(malf_dir, "rev-parse", "HEAD"), "sha256:"))
@@ -1754,9 +2060,11 @@ def selftest() -> int:
             breaking = (
                 ("a copyleft record", lambda at: _put_third_party(at, "readline", "8.2", '"GPL-3.0-or-later"'),
                  "readline readline/8.2#rrev [linux-gcc16-release]: licence GPL-3.0-or-later names GPL-3.0-or-later "
-                 "outside the permissive allowlist Apache-2.0, BSD-3-Clause, MIT"),
-                ("a permissive identifier off the allowlist", lambda at: _put_third_party(at, "zlib", "1.3.1", '"Zlib"'),
-                 "zlib zlib/1.3.1#rrev [linux-gcc16-release]: licence Zlib names Zlib outside the permissive allowlist"),
+                 "outside the permissive allowlist Apache-2.0, BSD-3-Clause, MIT, curl, Zlib"),
+                ("a permissive identifier off the allowlist",
+                 lambda at: _put_third_party(at, "boost", "1.86.0", '"BSL-1.0"'),
+                 "boost boost/1.86.0#rrev [linux-gcc16-release]: licence BSL-1.0 names BSL-1.0 outside the permissive "
+                 "allowlist"),
                 ("a dual licence with one copyleft alternative",
                  lambda at: _put_third_party(at, "dual", "1.0", '"MIT OR LGPL-2.1-only"'),
                  "licence MIT OR LGPL-2.1-only names LGPL-2.1-only outside the permissive allowlist"),
@@ -1811,7 +2119,7 @@ def selftest() -> int:
                    "coderoasted/coderoast-ipc's store is PUBLIC and 1 third-party record(s) break ADR-3.D3's public-seat "
                    "licence rule; nothing was pushed:\n  readline readline/8.2#rrev [linux-gcc16-release]: licence "
                    "GPL-3.0-or-later names GPL-3.0-or-later outside the permissive allowlist Apache-2.0, BSD-3-Clause, "
-                   f"MIT\n{LICENCE_REMEDY}")
+                   f"MIT, curl, Zlib\n{LICENCE_REMEDY}")
             private_fake, private_registry = scene()
             arm("a private store holding every refused record takes the push: a private store is not judged",
                 lambda: push(private_registry, package_guard(get_from(private), get_from(private), private_registry,
@@ -1830,9 +2138,11 @@ def selftest() -> int:
             _put_third_party(passing, "noticed", "2.0", '"Apache-2.0 WITH LLVM-exception"',
                              conandata=conandata("2.0", "d" * 64),
                              licences=[("licenses/LICENSE", FIXTURE_LICENCE), ("licenses/NOTICE", b"Noticed, 2026.\n")])
+            _put_third_party(passing, "libcurl", "8.17.0", '"curl"')
+            _put_third_party(passing, "zlib", "1.3.1", '"Zlib"')
             passing_fake, passing_registry = scene()
             arm("a public push passes BSD-3-Clause, a listed NOTICE-absent Apache-2.0 archive, a dual permissive "
-                "licence and an Apache-2.0 package carrying its NOTICE",
+                "licence, an Apache-2.0 package carrying its NOTICE, and a curl and a Zlib record (RUL-233)",
                 lambda: push(passing_registry, package_guard(get_from(api), get_from(api), passing_registry, repository,
                                                              quiet.append),
                              passing, repository, checkout, {}, malf_dir, {}, root / "licence-pass-out", quiet.append), None)
@@ -1846,7 +2156,7 @@ def selftest() -> int:
                     sum(line.startswith("store_transport: AUDIT-PASS ") for line in audited),
                     audited[-1].split(" — ")[0], any(f"holds malf's recipe notice sha256-{notice}" in line
                                                       for line in audited)),
-                   (0, 4, "store_transport: AUDIT coderoasted/coderoast-ipc: PASSED 4 record(s)", True))
+                   (0, 6, "store_transport: AUDIT coderoasted/coderoast-ipc: PASSED 6 record(s)", True))
             audited.clear()
             refused_audit = licence_audit(Reader(Registry(private_registry.base, private_registry.name),
                                                  root / "audit-cache-2", quiet.append),
@@ -1869,7 +2179,120 @@ def selftest() -> int:
                 for name, value in saved.items():
                     os.environ.pop(name, None) if value is None else os.environ.__setitem__(name, value)
             expect("the licence-audit verb reads the store anonymously and prints PASSED",
-                   (code, "PASSED 4 record(s)" in printed.getvalue()), (0, True))
+                   (code, "PASSED 6 record(s)" in printed.getvalue()), (0, True))
+
+            # -- complete third-party notices (DN-142.D39 (6)): every push, public or private, proves each owned
+            # first-party create's file against the records before its first blob.
+            notices_module = _notices_module()
+
+            def notices_scene(at: Path, render: Callable[[dict], bytes | None]) -> None:
+                fmt = _put_third_party(at, "fmt", "12.1.0", '"MIT"')
+                zlib = _put_third_party(at, "zlib", "1.3.1", '"Zlib"')
+                gtest = _put_third_party(at, "gtest", "1.17.0", '"BSD-3-Clause"')
+                cmake = _put_third_party(at, "cmake", "4.4.4", '"BSD-3-Clause"')
+                simdjson = _put_third_party(at, "simdjson", "4.6.3", '"MIT"')
+                picosha2 = _put_third_party(at, "picosha2", "1.0.0", '"MIT"')
+                _canon, canon = _put_first_party(at, "canon_core", b"the upstream's own file, not judged here\n",
+                                                 third_party={"simdjson/host": _third_party_member(at, simdjson, False)})
+                _semantic, semantic = _put_first_party(at, "semantic_github", None, third_party={
+                    "picosha2/host": _third_party_member(at, picosha2, False)})
+                members = {key: _third_party_member(at, key, False) for key in (fmt, zlib, simdjson, picosha2)}
+                closure = {"fmt": members[fmt], "zlib": members[zlib], "simdjson": members[simdjson],
+                           "picosha2": members[picosha2]}
+                _put_first_party(at, "ipc_core", render(closure), third_party={
+                    "fmt/host": members[fmt], "zlib/host": members[zlib],
+                    "gtest/host": _third_party_member(at, gtest, True),
+                    "cmake/build": _third_party_member(at, cmake, False)},
+                    upstream={"canon_core/host": {"content": canon, "test": False},
+                              "semantic_github/host": {"content": semantic, "test": True}})
+
+            def component(member: dict, licence: str, text: bytes = FIXTURE_LICENCE):
+                return notices_module.Component(member["ref"], licence,
+                                                (notices_module.LicenceFile.of("licenses/LICENSE", text),))
+
+            def rendered(closure: dict, *, package: str = "ipc_core/1", drop: tuple[str, ...] = (),
+                         extra: tuple[str, ...] = (), text: dict | None = None, licence: dict | None = None) -> bytes:
+                licences = {"fmt": "MIT", "zlib": "Zlib", "simdjson": "MIT", "picosha2": "MIT", **(licence or {})}
+                chosen = sorted((set(("fmt", "zlib", "simdjson")) - set(drop)) | set(extra))
+                return notices_module.render(notices_module.Notices(package, tuple(sorted(
+                    (component(closure[name], licences[name], (text or {}).get(name, FIXTURE_LICENCE))
+                     for name in chosen), key=lambda each: each.key))))
+
+            def hashed_wrong(closure: dict) -> bytes:
+                return rendered(closure).replace(b"Permission is granted, the fixture's",
+                                                 b"PERMISSION IS GRANTED, THE FIXTURE'S", 1)
+
+            fixture_rrev = "rrev"
+            notices_cases = (
+                ("the member absent", lambda closure: None, "ipc_core/1#r:p#v [linux-gcc16-release]: no "
+                 "licenses/THIRD-PARTY-NOTICES.txt"),
+                ("a package: line naming another package", lambda closure: rendered(closure, package="ipc_core/2"),
+                 "notices name ipc_core/2, the record is ipc_core/1"),
+                ("a component omitted", lambda closure: rendered(closure, drop=("fmt",)),
+                 f"notices omit fmt/12.1.0#{fixture_rrev}"),
+                ("a component reached only through an upstream record omitted",
+                 lambda closure: rendered(closure, drop=("simdjson",)), f"notices omit simdjson/4.6.3#{fixture_rrev}"),
+                ("an extra component, the closure of a first-party TEST requirement listed",
+                 lambda closure: rendered(closure, extra=("picosha2",)),
+                 f"notices list picosha2/1.0.0#{fixture_rrev}, which is outside the closure"),
+                ("a file digest differing from the third-party record's entry",
+                 lambda closure: rendered(closure, text={"fmt": b"another licence text\n"}),
+                 f"fmt/12.1.0#{fixture_rrev} licenses/LICENSE: notices "
+                 f"{sha256(b'another licence text' + bytes([10]))}, the record {sha256(FIXTURE_LICENCE)}"),
+                ("a licence expression differing from the transport's recipe",
+                 lambda closure: rendered(closure, licence={"zlib": "MIT"}),
+                 f"zlib/1.3.1#{fixture_rrev}: notices licence MIT, the recipe Zlib"),
+                ("a text block whose bytes do not hash to its header", hashed_wrong,
+                 f"fmt/12.1.0#{fixture_rrev} licenses/LICENSE: text hashes"))
+            for visibility, answers in (("public", api), ("private", private)):
+                for number, (label, render, line) in enumerate(notices_cases):
+                    at = root / f"notices-{visibility}-{number}"
+                    notices_scene(at, render)
+                    refused_fake, refused_registry = scene()
+                    arm(f"RED: a {visibility} push refuses {label}, naming it",
+                        lambda at=at, refused_registry=refused_registry, answers=answers: push(
+                            refused_registry, package_guard(get_from(answers), get_from(answers), refused_registry,
+                                                            repository, quiet.append),
+                            at, repository, checkout, {}, malf_dir, {}, at / "out", quiet.append), line)
+                    expect(f"nothing was pushed on {label} to a {visibility} store: no blob, no tag",
+                           (len(refused_fake.blobs), sorted(refused_fake.tags)), (0, []))
+            green = root / "notices-green"
+            notices_scene(green, rendered)
+            green_fake, green_registry = scene()
+            said: list[str] = []
+            arm("a public push takes complete notices: the test member (gtest), the build member (cmake) and a first-party "
+                "test requirement's closure (picosha2) absent from the file, the upstream's simdjson present",
+                lambda: push(green_registry, package_guard(get_from(api), get_from(api), green_registry, repository,
+                                                           quiet.append),
+                             green, repository, checkout, {}, malf_dir, {}, green / "out", said.append), None)
+            expect("the push says it proved one first-party record's notices",
+                   any("1 first-party record(s) whose third-party notices were proved complete" in line for line in said),
+                   True)
+            ipc_key = next(path.stem for path in (green / "records").glob("*.json")
+                           if json.loads(path.read_text())["inputs"]["step"]["package"] == "ipc_core")
+            render_out = root / "notices-rendered.txt"
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed):
+                code = main(["notices", str(green), ipc_key, str(render_out)])
+            green_record = json.loads((green / "records" / f"{ipc_key}.json").read_text())
+            expect("the generator renders from the records alone the very bytes the green package carries (RUL-234)",
+                   (code, render_out.read_bytes() if render_out.is_file() else None),
+                   (0, _package_member(green / "objects" / green_record["outputs"]["package"]["transport"],
+                                       NOTICES_MEMBER)))
+            flagless = root / "notices-flagless"
+            gtest_old = _put_third_party(flagless, "gtest", "1.17.0", '"BSD-3-Clause"')
+            fmt_old = _put_third_party(flagless, "fmt", "12.1.0", '"MIT"')
+            old_members = {label: {key: value for key, value in _third_party_member(flagless, key, False).items()
+                                   if key != "test"} for label, key in (("gtest/host", gtest_old), ("fmt/host", fmt_old))}
+            old_key, _content = _put_first_party(flagless, "ipc_core", None, third_party=old_members)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                refused_code = main(["notices", str(flagless), old_key, str(root / "flagless.txt")])
+                declared_code = main(["notices", str(flagless), old_key, str(root / "flagless.txt"), "--tests", "gtest/host"])
+            expect("a record written before the flag is refused unless the operator declares its test labels, and then "
+                   "renders without them",
+                   (refused_code, declared_code,
+                    [each.key for each in notices_module.parse((root / "flagless.txt").read_bytes()).components]),
+                   (1, 0, [f"fmt/12.1.0#{fixture_rrev}"]))
 
             # -- the prune (DN-142.D32 (2)): a published candidate, then an unindexed record and its object.
             fake, kept_registry = scene()
@@ -2120,6 +2543,9 @@ def main(argv: list[str]) -> int:
     verb.add_argument("repository"), verb.add_argument("key")
     verb = verbs.add_parser("licence-audit")
     verb.add_argument("--repository", required=True)
+    verb = verbs.add_parser("notices")
+    verb.add_argument("store"), verb.add_argument("key"), verb.add_argument("out")
+    verb.add_argument("--tests")
     verb = verbs.add_parser("prune")
     verb.add_argument("repository"), verb.add_argument("keep_set"), verb.add_argument("--apply", action="store_true")
     for name, positional in (("candidate-present", ("repository", "key")),
@@ -2158,6 +2584,19 @@ def main(argv: list[str]) -> int:
             return sources_verb(args, token, say)
         if args.verb == "package-check":
             package_check(get, peek, args.repository, say)
+            return 0
+        if args.verb == "notices":
+            store = Path(args.store)
+            every = [judged_record(path.read_bytes(), path.stem) for path in sorted((store / "records").glob("*.json"))]
+            chosen = [record for record in every if record["key"] == args.key]
+            if len(chosen) != 1 or chosen[0]["inputs"]["step"].get("kind") != "conan-create":
+                raise Refused(f"{store} holds no conan-create record {args.key}")
+            declared = None if args.tests is None else frozenset(label for label in args.tests.split(",") if label)
+            data = records_notices(Records.of(store, every), chosen[0], declared)
+            Path(args.out).write_bytes(data)
+            say(f"store_transport: NOTICES {args.out} sha256 {sha256(data)} rendered from record {args.key}"
+                + ("" if declared is None else f", the operator declaring the flagless records' test labels to be "
+                   f"exactly: {', '.join(sorted(declared)) or 'none'}"))
             return 0
         if args.verb == "licence-audit":
             # note: anonymous whatever GITHUB_TOKEN holds: the audit reads what the public reads

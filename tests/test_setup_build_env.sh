@@ -19,8 +19,8 @@ bash "$action/install-home.sh" "$home" > "$scratch/fresh.log" 2>&1
 check "a fresh home receives every profile of malf's registry, byte-equal" \
       "$(cd "$root/profiles" && for f in *; do printf '%s %s\n' "$f" "$(sha256sum < "$f" | cut -c1-64)"; done)" \
       "$( [[ -d "$home/profiles" ]] && cd "$home/profiles" && for f in *; do printf '%s %s\n' "$f" "$(sha256sum < "$f" | cut -c1-64)"; done)"
-check "and malf's five home files, byte-equal" "equal equal equal equal equal" \
-      "$(for f in global.conf settings_user.yml cmake/malf-path-map.cmake malf_recipe_exports.py malf_recipe_tests.py; do cmp -s "$root/$f" "$home/${f##*/}" && printf 'equal ' || printf 'differs(%s) ' "${f##*/}"; done | sed 's/ $//')"
+check "and malf's seven home files, byte-equal" "equal equal equal equal equal equal equal" \
+      "$(for f in global.conf settings_user.yml cmake/malf-path-map.cmake malf_recipe_exports.py malf_recipe_tests.py third_party_notices.py spdx_licence.py; do cmp -s "$root/$f" "$home/${f##*/}" && printf 'equal ' || printf 'differs(%s) ' "${f##*/}"; done | sed 's/ $//')"
 
 check "and malf's recipe overlay as its FIRST remote, from this tree (DN-142.D17 (8))" \
       "malf-overlay|$root/overlay|local-recipes-index" \

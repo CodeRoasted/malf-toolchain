@@ -1,0 +1,25 @@
+THIRD-PARTY-NOTICES 1
+package: insight_sift_tools/1.0.0
+note: This package contains, or is built to link, the third-party software listed below. Each component's licence files follow verbatim, as its own package ships them.
+components: 3
+component: fmt/12.1.0#bbbb licence: MIT
+file: fmt/12.1.0#bbbb licenses/LICENSE 52f9022628139e7f6a09c36a6a3513038f5260d4c47d81ec42adbf8d32776de7 36
+component: simdjson/4.6.3#aaaa licence: Apache-2.0 AND MIT
+file: simdjson/4.6.3#aaaa licenses/LICENSE 2eef857c0c5bf18404b328ccb15867d9849386f51865524ab6edd690aa02aacf 22
+component: zlib/1.3.1#cccc licence: Zlib
+file: zlib/1.3.1#cccc licenses/LICENSE 0b8a92a707c0e299317f23bf44b0057505cefa03365b78548083f3428c3198e3 28
+file: zlib/1.3.1#cccc licenses/extra/NOTE.txt 1d41ab4fe5ea5e1dae8c2bc6f8b821014e99f3a4b338197603f2203dac6cb625 28
+
+=== fmt/12.1.0#bbbb licenses/LICENSE 52f9022628139e7f6a09c36a6a3513038f5260d4c47d81ec42adbf8d32776de7 36
+Copyright (c) fmt authors
+MIT terms
+
+=== simdjson/4.6.3#aaaa licenses/LICENSE 2eef857c0c5bf18404b328ccb15867d9849386f51865524ab6edd690aa02aacf 22
+simdjson licence text
+
+=== zlib/1.3.1#cccc licenses/LICENSE 0b8a92a707c0e299317f23bf44b0057505cefa03365b78548083f3428c3198e3 28
+zlib terms, no final newline
+=== zlib/1.3.1#cccc licenses/extra/NOTE.txt 1d41ab4fe5ea5e1dae8c2bc6f8b821014e99f3a4b338197603f2203dac6cb625 28
+=== looks like a header
+===
+

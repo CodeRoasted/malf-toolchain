@@ -404,9 +404,8 @@ gh variable set WINDOWS_RUNNER --org CodeRoasted --body hosted --visibility priv
 
 Unset reads as `hosted`. Under `self-hosted`, `sift-windows.yml`'s `build` (the Windows engine a
 candidate stores and a release publishes) runs on the Windows release runner, `coderoast-release-windows`;
-`golden.yaml`'s `proof-msvc` runs there only for a caller naming its `runs-on` input, which no workflow
-does, and otherwise (the candidate's golden, the weekly schedule, a plain dispatch) on this runner, whose
-label `malf-windows` the leg's expression names; `WINDOWS_RUNNER` is the Windows legs' ONE org variable (the superproject's
+`golden.yaml`'s `proof-msvc` (the candidate's golden, the weekly schedule, a plain dispatch) runs on this
+runner, whose label `malf-windows` the leg's expression names; `WINDOWS_RUNNER` is the Windows legs' ONE org variable (the superproject's
 `workflow_source` refuses a runner reading a second, ROADMAP N394).
 The legs: insight-eidos's `golden.yaml` `proof-msvc` and `sift-windows.yml` `build`. The
 superproject's `workflow_source` check module reds on a private repository's Windows leg that

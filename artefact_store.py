@@ -972,6 +972,41 @@ def refuse_python_requires(nodes: list[dict], graph_json: Path) -> None:
                  "(DN-142.D17 (11)): " + "; ".join(carried))
 
 
+# THE TEST FLAG (DN-142.D39 (5)). Every `upstream` and `third_party` member says whether its label is a TEST
+# requirement only: the notices closure of a package (third_party_notices.py) leaves test requirements out, and
+# the push's completeness check (store_transport) can only separate them from what the binary contains when the
+# record says so. A record keys members by `<name>/<context>`, and one label can stand for several graph nodes
+# (measured in G1: insight_semantic_github/host carried by one shipped and one test node), so the flag is per
+# LABEL: true only when EVERY non-skipped node bearing it is a test node, one shipped node making it shipped,
+# the conservative direction for a notice. A label whose nodes name two references (two versions or two
+# revisions) is refused: a record keyed by label cannot hold both.
+
+
+def label_tests(nodes: list[dict], graph_json: Path) -> dict[str, bool]:
+    """Each label (`<name>/<context>`) of the non-skipped `nodes` to its test flag. raises Refused naming every
+    label whose nodes carry two references."""
+    tests: dict[str, bool] = {}
+    references: dict[str, set[str]] = {}
+    for node in nodes:
+        if node.get("binary") == "Skip":
+            continue
+        label = f"{node['name']}/{node['context']}"
+        tests[label] = tests.get(label, True) and node.get("test") is True
+        references.setdefault(label, set()).add(_alias(node)[0])
+    doubled = sorted(f"{label} ({' and '.join(sorted(held))})" for label, held in references.items() if len(held) > 1)
+    if doubled:
+        raise Refused(f"the graph {graph_json} carries {len(doubled)} label(s) whose nodes name two references, and a "
+                      f"record keyed by label holds one (DN-142.D39 (5)): " + "; ".join(doubled))
+    return tests
+
+
+def upstream_content(member: object) -> str:
+    """The content digest an `upstream` member names: `{content, test}` in a key document, the bare digest in a
+    restore list (`restore-document`, `upstream-document`, which key nothing) and in a record a store kept from
+    before the flag (a store never rewrites a record), which `audit_upstreams` still reads."""
+    return member["content"] if isinstance(member, dict) else str(member)
+
+
 def _step_inputs(home: Path, graph_json: Path, package: str, prefixes: tuple[str, ...],
                  with_root: bool) -> tuple[dict, dict, dict, tuple[str, Path] | None, dict]:
     """(sources, upstream, third_party, the target's (binary, folder), each third-party node's
@@ -980,6 +1015,10 @@ def _step_inputs(home: Path, graph_json: Path, package: str, prefixes: tuple[str
     refuse_python_requires(nodes, graph_json)
     sources, upstream, third_party, folders = {}, {}, {}, {}
     target = None
+    try:
+        tests = label_tests(nodes, graph_json)
+    except Refused as refused:
+        sys.exit(f"artefact_store: REFUSED {package}: {refused}")
     # note: a `build-scripts` package (a content recipe) is created in the build context alone
     created = "host" if any(node["name"] == package and node["context"] == "host" for node in nodes) \
         else "build"
@@ -994,11 +1033,12 @@ def _step_inputs(home: Path, graph_json: Path, package: str, prefixes: tuple[str
             if name == package and node["context"] == created:
                 target = (binary, folder)
             else:
-                upstream[f"{name}/{node['context']}"] = tree_digest(folder)[0]
+                upstream[f"{name}/{node['context']}"] = {"content": tree_digest(folder)[0],
+                                                         "test": tests[f"{name}/{node['context']}"]}
         else:
             third_party[f"{name}/{node['context']}"] = {
                 "ref": recipe, "package_id": node["package_id"],
-                "content": tree_digest(folder)[0]}
+                "content": tree_digest(folder)[0], "test": tests[f"{name}/{node['context']}"]}
             folders[f"{name}/{node['context']}"] = folder
     if with_root and target is None:
         sys.exit(f"artefact_store: the graph {graph_json} holds no node named {package}")
@@ -1104,6 +1144,42 @@ def recorded_contents(store: Path, profile: str) -> dict[str, set[str]]:
     return held
 
 
+def key_first_members(store: Path, home: Path, graph_json: Path, package: str, profile: str,
+                      prefixes: tuple[str, ...]) -> tuple[dict, dict, dict]:
+    """(sources, upstream, third_party) of the key before the step, the target's own source excluded: each
+    first-party upstream read from the record its own step wrote, each third-party content from the record holding
+    its folder, each member's test flag per label. raises Refused naming each upstream no record holds, or holds
+    at two contents, and each label carrying two references."""
+    nodes = graph_nodes(graph_json)
+    held = recorded_contents(store, profile)
+    judged = third_party_records(store, profile)
+    tests = label_tests(nodes, graph_json)
+    sources, upstream, third_party = {}, {}, {}
+    unrecorded = []
+    for node in nodes:
+        if node.get("binary") == "Skip":
+            continue
+        name, label = node["name"], f"{node['name']}/{node['context']}"
+        recipe, configuration, binary = _alias(node)
+        if not _owned(name, prefixes):
+            digest = tree_digest(_cache_path(home, binary))[0]
+            third_party[label] = {"ref": recipe, "package_id": node["package_id"],
+                                  "content": held_content(judged.get(configuration, []), digest) or digest,
+                                  "test": tests[label]}
+            continue
+        sources[label] = _export_digest(home, recipe)
+        contents = held.get(binary, set())
+        if len(contents) != 1:
+            unrecorded.append(f"{label} {binary}: " + (f"{len(contents)} recorded contents" if contents
+                                                       else "no record of its own step holds it"))
+            continue
+        upstream[label] = {"content": next(iter(contents)), "test": tests[label]}
+    if unrecorded:
+        raise Refused(f"{package}: the key before the step reads each upstream from its own step's "
+                      f"record (DN-142.D19 (4)), and {len(unrecorded)} cannot be read: " + "; ".join(unrecorded))
+    return sources, upstream, third_party
+
+
 def key_first_document(store: Path, home: Path, graph_json: Path, package: str, profile: str,
                        malf_dir: Path, toolchain: Path, prefixes: tuple[str, ...],
                        anchor: str) -> dict:
@@ -1121,32 +1197,8 @@ def key_first_document(store: Path, home: Path, graph_json: Path, package: str, 
     if kind not in ("reference", "tree") or not value:
         raise Refused(f"{package}: the key before the step needs `reference=<ref>` or `tree=<id>`, not {anchor!r}")
     root = json.loads(graph_json.read_text())["graph"]["nodes"]["0"]
-    nodes = graph_nodes(graph_json)
-    refuse_python_requires([root, *nodes], graph_json)
-    held = recorded_contents(store, profile)
-    judged = third_party_records(store, profile)
-    sources, upstream, third_party = {}, {}, {}
-    unrecorded = []
-    for node in nodes:
-        if node.get("binary") == "Skip":
-            continue
-        name, label = node["name"], f"{node['name']}/{node['context']}"
-        recipe, configuration, binary = _alias(node)
-        if not _owned(name, prefixes):
-            digest = tree_digest(_cache_path(home, binary))[0]
-            third_party[label] = {"ref": recipe, "package_id": node["package_id"],
-                                  "content": held_content(judged.get(configuration, []), digest) or digest}
-            continue
-        sources[label] = _export_digest(home, recipe)
-        contents = held.get(binary, set())
-        if len(contents) != 1:
-            unrecorded.append(f"{label} {binary}: " + (f"{len(contents)} recorded contents" if contents
-                                                       else "no record of its own step holds it"))
-            continue
-        upstream[label] = next(iter(contents))
-    if unrecorded:
-        raise Refused(f"{package}: the key before the step reads each upstream from its own step's "
-                      f"record (DN-142.D19 (4)), and {len(unrecorded)} cannot be read: " + "; ".join(unrecorded))
+    refuse_python_requires([root, *graph_nodes(graph_json)], graph_json)
+    sources, upstream, third_party = key_first_members(store, home, graph_json, package, profile, prefixes)
     if kind == "tree":
         sources[f"{package}/host"] = value
         return _step_document("conan-build", package, profile, home, malf_dir, toolchain,
@@ -1215,8 +1267,8 @@ def unrecorded_upstreams(store: Path, document: dict) -> list[str]:
     and judged (DN-142.D16): a digest no record holds is a variant some consumer's create built
     with options of its own, and its tests ran in no step."""
     produced = produced_packages(store, document["step"]["profile"])
-    return sorted(f"{name} {digest}" for name, digest in document["upstream"].items()
-                  if digest not in produced.get(name.split("/", 1)[0], set()))
+    return sorted(f"{name} {upstream_content(member)}" for name, member in document["upstream"].items()
+                  if upstream_content(member) not in produced.get(name.split("/", 1)[0], set()))
 
 
 def _refuse_unrecorded(store: Path, document: dict) -> bool:
@@ -1571,8 +1623,8 @@ def restore_sources(store: Path, document: dict) -> tuple[list[dict], list[str]]
     profile = document["step"]["profile"]
     index = _restore_index(store, profile)
     configurations = document.get(CONFIGURATIONS_FIELD, {})
-    members = [(label, ("conan-create", label.split("/", 1)[0], content), configurations.get(label))
-               for label, content in sorted(document.get("upstream", {}).items())]
+    members = [(label, ("conan-create", label.split("/", 1)[0], upstream_content(member)), configurations.get(label))
+               for label, member in sorted(document.get("upstream", {}).items())]
     members += [(label, (THIRD_PARTY_KIND, None, member["content"]),
                  f"{member['ref']}:{member['package_id']}")
                 for label, member in sorted(document.get("third_party", {}).items())]
@@ -1966,7 +2018,7 @@ def build_step(store: Path, home: Path, graph_json: Path, package: str, profile:
     keys: dict = {}
     judged = verdict_record(store, key_of(document), package, package_ids[0] if package_ids else "-",
                             profile, malf_dir, results,
-                            {name.split("/")[0]: digest for name, digest in upstream.items()}, True,
+                            {name.split("/")[0]: member["content"] for name, member in upstream.items()}, True,
                             _helper().read_declarations(source), keys)
     return judged or outcome_record(store, key_of(document), package, profile, keys,
                                     packaged=False, tested=True)
@@ -2933,6 +2985,10 @@ def bytes_class(data: bytes) -> str:
 
 
 CANDIDATE_INGEST_KEYS = {"artifact", "published"}
+# AN INGESTED EXECUTABLE CARRIES ITS NOTICES (DN-142.D39 (7b)): its hosted job copies the created package's
+# `licenses/THIRD-PARTY-NOTICES.txt` into the artifact beside it, and the ingestion stores it as a second member of
+# the same record, refused when absent or not format 1; the release publishes it as `<asset>.THIRD-PARTY-NOTICES.txt`.
+INGEST_NOTICES = "THIRD-PARTY-NOTICES.txt"
 # THE CANDIDATE'S OWN VERDICTS (DN-142.D33, the sanitizer gates): a gate a job of the candidate runs over the
 # repository's sources (canon core's ASan suite, insight-eidos's fuzz ASan replay and valgrind replay) leaves one
 # verdict document, declared under `candidate_verdicts:` as `{artifact, object}` and ingested exactly as an `ingest:`
@@ -2990,6 +3046,26 @@ def verdict_defect(body: bytes) -> str | None:
     return None
 
 
+def _ingested_notices(workflow: str, artefact: str, artifact_dir: Path) -> bytes:
+    """The notices an ingested executable's artifact carries beside it, once they read as format 1 with every text
+    block hashing to its header; Refused otherwise."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import third_party_notices
+
+    path = artifact_dir / INGEST_NOTICES
+    if not path.is_file():
+        raise Refused(f"ingest {workflow}: the artifact {artefact} holds no {INGEST_NOTICES} beside its executable, "
+                      f"and a published executable ships the notices of its third-party closure (DN-142.D39 (7b))")
+    data = path.read_bytes()
+    try:
+        broken = third_party_notices.defects(third_party_notices.parse(data))
+    except third_party_notices.NoticesRefused as unread:
+        broken = [f"notices unreadable: {unread}"]
+    if broken:
+        raise Refused(f"ingest {workflow}: {INGEST_NOTICES}: " + "; ".join(broken))
+    return data
+
+
 def candidate_ingest(store: Path, repository: Path, commit: str, workflow: str, artifact_dir: Path,
                      run: dict, github_digest: str) -> str:
     """A CANDIDATE's ingestion (DN-142.D33 (3)): the member packages.yml's `ingest:` row for `workflow` declares,
@@ -3000,8 +3076,9 @@ def candidate_ingest(store: Path, repository: Path, commit: str, workflow: str, 
     `{ingest: {objects: {<member>: <sha256>}, class, producers: {github_artifact_digest, writer_recomputed}}}`.
     Refused, storing nothing, on a row packages.yml does not declare, a member the artifact lacks, a declared
     class the bytes contradict (DN-142.D25 (4) A), an executable not in the published form (DN-142.D22 (4)), a
-    `candidate_verdicts:` member whose verdict is not `pass` (CANDIDATE_VERDICTS), a
-    digest GitHub did not answer, or other outputs at the same key. post: the record key."""
+    `candidate_verdicts:` member whose verdict is not `pass` (CANDIDATE_VERDICTS), an executable whose artifact
+    holds no format-1 `THIRD-PARTY-NOTICES.txt` beside it (INGEST_NOTICES), a digest GitHub did not answer, or other
+    outputs at the same key. post: the record key."""
     matched = WORKFLOW_PATH.match(f".github/workflows/{workflow}")
     rows = {row[0]: row for row in _declared_rows(repository, commit)}
     if matched is None or workflow not in rows:
@@ -3026,6 +3103,7 @@ def candidate_ingest(store: Path, repository: Path, commit: str, workflow: str, 
         defects.append(defect)
     if defects:
         raise Refused(f"ingest {workflow}: {member}: " + "; ".join(defects))
+    notices = _ingested_notices(workflow, artefact, artifact_dir) if klass == "executable" else None
     name = repository.resolve().name
     blob = _git_bytes(repository, ["rev-parse", f"{commit}:.github/workflows/{workflow}"]).decode().strip()
     document = {"step": {"kind": INGEST_KIND, "repository": name, "artefact": artefact,
@@ -3033,7 +3111,8 @@ def candidate_ingest(store: Path, repository: Path, commit: str, workflow: str, 
                 "run": {"id": run["id"], "attempt": run["attempt"]}, "commit": commit, "workflow_blob": blob}
     local = LocalStore(store)
     digest = local.put_bytes(body)
-    output = {OBJECTS_FIELD: {member: digest}, "class": klass,
+    held = {member: digest, **({INGEST_NOTICES: local.put_bytes(notices)} if notices is not None else {})}
+    output = {OBJECTS_FIELD: held, "class": klass,
               "producers": {"github_artifact_digest": github_digest, "writer_recomputed": digest}}
     if local.commit(document, {INGEST_OUTPUT: output}, {}, subject=ingest_step_id(name, f".github/workflows/{workflow}")):
         raise Refused(f"ingest {workflow}: run {run['id']} attempt {run['attempt']} is already recorded with other outputs")
@@ -3395,6 +3474,17 @@ def selftest() -> int:
         clean = _pe_fixture(debug_types=(13,))
         expect("the real-binary shape: no defect on a PE with only a POGO entry", pe_published_defects(clean), [])
         (artifact / "win.exe").write_bytes(clean)
+        arm("RED: an ingested executable whose artifact holds no THIRD-PARTY-NOTICES.txt is refused (DN-142.D39 (7b))",
+            lambda: candidate_ingest(cstore, crepo, ccommit, "windows.yml", artifact, {"id": 41, "attempt": 1}, zipped),
+            "holds no THIRD-PARTY-NOTICES.txt beside its executable")
+        (artifact / INGEST_NOTICES).write_bytes(b"THIRD-PARTY-NOTICES 2\n\n")
+        arm("RED: notices off format 1 beside an ingested executable are refused",
+            lambda: candidate_ingest(cstore, crepo, ccommit, "windows.yml", artifact, {"id": 41, "attempt": 1}, zipped),
+            "notices unreadable")
+        sys.path.insert(0, str(malf_dir))
+        import third_party_notices
+        notices_bytes = third_party_notices.render(third_party_notices.Notices("win/1.0", ()))
+        (artifact / INGEST_NOTICES).write_bytes(notices_bytes)
         wkey, _out = arm("CANDIDATE INGEST: a clean PE (one POGO debug entry) declared an executable is stored",
                          lambda: candidate_ingest(cstore, crepo, ccommit, "windows.yml", artifact,
                                                   {"id": 41, "attempt": 1}, zipped), None)
@@ -3402,7 +3492,8 @@ def selftest() -> int:
             wrecord = json.loads((cstore / "records" / f"{wkey}.json").read_text())
             expect("the executable's class and object", (wrecord["outputs"][INGEST_OUTPUT]["class"],
                    wrecord["outputs"][INGEST_OUTPUT][OBJECTS_FIELD]),
-                   ("executable", {"win.exe": hashlib.sha256(clean).hexdigest()}))
+                   ("executable", {"win.exe": hashlib.sha256(clean).hexdigest(),
+                                   INGEST_NOTICES: hashlib.sha256(notices_bytes).hexdigest()}))
         before = (listing(cstore, "records"), listing(cstore, "objects"))
         elf = ELF_MAGIC + bytes([2, 1, 1]) + bytes(9) + struct.pack("<H", 2) + bytes(46)
         for run_id, (label, body, needle) in enumerate((
@@ -3864,6 +3955,65 @@ def selftest() -> int:
                "themselves, with no record held at their build key",
                (written, [((record or {}).get("inputs") or {}).get("system") for record in yrecords]),
                ((0, 0), [{"image": pinned}, {"image": pinned}]))
+
+    with tempfile.TemporaryDirectory(prefix="artefact_store.test-flag.") as scratch:
+        root, profile = Path(scratch), "fixture"
+        saved_paths = (globals()["_cache_path"], globals()["_export_digest"])
+
+        def folder_of(home: Path, reference: str, folder: str | None = None) -> Path:
+            made = home / "cache" / hashlib.sha256(reference.encode()).hexdigest()[:16]
+            made.mkdir(parents=True, exist_ok=True)
+            (made / "conaninfo.txt").write_text(reference)
+            return made
+
+        def node(name: str, test: bool, rrev: str = "r", binary: str = "Cache") -> dict:
+            return {"name": name, "context": "host", "ref": f"{name}/1.0#{rrev}", "rrev": rrev, "package_id": "p",
+                    "prev": "v", "binary": binary, "test": test}
+
+        def graph(*listed: dict) -> Path:
+            path = root / f"graph-{len(list(root.glob('graph-*')))}.json"
+            path.write_text(json.dumps({"graph": {"nodes": {"0": {"name": "ex_top", "context": "host"},
+                                                            **{str(index): each for index, each in
+                                                               enumerate(listed, start=1)}}}}))
+            return path
+
+        home, fstore = root / "home", root / "store"
+        (fstore / "records").mkdir(parents=True)
+        members = (node("tpa", False), node("gtest", True), node("ex_low", False), node("ex_test", True),
+                   node("ex_mixed", True), node("ex_mixed", False), node("tpskip", False, binary="Skip"))
+        # note: a create's graph holds the target as a node; `conan graph info` over the export holds it as node 0
+        shaped, informed = graph(node("ex_top", False), *members), graph(*members)
+        try:
+            globals()["_cache_path"], globals()["_export_digest"] = folder_of, lambda home, recipe: "e" * 64
+            for index, name in enumerate(("ex_low", "ex_test", "ex_mixed")):
+                alias = _alias(node(name, False))[2]
+                (fstore / "records" / f"{index}.json").write_text(json.dumps(
+                    {"key": str(index), "inputs": {"step": {"kind": "conan-create", "package": name, "profile": profile}},
+                     "outputs": {"package": {"alias": alias, "content": tree_digest(folder_of(home, alias))[0]}}}))
+            _sources, step_upstream, step_third, _target, _folders = _step_inputs(home, shaped, "ex_top", ("ex_",), True)
+            first, _out = arm("TEST FLAG (DN-142.D39 (5)): the key before the step reads every member with its flag",
+                              lambda: key_first_members(fstore, home, informed, "ex_top", profile, ("ex_",)), None)
+            flags = ({label: member["test"] for label, member in step_upstream.items()},
+                     {label: member["test"] for label, member in step_third.items()})
+            expect("both derivations carry the per-label flag: true on the third-party and the first-party test "
+                   "requirement, false on a label one shipped node bears, no skipped node",
+                   flags, ({"ex_low/host": False, "ex_test/host": True, "ex_mixed/host": False},
+                           {"tpa/host": False, "gtest/host": True}))
+            expect("the two derivations agree member for member (the key-first gate stays green)",
+                   (first or (None, None, None))[1:], (step_upstream, step_third))
+            doubled = graph(node("ex_mixed", False), node("ex_mixed", True, rrev="r2"))
+            arm("RED: a label carried by two references is refused by the key before the step, naming both",
+                lambda: key_first_members(fstore, home, doubled, "ex_top", profile, ("ex_",)),
+                "ex_mixed/host (ex_mixed/1.0#r and ex_mixed/1.0#r2)")
+            try:
+                _step_inputs(home, graph(node("ex_top", False), node("ex_mixed", False), node("ex_mixed", True, rrev="r2")),
+                             "ex_top", ("ex_",), True)
+                exited = "returned"
+            except SystemExit as stop:
+                exited = "ex_mixed/1.0#r and ex_mixed/1.0#r2" in str(stop.code)
+            expect("RED: the same label refused by the derivation after the step, naming both", exited, True)
+        finally:
+            globals()["_cache_path"], globals()["_export_digest"] = saved_paths
 
     if outside is None:
         os.environ.pop(SYSTEM_ENV, None)

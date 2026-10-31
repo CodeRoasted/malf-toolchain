@@ -170,6 +170,9 @@ runs:
         cp "$ACTION_PATH/../../../cmake/malf-path-map.cmake" "$GITHUB_WORKSPACE/.malf-toolchain/malf-path-map.cmake"
         cp "$ACTION_PATH/../../../malf_recipe_exports.py" "$GITHUB_WORKSPACE/.malf-toolchain/malf_recipe_exports.py"
         cp "$ACTION_PATH/../../../malf_recipe_tests.py" "$GITHUB_WORKSPACE/.malf-toolchain/malf_recipe_tests.py"
+        # and the notices helper with the one SPDX reader it imports from its own folder (DN-142.D39).
+        cp "$ACTION_PATH/../../../third_party_notices.py" "$GITHUB_WORKSPACE/.malf-toolchain/third_party_notices.py"
+        cp "$ACTION_PATH/../../../spdx_licence.py" "$GITHUB_WORKSPACE/.malf-toolchain/spdx_licence.py"
 
     - name: The cache key, computed ONCE, before the restore
       id: key

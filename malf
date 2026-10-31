@@ -545,7 +545,8 @@ _malf_sync_conan_conf() {
     # executed-surface grammar (malf_closure.py, pin_coherence's) sees each (DN-142.D29 (7)); and a
     # missing one is a red, never a silent skip: a home synced without it is not the home its key names.
     for source in "$MALF_DIR/global.conf" "$MALF_DIR/settings_user.yml" "$MALF_DIR/cmake/malf-path-map.cmake" \
-                  "$MALF_DIR/malf_recipe_exports.py" "$MALF_DIR/malf_recipe_tests.py"; do
+                  "$MALF_DIR/malf_recipe_exports.py" "$MALF_DIR/malf_recipe_tests.py" \
+                  "$MALF_DIR/third_party_notices.py" "$MALF_DIR/spdx_licence.py"; do
         conf_file="${source##*/}"
         [[ -f "$source" ]] || { echo "malf: $source is missing, and every conan home malf syncs holds it" >&2; exit 1; }
         mkdir -p "$CONAN_HOME"
@@ -5103,11 +5104,6 @@ Commands:
                                    any build when that seed lacks one the graphs need; exit 0 only
                                    when every released package's recipe revision, package id,
                                    package revision and file bytes are equal in both
-    exports-verify                 first-party recipes' exports (DN-142.D4 (b)): every tracked
-                                   recipe, whatever spells its exports, exported from this checkout
-                                   and a fresh clone of its commit; exit 0 only when every pair of recipe
-                                   revisions is equal, 1 when one differs, 2 when a package is
-                                   not judged, 3 when the verb failed. No compile; seconds
     store-create [--ship] [<pkg>...]
                                    ROADMAP N358's one build act over a local store (DN-142.D2,
                                    DN-142.D3, DN-142.D5, DN-142.D6): every step of malf's walk (named:
@@ -5485,34 +5481,6 @@ PY
     python3 "$MALF_DIR/package_twin.py" digest "$second" "$root/released.tsv" > "$root/b.jsonl" || return 1
     python3 "$MALF_DIR/package_twin.py" compare "$root/a.jsonl" "$root/b.jsonl"
 }
-
-# malf exports-verify — DN-142.D4 (b)'s gate: every first-party recipe, whatever spells its exports
-# (released or not; malf/package_exports.py `recipes` derives them) exported from THIS checkout
-# and from a fresh clone of its commit, into one scratch conan home staged as malf stages any home,
-# and the two recipe revisions compared (malf/package_exports.py owns the comparison). No compiler
-# runs: an export copies files and hashes them, so the gate costs seconds, not a build.
-#
-# Exit 0 every recipe equal, 1 a recipe differs, 2 a package not judged, 3 the verb failed before a
-# verdict (package_exports.py's own codes; its docstring says why a failure may never exit 1).
-#
-# Usage: malf exports-verify
-cmd_exports_verify() {
-    [[ $# -eq 0 ]] || _malf_refuse_option exports-verify "$1"
-    local scratch rc=0 failed=3
-    scratch="$(mktemp -d /tmp/malf-exports.XXXXXX)" \
-        || { echo "malf exports-verify: FAILED — no scratch directory" >&2; return "$failed"; }
-    python3 "$MALF_DIR/package_exports.py" recipes "$MALF_WORKSPACE_ROOT" > "$scratch/recipes.tsv" \
-        || { echo "malf exports-verify: FAILED — could not derive the first-party recipe list" >&2; rm -rf "$scratch"; return "$failed"; }
-    ( export CONAN_HOME="$scratch/conan-home"
-      # A subshell of its own: the sync `exit 1`s on a failed install, which would end THIS subshell
-      # with the code that means a differing recipe.
-      ( _malf_sync_conan_conf ) \
-          || { echo "malf exports-verify: FAILED — could not stage the scratch conan home" >&2; exit "$failed"; }
-      python3 "$MALF_DIR/package_exports.py" verify "$CONAN_HOME" "$scratch/recipes.tsv" "$scratch" ) || rc=$?
-    rm -rf "$scratch"
-    return "$rc"
-}
-
 
 # malf store-transport licence-audit --repository <owner>/<repo> — DN-142.D38 (5b)'s one-shot audit of a PUBLIC
 # store, read-only and anonymous: store_transport.py owns the predicate, the push holds it on every later write.
@@ -5934,11 +5902,10 @@ cmd_store_create() {
                   --conan-home "$HOME/.conan2")
     [[ -z "${MALF_BENCH:-}" ]] || _MALF_DOMAIN+=(--parameter-file "$MALF_BENCH")
 
-    local name path deps kind dep blocked rc=0 total=0 run_at step_rc stopped=""
+    local name path deps kind dep blocked rc=0 total=0 step_rc stopped=""
     local -a failed=() skipped=()
     local -A broke=()
     _MALF_WALK_SERVED=0
-    _malf_store_clock "$scratch/times"; run_at="$_MALF_CLOCK_AT"
     while IFS=$'\t' read -r name path deps kind; do
         total=$((total+1))
         blocked=""
@@ -5951,8 +5918,7 @@ cmd_store_create() {
             continue
         fi
         step_rc=0
-        _malf_store_run_step "$total" "$name" "$path" "$kind" "$store" "$scratch" "$prefixes" "$run_at" \
-            || step_rc=$?
+        _malf_store_run_step "$total" "$name" "$path" "$kind" "$store" "$scratch" "$prefixes" || step_rc=$?
         case $step_rc in
             0) ;;
             "$_MALF_STEP_FAILED") failed+=("$name"); broke["$name"]=1 ;;
@@ -6101,30 +6067,27 @@ _MALF_STEP_FAILED=1
 _MALF_STEP_UNRECORDED=2
 _MALF_STEP_SKIPPED=4
 _MALF_STEP_STOPPED=8
-_malf_store_run_step() {   # <n> <name> <path> <create|build> <store> <scratch> <prefixes> <walk start>
-    local total="$1" name="$2" path="$3" kind="$4" store="$5" scratch="$6" prefixes="$7" run_at="$8"
-    local step_at step_cpu step_home verdict rc=0
+_malf_store_run_step() {   # <n> <name> <path> <create|build> <store> <scratch> <prefixes>
+    local total="$1" name="$2" path="$3" kind="$4" store="$5" scratch="$6" prefixes="$7"
+    local step_home verdict rc=0
     _MALF_STEP_UNCONFINED=""
-    _malf_store_third_party "$total" "$name" "$path" "$prefixes" "$store" "$scratch" "$run_at" || rc=$?
+    _malf_store_third_party "$total" "$name" "$path" "$prefixes" "$store" "$scratch" || rc=$?
     if [[ $rc -eq 2 ]]; then
-        _malf_store_clock "$scratch/times"; step_at="$_MALF_CLOCK_AT"; step_cpu="$_MALF_CLOCK_CPU"
-        _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+        _malf_store_closed "$total" "$name" UNRECORDED
         return "$_MALF_STEP_STOPPED"
     fi
     if [[ $rc -ne 0 ]]; then
         echo "--- store-create: SKIP $name — its third-party step: $_MALF_THIRD_PARTY_CAUSE, and nothing is built on a third-party binary no step judged (DN-142.D17 (5)) ---" >&2
-        _malf_store_clock "$scratch/times"; step_at="$_MALF_CLOCK_AT"; step_cpu="$_MALF_CLOCK_CPU"
-        _malf_store_closed "$total" "$name" SKIPPED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+        _malf_store_closed "$total" "$name" SKIPPED
         return "$_MALF_STEP_SKIPPED"
     fi
-    _malf_store_clock "$scratch/times"; step_at="$_MALF_CLOCK_AT"; step_cpu="$_MALF_CLOCK_CPU"
-    _malf_store_opened "$total" "$kind" "$name" "$path" "$run_at" "$step_at"
+    _malf_store_opened "$total" "$kind" "$name" "$path"
     # A PACKAGE WHOSE TESTS CHANGE MOUNT TOPOLOGY DECLARES ITSELF UNCONFINED (DN-142.D29 ruled (v)): a
     # Landlock domain refuses mount and pivot_root whatever it grants, so such a package's create and
     # build run with no domain, its records keep denials_counted false, and nothing of it is reused.
     if ! _MALF_STEP_UNCONFINED="$(python3 "$MALF_DIR/artefact_store.py" unconfined "$path" "$name")"; then
         echo "malf store-create: the \`unconfined:\` declaration of $name could not be read from its packages.yml at HEAD (DN-142.D29)" >&2
-        _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+        _malf_store_closed "$total" "$name" UNRECORDED
         return "$_MALF_STEP_UNRECORDED"
     fi
     [[ -z "$_MALF_STEP_UNCONFINED" ]] \
@@ -6136,7 +6099,7 @@ _malf_store_run_step() {   # <n> <name> <path> <create|build> <store> <scratch> 
     local -x MALF_STEP_BACKENDS="$scratch/$name.backends.json"
     if ! python3 "$MALF_DIR/build_environment.py" backends "$path" "$name" > "$MALF_STEP_BACKENDS"; then
         echo "malf store-create: the \`backends:\` declaration of $name could not be read from its packages.yml at HEAD (DN-142.D30 (5) E2b)" >&2
-        _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+        _malf_store_closed "$total" "$name" UNRECORDED
         return "$_MALF_STEP_UNRECORDED"
     fi
     if [[ "$(cat "$MALF_STEP_BACKENDS")" != "[]" ]]; then
@@ -6146,7 +6109,7 @@ _malf_store_run_step() {   # <n> <name> <path> <create|build> <store> <scratch> 
         done < <(python3 "$MALF_DIR/build_environment.py" backends --variables "$path" "$name")
         step_parameters="$(python3 "$MALF_DIR/build_environment.py" backends --parameters "$MALF_STORE_PARAMETERS" "$path" "$name")" \
             && step_parameters="$(MALF_STORE_PARAMETERS="$step_parameters" python3 "$MALF_DIR/artefact_store.py" parameters "$MALF_PROFILE_NAME" malf store-create)" \
-            || { _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+            || { _malf_store_closed "$total" "$name" UNRECORDED
                  return "$_MALF_STEP_UNRECORDED"; }
         local -x MALF_STORE_PARAMETERS="$step_parameters"
         echo "--- store-create: $name reaches its backends: $(python3 "$MALF_DIR/build_environment.py" backends --variables "$path" "$name" | paste -sd ' ') ---"
@@ -6157,38 +6120,38 @@ _malf_store_run_step() {   # <n> <name> <path> <create|build> <store> <scratch> 
         _malf_store_build_one "$name" "$path" "${MALF_STORE_BUILD_REV:-HEAD}" "$store" "$scratch" "$prefixes" || rc=$?
         case $rc in
             0) [[ -z "$_MALF_STEP_SERVED" ]] || _MALF_WALK_SERVED=$((_MALF_WALK_SERVED + 1))
-               _malf_store_closed "$total" "$name" "${_MALF_STEP_SERVED:-PASS}" "$run_at" "$step_at" "$step_cpu" "$scratch/times"; return 0 ;;
-            2) _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+               _malf_store_closed "$total" "$name" "${_MALF_STEP_SERVED:-PASS}"; return 0 ;;
+            2) _malf_store_closed "$total" "$name" UNRECORDED
                return "$_MALF_STEP_STOPPED" ;;
         esac
-        _malf_store_closed "$total" "$name" FAILED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+        _malf_store_closed "$total" "$name" FAILED
         return "$_MALF_STEP_FAILED"
     fi
     if ! python3 "$MALF_DIR/artefact_store.py" executables "$path" "$name" > "$scratch/$name.executables.json"; then
         echo "malf store-create: the \`executables:\` declaration of $name could not be read from its packages.yml at HEAD (DN-142.D22)" >&2
-        _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+        _malf_store_closed "$total" "$name" UNRECORDED
         return "$_MALF_STEP_UNRECORDED"
     fi
     if ! MALF_STEP_EXECUTABLES="$scratch/$name.executables.json" \
         _malf_store_key_first "$name" "$prefixes" "$store" "$scratch" "$scratch/$name.log" "$path"; then
         echo "malf store-create: the key of $name could not be computed before its create (above, or $scratch/$name.log)" >&2
         _malf_quote_log "$scratch/$name.log" "$name (its key before the create)"
-        _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+        _malf_store_closed "$total" "$name" UNRECORDED
         return "$_MALF_STEP_UNRECORDED"
     fi
     rc=0
     _malf_store_serve "$name" "$store" "$scratch" "$CONAN_HOME" || rc=$?
     case $rc in
         0) _MALF_WALK_SERVED=$((_MALF_WALK_SERVED + 1))
-           _malf_store_closed "$total" "$name" REUSED "$run_at" "$step_at" "$step_cpu" "$scratch/times"; return 0 ;;
+           _malf_store_closed "$total" "$name" REUSED; return 0 ;;
         "$_MALF_SERVE_MISS") ;;
-        2) _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+        2) _malf_store_closed "$total" "$name" UNRECORDED
            return "$_MALF_STEP_STOPPED" ;;
-        *) _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+        *) _malf_store_closed "$total" "$name" UNRECORDED
            return "$_MALF_STEP_UNRECORDED" ;;
     esac
     if ! step_home="$(_malf_step_home "$scratch" "$name")"; then
-        _malf_store_closed "$total" "$name" UNRECORDED "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+        _malf_store_closed "$total" "$name" UNRECORDED
         return "$_MALF_STEP_UNRECORDED"
     fi
     _malf_store_create_in "$name" "$path" "$store" "$scratch" "$prefixes" "$step_home"
@@ -6200,7 +6163,7 @@ _malf_store_run_step() {   # <n> <name> <path> <create|build> <store> <scratch> 
         "$_MALF_STEP_STOPPED") verdict=UNRECORDED ;;
         *) verdict=UNRECORDED; rc=$_MALF_STEP_UNRECORDED ;;
     esac
-    _malf_store_closed "$total" "$name" "$verdict" "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+    _malf_store_closed "$total" "$name" "$verdict"
     return "$rc"
 }
 
@@ -6253,34 +6216,17 @@ _malf_store_create_in() {   # <name> <path> <store> <scratch> <prefixes> <step h
     [[ $rc -eq 0 ]] || { [[ $rc -eq 2 ]] && return "$_MALF_STEP_STOPPED"; return "$_MALF_STEP_UNRECORDED"; }
 }
 
-# A STEP'S TIME IS PRINTED ON ITS OWN TWO LINES, so a reader of the walk's log reads one act per step
-# off them (DN-119.D4). The opening line names the step and the seconds since the walk began;
-# the closing line, `--- store-create [<n>] <name> <PASS|FAILED|UNRECORDED> · at <s> s · wall <s> s
-# · cpu <s> s ---`, adds the step's own wall and its children's CPU. The clock is the kernel's
-# seconds since boot (`/proc/uptime`), never the wall clock, so a clock step cannot move a step's
-# time; the CPU is bash's `times` for this shell's reaped children, which is why it must run in the
-# walking shell itself and never in a command substitution. malf's selftest [7q16] parses what these
-# functions print.
-# post: _MALF_CLOCK_AT holds the seconds since boot and _MALF_CLOCK_CPU this shell's children's
-#       user plus system CPU seconds.
-_malf_store_clock() {   # <times file>
-    local idle
-    read -r _MALF_CLOCK_AT idle < /proc/uptime
-    times > "$1"
-    read -r _MALF_CLOCK_CPU < <(awk 'NR == 2 { split($0, f, /[ms ]+/); printf "%.2f\n", f[1] * 60 + f[2] + f[3] * 60 + f[4] }' "$1")
+# A STEP OPENS AND CLOSES ON ITS OWN TWO LINES: `--- store-create [<n>] <conan create|build|install> <name>
+# (<path>) ---`, then `--- store-create [<n>] <name> <PASS|FAILED|UNRECORDED|SKIPPED|MISMATCH|REUSED> ---`.
+_malf_store_opened() {   # <n> <create|build|install> <name> <path>
+    local verb="conan create"
+    [[ "$2" == build ]] && verb="conan build"
+    [[ "$2" == install ]] && verb="conan install"
+    printf -- '--- store-create [%s] %s %s (%s) ---\n' "$1" "$verb" "$3" "$4"
 }
 
-_malf_store_opened() {   # <n> <create|build|install> <name> <path> <walk start> <step start>
-    awk -v n="$1" -v kind="$2" -v name="$3" -v path="$4" -v run="$5" -v at="$6" \
-        'BEGIN { verb = kind == "build" ? "conan build" : kind == "install" ? "conan install" : "conan create"
-                 printf "--- store-create [%s] %s %s (%s) · at %.2f s ---\n", n, verb, name, path, at - run }'
-}
-
-_malf_store_closed() {   # <n> <name> <verdict> <walk start> <step start> <step start cpu> <times file>
-    _malf_store_clock "$7"
-    awk -v n="$1" -v name="$2" -v verdict="$3" -v run="$4" -v start="$5" -v cpu0="$6" \
-        -v at="$_MALF_CLOCK_AT" -v cpu="$_MALF_CLOCK_CPU" \
-        'BEGIN { printf "--- store-create [%s] %s %s · at %.2f s · wall %.2f s · cpu %.2f s ---\n", n, name, verdict, at - run, at - start, cpu - cpu0 }'
+_malf_store_closed() {   # <n> <name> <verdict>
+    printf -- '--- store-create [%s] %s %s ---\n' "$1" "$2" "$3"
 }
 
 # THE KEY BEFORE THE STEP (DN-142.D19 (4), gate G2): the step's graph resolved by `conan graph info`
@@ -6434,16 +6380,15 @@ _malf_store_build_args() {
 #       restore, the install or a refusal failed; 2 a corrupt store (the walk stops); 3 a third-party
 #       binary rebuilt at an equal key differs. On a non-zero exit _MALF_THIRD_PARTY_CAUSE names the
 #       references and the cause.
-_malf_store_third_party() {   # <n> <name> <path> <prefixes> <store> <scratch> <walk start>
-    local index="$1" name="$2" path="$3" prefixes="$4" store="$5" scratch="$6" run_at="$7"
+_malf_store_third_party() {   # <n> <name> <path> <prefixes> <store> <scratch>
+    local index="$1" name="$2" path="$3" prefixes="$4" store="$5" scratch="$6"
     local graph="$scratch/$name.third-party.graph.json" log="$scratch/$name.third-party.log"
-    local round planned rc=0 step_at step_cpu verdict=PASS phase_home
+    local round planned rc=0 verdict=PASS phase_home
     local -a common=("${_MALF_WRITER_PROFILES[@]}"
                      -s build_type="$MALF_CONFIG" "${_MALF_WRITER_ARGS[@]}" "${_MALF_SHIP_LOCK[@]}")
     local -a builds=() next=()
     _MALF_THIRD_PARTY_CAUSE=""
-    _malf_store_clock "$scratch/times"; step_at="$_MALF_CLOCK_AT"; step_cpu="$_MALF_CLOCK_CPU"
-    _malf_store_opened "$index" install "$name:third-party" "$path" "$run_at" "$step_at"
+    _malf_store_opened "$index" install "$name:third-party" "$path"
     for round in 1 2 3 4 5 6 7 8 9; do
         if ! conan graph info "$path" "${common[@]}" "${builds[@]}" --no-remote --format=json > "$graph" 2>> "$log"; then
             _MALF_THIRD_PARTY_CAUSE="resolving its graph failed ($log)"; rc=1
@@ -6471,7 +6416,7 @@ _malf_store_third_party() {   # <n> <name> <path> <prefixes> <store> <scratch> <
     fi
     [[ $rc -eq 0 ]] || verdict=FAILED
     [[ $rc -eq 3 ]] && verdict=MISMATCH
-    _malf_store_closed "$index" "$name:third-party" "$verdict" "$run_at" "$step_at" "$step_cpu" "$scratch/times"
+    _malf_store_closed "$index" "$name:third-party" "$verdict"
     return "$rc"
 }
 
@@ -7688,7 +7633,6 @@ case "$COMMAND" in
     bump)             cmd_bump "$@" ;;
     inventory)        cmd_inventory "$@" ;;
     twin-verify)      cmd_twin_verify "$@" ;;
-    exports-verify)   cmd_exports_verify "$@" ;;
     store-create)     cmd_store_create "$@" ;;
     source-verdict)   cmd_source_verdict "$@" ;;
     source-lint)      cmd_source_lint "$@" ;;

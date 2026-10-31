@@ -15,9 +15,12 @@ candidate store job (`candidate`, below). Its inputs, each identified by bytes o
     Dockerfile's own `FROM … @sha256:` line, so the tree carries it.
 
 THE STAGING CONTRACT, which the Dockerfile copies from: the build context is that export, plus
-`.store-image/<entry path>` for each executable and `.store-image/runtime/<name>` for each runtime
-library. A tree that already holds `.store-image` is refused: staged bytes are never mixed with
-tracked ones.
+`.store-image/<entry path>` for each executable, `.store-image/runtime/<name>` for each runtime
+library and `.store-image/licenses/<package>/THIRD-PARTY-NOTICES.txt` for each executable's package
+(its `licenses/THIRD-PARTY-NOTICES.txt`, DN-142.D39 (8)), which the Dockerfile copies to
+`/usr/share/doc/<package>/THIRD-PARTY-NOTICES.txt`: an image carries the notices of every executable
+it holds, and an archive whose filesystem lacks that path at the member's digest is refused. A tree
+that already holds `.store-image` is refused: staged bytes are never mixed with tracked ones.
 
 NON-REPRODUCIBLE, DECLARED (DN-142.D9: 9 of 12 layers differ across two builds, measured): the
 record is addressed by its RUN, the run identity being a key member (a declared exception to
@@ -61,6 +64,9 @@ import artefact_store  # noqa: E402 — a sibling module, located from this file
 
 STAGING = ".store-image"
 RUNTIME = "runtime"
+LICENCES = "licenses"
+NOTICES_MEMBER = "licenses/THIRD-PARTY-NOTICES.txt"
+NOTICES_DOC = "usr/share/doc/{package}/THIRD-PARTY-NOTICES.txt"
 PLATFORM = "linux/amd64"
 OCI_INDEX = "application/vnd.oci.image.index.v1+json"
 OCI_MANIFEST = "application/vnd.oci.image.manifest.v1+json"
@@ -144,6 +150,32 @@ def judge_archive(archive: Path) -> tuple[str, list[list[str]]]:
     return descriptor["digest"], sorted({tuple(entry): entry for entry in entries}.values())
 
 
+def image_file(archive: Path, path: str) -> bytes | None:
+    """The bytes the image's filesystem holds at `path` (no leading `/`): its manifest's layers applied in order, a
+    later layer's file or whiteout (`.wh.<name>`) overriding an earlier one; None when absent."""
+    found: bytes | None = None
+    folder, _slash, name = path.rpartition("/")
+    whiteout = f"{folder}/.wh.{name}" if folder else f".wh.{name}"
+    with tarfile.open(archive, "r:*") as bundle:
+        index = json.loads(_member(bundle, "index.json") or b"{}")
+        descriptor = (index.get("manifests") or [{}])[0]
+        manifest = json.loads(_member(bundle, f"blobs/sha256/{str(descriptor.get('digest')).removeprefix('sha256:')}")
+                              or b"{}")
+        for layer in manifest.get("layers") or []:
+            data = _member(bundle, f"blobs/sha256/{str(layer.get('digest')).removeprefix('sha256:')}")
+            if data is None:
+                continue
+            with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as files:
+                for member in files.getmembers():
+                    named = member.name.removeprefix("./").lstrip("/")
+                    if named == whiteout:
+                        found = None
+                    elif named == path and member.isfile():
+                        extracted = files.extractfile(member)
+                        found = extracted.read() if extracted is not None else None
+    return found
+
+
 def _export(repository: Path, commit: str, into: Path) -> str:
     """The repository's tree at `commit`, written under `into`; its git tree id."""
     tree = subprocess.run(["git", "-C", str(repository), "rev-parse", f"{commit}^{{tree}}"],
@@ -194,6 +226,7 @@ def _assemble(store: Path, image: str, repo: str, declared: dict, created: Creat
     staged = context / STAGING
     (staged / RUNTIME).mkdir(parents=True)
     executables = []
+    notices_digests: dict[str, str] = {}
     for executable in sorted(declared.get("executables") or [], key=lambda row: (row["package"], row["entry"])):
         package, entry = executable["package"], executable["entry"]
         found = created(package)
@@ -212,12 +245,30 @@ def _assemble(store: Path, image: str, repo: str, declared: dict, created: Creat
             raise Refused(f"{image}: {refused}") from refused
         target.chmod(0o755)
         executables.append({"package": package, "entry": entry, "digest": held[entry], "record": key})
+        if NOTICES_MEMBER not in held:
+            raise Refused(f"{image}: {package} holds no {NOTICES_MEMBER}, and an image carries the notices of every "
+                          f"executable it holds (DN-142.D39 (8))")
+        notices = staged / LICENCES / package / "THIRD-PARTY-NOTICES.txt"
+        notices.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            artefact_store.extract(store / "objects" / output["transport"], NOTICES_MEMBER, held[NOTICES_MEMBER],
+                                   notices)
+        except artefact_store.Refused as refused:
+            raise Refused(f"{image}: {refused}") from refused
+        notices_digests[package] = held[NOTICES_MEMBER]
     if not executables:
         raise Refused(f"the image {image} carries no executable")
     runtime = {name: resolve(name, staged / RUNTIME) for name in sorted(declared.get("runtime") or [])}
     archive = scratch / f"{image}.oci.tar"
     builder(context, dockerfile, archive)
     manifest, entries = judge_archive(archive)
+    for package, digest in sorted(notices_digests.items()):
+        held_bytes = image_file(archive, NOTICES_DOC.format(package=package))
+        if held_bytes is None or hashlib.sha256(held_bytes).hexdigest() != digest:
+            raise Refused(f"{image}: its filesystem holds " + ("no" if held_bytes is None else "other bytes at")
+                          + f" /{NOTICES_DOC.format(package=package)}, and {package}'s notices are {digest}: the "
+                          f"Dockerfile copies .store-image/{LICENCES}/{package}/THIRD-PARTY-NOTICES.txt there "
+                          f"(DN-142.D39 (8))")
     document = {"step": {"kind": IMAGE_KIND, "subject": image, "repository": repo, "reproducible": False},
                 "run": run, "tree": tree, "dockerfile": dockerfile,
                 "executables": executables, "runtime": runtime}
@@ -236,8 +287,7 @@ def declared_images(repository: Path, commit: str) -> dict[str, dict]:
     """{image: {dockerfile, runtime, executables: [{package, entry}]}} as the repository's packages.yml at
     `commit` declares them: each `images:` row, carrying every executable whose `published` sites name it
     by `image:`. Raises Refused on an image no site names, a site naming an undeclared image, or a row off
-    the shape (the rules `scripts/pharos/publication.py` applies to the whole reach, here over one
-    repository, which is all a candidate sees)."""
+    the shape (DN-142.D24 (2), over the one repository a candidate sees)."""
     import yaml
 
     shown = subprocess.run(["git", "-C", str(repository), "show", f"{commit}:{PACKAGES_FILE}"],
@@ -337,8 +387,9 @@ def candidate(store: Path, repository: Path, run: str, scratch: Path, builder: B
 
 
 def _layout(manifest_extra: dict | None = None, platform: str = PLATFORM, drop_layer: bool = False,
-            manifests: int = 1) -> Callable[[Path, str, Path], None]:
-    """A fake builder writing a one-layer OCI layout that names what the context staged."""
+            manifests: int = 1, docs: bool = True) -> Callable[[Path, str, Path], None]:
+    """A fake builder writing a one-layer OCI layout that names what the context staged, and (`docs`) copies each
+    staged notices file to `usr/share/doc/<package>/`, as the Dockerfile's COPY does."""
     def write(context: Path, dockerfile: str, archive: Path) -> None:
         assert (context / dockerfile).is_file()
         layer = io.BytesIO()
@@ -346,6 +397,8 @@ def _layout(manifest_extra: dict | None = None, platform: str = PLATFORM, drop_l
             for path in sorted((context / STAGING).rglob("*")):
                 if path.is_file():
                     bundle.add(path, arcname=path.relative_to(context).as_posix())
+            for path in sorted((context / STAGING / LICENCES).glob("*/THIRD-PARTY-NOTICES.txt")) if docs else ():
+                bundle.add(path, arcname=NOTICES_DOC.format(package=path.parent.name))
         blobs = {"layer": layer.getvalue(), "config": b'{"architecture":"amd64","os":"linux"}'}
         digests = {name: "sha256:" + hashlib.sha256(data).hexdigest() for name, data in blobs.items()}
         manifest = json.dumps({"schemaVersion": 2, "mediaType": OCI_MANIFEST,
@@ -368,6 +421,9 @@ def _layout(manifest_extra: dict | None = None, platform: str = PLATFORM, drop_l
     return write
 
 
+FIXTURE_NOTICES = b"THIRD-PARTY-NOTICES 1\npackage: server_pkg/1\n"
+
+
 def _fixture(root: Path) -> tuple[Path, Path]:
     """A store holding a server package with one published entry, and the image's repository at a commit."""
     store = root / "store"
@@ -376,12 +432,14 @@ def _fixture(root: Path) -> tuple[Path, Path]:
     server = b"\x7fELF server bytes"
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as bundle:
-        info = tarfile.TarInfo("b/serve0123/p/bin/server")
-        info.size = len(server)
-        bundle.addfile(info, io.BytesIO(server))
+        for name, data in (("bin/server", server), (NOTICES_MEMBER, FIXTURE_NOTICES)):
+            info = tarfile.TarInfo(f"b/serve0123/p/{name}")
+            info.size = len(data)
+            bundle.addfile(info, io.BytesIO(data))
     transport = hashlib.sha256(buffer.getvalue()).hexdigest()
     (store / "objects" / transport).write_bytes(buffer.getvalue())
-    entries = [["bin/server", "executable", hashlib.sha256(server).hexdigest()]]
+    entries = [["bin/server", "executable", hashlib.sha256(server).hexdigest()],
+               [NOTICES_MEMBER, "file", hashlib.sha256(FIXTURE_NOTICES).hexdigest()]]
     document = {"step": {"kind": "conan-create", "package": "server_pkg", "executables": {"bin/server": "published"}}}
     key = artefact_store.key_of(document)
     (store / "records" / f"{key}.json").write_text(json.dumps(
@@ -485,6 +543,11 @@ def candidate_arms(arm: Callable, failures: list[str], root: Path) -> None:
     if len([path for path in (twice / "records").glob("*.json")
             if json.loads(path.read_text())["inputs"]["step"]["kind"] == IMAGE_KIND]):
         failures.append("CANDIDATE: a refused candidate image stored a record")
+    undocumented, undocumented_repository = _candidate_fixture(root / "g", CANDIDATE_PACKAGES)
+    arm("RED: an image whose filesystem lacks /usr/share/doc/<package>/THIRD-PARTY-NOTICES.txt is refused "
+        "(DN-142.D39 (8))",
+        lambda: candidate(undocumented, undocumented_repository, "run-c7", root / "s7", _layout(docs=False),
+                          _fake_runtime, quiet), "holds no /usr/share/doc/server_pkg/THIRD-PARTY-NOTICES.txt")
     if CXX_LINE.search(SHIP_PROFILE.read_text(encoding="utf-8")) is None:
         failures.append(f"CANDIDATE: {SHIP_PROFILE} names no CXX= the build environment's runtime is resolved by")
 
@@ -535,7 +598,9 @@ def selftest() -> int:
                 with tarfile.open(fileobj=io.BytesIO(layer.read())) as staged:
                     files = {member.name: staged.extractfile(member).read() for member in staged if member.isfile()}
             want_files = {f"{STAGING}/bin/server": b"\x7fELF server bytes",
-                          f"{STAGING}/{RUNTIME}/libstdc++.so.6": b"image runtime bytes"}
+                          f"{STAGING}/{RUNTIME}/libstdc++.so.6": b"image runtime bytes",
+                          f"{STAGING}/{LICENCES}/server_pkg/THIRD-PARTY-NOTICES.txt": FIXTURE_NOTICES,
+                          NOTICES_DOC.format(package="server_pkg"): FIXTURE_NOTICES}
             if files != want_files:
                 failures.append(f"the image's context staged {sorted(files)}, want {sorted(want_files)} with their bytes")
             document = body["inputs"]

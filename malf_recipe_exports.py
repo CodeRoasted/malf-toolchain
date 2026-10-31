@@ -24,6 +24,14 @@ by `export_tracked(self, source, destination)`, called after `narrow_to_tracked`
 tracks under `source`, a path relative to the recipe folder that may leave it, are copied into the
 export at `destination`. A `source` holding no tracked file fails the export: an input the tests
 read cannot be exported empty.
+
+EVERY EXPORT CARRIES ITS REPOSITORY'S LICENCE at its root, as `LICENSE` (DN-142.D39, the package's own
+licence beside its third-party notices): both entries above end by calling `export_licence`, which
+copies the `LICENSE` git tracks at the top of the recipe's checkout, so every recipe gets it from the
+call it already makes, and `third_party_notices.write_notices` copies it into the package as
+`licenses/LICENSE`. A checkout that tracks no `LICENSE` at its top fails the export; outside a
+checkout the nearest `LICENSE` at or above the recipe folder is taken, with the same warning as the
+globs.
 """
 
 from __future__ import annotations
@@ -56,7 +64,8 @@ def narrow_to_tracked(conanfile) -> None:
     """Remove from the export every file conan copied that git does not track.
 
     pre: called from `export_sources()`, after conan copied the recipe's `exports_sources` globs
-    post: the export holds only tracked paths, with no directory left empty by the removal
+    post: the export holds only tracked paths, with no directory left empty by the removal, and the
+        repository's LICENSE at its root (`export_licence`)
     """
     destination = Path(conanfile.export_sources_folder)
     tracked = _tracked(conanfile.recipe_folder)
@@ -65,6 +74,7 @@ def narrow_to_tracked(conanfile) -> None:
             f"malf: {conanfile.recipe_folder} is not in a git checkout (or git is not installed): "
             "the export keeps its exports_sources globs as found on disk, so its recipe revision "
             "depends on the disk, not on a commit (DN-142.D4)")
+        export_licence(conanfile)
         return
     kept = dropped = 0
     for root, directories, files in os.walk(destination, topdown=False):
@@ -81,6 +91,7 @@ def narrow_to_tracked(conanfile) -> None:
             here.rmdir()
     conanfile.output.info(f"malf: exports narrowed to the tracked files — {kept} kept, "
                           f"{dropped} untracked or ignored dropped")
+    export_licence(conanfile)
 
 
 def export_tracked(conanfile, source: str, destination: str) -> None:
@@ -116,3 +127,35 @@ def export_tracked(conanfile, source: str, destination: str) -> None:
         shutil.copy2(folder / relative, copied)
     conanfile.output.info(f"malf: {len(chosen)} tracked file(s) under {source} exported "
                           f"to {destination}")
+    export_licence(conanfile)
+
+
+LICENCE_NAME = "LICENSE"
+
+
+def export_licence(conanfile) -> None:
+    """Copy the repository's tracked `LICENSE` to the root of the export.
+
+    pre: called from `export_sources()` (both entries above call it last)
+    post: `<export>/LICENSE` holds the bytes of the `LICENSE` at the top of the recipe's checkout, or the
+        export failed
+    """
+    target = Path(conanfile.export_sources_folder) / LICENCE_NAME
+    probe = subprocess.run(["git", "-C", conanfile.recipe_folder, "rev-parse", "--show-toplevel"],
+                           capture_output=True, text=True, check=False) if shutil.which("git") else None
+    if probe is not None and probe.returncode == 0:
+        top = Path(probe.stdout.strip())
+        if LICENCE_NAME not in (_tracked(str(top)) or set()):
+            raise ConanException(f"malf: {conanfile.name}: {top} tracks no {LICENCE_NAME} at its top, and every "
+                                 f"first-party package ships its repository's licence (DN-142.D39)")
+        origin = top / LICENCE_NAME
+    else:
+        recipe = Path(conanfile.recipe_folder).resolve()
+        found = [folder / LICENCE_NAME for folder in (recipe, *recipe.parents) if (folder / LICENCE_NAME).is_file()]
+        if not found:
+            raise ConanException(f"malf: {conanfile.name}: no {LICENCE_NAME} at or above {recipe}, and every "
+                                 f"first-party package ships its repository's licence (DN-142.D39)")
+        origin = found[0]
+        conanfile.output.warning(f"malf: {recipe} is not in a git checkout (or git is not installed): the "
+                                 f"export's {LICENCE_NAME} is {origin}, as found on disk (DN-142.D4)")
+    shutil.copyfile(origin, target)

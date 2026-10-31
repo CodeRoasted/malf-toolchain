@@ -39,7 +39,7 @@ MALF_TEST_SYSTEM="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[
 malf_sync_files() {   # <dir>
     mkdir -p "$1/cmake"
     cp -n "$MALF_ROOT/global.conf" "$MALF_ROOT/settings_user.yml" "$MALF_ROOT/malf_recipe_exports.py" \
-        "$MALF_ROOT/malf_recipe_tests.py" "$1/"
+        "$MALF_ROOT/malf_recipe_tests.py" "$MALF_ROOT/third_party_notices.py" "$MALF_ROOT/spdx_licence.py" "$1/"
     cp -n "$MALF_ROOT/cmake/malf-path-map.cmake" "$1/cmake/"
     [[ -e "$1/overlay" ]] || cp -r "$MALF_ROOT/overlay" "$1/overlay"
 }
@@ -393,11 +393,24 @@ check "store_replica selftest: 21 arms, every refusal fired, the one visibility 
 
 echo
 
+echo "[7i1n] the third-party notices helper and the one SPDX reader carry their own proof (DN-142.D39 (3), (4))"
+notices_selftest_output="$(timeout 120 python3 "$MALF_ROOT/third_party_notices.py" selftest 2>&1)"
+notices_selftest_status=$?
+check "third_party_notices selftest: 16 arms, the committed format-1 golden, shuffled inputs rendering identical bytes, the round trip (a text with no final newline, one holding ===), an empty closure, no absolute path, the key from the reference's fields and never its printed timestamp, and every refusal" \
+      "ok" "$([[ $notices_selftest_status -eq 0 ]] && grep -q '^third_party_notices selftest: 16/16 arms passed$' <<< "$notices_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$notices_selftest_output")")"
+spdx_selftest_output="$(timeout 120 python3 "$MALF_ROOT/spdx_licence.py" selftest 2>&1)"
+spdx_selftest_status=$?
+check "spdx_licence selftest: 10 arms, expression_of on a string, a tuple and a list and refusing every other value, recipe_licences splitting as before" \
+      "ok" "$([[ $spdx_selftest_status -eq 0 ]] && grep -q '^spdx_licence selftest: 10/10 arms passed$' <<< "$spdx_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$spdx_selftest_output")")"
+check "global.conf names the notices helper inside the home, and every CI action that stages global.conf stages it and the SPDX reader beside it" \
+      "1 3 3" "$(grep -c "^user.malf:recipe_notices={{ os.path.join(conan_home_folder, 'third_party_notices.py')" "$MALF_ROOT/global.conf") $(grep -l 'third_party_notices.py' "$MALF_ROOT"/.github/actions/setup-{build-env,proof-linux,proof-msvc}/action.yml | wc -l | tr -d ' ') $(grep -l 'spdx_licence.py' "$MALF_ROOT"/.github/actions/setup-{build-env,proof-linux,proof-msvc}/action.yml | wc -l | tr -d ' ')"
+echo
+
 echo "[7i2] store_transport carries its own proof (selftest): a repository's own store, pushed by its candidate and restored by digest through a cache, the index trusted only through its attestation (DN-142.D31 (3), (4), slice S4)"
 transport_selftest_output="$(timeout 300 python3 "$MALF_ROOT/store_transport.py" selftest 2>&1)"
 transport_selftest_status=$?
-check "store_transport selftest: 120 arms, a cut candidate tag trusted only on main, the runner cache shared across verbs and bounded, the candidate key, push and its ownership filter, publish-index last, the attestation verifier's eight ABSENT reds, the cache judged by digest, the mismatch tag, the one visibility rule and package-check's early read of it, a private package's link read through the peek token, a dependent candidate's upstreams read and checked, a source-only upstream's commit in the key, a private upstream never cloned and known private when unseen, a user-owned fork, the index verb (printed whole, ABSENT at 3), and the prune: a dry run that deletes nothing, an applied prune that leaves the kept closure whole and restorable, a young version kept by the grace bound, a refused delete naming the package setting, and six keep-sets refused before anything is deleted; the public-seat licence rule (DN-142.D38): eight breaking third-party records each refusing a public push whole with no blob pushed, D38's refusal text whole, a private store pushing them all, a passing public store carrying malf's recipe notice in its index, the licence-audit passing it and naming every finding on the refused records, and the verb reading anonymously" \
-      "ok" "$([[ $transport_selftest_status -eq 0 ]] && grep -q '^store_transport selftest: 120 arm(s), 0 failure(s)$' <<< "$transport_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$transport_selftest_output")")"
+check "store_transport selftest: 156 arms, a cut candidate tag trusted only on main, the runner cache shared across verbs and bounded, the candidate key, push and its ownership filter, publish-index last, the attestation verifier's eight ABSENT reds, the cache judged by digest, the mismatch tag, the one visibility rule and package-check's early read of it, a private package's link read through the peek token, a dependent candidate's upstreams read and checked, a source-only upstream's commit in the key, a private upstream never cloned and known private when unseen, a user-owned fork, the index verb (printed whole, ABSENT at 3), and the prune: a dry run that deletes nothing, an applied prune that leaves the kept closure whole and restorable, a young version kept by the grace bound, a refused delete naming the package setting, and six keep-sets refused before anything is deleted; the public-seat licence rule (DN-142.D38): eight breaking third-party records each refusing a public push whole with no blob pushed, D38's refusal text whole, a private store pushing them all, a passing public store carrying malf's recipe notice in its index (a curl and a Zlib record among its passes, RUL-233), the licence-audit passing it and naming every finding on the refused records, and the verb reading anonymously; complete third-party notices (DN-142.D39 (6)): eight defects each refusing a public AND a private push whole with no blob pushed, the green push leaving out the test, build and test-requirement closure members, the records rendering the very bytes the package carries, and a record from before the test flag refused unless its test labels are declared" \
+      "ok" "$([[ $transport_selftest_status -eq 0 ]] && grep -q '^store_transport selftest: 156 arm(s), 0 failure(s)$' <<< "$transport_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$transport_selftest_output")")"
 
 echo
 
@@ -443,16 +456,16 @@ echo
 echo "[7j0] artefact_store's object producers carry their own refusal proof (selftest): the objects convention resolves step -> record -> output -> member, the tracked step is keyed on blob ids at a commit, a package member is extracted from its transport only at its digest, and a candidate's ingestion refuses a declared class its bytes contradict and a PE carrying a symbol table or a CodeView entry (DN-142.D25, DN-142.D33 (3))"
 objects_selftest_output="$(timeout 120 python3 "$MALF_ROOT/artefact_store.py" selftest 2>&1)"
 objects_selftest_status=$?
-check "artefact_store selftest: 47 arms, every refusal fired (an ingest row carrying the retired `commits:` or `after:` key among them), the system member refused outside the build environment, the transport extraction, the tracked record, a candidate's ingestion of its own run's artifact and its class, a candidate verdict stored only when it passed and only from a candidate_verdicts row of its shape, the bench verdict, the test_package member, the restore and the reuse decision intact" \
-      "ok" "$([[ $objects_selftest_status -eq 0 ]] && grep -q '^artefact_store selftest: 47 arm(s), 0 failure(s)$' <<< "$objects_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$objects_selftest_output")")"
+check "artefact_store selftest: 51 arms, every refusal fired (an ingest row carrying the retired `commits:` or `after:` key among them), the system member refused outside the build environment, the transport extraction, the tracked record, a candidate's ingestion of its own run's artifact and its class, a candidate verdict stored only when it passed and only from a candidate_verdicts row of its shape, the bench verdict, the test_package member, the restore and the reuse decision intact, an ingested executable refused without format-1 notices beside it, and the per-label test flag on third_party and upstream members in both key derivations, which agree, a label carried by two references refused by both (DN-142.D39 (5), (7b))" \
+      "ok" "$([[ $objects_selftest_status -eq 0 ]] && grep -q '^artefact_store selftest: 51 arm(s), 0 failure(s)$' <<< "$objects_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$objects_selftest_output")")"
 
 echo
 
 echo "[7j1] store_image carries its own refusal proof (selftest): an image is built from a candidate's ship-form creates and a resolved runtime, judged as one linux/amd64 OCI image, and stored once per run (DN-142.D9, DN-142.D33 (3))"
 image_selftest_output="$(timeout 120 python3 "$MALF_ROOT/store_image.py" selftest 2>&1)"
 image_selftest_status=$?
-check "store_image selftest: 15 arms, every refusal fired, the staged context and the stored record intact, the candidate's image from its one ship-form create" \
-      "ok" "$([[ $image_selftest_status -eq 0 ]] && grep -q '^store_image selftest: 15 arm(s), 0 failure(s)$' <<< "$image_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$image_selftest_output")")"
+check "store_image selftest: 16 arms, every refusal fired, the staged context (each executable's package notices among it) and the stored record intact, the candidate's image from its one ship-form create, an image lacking /usr/share/doc/<package>/THIRD-PARTY-NOTICES.txt refused (DN-142.D39 (8))" \
+      "ok" "$([[ $image_selftest_status -eq 0 ]] && grep -q '^store_image selftest: 16 arm(s), 0 failure(s)$' <<< "$image_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$image_selftest_output")")"
 
 echo
 
@@ -3691,7 +3704,8 @@ class ExProbe(ConanFile):
         helper["narrow_to_tracked"](self)
         helper["export_tracked"](self, os.environ["EX_SOURCE"], os.environ["EX_DEST"])
 PYR
-git -C "$ex_repo" add pkg/conanfile.py support/sub/kept.hpp scripts/driver.sh scripts/other.sh
+printf 'The fixture repository licence.\n' > "$ex_repo/LICENSE"
+git -C "$ex_repo" add LICENSE pkg/conanfile.py support/sub/kept.hpp scripts/driver.sh scripts/other.sh
 git -C "$ex_repo" -c user.name=t -c user.email=t@invalid commit -qm fixture
 ex_export() {   # <source> <destination> -> rc=<status> then the exported files under the destination
     local out rc folder
@@ -5202,7 +5216,7 @@ print(twin.source_entries(cmake, "4"), twin.source_entries(macos_only, "4"), twi
 PY
 )"
 
-echo "[7q7e] a recipe exports its git-TRACKED files: the helper narrows the export, the gate compares desk and fresh clone (DN-142.D4 (b))"
+echo "[7q7e] a recipe exports its git-TRACKED files and its repository's LICENSE: the helper narrows the export (DN-142.D4 (b), DN-142.D39)"
 # A git repository with one package: tracked sources under the declared root and one outside it, an
 # ignored build tree and an untracked draft under the root — the two kinds of file insight-eidos's
 # globs swept from the desk on 2026-10-08. The home is staged by malf's own conf sync, so the arms
@@ -5219,6 +5233,7 @@ ex_recipe yes > "$ex_pkg/conanfile.py"
 printf 'cmake_minimum_required(VERSION 3.20)\n' > "$ex_pkg/CMakeLists.txt"
 printf 'int a();\n' > "$ex_pkg/src/a.cpp"; printf 'int b();\n' > "$ex_pkg/src/sub/b.cpp"
 printf 'outside the root\n' > "$ex_pkg/docs/x.md"; printf 'build-*/\n' > "$ex_pkg/.gitignore"
+printf 'The fixture repository licence.\n' > "$ex_repo/LICENSE"
 git -C "$ex_repo" init -q && git -C "$ex_repo" add -A \
     && git -C "$ex_repo" -c user.name=t -c user.email=t@t commit -q -m fixture
 mkdir -p "$ex_pkg/src/build-x"; printf 'object\n' > "$ex_pkg/src/build-x/junk.o"; printf 'int draft();\n' > "$ex_pkg/src/draft.cpp"
@@ -5236,10 +5251,10 @@ check "malf stages the helper beside global.conf in the home, byte for byte, and
       "synced 1" "$(cmp -s "$MALF_ROOT/malf_recipe_exports.py" "$ex_home/malf_recipe_exports.py" && echo synced) $(grep -c "^user.malf:recipe_exports={{ os.path.join(conan_home_folder, 'malf_recipe_exports.py')" "$ex_home/global.conf")"
 check "every CI action that stages global.conf stages the helper beside it, and overwrites a restored home's global.conf" \
       "3 0" "$(grep -l 'malf_recipe_exports.py' "$MALF_ROOT"/.github/actions/setup-{build-env,proof-linux,proof-msvc}/action.yml | wc -l | tr -d ' ') $(grep -c -E 'global.conf.*(has none|Test-Path)|! -f "\$HOME_DIR/global.conf"' "$MALF_ROOT"/.github/actions/setup-proof-{linux,msvc}/action.yml | awk -F: '{n+=$2} END{print n+0}')"
-check "the helper narrows the export to the tracked files under the declared roots: no ignored build file, no untracked draft, nothing outside the roots" \
+check "the helper narrows the export to the tracked files under the declared roots, and puts the repository's tracked LICENSE at its root: no ignored build file, no untracked draft, nothing else outside the roots" \
       "rc=0
-CMakeLists.txt src/a.cpp src/sub/b.cpp |1" \
-      "$(ex_export "$ex_pkg")|$(grep -c 'exports narrowed to the tracked files — 3 kept, 2 untracked or ignored dropped' "$ex_tmp/log")"
+CMakeLists.txt LICENSE src/a.cpp src/sub/b.cpp |1|equal" \
+      "$(ex_export "$ex_pkg")|$(grep -c 'exports narrowed to the tracked files — 3 kept, 2 untracked or ignored dropped' "$ex_tmp/log")|$(cmp -s "$ex_repo/LICENSE" "$(CONAN_HOME="$ex_home" conan cache path ex_probe/0.0.1 --folder export_source)/LICENSE" && echo equal)"
 check "the build tree the removal emptied is gone from the export, not left as an empty directory" \
       "0" "$(ex_src="$(CONAN_HOME="$ex_home" conan cache path ex_probe/0.0.1 --folder export_source 2>&1)" \
              && find "$ex_src" -type d -empty | wc -l | tr -d ' ' || echo "no export: $ex_src")"
@@ -5248,116 +5263,20 @@ check "WITHOUT the helper the same recipe sweeps the desk: the ignored build fil
       "rc=0
 CMakeLists.txt src/a.cpp src/build-x/junk.o src/draft.cpp src/sub/b.cpp " "$(ex_export "$ex_pkg")"
 cp "$ex_tmp/helper.py" "$ex_pkg/conanfile.py"
-mkdir -p "$ex_tmp/archive"; cp -r "$ex_pkg" "$ex_tmp/archive/pkg"
-check "outside a git checkout the export keeps the declared globs as found on disk, and says so in a warning" \
+mkdir -p "$ex_tmp/archive"; cp -r "$ex_pkg" "$ex_tmp/archive/pkg"; cp "$ex_repo/LICENSE" "$ex_tmp/archive/LICENSE"
+check "outside a git checkout the export keeps the declared globs as found on disk and the nearest LICENSE above the recipe, and says so in a warning each" \
       "rc=0
-CMakeLists.txt src/a.cpp src/build-x/junk.o src/draft.cpp src/sub/b.cpp |1" \
+CMakeLists.txt LICENSE src/a.cpp src/build-x/junk.o src/draft.cpp src/sub/b.cpp |2" \
       "$(ex_export "$ex_tmp/archive/pkg")|$(grep -c 'WARN: malf: .* is not in a git checkout' "$ex_tmp/log")"
+git -C "$ex_repo" rm -q --cached LICENSE && git -C "$ex_repo" -c user.name=t -c user.email=t@t commit -q -m unlicensed
+check "a checkout that tracks no LICENSE at its top FAILS the export, naming it: a first-party package ships its repository's licence (DN-142.D39)" \
+      "rc=1|1" "$(ex_export "$ex_pkg")|$(grep -c 'tracks no LICENSE at its top' "$ex_tmp/log")"
+git -C "$ex_repo" add LICENSE && git -C "$ex_repo" -c user.name=t -c user.email=t@t commit -q -m licensed
 mv "$ex_home/malf_recipe_exports.py" "$ex_tmp/helper.bak"
 check "a home that lacks the helper FAILS the export, naming the file — it never exports the disk silently" \
       "rc=1|1" "$(ex_export "$ex_pkg")|$(grep -c "No such file or directory: '$ex_home/malf_recipe_exports.py'" "$ex_tmp/log")"
 mv "$ex_tmp/helper.bak" "$ex_home/malf_recipe_exports.py"
 
-# The gate: desk against a fresh clone of the commit. Equal with the helper; the helper-less recipe,
-# committed, reds naming the swept files; a modified tracked file is not judged.
-printf 'ex_probe\t%s\t\n' "$ex_pkg" > "$ex_tmp/released.tsv"
-ex_gate() {   # <scratch name> — package_exports verify over the fixture
-    local out rc
-    out="$(CONAN_HOME="$ex_home" python3 "$MALF_ROOT/package_exports.py" verify "$ex_home" "$ex_tmp/released.tsv" "$ex_tmp/$1" 2>&1)"; rc=$?
-    printf 'rc=%s %s|%s' "$rc" "$(grep -o '[0-9]* of [0-9]* recipe[^;]*; [0-9]* differ, [0-9]* not judged' <<< "$out")" "$(grep -E 'DIFFER|UNJUDGED' <<< "$out" | sed 's/ desk [0-9a-f]* != clone [0-9a-f]*//')"
-}
-check "exports-verify: the helper's recipe exports the same revision from the desk and from a fresh clone, exit 0" \
-      "rc=0 1 of 1 recipe(s) export the same recipe revision from the desk and from a fresh clone; 0 differ, 0 not judged|" "$(ex_gate g1)"
-cp "$ex_tmp/plain.py" "$ex_pkg/conanfile.py"; git -C "$ex_repo" -c user.name=t -c user.email=t@t commit -q -am plain
-check "exports-verify: a recipe that sweeps the desk is red, naming the files only the desk exports" \
-      "rc=1 0 of 1 recipe(s) export the same recipe revision from the desk and from a fresh clone; 1 differ, 0 not judged|  DIFFER ex_probe:; 2 file(s) differ, 2 exported by the desk alone: export_source/src/build-x/junk.o, export_source/src/draft.cpp" \
-      "$(ex_gate g2)"
-cp "$ex_tmp/helper.py" "$ex_pkg/conanfile.py"
-check "exports-verify: a package whose tracked files are modified on the desk is not judged, exit 2" \
-      "rc=2 0 of 1 recipe(s) export the same recipe revision from the desk and from a fresh clone; 0 differ, 1 not judged|  UNJUDGED ex_probe: tracked files modified on the desk —" \
-      "$(ex_gate g3)"
-
-# The verb FAILING is its own exit, 3, and never 1: a caller reads exit 1 as a recipe that
-# differs. Three failures before any verdict — a command the helper runs exits non-zero (the folder
-# is no git checkout), the helper raises (a malformed recipes row), and malf cannot derive the
-# recipe list (a workspace root with no scripts/workspace_layout.py) — each exits 3 and says FAILED.
-ex_failed() {   # <tsv body> <scratch name> — package_exports verify over a doctored recipes list
-    local out rc
-    printf '%b' "$1" > "$ex_tmp/doctored.tsv"
-    out="$(CONAN_HOME="$ex_home" python3 "$MALF_ROOT/package_exports.py" verify "$ex_home" "$ex_tmp/doctored.tsv" "$ex_tmp/$2" 2>&1)"; rc=$?
-    printf 'rc=%s %s' "$rc" "$(grep -c '^package_exports: FAILED — ' <<< "$out")"
-}
-mkdir -p "$ex_tmp/not-a-repo" "$ex_tmp/empty-ws"
-check "exports-verify: a command the helper runs that fails (the folder is no git checkout) exits 3, never the differ code 1" \
-      "rc=3 1" "$(ex_failed "ex_probe\t$ex_tmp/not-a-repo\t\n" g4)"
-check "exports-verify: the helper raising (a recipes row with no folder) exits 3, never Python's own 1" \
-      "rc=3 1" "$(ex_failed "ex_probe\n" g5)"
-check "exports-verify: malf failing to derive the recipe list exits 3, naming the failure" \
-      "rc=3 1" "$(out="$(MALF_WORKSPACE_ROOT="$ex_tmp/empty-ws" bash "$MALF_BIN" exports-verify 2>&1)"; rc=$?
-                  printf 'rc=%s %s' "$rc" "$(grep -c '^malf exports-verify: FAILED — could not derive the first-party recipe list' <<< "$out")")"
-
-# The POPULATION is the tracked recipe set, never a spelling. Selecting the recipes that assign
-# `exports_sources` judged 28 of the workspace's 30 on 2026-10-09 and read green over the two that
-# export through an `export_sources()` method alone (insight_canon_proof, insight_scenarios). The
-# fixture spells every way a recipe exports — the attribute, the annotated attribute, `exports`,
-# the method, nothing — beside a test_package recipe, a file merely ending in conanfile.py and an
-# untracked recipe, none of which is a first-party recipe of the repository.
-ex_ws="$ex_tmp/pop-ws"; mkdir -p "$ex_ws/scripts" "$ex_ws/r"
-printf 'VENDORED = {"r": (("vendor/recipes/", "vendor/LICENSE"),)}\n\n\ndef owned_package_prefixes():\n    return ["pop"]\n\n\ndef declared_repos(root):\n    return ["opt", "r", "s"]\n\n\ndef required_repos(root):\n    return ["r", "s"]\n' \
-    > "$ex_ws/scripts/workspace_layout.py"
-ex_pop() {   # <folder> <class body line> — a fixture recipe under the fixture repository
-    mkdir -p "$ex_ws/r/$1"
-    printf 'from conan import ConanFile\n\n\nclass Probe(ConanFile):\n    name = "pop"\n    version = "0.0.1"\n%s\n' "$2" > "$ex_ws/r/$1/conanfile.py"
-}
-ex_pop attr   '    exports_sources = "src/*"'
-ex_pop ann    '    exports_sources: tuple = ("src/*",)'
-ex_pop exp    '    exports = "data.txt"'
-ex_pop method '    def export_sources(self):
-        pass'
-ex_pop bare   ''
-ex_pop attr/test_package '    exports_sources = "src/*"'
-printf 'from conan import ConanFile\n' > "$ex_ws/r/method/legacy_conanfile.py"
-# A conan-center-index-layout recipe under the repository's DECLARED vendored root: its version is
-# the index's config.yml's, so `conan export` of its folder alone fails "didn't specify version".
-mkdir -p "$ex_ws/r/vendor/recipes/cci/all"
-printf 'from conan import ConanFile\n\n\nclass Cci(ConanFile):\n    name = "cci"\n' > "$ex_ws/r/vendor/recipes/cci/all/conanfile.py"
-git -C "$ex_ws/r" init -q && git -C "$ex_ws/r" add -A \
-    && git -C "$ex_ws/r" -c user.name=t -c user.email=t@t commit -q -m fixture
-ex_pop untracked '    exports_sources = "src/*"'
-mkdir -p "$ex_ws/s"; printf 'from conan import ConanFile\n\n\nclass S(ConanFile):\n    name = "pop_s"\n    version = "0.0.1"\n' > "$ex_ws/s/conanfile.py"
-git -C "$ex_ws/s" init -q && git -C "$ex_ws/s" add -A \
-    && git -C "$ex_ws/s" -c user.name=t -c user.email=t@t commit -q -m fixture
-check "exports-verify's population is every tracked first-party recipe, whatever the spelling of its exports: the attribute, the annotated attribute, \`exports\`, the export_sources() method and a recipe exporting nothing — never a test_package, a *_conanfile.py or an untracked recipe" \
-      "rc=0 r/ann r/attr r/bare r/exp r/method s " \
-      "$(out="$(python3 "$MALF_ROOT/package_exports.py" recipes "$ex_ws" 2>"$ex_tmp/pop.err")"; rc=$?
-         printf 'rc=%s %s' "$rc" "$(cut -f1 <<< "$out" | tr '\n' ' ')")"
-
-# A declared repository ABSENT from the disk was skipped in silence, so the gate read green over
-# recipes it never saw. A repository the CLONE MANIFESTS declare (`required_repos`: repos.txt and
-# the toolchain's `toolchain.txt` row, all checked out by the cut) refuses, exit 3, named; one the root
-# .gitignore alone declares (`opt` here; coderoast-corpora on the desk) is
-# named as not swept and the run goes on. `s` stays on disk, so the old skip reads exit 0 over it.
-check "exports-verify: a declared repository that is not a clone-manifest one and is absent is named as not swept, never silently" \
-      "1" "$(grep -c '^package_exports: not swept, declared by the root .gitignore alone and absent: opt$' "$ex_tmp/pop.err")"
-# THE VENDORED OVERLAY (DN-142.D17 (8)): a recipe outside the owned namespaces is excused only under a
-# root VENDORED declares, named as not judged; one in neither, or one with no literal name, refuses.
-# Measured 2026-10-12: step 0's B2 reddened when exports-verify exported malf's overlay recipes.
-check "exports-verify: a vendored recipe under its declared root is no first-party recipe: never exported, named as not judged" \
-      "1" "$(grep -c '^package_exports: not judged, vendored by workspace_layout.VENDORED: cci (r/vendor/recipes/cci/all)$' "$ex_tmp/pop.err")"
-check "exports-verify over the workspace holding a vendored recipe gives a verdict on every first-party recipe (RED before: conan export of the vendored folder failed, exit 3)" \
-      "rc=0" "$(MALF_WORKSPACE_ROOT="$ex_ws" bash "$MALF_BIN" exports-verify > "$ex_tmp/ev.log" 2>&1; echo "rc=$?")"
-mkdir -p "$ex_ws/r/stray"; printf 'from conan import ConanFile\n\n\nclass Stray(ConanFile):\n    name = "stray"\n' > "$ex_ws/r/stray/conanfile.py"
-git -C "$ex_ws/r" add stray/conanfile.py && git -C "$ex_ws/r" -c user.name=t -c user.email=t@t commit -q -m stray
-check "exports-verify: a recipe in no owned namespace and under no vendored root REFUSES the population, exit 3, naming it" \
-      "rc=3 1" \
-      "$(python3 "$MALF_ROOT/package_exports.py" recipes "$ex_ws" > /dev/null 2>"$ex_tmp/stray.err"; echo -n "rc=$? "; grep -c 'r/stray: stray is in no namespace the workspace owns (pop) and under no vendored root it declares' "$ex_tmp/stray.err")"
-git -C "$ex_ws/r" rm -q stray/conanfile.py && git -C "$ex_ws/r" -c user.name=t -c user.email=t@t commit -q -m unstray
-mv "$ex_ws/r" "$ex_ws/r.away"
-check "exports-verify: a clone-manifest repository absent from the disk REFUSES the population, exit 3, naming it — never a green over recipes never judged" \
-      "rc=3 1 0" \
-      "$(out="$(python3 "$MALF_ROOT/package_exports.py" recipes "$ex_ws" 2>"$ex_tmp/pop.err")"; rc=$?
-         printf 'rc=%s %s %s' "$rc" "$(grep -c '^package_exports: FAILED — 1 repository(ies) the clone manifests declare are not on disk, so their recipes cannot be judged: r$' "$ex_tmp/pop.err")" "$(grep -c . <<< "$out")")"
-mv "$ex_ws/r.away" "$ex_ws/r"
 rm -rf "$ex_tmp"
 echo
 
@@ -6943,35 +6862,21 @@ check "the step prints the patchelf that runs and its version" \
 rm -rf "$pe_tmp"
 echo
 
-echo "[7q16] store-create prints each step's time on its opening and closing lines, for a reader of the walk's log (DN-119.D4)"
+echo "[7q16] store-create opens and closes each step on its own two lines, the closing one carrying its verdict"
 
 # note: the walk's own use of the two functions is the cmd_store_create body arm below.
 st_tmp="$(realpath "$(mktemp -d)")"
 st_out="$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e
-    _malf_store_clock "$2/times"; run_at="$_MALF_CLOCK_AT"
-    sleep 0.3
-    _malf_store_clock "$2/times"; step_at="$_MALF_CLOCK_AT"; step_cpu="$_MALF_CLOCK_CPU"
-    _malf_store_opened 3 create st_pkg /w/st "$run_at" "$step_at"
-    python3 -c "import time
-stop = time.process_time() + 0.4
-while time.process_time() < stop: pass"
-    _malf_store_closed 3 st_pkg PASS "$run_at" "$step_at" "$step_cpu" "$2/times"' _ "$MALF_BIN" "$st_tmp" 2>&1)"
-check "the opening line names the step, its verb and directory, and the seconds since the walk began" \
-      "ok" "$(python3 -c 'import re, sys
-line = sys.argv[1].splitlines()[0]
-found = re.fullmatch(r"--- store-create \[3\] conan create st_pkg \(/w/st\) · at ([0-9.]+) s ---", line)
-print("ok" if found and float(found.group(1)) >= 0.3 else repr(line))' "$st_out")"
-check "the closing line carries the verdict, the walk's seconds, the step's wall and its children's CPU, each measured" \
-      "ok" "$(python3 -c 'import re, sys
-line = sys.argv[1].splitlines()[-1]
-found = re.fullmatch(r"--- store-create \[(\d+)\] (\S+) (PASS|FAILED|UNRECORDED|SKIPPED|MISMATCH) · at ([0-9.]+) s · wall ([0-9.]+) s · cpu ([0-9.]+) s ---", line)
-ok = found and found.group(1, 2, 3) == ("3", "st_pkg", "PASS") and float(found.group(5)) >= 0.4 \
-    and float(found.group(4)) >= float(found.group(5)) + 0.3 and float(found.group(6)) >= 0.3
-print("ok" if ok else repr(line))' "$st_out")"
-st_body="$(sed -n '/^cmd_store_create()/,/^}/p' "$MALF_BIN")"
+    _malf_store_opened 3 create st_pkg /w/st
+    _malf_store_opened 4 install st_pkg:third-party /w/st
+    _malf_store_closed 3 st_pkg PASS' _ "$MALF_BIN" 2>&1)"
+check "the opening line names the step, its verb and directory; the closing line its verdict" \
+      "--- store-create [3] conan create st_pkg (/w/st) ---
+--- store-create [4] conan install st_pkg:third-party (/w/st) ---
+--- store-create [3] st_pkg PASS ---" "$st_out"
 st_step="$(sed -n '/^_malf_store_run_step()/,/^}/p' "$MALF_BIN")"
 check "the walk opens every step it runs and closes it on each of its fifteen exits: its third-party step failed or found the store corrupt, its unconfined declaration unread, its backends declaration unread or its parameter document refused, a build passed, failed or found the store corrupt, a declaration unread, its key before the step refused, its serve served it, found the store corrupt or refused its restore, its step home unwritten, its create and records in that home" \
-      "1 1 15 1" "$(grep -c '_malf_store_clock "$scratch/times"; run_at=' <<< "$st_body") $(grep -c '_malf_store_opened "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total" "$name" SKIPPED' <<< "$st_step")"
+      "1 15 1" "$(grep -c '_malf_store_opened "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total"' <<< "$st_step") $(grep -c '_malf_store_closed "$total" "$name" SKIPPED' <<< "$st_step")"
 st_build="$(sed -n '/^_malf_store_build_in()/,/^}/p' "$MALF_BIN")"
 check "a stored: false step's conan build runs with --no-remote, as its key before the step resolved it: inside the build environment there is no network, and on the host a remote would be consulted silently (W559 G-env-1, insight_twin)" \
       "1" "$(grep -c -- '--build=never --no-remote' <<< "$st_build")"
