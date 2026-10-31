@@ -5134,6 +5134,12 @@ Commands:
                                    environment (DN-142.D33), the repository's upstreams exported
                                    into <profile>'s home (built from source there), or also their
                                    stored ship packages restored; exit the command's, 2 refused
+    store-transport licence-audit --repository <owner>/<repo>
+                                   read-only and anonymous over a PUBLIC store (DN-142.D38):
+                                   every third-party-create record a reader reaches judged with
+                                   its transport by the push's public-seat licence rule; exit 0
+                                   PASSED, 1 naming every finding or refused (the reason on
+                                   stderr), 2 a usage error
     sandbox [--read <root>]... [--write <root>]... -- <command>...
                                    run <command> under a Landlock domain (gate G4): readable only
                                    beneath each --read root, writable only beneath each --write
@@ -5507,6 +5513,14 @@ cmd_exports_verify() {
     return "$rc"
 }
 
+
+# malf store-transport licence-audit --repository <owner>/<repo> — DN-142.D38 (5b)'s one-shot audit of a PUBLIC
+# store, read-only and anonymous: store_transport.py owns the predicate, the push holds it on every later write.
+# Only the audit is a malf verb; the candidate's writer acts run store_transport.py from the workflows.
+cmd_store_transport() {
+    [[ "${1:-}" == licence-audit ]] || _malf_refuse_option store-transport "${1:-<none>}"
+    exec python3 "$MALF_DIR/store_transport.py" "$@"
+}
 
 # malf sandbox [--read <root>]... [--write <root>]... -- <command>... — gate G4's harness
 # (DN-142.D19 (5)): <command> runs under a Landlock domain built by landlock_sandbox.py, which says
@@ -7679,6 +7693,7 @@ case "$COMMAND" in
     source-verdict)   cmd_source_verdict "$@" ;;
     source-lint)      cmd_source_lint "$@" ;;
     source-act)       cmd_source_act "$@" ;;
+    store-transport)  cmd_store_transport "$@" ;;
     sandbox)          cmd_sandbox "$@" ;;
     environment)      exec python3 "$MALF_DIR/build_environment.py" "$@" ;;
     lock)             cmd_lock "$@" ;;

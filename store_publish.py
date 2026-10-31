@@ -776,7 +776,9 @@ def _candidate_scene(root: Path, packages: str = CANDIDATE_PACKAGES, perf_verdic
     server_handle, base = store_replica._fake_server(fake)
     registry = store_replica.Registry(base, "coderoasted/store-pub-repo", ("x-access-token", "token"))
     out = root / "push"
-    pushed = store_transport.push(registry, lambda: None, store, "CodeRoasted/pub-repo", checkout, {}, malf, {}, out,
+    guard = store_transport.Guard(lambda: store_replica.expected_package("coderoasted", "pub-repo", "public"),
+                                  lambda _expected: None)
+    pushed = store_transport.push(registry, guard, store, "CodeRoasted/pub-repo", checkout, {}, malf, {}, out,
                                   lambda _line: None)
     store_transport.publish_index(registry, out, lambda _line: None)
     index = json.loads((out / "index.json").read_bytes())

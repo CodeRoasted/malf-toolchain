@@ -29,7 +29,9 @@ package's privacy and every read judged by digest.
         the tree `git rev-parse HEAD^{tree}` of <checkout>, upstream a JSON {owner/repo: key} ({} if none)
     store_transport.py push <owner/repo> <checkout> <store dir> <out dir> [--upstream F] [--extra F]
         every OWNED record of <store dir> (this repository's packages, third-party, its tracked steps)
-        and the objects it names, then the index's blob; writes <out dir>/index.json and
+        and the objects it names, then the index's blob; a PUBLIC store's third-party records judged first
+        under the public-seat licence rule, the whole push refused on a finding, and malf's recipe notice
+        pushed as one object the index names (DN-142.D38); writes <out dir>/index.json and
         <out dir>/subjects.sha256 (`<manifest hex>  <name>`, one line per object, record and the index:
         the attest step's `subject-checksums`). Env: GITHUB_TOKEN (packages: write), required.
     store_transport.py publish-index <owner/repo> <out dir>
@@ -65,11 +67,16 @@ package's privacy and every read judged by digest.
         a keep decision only spares versions): exit 0, 3 ABSENT. Env: GITHUB_TOKEN for a private store.
     store_transport.py prune <owner/repo> <keep-set> [--apply]
         DN-142.D32 (2): every version of store-<repo> the keep-set's closure does not name (each kept index, the
-        records it pins by manifest digest, the objects they name; a version younger than PRUNE_GRACE_SECONDS
-        before the keep-set's `computed_at` is kept too), printed WOULD-DELETE, or deleted with --apply. Refused,
+        records it pins by manifest digest, the objects they name, the notices it names; a version younger than
+        PRUNE_GRACE_SECONDS before the keep-set's `computed_at` is kept too), printed WOULD-DELETE, or deleted with --apply. Refused,
         deleting nothing, on an unreadable, foreign-schema or empty keep-set and on a kept candidate the store
         does not hold. Env: GITHUB_TOKEN, the repository's own, whose repository holds the Admin role on the
         package (granted by default to the repository whose workflow first published it).
+    store_transport.py licence-audit --repository <owner/repo>
+        DN-142.D38 (5b), read-only and anonymous: every record of a PUBLIC store a reader reaches (its record-,
+        mismatch- and candidate- tags), each third-party-create one judged with its transport by the push's
+        public-seat licence predicate; AUDIT-PASS per passing record, the findings under `AUDIT —` with the
+        remedy and exit 1, else `PASSED <n> record(s)` and exit 0. `malf store-transport licence-audit` runs it.
     store_transport.py selftest
         every verb against an in-process registry, a fixture API and recorded-shape attestations; no network
 
@@ -105,6 +112,7 @@ from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import artefact_store  # noqa: E402 — a sibling module, located from this file
+import spdx_licence  # noqa: E402 — a sibling module, located from this file
 import store_replica  # noqa: E402 — a sibling module, located from this file
 from store_replica import Refused, Registry  # noqa: E402
 
@@ -526,6 +534,9 @@ def index_defects(index: dict, repository: str, key: str) -> list[str]:
     for entry in index.get("records") or []:
         if not HEX64.match(str(entry.get("key"))) or not HEX64.match(str(entry.get("manifest"))):
             defects.append(f"a record entry {entry!r} is not a key and a manifest digest")
+    notices = index.get(NOTICES_FIELD, {})
+    if not isinstance(notices, dict) or not all(HEX64.match(str(value)) for value in notices.values()):
+        defects.append(f"its {NOTICES_FIELD} {notices!r} are not object digests")
     return defects
 
 
@@ -612,6 +623,197 @@ def pull_record(reader: Reader, store: Path, key: str, verifier: Verifier | None
     return record
 
 
+# ── the public-seat licence rule (DN-142.D38, the Founder's option B) ──────────────────────────────
+
+# A PUBLIC store may hold a third-party binary only when every licence its recipe declares is on this allowlist
+# and its package carries its notice; copyleft is never admitted. An allowlist, never a denylist: an identifier
+# outside it is refused, copyleft and an unknown permissive one alike, and a new permissive identifier enters by
+# a ruling recorded in DN-142.D38. Derived from what the three public stores held on 2026-10-31.
+PERMISSIVE = ("Apache-2.0", "BSD-3-Clause", "MIT")
+APACHE = "Apache-2.0"
+# Upstream source archives VERIFIED to ship no NOTICE at their root, so their packages owe Apache-2.0 4(d)'s
+# notice nothing: (name, version) -> (the archive's sha256 as the recipe's conandata.yml names it, the day its
+# extracted tree was read). A HAND LIST that fails CLOSED: a version bump changes the archive digest, and the
+# push refuses until the new archive is read and its row added here.
+NOTICE_ABSENT = {
+    ("benchmark", "1.9.5"): ("9631341c82bac4a288bef951f8b26b41f69021794184ece969f8473977eaa340", "2026-10-31"),
+    ("simdjson", "4.6.3"): ("bde0c42f43899c4c5c48be826c09abd22500ed537b89f16b3cced5eec477c263", "2026-10-31"),
+}
+# The MIT notice of every conan-center-index recipe copy a transport carries (`<n>/e/conanfile.py`); a public
+# store holding any third-party record holds these bytes as one object its index names (DN-142.D38 (4)).
+RECIPE_NOTICE = Path("overlay") / "LICENSE.conan-center-index"
+RECIPE_NOTICE_NAME = "conan-center-index"
+NOTICES_FIELD = "notices"
+EMPTY_FILE_SHA256 = hashlib.sha256(b"").hexdigest()
+RECIPE_MEMBER = re.compile(r"^[^/]+/e/conanfile\.py$")
+DATA_MEMBER = re.compile(r"^[^/]+/e/conandata\.yml$")
+LICENCE_REMEDY = ("remove the dependency from this public repository's graph, read the new upstream archive for a "
+                  "NOTICE, or rule a permissive identifier onto the allowlist (copyleft is never admitted)")
+
+
+def _archive_digest(data: bytes | None, version: str) -> str:
+    """The one source archive digest `conandata.yml` names for `version`, or `unread` when it names none or
+    several (a list of archives, a per-platform map): the NOTICE-absent table then matches nothing."""
+    import yaml
+
+    try:
+        document = yaml.safe_load(data.decode("utf-8")) if data is not None else None
+    except (UnicodeDecodeError, yaml.YAMLError):
+        return "unread"
+    entry = ((document or {}).get("sources") or {}).get(version) if isinstance(document, dict) else None
+    if isinstance(entry, dict) and isinstance(entry.get("sha256"), str) and HEX64.match(entry["sha256"]):
+        return entry["sha256"]
+    return "unread"
+
+
+def licence_findings(record: dict, transport: bytes) -> list[str]:
+    """Every way one `third-party-create` record and its transport break the public-seat licence rule, as
+    DN-142.D38 (6) spells each reason; empty when the record may stand in a public store. The licence is read
+    from the published bytes (the transport's one recipe), the notice from the record's package entries."""
+    import tarfile
+
+    try:
+        with tarfile.open(fileobj=io.BytesIO(transport), mode="r:*") as archive:
+            members = {member.name: member for member in archive.getmembers() if member.isfile()}
+            recipes = sorted(name for name in members if RECIPE_MEMBER.match(name))
+            if len(recipes) != 1:
+                return [f"licence unreadable: the transport holds {len(recipes)} recipe(s), not 1"]
+            folder = recipes[0].split("/", 1)[0]
+            recipe = archive.extractfile(members[recipes[0]]).read()
+            data_name = f"{folder}/e/conandata.yml"
+            conandata = archive.extractfile(members[data_name]).read() if data_name in members else None
+    except (tarfile.TarError, OSError, EOFError) as unread:
+        return [f"licence unreadable: the transport is no readable archive ({unread})"]
+    try:
+        declared = spdx_licence.recipe_licences(recipe.decode("utf-8"), recipes[0])
+    except (UnicodeDecodeError, SyntaxError, ValueError):
+        declared = []
+    if len(declared) != 1 or not declared[0].literal or not declared[0].identifiers:
+        return ["licence unreadable: the transport's recipe holds no literal license attribute"]
+    licence = declared[0]
+    findings = []
+    outside = [identifier for identifier in licence.identifiers if identifier not in PERMISSIVE]
+    if outside:
+        findings.append(f"licence {licence.expression} names {', '.join(outside)} outside the permissive "
+                        f"allowlist {', '.join(PERMISSIVE)}")
+    files = [entry for output in record["outputs"].values() if output.get(artefact_store.TRANSPORT_FIELD)
+             for entry in output.get("entries") or []
+             if isinstance(entry, list) and len(entry) == 3 and entry[1] == "file"
+             and str(entry[0]).startswith("licenses/")]
+    if not any(entry[2] != EMPTY_FILE_SHA256 for entry in files):
+        findings.append("no licence notice: the package holds no non-empty file under licenses/")
+    if APACHE in licence.identifiers and not any(Path(entry[0]).name.startswith("NOTICE") for entry in files):
+        name, _slash, version = reference_of(record).split("#")[0].split(":")[0].partition("/")
+        source = _archive_digest(conandata, version)
+        if NOTICE_ABSENT.get((name, version), ("", ""))[0] != source:
+            findings.append(f"{APACHE} without NOTICE: licenses/ holds none and {name}/{version} at source {source} "
+                            f"is not a verified NOTICE-absent archive")
+    return findings
+
+
+def reference_of(record: dict) -> str:
+    """The conan reference a record names: its step's, else its package output's alias."""
+    step = record["inputs"]["step"]
+    alias = next((output.get("alias") for output in record["outputs"].values() if output.get("alias")), "")
+    return str(step.get("reference") or alias or step.get("package") or "?")
+
+
+def finding_lines(record: dict, transport: bytes) -> list[str]:
+    """`<package> <reference> [<profile>]: <reason>`, one per finding of one record."""
+    step = record["inputs"]["step"]
+    return [f"{step.get('package')} {reference_of(record)} [{step.get('profile') or 'no profile'}]: {reason}"
+            for reason in licence_findings(record, transport)]
+
+
+def record_transports(record: dict) -> list[str]:
+    """The transport objects a record's outputs name."""
+    return sorted({output[artefact_store.TRANSPORT_FIELD] for output in record["outputs"].values()
+                   if isinstance(output.get(artefact_store.TRANSPORT_FIELD), str)})
+
+
+def judge_public_push(store: Path, records: list[dict], repository: str) -> int:
+    """Every owned `third-party-create` record of a PUBLIC store's push judged before the first blob; the whole
+    push refused on any finding (DN-142.D38 (5a)). Returns the number of third-party records judged."""
+    owner, name = full_name(repository)
+    third_party = [record for record in records if record["inputs"]["step"].get("kind") in THIRD_PARTY_KINDS]
+    broken: list[list[str]] = []
+    for record in third_party:
+        lines = []
+        for hex_digest in record_transports(record):
+            source = store / "objects" / hex_digest
+            if not source.is_file() or artefact_store.file_sha256(source) != hex_digest:
+                raise Refused(f"the store does not hold object {hex_digest} whole, and a record names it")
+            lines += finding_lines(record, source.read_bytes())
+        if lines:
+            broken.append(lines)
+    if broken:
+        raise Refused(f"{owner}/{name}'s store is PUBLIC and {len(broken)} third-party record(s) break ADR-3.D3's "
+                      f"public-seat licence rule; nothing was pushed:\n"
+                      + "".join(f"  {line}\n" for lines in broken for line in lines) + LICENCE_REMEDY)
+    return len(third_party)
+
+
+def licence_audit(reader: Reader, repository: str, malf_dir: Path, say: Callable[[str], None]) -> int:
+    """`licence-audit` (DN-142.D38 (5b)), read-only: every record a reader of the store can reach (each
+    `record-` and `mismatch-` tag, each record a `candidate-` index pins) read and checked against its key, and
+    each `third-party-create` one judged with its transport by the push's predicate. 1 on any finding, else 0.
+    Two facts the predicate does not judge are printed beside it: whether the store holds malf's recipe notice
+    (a push adds it, DN-142.D38 (4)), and the `sha256-` objects no enumerated record or notice names."""
+    owner, name = full_name(repository)
+    tags = sorted(reader.registry.tags())
+    pinned: dict[str, str] = {}
+    for tag in tags:
+        if tag.startswith("record-") or tag.startswith("mismatch-"):
+            pinned.setdefault(reader.tagged(tag), tag.split("-")[1])
+    notices: set[str] = set()
+    for tag in (tag for tag in tags if tag.startswith("candidate-")):
+        try:
+            index = trusted_index(reader, f"{owner}/{name}", tag.removeprefix("candidate-"), None)
+        except Absent as absent:
+            raise Refused(f"{tag} cannot be read as an index ({absent}): the records it pins are unenumerated, "
+                          f"so no verdict is given") from absent
+        notices.update(index.get(NOTICES_FIELD, {}).values())
+        for entry in index["records"]:
+            pinned.setdefault(entry["manifest"], entry["key"])
+    named = set(notices)
+    judged = 0
+    broken: list[list[str]] = []
+    for manifest_hex, key in sorted(pinned.items(), key=lambda item: (item[1], item[0])):
+        record = judged_record(reader.layer(manifest_hex, RECORD_MEDIA), key)
+        named.update(record_objects(record))
+        if record["inputs"]["step"].get("kind") not in THIRD_PARTY_KINDS:
+            continue
+        judged += 1
+        lines = []
+        for hex_digest in record_transports(record):
+            found = finding_lines(record, reader.blob(hex_digest))
+            lines += found
+            if not found:
+                step = record["inputs"]["step"]
+                say(f"store_transport: AUDIT-PASS {step.get('package')} {reference_of(record)} "
+                    f"[{step.get('profile') or 'no profile'}] record-{key} transport sha256-{hex_digest}")
+        if lines:
+            broken.append(lines)
+    notice = sha256((malf_dir / RECIPE_NOTICE).read_bytes())
+    say(f"store_transport: AUDIT-NOTICE {owner}/{name} "
+        + (f"holds malf's recipe notice sha256-{notice}" if object_tag(notice) in tags else
+           f"does not hold malf's recipe notice sha256-{notice} (DN-142.D38 (4)): the next public push adds it"))
+    unnamed = sorted(tag for tag in tags if tag.startswith("sha256-") and tag.removeprefix("sha256-") not in named)
+    say(f"store_transport: AUDIT-UNNAMED {len(unnamed)} sha256- object(s) of {owner}/{name} named by no "
+        f"enumerated record nor notice, not judged: {', '.join(unnamed) or 'none'}")
+    if broken:
+        say(f"store_transport: AUDIT — {owner}/{name}'s store is PUBLIC and {len(broken)} third-party record(s) "
+            f"break ADR-3.D3's public-seat licence rule:")
+        for lines in broken:
+            for line in lines:
+                say(f"  {line}")
+        say(LICENCE_REMEDY)
+        return 1
+    say(f"store_transport: AUDIT {owner}/{name}: PASSED {judged} record(s) — every third-party-create record of "
+        f"{len(pinned)} enumerated record(s) over {len(tags)} tag(s)")
+    return 0
+
+
 # ── the push (the candidate's writer act) ──────────────────────────────────────────────────────────
 
 
@@ -636,7 +838,13 @@ def push_object(registry: Registry, store: Path, hex_digest: str, say: Callable[
     source = store / "objects" / hex_digest
     if not source.is_file() or artefact_store.file_sha256(source) != hex_digest:
         raise Refused(f"the store does not hold object {hex_digest} whole, and a record names it")
-    manifest = store_replica.object_manifest(hex_digest, source.stat().st_size)
+    return put_object_bytes(registry, hex_digest, source.stat().st_size, source.read_bytes, say)
+
+
+def put_object_bytes(registry: Registry, hex_digest: str, size: int, read: Callable[[], bytes],
+                     say: Callable[[str], None]) -> str:
+    """The object `read` returns, under its `sha256-<hex>` tag; its bytes read only when the tag is absent."""
+    manifest = store_replica.object_manifest(hex_digest, size)
     manifest_hex = sha256(manifest)
     held = registry.manifest_digest(object_tag(hex_digest))
     if held == f"sha256:{manifest_hex}":
@@ -645,7 +853,7 @@ def push_object(registry: Registry, store: Path, hex_digest: str, say: Callable[
     if held is not None:
         raise Refused(f"{registry.name}:{object_tag(hex_digest)} holds {held}, not the object's manifest "
                       f"sha256:{manifest_hex}: an object's name is never rewritten")
-    _put(registry, object_tag(hex_digest), manifest, [source.read_bytes()])
+    _put(registry, object_tag(hex_digest), manifest, [read()])
     say(f"store_transport: PUSHED sha256-{hex_digest}")
     return manifest_hex
 
@@ -683,11 +891,14 @@ def push_record(registry: Registry, store: Path, path: Path, pushed: Pushed, say
                            "manifest": manifest_hex})
 
 
-def push(registry: Registry, guard: Callable[[], None], store: Path, repository: str, checkout: Path,
+def push(registry: Registry, guard: Guard, store: Path, repository: str, checkout: Path,
          upstream: dict[str, str], malf_dir: Path, extra: dict, out: Path, say: Callable[[str], None],
          sources: dict[str, str] | None = None) -> int:
     """Every owned record of `store` and its objects, then the index's blob; the index and the subjects
-    to attest written to `out`. 1 when a record at an existing key differs (nothing indexed)."""
+    to attest written to `out`. 1 when a record at an existing key differs (nothing indexed). A PUBLIC store's
+    owned third-party records are judged under the public-seat licence rule before the guard writes anything,
+    the whole push refused on a finding, and malf's recipe notice joins it as one object the index names
+    (DN-142.D38 (4), (5a)); a private store is not judged."""
     owner, name = full_name(repository)
     commit, tree = checkout_identity(checkout)
     key = candidate_key(repository, tree, upstream, sources)
@@ -696,25 +907,42 @@ def push(registry: Registry, guard: Callable[[], None], store: Path, repository:
         raise Refused(f"malf at {malf_dir} differs from its commit {malf_commit}: an index names the commit "
                       f"that ran, and this one did not")
     packages = owned_packages(checkout, commit)
-    guard()
-    pushed = Pushed()
+    owned: list[tuple[Path, dict]] = []
     upstream_records = 0
     for path in sorted((store / "records").glob("*.json")):
         record = judged_record(path.read_bytes(), path.stem)
-        if not record_owned(record, name, packages):
+        if record_owned(record, name, packages):
+            owned.append((path, record))
+        else:
             upstream_records += 1
-            continue
+    expected = guard.expected()
+    third_party = (judge_public_push(store, [record for _path, record in owned], repository)
+                   if expected.visibility == "public" else 0)
+    guard.ensure(expected)
+    pushed = Pushed()
+    for path, _record in owned:
         push_record(registry, store, path, pushed, say)
     if pushed.mismatches:
         for line in pushed.mismatches:
             say(f"store_transport: MISMATCH {line}")
         return 1
+    notices = {}
+    if third_party:
+        notice = malf_dir / RECIPE_NOTICE
+        if not notice.is_file():
+            raise Refused(f"malf at {malf_dir} holds no {RECIPE_NOTICE}, the notice of every recipe copy a public "
+                          f"store's third-party transports carry (DN-142.D38 (4))")
+        data = notice.read_bytes()
+        notices[RECIPE_NOTICE_NAME] = sha256(data)
+        pushed.subjects.append((object_tag(sha256(data)),
+                                put_object_bytes(registry, sha256(data), len(data), lambda: data, say)))
     document = candidate_document(repository, tree, upstream, sources)
     index = {"schema": INDEX_SCHEMA, "repository": f"{owner}/{name}", "commit": commit, "tree": tree,
              "candidate": key, "upstream": document["upstream"], **({"sources": document["sources"]} if sources else {}),
              "malf": {"commit": malf_commit, "tree": malf_tree},
              "image": json.loads(ENVIRONMENT_PIN.read_text(encoding="utf-8"))["image"],
-             "records": sorted(pushed.entries, key=lambda entry: entry["key"]), "extra": extra}
+             "records": sorted(pushed.entries, key=lambda entry: entry["key"]), "extra": extra,
+             **({NOTICES_FIELD: notices} if notices else {})}
     index_bytes = canonical(index)
     registry.push_blob(sha256(index_bytes), index_bytes)
     manifest = one_layer_manifest(INDEX_TYPE, INDEX_MEDIA, index_bytes)
@@ -723,8 +951,9 @@ def push(registry: Registry, guard: Callable[[], None], store: Path, repository:
     subjects = sorted(set(pushed.subjects)) + [(candidate_tag(key), sha256(manifest))]
     (out / "subjects.sha256").write_text("".join(f"{digest}  {tag}\n" for tag, digest in subjects),
                                          encoding="utf-8")
-    guard()
+    guard.ensure(guard.expected())
     say(f"store_transport: PUSHED candidate {key} of {owner}/{name}: {len(pushed.entries)} record(s), "
+        f"{third_party} third-party record(s) judged under the public-seat licence rule, "
         f"{upstream_records} upstream record(s) left to their own store, {len(subjects)} subject(s) to attest "
         f"in {out / 'subjects.sha256'}; the index is published by publish-index AFTER the attestation")
     return 0
@@ -806,7 +1035,7 @@ def read_keep_set(path: Path, repository: str) -> tuple[list[str], int]:
 
 def kept_closure(reader: Reader, repository: str, keys: list[str]) -> tuple[set[str], set[str]]:
     """(every manifest digest, every tag) the kept candidates' closure names in this store: each index, each
-    record it pins, each object such a record names. A kept key whose index is absent or off its shape refuses
+    record it pins, each object such a record names, each notice object the index names. A kept key whose index is absent or off its shape refuses
     the prune: what it would have kept cannot be derived, so nothing is deleted."""
     digests: set[str] = set()
     tags: set[str] = set()
@@ -824,6 +1053,7 @@ def kept_closure(reader: Reader, repository: str, keys: list[str]) -> tuple[set[
             tags.add(record_tag(entry["key"]))
             record = judged_record(reader.layer(entry["manifest"], RECORD_MEDIA), entry["key"])
             tags.update(object_tag(hex_digest) for hex_digest in record_objects(record))
+        tags.update(object_tag(hex_digest) for hex_digest in index.get(NOTICES_FIELD, {}).values())
     return digests, tags
 
 
@@ -951,17 +1181,25 @@ def own_expected(get: Callable[[str], "tuple[int, dict]"], owner: str, name: str
     return store_replica.expected_package(owner, name, seen["visibility"])
 
 
+@dataclass(frozen=True)
+class Guard:
+    """The writer's guard, in two reads: `expected` is what the package must be, from the repository's visibility
+    (`own_expected`), and `ensure` holds the package to it, creating and guarding it on a first push. Split so the
+    push judges a public store's licences on the visibility the guard enforces, before the guard writes."""
+
+    expected: Callable[[], store_replica.Expected]
+    ensure: Callable[[store_replica.Expected], None]
+
+
 def package_guard(get: Callable[[str], "tuple[int, dict]"], peek: Callable[[str], "tuple[int, dict]"],
-                  registry: Registry, repository: str, say: Callable[[str], None]) -> Callable[[], None]:
+                  registry: Registry, repository: str, say: Callable[[str], None]) -> Guard:
     """The writer's guard for an OWN store: the package has the repository's visibility and is linked to it.
     `peek` reads the package's metadata: a private package's link is absent from a GITHUB_TOKEN's answer
     (measured 2026-10-28, coderoast-security run 40687600161), so a private caller passes a read:packages token."""
     owner, name = full_name(repository)
-
-    def guard() -> None:
-        store_replica.ensure_guarded(registry, package_view(peek, owner), owner, package_name(name), say,
-                                     own_expected(get, owner, name))
-    return guard
+    return Guard(lambda: own_expected(get, owner, name),
+                 lambda expected: store_replica.ensure_guarded(registry, package_view(peek, owner), owner,
+                                                               package_name(name), say, expected))
 
 
 def package_check(get: Callable[[str], "tuple[int, dict]"], peek: Callable[[str], "tuple[int, dict]"],
@@ -1079,9 +1317,12 @@ def _fixture_attestations(manifest_hex: str, **certificate: str) -> str:
     return json.dumps(results)
 
 
-def _repository(root: Path, packages: list[str], candidate: bool) -> Path:
+def _repository(root: Path, packages: list[str], candidate: bool, files: dict[str, bytes] | None = None) -> Path:
     checkout = root / "checkout"
     checkout.mkdir()
+    for relative, data in (files or {}).items():
+        (checkout / relative).parent.mkdir(parents=True, exist_ok=True)
+        (checkout / relative).write_bytes(data)
     (checkout / "packages.yml").write_text(
         "packages:\n" + "".join(f"  {name}:\n    path: {name}\n" for name in packages), encoding="utf-8")
     if candidate:
@@ -1107,6 +1348,41 @@ def _put_object(store: Path, data: bytes) -> str:
     (store / "objects").mkdir(parents=True, exist_ok=True)
     (store / "objects" / sha256(data)).write_bytes(data)
     return sha256(data)
+
+
+FIXTURE_LICENCE = b"Permission is granted, the fixture's licence text.\n"
+
+
+def _third_party_transport(recipe: str, conandata: str | None, recipes: int = 1) -> bytes:
+    """A `conan cache save` shape, uncompressed so its bytes are a function of its members: `recipes` copies of
+    the recipe under `<n>/e/`, the first one's conandata.yml beside it, and the package's licence."""
+    import tarfile
+
+    members = [(f"pkg{number}/e/conanfile.py", recipe.encode()) for number in range(recipes)]
+    members += [("pkg0/e/conandata.yml", conandata.encode())] if conandata is not None else []
+    members += [("b/pkg/p/licenses/LICENSE", FIXTURE_LICENCE)]
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        for name, data in members:
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+def _put_third_party(store: Path, package: str, version: str, licence: str, *, conandata: str | None = None,
+                     recipes: int = 1, licences: list[tuple[str, bytes]] | None = None) -> str:
+    """A `third-party-create` record of `package`/`version` whose transport's recipe declares `licence` (Python
+    source of the attribute's value) and whose package entries hold `licences` (default: one non-empty LICENSE)."""
+    recipe = f"from conan import ConanFile\n\n\nclass Package(ConanFile):\n    name = {package!r}\n    license = {licence}\n"
+    transport = _put_object(store, _third_party_transport(recipe, conandata, recipes))
+    held = [("licenses/LICENSE", FIXTURE_LICENCE)] if licences is None else licences
+    return _put_record(store, {"step": {"kind": "third-party-create", "package": package, "package_id": "1" * 40,
+                                        "profile": "linux-gcc16-release", "reference": f"{package}/{version}#rrev"}},
+                       {"package": {"alias": f"{package}/{version}#rrev:{'1' * 40}#prev", "content": sha256(recipe.encode()),
+                                    "transport": transport,
+                                    "entries": [["conaninfo.txt", "file", "a" * 64]]
+                                    + [[path, "file", sha256(data)] for path, data in held]}})
 
 
 def selftest() -> int:
@@ -1137,7 +1413,9 @@ def selftest() -> int:
         with tempfile.TemporaryDirectory(prefix="store_transport.") as scratch:
             root = Path(scratch)
             (root / "malf").mkdir()
-            malf_dir = _repository(root / "malf", ["malf"], candidate=False)
+            malf_dir = _repository(root / "malf", ["malf"], candidate=False,
+                                   files={str(RECIPE_NOTICE): b"MIT License\n\nthe fixture's recipe notice\n"})
+            notice = sha256((malf_dir / RECIPE_NOTICE).read_bytes())
             checkout = _repository(root, ["ipc_core", "ipc_consumer"], candidate=True)
             commit, tree = checkout_identity(checkout)
             repository = "CodeRoasted/coderoast-ipc"
@@ -1171,8 +1449,8 @@ def selftest() -> int:
             own_verdict = _put_record(store, {"step": {"kind": "source-verdict", "package": "ipc_core"},
                                               "definition": {"malf": "m" * 40}},
                                       {"verdict": {"verdict": "pass", "results": [], "log": log}})
-            third = _put_record(store, {"step": {"kind": "third-party-create", "package": "gtest"}},
-                                {"package": {"alias": "gtest/1.17.0", "content": "d" * 64, "transport": transport}})
+            third = _put_third_party(store, "gtest", "1.17.0", '"BSD-3-Clause"')
+            third_transport = record_transports(json.loads((store / "records" / f"{third}.json").read_bytes()))[0]
             upstream_key = _put_record(store, {"step": {"kind": "conan-create", "package": "canon_core"}},
                                        {"package": {"alias": "canon", "content": "e" * 64, "transport": transport}})
 
@@ -1208,8 +1486,12 @@ def selftest() -> int:
                    candidate_tag(key) in fake.tags, False)
             subjects = (out / "subjects.sha256").read_text(encoding="utf-8").splitlines()
             index_manifest = sha256(one_layer_manifest(INDEX_TYPE, INDEX_MEDIA, (out / "index.json").read_bytes()))
-            expect("the subjects are every object, every record and the index, by manifest digest",
-                   (len(subjects), subjects[-1]), (2 + 3 + 1, f"{index_manifest}  {candidate_tag(key)}"))
+            expect("the subjects are every object, the recipe notice, every record and the index, by manifest digest",
+                   (len(subjects), subjects[-1]), (3 + 1 + 3 + 1, f"{index_manifest}  {candidate_tag(key)}"))
+            expect("a public store holding a third-party record holds malf's recipe notice, named by the index "
+                   "(DN-142.D38 (4))", (index.get(NOTICES_FIELD), object_tag(notice) in fake.tags,
+                                        fake.blobs.get(f"sha256:{notice}") == (malf_dir / RECIPE_NOTICE).read_bytes()),
+                   ({RECIPE_NOTICE_NAME: notice}, True, True))
             expect("an object's manifest is store_replica's canonical object manifest",
                    fake.tags[object_tag(transport)],
                    "sha256:" + sha256(store_replica.object_manifest(transport, len(b"a ship-form transport\n" * 32))))
@@ -1306,7 +1588,7 @@ def selftest() -> int:
                    sorted(path.read_bytes() == (store / "records" / path.name).read_bytes()
                           for path in (restored / "records").glob("*.json")), [True, True, True])
             expect("the restored objects are the named ones", sorted(path.name for path in (restored / "objects").iterdir()),
-                   sorted([transport, log]))
+                   sorted([transport, log, third_transport]))
             fetched_first = len(reader.fetched)
             reader = Reader(registry, root / "cache2", quiet.append)
             restore(reader, root / "restored2", "coderoasted/coderoast-ipc", key, verifier(), quiet.append)
@@ -1462,6 +1744,133 @@ def selftest() -> int:
                    json.loads((root / "out8" / "index.json").read_bytes())["candidate"],
                    candidate_key("someone/coderoast-ipc", tree, {}))
 
+            # -- the public-seat licence rule (DN-142.D38): a PUBLIC push judges every owned third-party record before
+            # the guard writes anything, and one finding refuses the whole push; a private store is not judged.
+            def conandata(version: str, digest: str) -> str:
+                return f'sources:\n  "{version}":\n    url: "https://example.invalid/v{version}.tar.gz"\n    sha256: "{digest}"\n'
+
+            listed_benchmark = NOTICE_ABSENT[("benchmark", "1.9.5")][0]
+            listed_simdjson = NOTICE_ABSENT[("simdjson", "4.6.3")][0]
+            breaking = (
+                ("a copyleft record", lambda at: _put_third_party(at, "readline", "8.2", '"GPL-3.0-or-later"'),
+                 "readline readline/8.2#rrev [linux-gcc16-release]: licence GPL-3.0-or-later names GPL-3.0-or-later "
+                 "outside the permissive allowlist Apache-2.0, BSD-3-Clause, MIT"),
+                ("a permissive identifier off the allowlist", lambda at: _put_third_party(at, "zlib", "1.3.1", '"Zlib"'),
+                 "zlib zlib/1.3.1#rrev [linux-gcc16-release]: licence Zlib names Zlib outside the permissive allowlist"),
+                ("a dual licence with one copyleft alternative",
+                 lambda at: _put_third_party(at, "dual", "1.0", '"MIT OR LGPL-2.1-only"'),
+                 "licence MIT OR LGPL-2.1-only names LGPL-2.1-only outside the permissive allowlist"),
+                ("an empty licenses/",
+                 lambda at: _put_third_party(at, "fmt", "12.1.0", '"MIT"', licences=[("licenses/LICENSE", b"")]),
+                 "fmt fmt/12.1.0#rrev [linux-gcc16-release]: no licence notice: the package holds no non-empty file "
+                 "under licenses/"),
+                ("an Apache-2.0 record without NOTICE whose version is outside the table",
+                 lambda at: _put_third_party(at, "benchmark", "1.9.6", '"Apache-2.0"',
+                                             conandata=conandata("1.9.6", "b" * 64)),
+                 f"benchmark benchmark/1.9.6#rrev [linux-gcc16-release]: Apache-2.0 without NOTICE: licenses/ holds none "
+                 f"and benchmark/1.9.6 at source {'b' * 64} is not a verified NOTICE-absent archive"),
+                ("an Apache-2.0 record at a listed version whose archive is another",
+                 lambda at: _put_third_party(at, "benchmark", "1.9.5", '"Apache-2.0"',
+                                             conandata=conandata("1.9.5", "c" * 64)),
+                 f"benchmark/1.9.5 at source {'c' * 64} is not a verified NOTICE-absent archive"),
+                ("a transport holding 2 recipes",
+                 lambda at: _put_third_party(at, "spdlog", "1.17.0", '"MIT"', recipes=2),
+                 "spdlog spdlog/1.17.0#rrev [linux-gcc16-release]: licence unreadable: the transport holds 2 recipe(s), "
+                 "not 1"),
+                ("a recipe with no literal license attribute",
+                 lambda at: _put_third_party(at, "glaze", "7.4.0", "LICENCE_OF_THE_DAY"),
+                 "glaze glaze/7.4.0#rrev [linux-gcc16-release]: licence unreadable: the transport's recipe holds no "
+                 "literal license attribute"))
+            every_breaking = root / "licence-every"
+            for number, (label, plant, line) in enumerate(breaking):
+                bad = root / f"licence-{number}"
+                _put_third_party(bad, "gtest", "1.17.0", '"BSD-3-Clause"')
+                plant(bad)
+                plant(every_breaking)
+                refused_fake, refused_registry = scene()
+                arm(f"RED: a public push refuses {label}, naming it",
+                    lambda bad=bad, refused_registry=refused_registry, number=number: push(
+                        refused_registry, package_guard(get_from(api), get_from(api), refused_registry, repository,
+                                                        quiet.append),
+                        bad, repository, checkout, {}, malf_dir, {}, root / f"licence-out-{number}", quiet.append),
+                    line)
+                expect(f"nothing was pushed on {label}: no blob, no tag, not even the package's sentinel",
+                       (len(refused_fake.blobs), sorted(refused_fake.tags)), (0, []))
+            single = root / "licence-single"
+            _put_third_party(single, "readline", "8.2", '"GPL-3.0-or-later"')
+            single_fake, single_registry = scene()
+            try:
+                push(single_registry, package_guard(get_from(api), get_from(api), single_registry, repository,
+                                                    quiet.append),
+                     single, repository, checkout, {}, malf_dir, {}, root / "licence-single-out", quiet.append)
+                refusal_text = "pushed"
+            except Refused as refused:
+                refusal_text = str(refused)
+            expect("the refusal is D38 (6)'s text whole: the head, one line per finding, the remedy",
+                   refusal_text,
+                   "coderoasted/coderoast-ipc's store is PUBLIC and 1 third-party record(s) break ADR-3.D3's public-seat "
+                   "licence rule; nothing was pushed:\n  readline readline/8.2#rrev [linux-gcc16-release]: licence "
+                   "GPL-3.0-or-later names GPL-3.0-or-later outside the permissive allowlist Apache-2.0, BSD-3-Clause, "
+                   f"MIT\n{LICENCE_REMEDY}")
+            private_fake, private_registry = scene()
+            arm("a private store holding every refused record takes the push: a private store is not judged",
+                lambda: push(private_registry, package_guard(get_from(private), get_from(private), private_registry,
+                                                             repository, quiet.append),
+                             every_breaking, repository, checkout, {}, malf_dir, {}, root / "licence-private",
+                             quiet.append), None)
+            private_index = json.loads((root / "licence-private" / "index.json").read_bytes())
+            expect("the private push indexes every record and carries no recipe notice",
+                   (len(private_index["records"]), NOTICES_FIELD in private_index, object_tag(notice) in private_fake.tags),
+                   (len(breaking), False, False))
+            passing = root / "licence-pass"
+            _put_third_party(passing, "gtest", "1.17.0", '"BSD-3-Clause"')
+            _put_third_party(passing, "benchmark", "1.9.5", '"Apache-2.0"', conandata=conandata("1.9.5", listed_benchmark))
+            _put_third_party(passing, "simdjson", "4.6.3", '("Apache-2.0", "MIT")',
+                             conandata=conandata("4.6.3", listed_simdjson))
+            _put_third_party(passing, "noticed", "2.0", '"Apache-2.0 WITH LLVM-exception"',
+                             conandata=conandata("2.0", "d" * 64),
+                             licences=[("licenses/LICENSE", FIXTURE_LICENCE), ("licenses/NOTICE", b"Noticed, 2026.\n")])
+            passing_fake, passing_registry = scene()
+            arm("a public push passes BSD-3-Clause, a listed NOTICE-absent Apache-2.0 archive, a dual permissive "
+                "licence and an Apache-2.0 package carrying its NOTICE",
+                lambda: push(passing_registry, package_guard(get_from(api), get_from(api), passing_registry, repository,
+                                                             quiet.append),
+                             passing, repository, checkout, {}, malf_dir, {}, root / "licence-pass-out", quiet.append), None)
+            publish_index(passing_registry, root / "licence-pass-out", quiet.append)
+            anonymous = Registry(passing_registry.base, passing_registry.name)
+            audited: list[str] = []
+            expect("licence-audit over the passing public store, anonymous: exit 0, every third-party record passed, the "
+                   "recipe notice held",
+                   (licence_audit(Reader(anonymous, root / "audit-cache", quiet.append), repository, malf_dir,
+                                  audited.append),
+                    sum(line.startswith("store_transport: AUDIT-PASS ") for line in audited),
+                    audited[-1].split(" — ")[0], any(f"holds malf's recipe notice sha256-{notice}" in line
+                                                      for line in audited)),
+                   (0, 4, "store_transport: AUDIT coderoasted/coderoast-ipc: PASSED 4 record(s)", True))
+            audited.clear()
+            refused_audit = licence_audit(Reader(Registry(private_registry.base, private_registry.name),
+                                                 root / "audit-cache-2", quiet.append),
+                                          repository, malf_dir, audited.append)
+            expect("licence-audit over a store holding the refused records: exit 1, the head, every finding, the remedy, "
+                   "and the missing recipe notice named",
+                   (refused_audit, sum(line.startswith("store_transport: AUDIT — ") for line in audited),
+                    [line for _label, _plant, line in breaking if not any(line in said for said in audited)],
+                    audited[-1], any("does not hold malf's recipe notice" in line for line in audited)),
+                   (1, 1, [], LICENCE_REMEDY, True))
+            saved = {name: os.environ.get(name) for name in (REGISTRY_ENV, "GITHUB_TOKEN", TRANSPORT_CACHE_ENV)}
+            for name in saved:
+                os.environ.pop(name, None)
+            os.environ[REGISTRY_ENV] = passing_registry.base
+            printed = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(printed):
+                    code = main(["licence-audit", "--repository", repository])
+            finally:
+                for name, value in saved.items():
+                    os.environ.pop(name, None) if value is None else os.environ.__setitem__(name, value)
+            expect("the licence-audit verb reads the store anonymously and prints PASSED",
+                   (code, "PASSED 4 record(s)" in printed.getvalue()), (0, True))
+
             # -- the prune (DN-142.D32 (2)): a published candidate, then an unindexed record and its object.
             fake, kept_registry = scene()
             push(kept_registry, package_guard(get_from(api), get_from(api), kept_registry, repository, quiet.append),
@@ -1529,7 +1938,8 @@ def selftest() -> int:
                     sorted(closure_tags - set(fake.tags)), candidate_tag(key) in fake.tags,
                     sorted(tag.split("-")[0] for tag in closure_tags)),
                    (0, sorted([record_tag(stale), object_tag(stale_object)]), [], True,
-                    ["candidate"] + ["record"] * len(json.loads((root / "prune-out" / "index.json").read_bytes())["records"]) + ["sha256"] * 2))
+                    ["candidate"] + ["record"] * len(json.loads((root / "prune-out" / "index.json").read_bytes())["records"])
+                    + ["sha256"] * 3))
             arm("after the prune the kept candidate restores whole from the store",
                 lambda: restore(Reader(kept_registry, root / "prune-cache-2", quiet.append), root / "restored",
                                 "coderoasted/coderoast-ipc", key, None, quiet.append), None)
@@ -1708,6 +2118,8 @@ def main(argv: list[str]) -> int:
     verb.add_argument("repository")
     verb = verbs.add_parser("index")
     verb.add_argument("repository"), verb.add_argument("key")
+    verb = verbs.add_parser("licence-audit")
+    verb.add_argument("--repository", required=True)
     verb = verbs.add_parser("prune")
     verb.add_argument("repository"), verb.add_argument("keep_set"), verb.add_argument("--apply", action="store_true")
     for name, positional in (("candidate-present", ("repository", "key")),
@@ -1747,6 +2159,17 @@ def main(argv: list[str]) -> int:
         if args.verb == "package-check":
             package_check(get, peek, args.repository, say)
             return 0
+        if args.verb == "licence-audit":
+            # note: anonymous whatever GITHUB_TOKEN holds: the audit reads what the public reads
+            anonymous = _registry(args.repository, None)
+            if os.environ.get(TRANSPORT_CACHE_ENV):
+                code = licence_audit(Reader(anonymous, transport_cache(), say), args.repository,
+                                     Path(__file__).resolve().parent, say)
+                prune_named_cache(say)
+                return code
+            with tempfile.TemporaryDirectory(prefix="store_transport.audit.") as scratch:
+                return licence_audit(Reader(anonymous, Path(scratch), lambda _line: None), args.repository,
+                                     Path(__file__).resolve().parent, say)
         if args.verb in ("push", "publish-index", "prune") and not token:
             raise Refused("GITHUB_TOKEN is unset: a repository writes and prunes its store with its own token")
         registry = _registry(args.repository, token)

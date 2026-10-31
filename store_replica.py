@@ -45,6 +45,8 @@ SENTINEL_TYPE = "application/vnd.coderoast.store.sentinel.v1"
 SENTINEL_TAG = "store-sentinel"
 EMPTY_BYTES = b"{}"
 EMPTY_DIGEST = "sha256:" + hashlib.sha256(EMPTY_BYTES).hexdigest()
+TAGS_PAGE = 1000
+LINK_NEXT = re.compile(r'<([^>]+)>\s*;\s*rel="?next"?')
 
 
 class Refused(Exception):
@@ -178,6 +180,19 @@ class Registry:
             raise Refused(f"manifest {self.name}:{tag}: the registry answered {answered}, the bytes "
                           f"written hash to {expected}")
         return expected
+
+    def tags(self) -> list[str]:
+        """Every tag the repository holds, page by page as the registry's `Link: rel="next"` header leads."""
+        found: list[str] = []
+        url = f"{self.base}/v2/{self.name}/tags/list?n={TAGS_PAGE}"
+        while url:
+            answer = self.call("GET", "", "pull", url=url)
+            if answer.status != 200:
+                raise Refused(f"GET tags of {self.name}: HTTP {answer.status}")
+            found += json.loads(answer.body or b"{}").get("tags") or []
+            following = LINK_NEXT.search(answer.headers.get("link", ""))
+            url = urllib.parse.urljoin(f"{self.base}/", following.group(1)) if following else ""
+        return found
 
     def blob(self, hex_digest: str) -> bytes:
         """A blob's bytes, only once they hash to the digest asked for; a redirect is followed bare."""
@@ -354,6 +369,14 @@ def _fake_server(fake: Fake) -> tuple[http.server.ThreadingHTTPServer, str]:
                 fake.blobs[digest] = data
                 self._reply(201, b"", {"Docker-Content-Digest": digest})
                 return
+            if parts[-2:] == ["tags", "list"]:
+                asked = urllib.parse.parse_qs(parsed.query)
+                page = int(asked.get("n", ["100"])[0])
+                names = sorted(name for name in fake.tags if name > asked.get("last", [""])[0])
+                more = {"Link": f'</v2/{parts[2]}/{parts[3]}/tags/list?n={page}&last={names[page - 1]}>; rel="next"'} \
+                    if len(names) > page else {}
+                self._reply(200, canonical({"name": f"{parts[2]}/{parts[3]}", "tags": names[:page]}), more)
+                return
             if "blobs" in parts:
                 digest = parts[-1]
                 if digest not in fake.blobs:
@@ -472,6 +495,17 @@ def selftest() -> int:
             lambda: registry.blob(good), "hashes to")
         arm("a fetch of a blob the package does not hold is refused",
             lambda: registry.blob("f" * 64), "HTTP 404")
+
+        fake, registry, _view, said = scene()
+        fake.tags.update({f"tag-{number:04d}": EMPTY_DIGEST for number in range(TAGS_PAGE + 5)})
+
+        def every_tag_across_pages() -> None:
+            listed = registry.tags()
+            if listed != sorted(fake.tags):
+                raise Refused(f"the tag list holds {len(listed)} tag(s), want {len(fake.tags)} across two pages")
+
+        arm("the tag list follows the registry's Link header across pages, every tag once",
+            every_tag_across_pages, None)
 
         fake, registry, _view, said = scene()
 
