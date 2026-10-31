@@ -137,7 +137,7 @@ jobs:
 
       - name: C++ modules conformance
         if: ${{ inputs.module-conformance }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-module-conformance@9b08564b27d55257d3d31319b678112138be7582
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-module-conformance@e41b8d57825c3a1ce7987b0eb9e2f8017b2edf7b
 
       # Last, because it provisions clang-21 to get a version-matched clang-format. On the
       # self-hosted fleet that provisioning is an idempotent no-op (the toolchain persists between
@@ -145,7 +145,7 @@ jobs:
       # above report first and a repo never pays for the toolchain to learn its workflows are broken.
       - name: C++ format conformance
         if: ${{ inputs.format-check }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-format-check@9b08564b27d55257d3d31319b678112138be7582
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-format-check@e41b8d57825c3a1ce7987b0eb9e2f8017b2edf7b
 
       # Cheap (no toolchain, no build — it reads the repository's declared core through git). Each
       # repository judges its own deterministic-content core here (DN-142.D33: a lint that judges one
@@ -153,7 +153,7 @@ jobs:
       # superproject.
       - name: Determinism gates (clock and std <random>)
         if: ${{ inputs.determinism-check }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-determinism@9b08564b27d55257d3d31319b678112138be7582
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-determinism@e41b8d57825c3a1ce7987b0eb9e2f8017b2edf7b
 
       # Cheap (no toolchain, no build — it reads text), but placed last on purpose: it is the
       # newest gate here, and a repo should learn its workflows, modules and formatting are sound
@@ -203,6 +203,6 @@ jobs:
 
       - name: Dead symbol in comment
         if: ${{ inputs.dead-symbol-check }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dead-symbol@9b08564b27d55257d3d31319b678112138be7582
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-dead-symbol@e41b8d57825c3a1ce7987b0eb9e2f8017b2edf7b
         with:
           range: ${{ steps.dead-symbol-range.outputs.range }}
