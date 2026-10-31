@@ -100,7 +100,7 @@ jobs:
     # The caller's cheap guards, through the one script-gate job: a red here stops every leg before
     # a metered minute is spent.
     if: inputs.guards != ''
-    uses: CodeRoasted/malf-toolchain/.github/workflows/coderoast-script-gate.yml@17652e4b9ccaccd73594167550b15db3e881b64c
+    uses: CodeRoasted/malf-toolchain/.github/workflows/coderoast-script-gate.yml@5290b7b8796e709d3fc46cbe906c7c9062f4ce80
     with:
       gates: ${{ inputs.guards }}
 
@@ -131,7 +131,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Stage malf-toolchain into malf/ at this workflow's own revision (the build tool and profiles)
-        uses: CodeRoasted/malf-toolchain/.github/actions/stage-malf@17652e4b9ccaccd73594167550b15db3e881b64c
+        uses: CodeRoasted/malf-toolchain/.github/actions/stage-malf@5290b7b8796e709d3fc46cbe906c7c9062f4ce80
 
       - name: Check out insight-canon SOURCE into _canon/ (the tower's from-source canon; public, anonymous)
         if: inputs.tower
@@ -149,7 +149,7 @@ jobs:
 
       - name: Provision the leg
         id: setup
-        uses: CodeRoasted/malf-toolchain/.github/actions/setup-proof-linux@17652e4b9ccaccd73594167550b15db3e881b64c
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-proof-linux@5290b7b8796e709d3fc46cbe906c7c9062f4ce80
         with:
           leg: ${{ matrix.leg }}
           conan-home: ${{ env.CONAN_HOME }}
@@ -183,7 +183,7 @@ jobs:
           if-no-files-found: error
 
       - name: Save the leg's conan cache (third-party only)
-        uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@17652e4b9ccaccd73594167550b15db3e881b64c
+        uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@5290b7b8796e709d3fc46cbe906c7c9062f4ce80
 
   proof-msvc:
     needs: [subjects, guards]
@@ -197,7 +197,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Stage malf-toolchain into malf/ at this workflow's own revision (the build tool and profiles)
-        uses: CodeRoasted/malf-toolchain/.github/actions/stage-malf@17652e4b9ccaccd73594167550b15db3e881b64c
+        uses: CodeRoasted/malf-toolchain/.github/actions/stage-malf@5290b7b8796e709d3fc46cbe906c7c9062f4ce80
 
       - name: Check out insight-canon SOURCE into _canon/ (the tower's from-source canon; public, anonymous)
         if: inputs.tower
@@ -215,7 +215,7 @@ jobs:
 
       - name: Provision the leg
         id: setup
-        uses: CodeRoasted/malf-toolchain/.github/actions/setup-proof-msvc@17652e4b9ccaccd73594167550b15db3e881b64c
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-proof-msvc@5290b7b8796e709d3fc46cbe906c7c9062f4ce80
         with:
           conan-home: ${{ env.CONAN_HOME }}
           cache-key: ${{ steps.key.outputs.key }}
@@ -239,4 +239,4 @@ jobs:
           if-no-files-found: error
 
       - name: Save the leg's conan cache (third-party only)
-        uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@17652e4b9ccaccd73594167550b15db3e881b64c
+        uses: CodeRoasted/malf-toolchain/.github/actions/conan-cache-save@5290b7b8796e709d3fc46cbe906c7c9062f4ce80
