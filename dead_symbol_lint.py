@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Dead-symbol-in-comment gate — a comment naming a symbol whose last declaration just died.
 
-CLAUDE.md § Comments: a comment restating a symbol name is a MIRROR with no enforced edge.
+ADR-26.D7: a comment restating a symbol name is a MIRROR with no enforced edge.
 This gate supplies the missing edge, for exactly one failure mode: a change deletes the last
 code occurrence of an identifier while a comment somewhere still names it. That comment is now
 pointing at nothing, and nothing else in the toolchain notices — the compiler never reads it.
@@ -217,7 +217,7 @@ def check_repo(repo: Path, diff_args: list[str],
             findings.append(
                 f"{path.relative_to(repo).as_posix()}:{lineno}: comment names `{token}`, "
                 f"whose last code occurrence this change removes — repair by REMOVING THE "
-                f"MIRROR, not by re-typing the name (CLAUDE.md § Comments)")
+                f"MIRROR, not by re-typing the name (ADR-26.D7)")
     return sorted(set(findings)), resolved
 
 

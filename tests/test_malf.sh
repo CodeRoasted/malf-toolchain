@@ -47,7 +47,7 @@ malf_sync_files() {   # <dir>
 pass_count=0
 fail_count=0
 
-# Verbose on failure (CLAUDE.md § Observability): print actual-vs-expected, so a red run is
+# Verbose on failure (malf/doctrine.md § Observability): print actual-vs-expected, so a red run is
 # diagnosable from the CI log alone without re-running anything locally.
 check() {
     local label="$1" expected="$2" actual="$3"
@@ -843,7 +843,7 @@ echo "[7j2] lint's changed-file set resolves from any directory of the repo, or 
 # it checked 1 file. `git diff --name-only` emits REPO-ROOT-relative paths whatever `-C` says, and
 # the default leg prepended $CWD to them, so from a subdirectory every path failed the existence
 # test and the set came out empty — "could not look" sharing the exit path of "found nothing", the
-# class CLAUDE.md § Searching hunts. The leg now lets git resolve (`--relative`: cwd-relative AND
+# class MEM:workspace-search hunts. The leg now lets git resolve (`--relative`: cwd-relative AND
 # scoped to the cwd's subtree, a no-op at the root), refuses when git itself fails, and refuses on
 # a listed path that does not resolve. Pinned end to end, because the resolution is one flag on one
 # git call and a flag is one edit from being "simplified" back.
@@ -6918,7 +6918,7 @@ check "no store verb spells a store default of its own: the root has one definit
 rm -rf "$sr_tmp"
 echo
 
-echo "[7q18] a failed step's log is QUOTED into the walk's output, never only named, and a red walk archives its logs where its caller names (CLAUDE.md § Observability; step 0 run 38823789127)"
+echo "[7q18] a failed step's log is QUOTED into the walk's output, never only named, and a red walk archives its logs where its caller names (malf/doctrine.md § Observability; step 0 run 38823789127)"
 # note: measured at step 0 run 38823789127 (1.10.7): coderoast_infra_postgres's create failed and
 # the walk named only /tmp/malf-store.T0NS2C/coderoast_infra_postgres.log, which on the release
 # runner is inside the service's systemd PrivateTmp — unreadable from the desk and gone at the end.

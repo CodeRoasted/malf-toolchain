@@ -46,7 +46,7 @@ on:
       dead-symbol-check:
         description: |
           Fail when the change deletes the last code occurrence of an identifier a comment still
-          names in backticks (CLAUDE.md § Comments — a comment restating a symbol is a mirror with
+          names in backticks (ADR-26.D7 — a comment restating a symbol is a mirror with
           no enforced edge). Diff-scoped, so it only ever considers identifiers THIS change removed;
           a pre-existing tree is never swept. Set false only for a repo with no C++.
         type: boolean

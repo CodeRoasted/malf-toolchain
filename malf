@@ -7153,7 +7153,7 @@ print("\n".join(name for name in names if name.startswith(prefixes)))' "$listed"
 #
 # WHAT IT IS, and how it differs from the build lock above. Concurrent malf runs share ONE
 # editable conan tree and one set of package-anchored build trees, so the workspace rule is that
-# at most one LANE builds at a time (CLAUDE.md § Build system). `_malf_with_build_lock` serializes
+# at most one LANE builds at a time (MEM:conan-malf-build-workflow). `_malf_with_build_lock` serializes
 # two runs that reach the same build DIRECTORY and is held for the length of one build. This is
 # the coarser, longer-lived thing: a workspace-wide claim a lane holds across many runs AND across
 # the gaps between them, so a second lane knows not to start one.

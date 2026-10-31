@@ -1,7 +1,7 @@
 name: 'CodeRoast dead-symbol-in-comment gate'
 description: |
   Fails when a change deletes the last code occurrence of an identifier that a comment in the
-  repo still names in backticks. CLAUDE.md § Comments calls such a comment a MIRROR with no
+  repo still names in backticks. ADR-26.D7 calls such a comment a MIRROR with no
   enforced edge; this gate is the missing edge, for that one failure mode.
 
   Ships a SELF-TEST that runs BEFORE the repo is checked, the same way coderoast-format-check
@@ -83,6 +83,6 @@ runs:
         echo "::endgroup::"
 
         if ! python3 "$LINT" --repo "$GITHUB_WORKSPACE" --range "$RANGE"; then
-          echo "::error::a comment names a symbol this change just deleted. Repair by REMOVING the mirror — name the owner, never restate what the compiler already checks (CLAUDE.md § Comments)."
+          echo "::error::a comment names a symbol this change just deleted. Repair by REMOVING the mirror — name the owner, never restate what the compiler already checks (ADR-26.D7)."
           exit 1
         fi
