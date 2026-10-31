@@ -38,7 +38,7 @@ runs:
   using: composite
   steps:
     - name: Provision clang-21 + libc++ (idempotent on a persistent runner)
-      uses: CodeRoasted/malf-toolchain/.github/actions/setup-clang21-libcxx@e2fdbbc0d90d9256f539593e18b98fee6bb559ff
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-clang21-libcxx@29a1cd69737e8e18b417cba6d712c207aafcfac9
 
     - name: Provision the requested clang-21 tools and assert each is clang-21's OWN
       shell: bash
