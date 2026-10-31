@@ -78,13 +78,16 @@ package's privacy and every read judged by digest.
         mismatch- and candidate- tags), each third-party-create one judged with its transport by the push's
         public-seat licence predicate; AUDIT-PASS per passing record, the findings under `AUDIT —` with the
         remedy and exit 1, else `PASSED <n> record(s)` and exit 0. `malf store-transport licence-audit` runs it.
-    store_transport.py notices <store dir> <record key> <out file> [--tests <label>,...]
+    store_transport.py notices <store dir> <record key> <out file> [--tests <record key>=<label>,...]...
         DN-142.D39 (4), RUL-234: the third-party notices of one first-party create record of <store dir> (a
         version's candidate restored there), rendered by the generator from the records alone, every licence file
         read from its third-party record's transport. A record written before the test flag (DN-142.D39 (5))
-        carries none: `--tests` is the operator's WHOLE declaration of those records' test labels
-        (`<name>/<context>`, comma-separated, empty for none), every other flagless host label then shipped;
-        without it a flagless record is refused, never guessed. The printed line names what was declared.
+        carries none: each `--tests` is the operator's WHOLE declaration of ONE record's test labels
+        (`<name>/<context>`, comma-separated, empty for none), repeated per record; once any is given, a record of
+        the walk it does not name declares none (its every flagless host label shipped), a label a record declares
+        that a record upstream of it ships is refused naming both, and a declared record the walk never reaches is
+        refused. Without `--tests` a flagless record is refused, never guessed. The printed line names what was
+        declared.
     store_transport.py selftest
         every verb against an in-process registry, a fixture API and recorded-shape attestations; no network
 
@@ -885,42 +888,61 @@ class Records:
         return indexed
 
 
-def _shipped(member: object, label: str, tests: frozenset[str] | None) -> bool | str:
+def _shipped(member: object, label: str, declared: frozenset[str] | None) -> bool | str:
     """True for a shipped host member, False for a test or build one. A member with no flag (a record written before
-    DN-142.D39 (5)) is read from `tests`, the operator's WHOLE declaration of that record's test labels (a label it
-    names is a test requirement, any other shipped); with no declaration it is a reason, never a guess."""
+    DN-142.D39 (5)) is read from `declared`, the operator's WHOLE declaration of that one record's test labels (a label
+    it names is a test requirement, any other shipped); with no declaration it is a reason, never a guess."""
     if not label.endswith(HOST_SUFFIX):
         return False
     flag = member.get("test") if isinstance(member, dict) else None
     if flag is None:
-        if tests is None:
+        if declared is None:
             return (f"{label} carries no test flag (a record written before DN-142.D39 (5)), so its closure cannot "
                     f"be read")
-        return label not in tests
+        return label not in declared
     return flag is False
 
 
-def record_closure(records: Records, record: dict, tests: frozenset[str] | None = None,
-                   seen: tuple[str, ...] = ()) -> tuple[dict[str, set[str]], list[str]]:
+def record_closure(records: Records, record: dict, tests: dict[str, frozenset[str]] | None = None
+                   ) -> tuple[dict[str, set[str]], list[str]]:
     """({component key `<name>/<version>#<rrev>`: its contents}, findings) of a first-party create record, from the
-    records alone. `tests` is an operator's whole declaration of the test labels of records that carry no flag
-    (`notices`, over a version recorded before the flag); the push declares nothing, so a flagless record reds it."""
+    records alone. `tests` is an operator's declaration, per record key, of the test labels of records that carry no
+    flag (`notices`, over a version recorded before the flag): a record it does not name declares none, so its every
+    flagless host label is shipped, and a label a record declares that a record upstream of it ships is a finding.
+    The push declares nothing (None), so a flagless record reds it."""
+    visited: set[str] = set()
+    closure, findings, _labels = _walk(records, record, tests, (), visited)
+    findings += [f"the declaration names record {key}, which the walk from {record['key']} never reaches"
+                 for key in sorted(set(tests or {}) - visited)]
+    return closure, sorted(set(findings))
+
+
+def _walk(records: Records, record: dict, tests: dict[str, frozenset[str]] | None, seen: tuple[str, ...],
+          visited: set[str]) -> tuple[dict[str, set[str]], list[str], dict[str, set[str]]]:
+    """record_closure's walk, also returning {host label: the keys of the records in the walk that ship it}, every
+    record it reads added to `visited`."""
+    visited.add(record["key"])
     profile = str(record["inputs"]["step"].get("profile"))
+    declared = None if tests is None else tests.get(record["key"], frozenset())
     closure: dict[str, set[str]] = {}
     findings: list[str] = []
+    labels: dict[str, set[str]] = {}
+    upstream_labels: dict[str, set[str]] = {}
     for label, member in sorted((record["inputs"].get("third_party") or {}).items()):
-        shipped = _shipped(member, label, tests)
+        shipped = _shipped(member, label, declared)
         if isinstance(shipped, str):
             findings.append(shipped)
         elif shipped:
             closure.setdefault(member["ref"], set()).add(member["content"])
+            labels.setdefault(label, set()).add(record["key"])
     for label, member in sorted((record["inputs"].get("upstream") or {}).items()):
-        shipped = _shipped(member, label, tests)
+        shipped = _shipped(member, label, declared)
         if isinstance(shipped, str):
             findings.append(shipped)
             continue
         if not shipped:
             continue
+        labels.setdefault(label, set()).add(record["key"])
         content = artefact_store.upstream_content(member)
         producers = records.creates.get((profile, content), [])
         if not producers:
@@ -931,11 +953,18 @@ def record_closure(records: Records, record: dict, tests: frozenset[str] | None 
             findings.append(f"{label}: the upstream records form a cycle through {record['key']}")
             continue
         for producer in producers:
-            inner, missing = record_closure(records, producer, tests, (*seen, record["key"]))
+            inner, missing, shipping = _walk(records, producer, tests, (*seen, record["key"]), visited)
             findings += missing
             for key, contents in inner.items():
                 closure.setdefault(key, set()).update(contents)
-    return closure, sorted(set(findings))
+            for shipped_label, keys in shipping.items():
+                upstream_labels.setdefault(shipped_label, set()).update(keys)
+    for label in sorted((declared or frozenset()) & set(upstream_labels)):
+        findings.append(f"record {record['key']} declares {label} a test requirement, but its upstream record(s) "
+                        f"{', '.join(sorted(upstream_labels[label]))} ship it")
+    for label, keys in upstream_labels.items():
+        labels.setdefault(label, set()).update(keys)
+    return closure, findings, labels
 
 
 def _licence_rows(record: dict) -> set[tuple[str, str]]:
@@ -967,14 +996,18 @@ def _recipe_expression(records: Records, record: dict) -> str | None:
 
 
 def _holder(records: Records, profile: str, key: str, contents: set[str]) -> tuple[dict | None, str | None]:
-    """The third-party record holding a component's content, or the reason there is none (or no single one)."""
+    """The third-party record holding a component's content, or the reason there is none (or no single one). Every
+    holder carries the same licenses/ files, so the first whose transport the store holds is read: a store keeps
+    records written before a record named its transport, beside a later one of the same content that does."""
     held = [record for content in sorted(contents) for record in records.third_party.get((profile, content), [])]
     rows = {frozenset(_licence_rows(record)) for record in held}
     if not held:
         return None, f"{key}: no third-party-create record at {profile} holds its content {', '.join(sorted(contents))}"
     if len(rows) != 1:
         return None, f"{key}: its {len(contents)} content(s) are held by records with different licenses/ files"
-    return held[0], None
+    readable = [record for record in held
+                if any((records.store / "objects" / digest).is_file() for digest in record_transports(record))]
+    return (readable or held)[0], None
 
 
 def notices_findings(records: Records, record: dict) -> list[str]:
@@ -1043,7 +1076,21 @@ def judge_notices(records: Records, owned: list[dict], repository: str) -> int:
     return len(creates)
 
 
-def records_notices(records: Records, record: dict, tests: frozenset[str] | None) -> bytes:
+def notices_declaration(arguments: list[str]) -> dict[str, frozenset[str]]:
+    """The `notices` verb's `--tests <record key>=<label>,...` arguments as {record key: its whole declaration of test
+    labels}, an empty list after `=` declaring none. raises Refused on a malformed argument or a key declared twice."""
+    declared: dict[str, frozenset[str]] = {}
+    for argument in arguments:
+        key, separator, labels = argument.partition("=")
+        if not separator or not HEX64.match(key):
+            raise Refused(f"--tests {argument!r} is not <record key (64 hex)>=<label>,...")
+        if key in declared:
+            raise Refused(f"--tests declares record {key} twice; one declaration is the record's whole set")
+        declared[key] = frozenset(label for label in labels.split(",") if label)
+    return declared
+
+
+def records_notices(records: Records, record: dict, tests: dict[str, frozenset[str]] | None) -> bytes:
     """The notices file the generator renders for one first-party create record from the records alone (RUL-234: a
     version published before the generator existed): every closure component with its licence files' bytes read
     from its third-party record's transport. raises Refused naming what the records cannot answer."""
@@ -2287,12 +2334,59 @@ def selftest() -> int:
             old_key, _content = _put_first_party(flagless, "ipc_core", None, third_party=old_members)
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 refused_code = main(["notices", str(flagless), old_key, str(root / "flagless.txt")])
-                declared_code = main(["notices", str(flagless), old_key, str(root / "flagless.txt"), "--tests", "gtest/host"])
+                declared_code = main(["notices", str(flagless), old_key, str(root / "flagless.txt"), "--tests",
+                                      f"{old_key}=gtest/host"])
             expect("a record written before the flag is refused unless the operator declares its test labels, and then "
                    "renders without them",
                    (refused_code, declared_code,
                     [each.key for each in notices_module.parse((root / "flagless.txt").read_bytes()).components]),
                    (1, 0, [f"fmt/12.1.0#{fixture_rrev}"]))
+            # the declaration is per record: the picosha2 shape, metalog declaring a label canon ships
+            walked = root / "notices-walked"
+            walked_third = {"gtest": _put_third_party(walked, "gtest", "1.17.0", '"BSD-3-Clause"'),
+                            "picosha2": _put_third_party(walked, "picosha2", "1.0.0", '"MIT"'),
+                            "glaze": _put_third_party(walked, "glaze", "7.4.0", '"MIT"')}
+            walked_members = {name: {key: value for key, value in _third_party_member(walked, record, False).items()
+                                     if key != "test"} for name, record in walked_third.items()}
+            canon_old, canon_content = _put_first_party(walked, "canon_core", None, third_party={
+                "gtest/host": walked_members["gtest"], "picosha2/host": walked_members["picosha2"]})
+            metalog_old, _content = _put_first_party(walked, "metalog", None, third_party={
+                "gtest/host": walked_members["gtest"], "picosha2/host": walked_members["picosha2"],
+                "glaze/host": walked_members["glaze"]}, upstream={"canon_core/host": {"content": canon_content}})
+            picosha2_record = json.loads((walked / "records" / f"{walked_third['picosha2']}.json").read_text())
+            older_output = {key: value for key, value in picosha2_record["outputs"]["package"].items() if key != "transport"}
+            older = _put_record(walked, {**picosha2_record["inputs"], "step": {**picosha2_record["inputs"]["step"],
+                                                                              "form": "before-transport"}},
+                                {"package": older_output})
+            walked_all = [json.loads(path.read_text()) for path in sorted((walked / "records").glob("*.json"))]
+            walked_records = Records.of(walked, sorted(walked_all, key=lambda record: record["key"] != older))
+            metalog_record = json.loads((walked / "records" / f"{metalog_old}.json").read_text())
+
+            def walked_keys(tests: dict[str, frozenset[str]]) -> object:
+                return [each.key for each in notices_module.parse(
+                    records_notices(walked_records, metalog_record, tests)).components]
+
+            arm("RED: a record declaring a test label its upstream record ships is refused, naming both records",
+                lambda: walked_keys({metalog_old: frozenset({"gtest/host", "picosha2/host"}),
+                                     canon_old: frozenset({"gtest/host"})}),
+                f"record {metalog_old} declares picosha2/host a test requirement, but its upstream record(s) "
+                f"{canon_old} ship it")
+            expect("each record's declaration is its own: gtest declared by both is absent, picosha2 shipped by canon "
+                   "is present, read from the holder whose transport the store holds, never an older one naming none",
+                   arm("a per-record declaration renders", lambda: walked_keys(
+                       {metalog_old: frozenset({"gtest/host"}), canon_old: frozenset({"gtest/host"})}), None),
+                   [f"glaze/7.4.0#{fixture_rrev}", f"picosha2/1.0.0#{fixture_rrev}"])
+            expect("a flagless record the declaration does not name declares none: canon's gtest ships",
+                   arm("an undeclared upstream renders", lambda: walked_keys({metalog_old: frozenset()}), None),
+                   [f"glaze/7.4.0#{fixture_rrev}", f"gtest/1.17.0#{fixture_rrev}", f"picosha2/1.0.0#{fixture_rrev}"])
+            arm("RED: a declaration naming a record the walk never reaches is refused",
+                lambda: walked_keys({metalog_old: frozenset(), "e" * 64: frozenset({"gtest/host"})}),
+                f"the declaration names record {'e' * 64}, which the walk from {metalog_old} never reaches")
+            arm("RED: a --tests argument without its record key is refused",
+                lambda: notices_declaration(["gtest/host"]), "is not <record key (64 hex)>=<label>,...")
+            arm("RED: a record declared twice is refused",
+                lambda: notices_declaration([f"{canon_old}=gtest/host", f"{canon_old}="]),
+                f"--tests declares record {canon_old} twice")
 
             # -- the prune (DN-142.D32 (2)): a published candidate, then an unindexed record and its object.
             fake, kept_registry = scene()
@@ -2545,7 +2639,7 @@ def main(argv: list[str]) -> int:
     verb.add_argument("--repository", required=True)
     verb = verbs.add_parser("notices")
     verb.add_argument("store"), verb.add_argument("key"), verb.add_argument("out")
-    verb.add_argument("--tests")
+    verb.add_argument("--tests", action="append")
     verb = verbs.add_parser("prune")
     verb.add_argument("repository"), verb.add_argument("keep_set"), verb.add_argument("--apply", action="store_true")
     for name, positional in (("candidate-present", ("repository", "key")),
@@ -2591,12 +2685,14 @@ def main(argv: list[str]) -> int:
             chosen = [record for record in every if record["key"] == args.key]
             if len(chosen) != 1 or chosen[0]["inputs"]["step"].get("kind") != "conan-create":
                 raise Refused(f"{store} holds no conan-create record {args.key}")
-            declared = None if args.tests is None else frozenset(label for label in args.tests.split(",") if label)
+            declared = None if args.tests is None else notices_declaration(args.tests)
             data = records_notices(Records.of(store, every), chosen[0], declared)
             Path(args.out).write_bytes(data)
             say(f"store_transport: NOTICES {args.out} sha256 {sha256(data)} rendered from record {args.key}"
-                + ("" if declared is None else f", the operator declaring the flagless records' test labels to be "
-                   f"exactly: {', '.join(sorted(declared)) or 'none'}"))
+                + ("" if declared is None else ", the operator declaring the flagless records' test labels to be "
+                   "exactly: " + "; ".join(f"{key} {', '.join(sorted(labels)) or 'none'}"
+                                           for key, labels in sorted(declared.items()))
+                   + " (every other record declaring none)"))
             return 0
         if args.verb == "licence-audit":
             # note: anonymous whatever GITHUB_TOKEN holds: the audit reads what the public reads
