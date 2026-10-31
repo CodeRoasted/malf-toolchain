@@ -3368,7 +3368,7 @@ def selftest() -> int:
             subprocess.run([*rgit, "commit", "-qm", key], check=True)
             rcommit = _run(["git", "-C", str(retired), "rev-parse", "HEAD"]).strip()
             arm(f"RED: an ingest row still carrying the retired `{key}:` key is refused by the row grammar "
-                f"(DN-142.D34: no reader is left for it)",
+                f"(ADR-3.D10: no reader is left for it)",
                 lambda: ingest_rows(retired, rcommit), "an ingest row is {artifact, executable | object, published}")
         ckey, _out = arm("CANDIDATE INGEST: the golden a job of the candidate's own run uploaded is stored as the record "
                          "`<repository>/ingest.golden`",
