@@ -51,7 +51,7 @@ runs:
   using: composite
   steps:
     - name: Install + activate MSVC 14.52 (the C++23-modules fix floor; not pre-installed)
-      uses: CodeRoasted/malf-toolchain/.github/actions/setup-msvc1452@e11511d19bcc73adb5ccd51ae483272cdfa3711d
+      uses: CodeRoasted/malf-toolchain/.github/actions/setup-msvc1452@bc691a7c80fe1e1c042e2ad23ab1f7d4b0d911da
 
     - name: Verify the active toolset is exactly MSVC 14.52, neither a fallback nor a newer one
       # EQUALITY, NEVER A MINIMUM (RUL-154): a `>= 14.52` check passes a 14.53 the Insiders channel
