@@ -2932,7 +2932,7 @@ def bytes_class(data: bytes) -> str:
     return "executable" if linked else "object"
 
 
-CANDIDATE_INGEST_KEYS = {"artifact", "commits", "after", "published"}
+CANDIDATE_INGEST_KEYS = {"artifact", "published"}
 # THE CANDIDATE'S OWN VERDICTS (DN-142.D33, the sanitizer gates): a gate a job of the candidate runs over the
 # repository's sources (canon core's ASan suite, insight-eidos's fuzz ASan replay and valgrind replay) leaves one
 # verdict document, declared under `candidate_verdicts:` as `{artifact, object}` and ingested exactly as an `ingest:`
@@ -2954,8 +2954,8 @@ def _declared_rows(repository: Path, commit: str) -> list[tuple[str, str, str, s
         classes = [klass for klass in INGEST_CLASSES if isinstance(row, dict) and klass in row]
         if len(classes) != 1 or not isinstance(row.get("artifact"), str) \
                 or set(row) - CANDIDATE_INGEST_KEYS - set(INGEST_CLASSES):
-            raise Refused(f"packages.yml ingest {workflow}: an ingest row is {{artifact, executable | object, commits, "
-                          f"after, published}}, its member under exactly one class, not {row!r}")
+            raise Refused(f"packages.yml ingest {workflow}: an ingest row is {{artifact, executable | object, "
+                          f"published}}, its member under exactly one class, not {row!r}")
         rows.append((str(workflow), row["artifact"], str(row[classes[0]]), classes[0], False))
     for workflow, row in sorted((document.get(CANDIDATE_VERDICTS) or {}).items()):
         if not isinstance(row, dict) or set(row) != CANDIDATE_VERDICT_KEYS \
@@ -3335,9 +3335,9 @@ def selftest() -> int:
         cgit = ["git", "-C", str(crepo), "-c", "user.email=t@t", "-c", "user.name=t"]
         (crepo / "packages.yml").write_text(
             "packages:\n  core: {release: true, version: 1.0.0}\ningest:\n"
-            "  golden.yaml: {artifact: determinism-golden, object: determinism-golden.txt, commits: [canon],\n"
+            "  golden.yaml: {artifact: determinism-golden, object: determinism-golden.txt,\n"
             "                published: {assets: [{name: canon.golden.txt}]}}\n"
-            "  windows.yml: {artifact: win, executable: win.exe, commits: [canon]}\n"
+            "  windows.yml: {artifact: win, executable: win.exe}\n"
             "candidate_verdicts:\n  asan-suite.yml: {artifact: asan-verdict, object: asan-suite.verdict.json}\n")
         (crepo / ".github" / "workflows" / "golden.yaml").write_text("on: workflow_call\n")
         (crepo / ".github" / "workflows" / "windows.yml").write_text("on: workflow_call\n")
@@ -3357,6 +3357,19 @@ def selftest() -> int:
                [("asan-suite.yml", "asan-verdict", "asan-suite.verdict.json", "object"),
                 ("golden.yaml", "determinism-golden", "determinism-golden.txt", "object"),
                 ("windows.yml", "win", "win.exe", "executable")])
+        retired = root / "retired-keys"
+        retired.mkdir()
+        rgit = ["git", "-C", str(retired), "-c", "user.email=t@t", "-c", "user.name=t"]
+        for key, value in (("commits", "[canon]"), ("after", "golden.yaml")):
+            (retired / "packages.yml").write_text(
+                f"ingest:\n  windows.yml: {{artifact: win, executable: win.exe, {key}: {value}}}\n")
+            subprocess.run(["git", "init", "-q", str(retired)], check=True)
+            subprocess.run([*rgit, "add", "-A"], check=True)
+            subprocess.run([*rgit, "commit", "-qm", key], check=True)
+            rcommit = _run(["git", "-C", str(retired), "rev-parse", "HEAD"]).strip()
+            arm(f"RED: an ingest row still carrying the retired `{key}:` key is refused by the row grammar "
+                f"(DN-142.D34: no reader is left for it)",
+                lambda: ingest_rows(retired, rcommit), "an ingest row is {artifact, executable | object, published}")
         ckey, _out = arm("CANDIDATE INGEST: the golden a job of the candidate's own run uploaded is stored as the record "
                          "`<repository>/ingest.golden`",
                          lambda: candidate_ingest(cstore, crepo, ccommit, "golden.yaml", artifact,

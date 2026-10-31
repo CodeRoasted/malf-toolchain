@@ -8,8 +8,7 @@
 #
 # WHY IN setup-build-env, not in a per-module script, where it first landed (malf 146c811): every
 # job that runs a package's tests passes through this action. A workflow's own bare `conan create`
-# in a `run:` block (the superproject's `conan-cache-publish.yml`) runs test_package and the
-# declared-skip judgment through no other shared step: the retired tag-time release build did exactly
+# in a `run:` block runs test_package and the declared-skip judgment through no other shared step: the retired tag-time release build did exactly
 # that, and coderoast-ipc's v1.10.7 Release (run 38738860055, job `release / publish`) refused the
 # same four skips its CI job in that very run had lifted and run. MALF_TOOLCHAIN_DIR moved here for
 # the identical reason (this action's own step says so).

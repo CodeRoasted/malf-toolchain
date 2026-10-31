@@ -443,8 +443,8 @@ echo
 echo "[7j0] artefact_store's object producers carry their own refusal proof (selftest): the objects convention resolves step -> record -> output -> member, the tracked step is keyed on blob ids at a commit, a package member is extracted from its transport only at its digest, and a candidate's ingestion refuses a declared class its bytes contradict and a PE carrying a symbol table or a CodeView entry (DN-142.D25, DN-142.D33 (3))"
 objects_selftest_output="$(timeout 120 python3 "$MALF_ROOT/artefact_store.py" selftest 2>&1)"
 objects_selftest_status=$?
-check "artefact_store selftest: 45 arms, every refusal fired, the system member refused outside the build environment, the transport extraction, the tracked record, a candidate's ingestion of its own run's artifact and its class, a candidate verdict stored only when it passed and only from a candidate_verdicts row of its shape, the bench verdict, the test_package member, the restore and the reuse decision intact" \
-      "ok" "$([[ $objects_selftest_status -eq 0 ]] && grep -q '^artefact_store selftest: 45 arm(s), 0 failure(s)$' <<< "$objects_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$objects_selftest_output")")"
+check "artefact_store selftest: 47 arms, every refusal fired (an ingest row carrying the retired `commits:` or `after:` key among them), the system member refused outside the build environment, the transport extraction, the tracked record, a candidate's ingestion of its own run's artifact and its class, a candidate verdict stored only when it passed and only from a candidate_verdicts row of its shape, the bench verdict, the test_package member, the restore and the reuse decision intact" \
+      "ok" "$([[ $objects_selftest_status -eq 0 ]] && grep -q '^artefact_store selftest: 47 arm(s), 0 failure(s)$' <<< "$objects_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$objects_selftest_output")")"
 
 echo
 

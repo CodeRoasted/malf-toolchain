@@ -702,7 +702,6 @@ ingest:
   golden.yaml:
     artifact: determinism-golden
     object: determinism-golden.txt
-    commits: [pub-repo]
     published: {assets: [{name: pub.golden.txt}]}
 """
 
@@ -906,7 +905,7 @@ def candidate_arms(arm: Callable, failures: list[str], root: Path, servers: list
         lambda: stage(candidate, declared, "9.9.9", "v9.9.8", root / "wrong-tag", quiet, measured),
         "is not the release tag v9.9.9")
     ingesting = json.loads(json.dumps(declared))
-    ingesting["ingest"]["windows.yml"] = {"artifact": "win", "executable": "win.exe", "commits": ["pub-repo"],
+    ingesting["ingest"]["windows.yml"] = {"artifact": "win", "executable": "win.exe",
                                           "published": {"assets": [{"name": "win.exe"}]}}
     arm("RED: a declared hosted output the candidate holds no ingestion of is refused by name, and nothing is staged",
         lambda: stage(candidate, ingesting, "9.9.9", "v9.9.9", root / "ingest", quiet, measured),

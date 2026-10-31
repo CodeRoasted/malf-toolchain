@@ -114,8 +114,8 @@ runs:
         # layout alone and is unreachable under `conan create`, which builds from sources exported
         # into the conan cache. CI is the environment that can declare, so it declares.
         #
-        # WHY HERE: a workflow's own bare `conan create` in a `run:` block (the superproject's
-        # `conan-cache-publish.yml`, eidos's `sift-windows.yml`) builds with whatever this job
+        # WHY HERE: a workflow's own bare `conan create` in a `run:` block (eidos's
+        # `sift-windows.yml`) builds with whatever this job
         # exports; until 2026-10-16 the release job of every consumer repository built that way with
         # the variable unset. `setup-build-env` is the step every such path does run, before any
         # build, and it derives the path from one fact (this action's own location inside the pinned
