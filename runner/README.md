@@ -80,7 +80,7 @@ changes nothing for the desk. Measured 2026-10-18 before it: the release seat's 
 
 Each seat keeps its **build slot in its own account's state**, `~/.local/state/coderoast-build/slot`
 (mode 700), named in the runner's `.env`: no account can open another seat's slot, so the stall class
-of a shared lock (a ci job holding step 0's mutex through a read-only descriptor) is gone by
+of a shared lock (a ci job holding a release job's mutex through a read-only descriptor) is gone by
 construction, and the shared root `/var/lib/coderoast-build` is retired.
 
 **The seat proof** (`seat-probe.py`, run by `--prove` and, CPU arms only, at the end of `--apply`),
@@ -108,7 +108,7 @@ onto CPUs 10–15 and unpinned desk loops sampled on them 6 873 times.
 The release cap holds only once `malf` derives its build width from the seat, not from the
 VM-wide `MemAvailable` (`DN-119.D9` (1), build row R5): until then a release build plans for about
 21 GiB inside a 10 GiB seat with no swap and is OOM-killed. Apply the release seat after R5 reaches
-the malf pin step 0 runs. Two further conditions hold it, both measured on step 0 run 39903608377,
+the malf pin the cut runs. Two further conditions hold it, both measured on step 0 run 39903608377,
 OOM-killed with 16 `cc1plus` in the seat: an act in the build environment reads the seat only because
 its container shares the host's cgroup namespace (`build_environment.py`, THE ACT SEES ITS SEAT; this
 seat's rootless dockerd gives a container no cgroup of its own, so the docker unit's cgroup, `memory.max`
@@ -205,10 +205,10 @@ admits. What it adds over the ci instance, and why:
 | home mode 700, no ACL, every file `ghrelease`'s | the account is the boundary: no ci job writes what a release executes, links or takes a verdict from |
 | `ProtectHome=tmpfs` + its own home bound back | no other home is visible from a release job, so nothing planted there is reachable even by a PATH mistake |
 | `ProtectSystem=full` | `/usr`, `/boot` and `/etc` read-only from a release job |
-| `PrivateIPC=yes` and a private `/dev/shm` (the ci instance has both too, § Seats) | step 0 runs the shared-memory transport's tests; a segment another account created under the same name would feed them, and a POSIX segment lives in `/dev/shm`, which the IPC namespace alone does not separate |
+| `PrivateIPC=yes` and a private `/dev/shm` (the ci instance has both too, § Seats) | the cut's benchmarks run on this seat, the shared-memory transport's among them (`bench-coderoast-ipc`); a segment another account created under the same name would feed them, and a POSIX segment lives in `/dev/shm`, which the IPC namespace alone does not separate |
 | its own venv, pinned from the desk's venv (never `ghrunner`'s) | a ci job can write `ghrunner`'s venv, so its package list is not a trusted source |
 | the registration token through stdin into `config.sh`'s environment | `/proc/<pid>/cmdline` is world-readable here; a token read from an argv enrols any runner into any group for an hour |
-| the build slot in `ghrelease`'s own state, mode 700 (§ Seats) | step 0 takes the slot; `malf slot` flocks `slot.lock` and flock works on a read-only descriptor, so an account able to open it could stall step 0 |
+| the build slot in `ghrelease`'s own state, mode 700 (§ Seats) | the cut's benchmark and e2e performance jobs take the slot; `malf slot` flocks `slot.lock` and flock works on a read-only descriptor, so an account able to open it could stall the cut |
 
 **The group's scope (Argos, 2026-09-29).** It admits `coderoast`, `coderoast-security`,
 `coderoast-server`, `insight-eidos` and `logcraft`, and no other: `insight-canon`,
@@ -402,10 +402,11 @@ gh variable set WINDOWS_RUNNER --org CodeRoasted --body self-hosted --visibility
 gh variable set WINDOWS_RUNNER --org CodeRoasted --body hosted --visibility private       # → windows-2025
 ```
 
-Unset reads as `hosted`. Under `self-hosted`, a leg at a release coordinate (the release, and the
-pre-tag reading of step 0's record) runs on the Windows release runner, `coderoast-release-windows`,
-and every other run (the weekly schedule, a plain dispatch) on this runner, whose label `malf-windows`
-the leg's expression names; `WINDOWS_RUNNER` is the Windows legs' ONE org variable (the superproject's
+Unset reads as `hosted`. Under `self-hosted`, `sift-windows.yml`'s `build` (the Windows engine a
+candidate stores and a release publishes) runs on the Windows release runner, `coderoast-release-windows`;
+`golden.yaml`'s `proof-msvc` runs there only for a caller naming its `runs-on` input, which no workflow
+does, and otherwise (the candidate's golden, the weekly schedule, a plain dispatch) on this runner, whose
+label `malf-windows` the leg's expression names; `WINDOWS_RUNNER` is the Windows legs' ONE org variable (the superproject's
 `workflow_source` refuses a runner reading a second, ROADMAP N394).
 The legs: insight-eidos's `golden.yaml` `proof-msvc` and `sift-windows.yml` `build`. The
 superproject's `workflow_source` check module reds on a private repository's Windows leg that
