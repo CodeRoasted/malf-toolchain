@@ -47,7 +47,7 @@ INSTANCES=(ci release)
 #   SEAT_SWAP_MAX  MemorySwapMax=; 0 on release, so an overshoot is an OOM kill inside the seat, a
 #                  loud red and never a slow thrash; empty leaves the seat's swap unbounded
 # THE SIZES ARE THE FOUNDER'S RULING (RUL-3, 2026-10-14: the desk gets the larger share, a slower
-# step 0 is accepted; the ci seat raised to 7 GiB on 2026-10-30). Of 16 vCPUs and 23.47 GiB: desk 0-7
+# cut is accepted; the ci seat raised to 7 GiB on 2026-10-30). Of 16 vCPUs and 23.47 GiB: desk 0-7
 # (8 vCPUs, the remainder, about 6.5 GiB guaranteed), ci 8-9, release 10-15. A change to .wslconfig `processors` or `memory` changes this
 # table in the same act: a cpuset naming a CPU the VM no longer has is refused by the partition unit,
 # and the seat stays offline.
@@ -87,7 +87,7 @@ instance_select() {
             RUNNER_DIRNAME="actions-runner-release"
             DOCKER_UNIT="coderoast-release-docker.service"
             STATE_DIR="/var/lib/coderoast-runner-isolation-release"
-            # Step 0 and the release jobs write no bank root.
+            # The cut's jobs and the release jobs write no bank root.
             BANK_WRITABLE=()
             # Mode 700 and no ACL: no other account reads what the release built before it ships,
             # the desk included; the desk reads a release job's log on GitHub, or as root.

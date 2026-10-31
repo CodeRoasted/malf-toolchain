@@ -852,7 +852,7 @@ def with_backends(docker: str, backends: list[Backend], argv: list[str]) -> int:
 
 # ── the probe: a digest-pinned image the launcher runs for an act (DN-142.D30 (11) R21) ─────────────
 #
-# An act that needs another image than the build environment's (B2 act 5's consumer container) never
+# An act that needs another image than the build environment's (`consumer_verdict.py`'s consumer container) never
 # holds a Docker socket: it writes what the probe reads into its scratch, and the launcher runs the
 # probe by digest, pulled when the daemon lacks it and verified to be held as that digest, with no
 # network, a read-only root, a tmpfs at /tmp and at its working directory, no mount and no variable.

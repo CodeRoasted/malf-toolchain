@@ -388,8 +388,8 @@ echo
 echo "[7i] store_replica carries its own refusal proof (selftest): the ghcr client and the package guard of a repository's own store fire against an in-process registry (DN-142.D31 (3))"
 replica_selftest_output="$(timeout 120 python3 "$MALF_ROOT/store_replica.py" selftest 2>&1)"
 replica_selftest_status=$?
-check "store_replica selftest: 19 arms, every refusal fired, the one visibility rule both ways (DN-142.D31 (3)), the sentinel linking a new package, the round trip byte-equal, the tag list followed across pages, a cached token reused, and no credential sent off the registry" \
-      "ok" "$([[ $replica_selftest_status -eq 0 ]] && grep -q '^store_replica selftest: 19 arm(s), 0 failure(s)$' <<< "$replica_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$replica_selftest_output")")"
+check "store_replica selftest: 21 arms, every refusal fired, the one visibility rule both ways (DN-142.D31 (3)), a public repository's private package refused with the delete remedy (DN-142.D38 (7)), the sentinel linking a new package, the round trip byte-equal, the tag list followed across pages, a cached token reused, and no credential sent off the registry" \
+      "ok" "$([[ $replica_selftest_status -eq 0 ]] && grep -q '^store_replica selftest: 21 arm(s), 0 failure(s)$' <<< "$replica_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$replica_selftest_output")")"
 
 echo
 
@@ -5277,7 +5277,7 @@ check "exports-verify: a package whose tracked files are modified on the desk is
       "rc=2 0 of 1 recipe(s) export the same recipe revision from the desk and from a fresh clone; 0 differ, 1 not judged|  UNJUDGED ex_probe: tracked files modified on the desk —" \
       "$(ex_gate g3)"
 
-# The verb FAILING is its own exit, 3, and never 1: step 0's B2 reads exit 1 as a recipe that
+# The verb FAILING is its own exit, 3, and never 1: a caller reads exit 1 as a recipe that
 # differs. Three failures before any verdict — a command the helper runs exits non-zero (the folder
 # is no git checkout), the helper raises (a malformed recipes row), and malf cannot derive the
 # recipe list (a workspace root with no scripts/workspace_layout.py) — each exits 3 and says FAILED.
@@ -5334,7 +5334,7 @@ check "exports-verify's population is every tracked first-party recipe, whatever
 
 # A declared repository ABSENT from the disk was skipped in silence, so the gate read green over
 # recipes it never saw. A repository the CLONE MANIFESTS declare (`required_repos`: repos.txt and
-# the toolchain's `toolchain.txt` row, all checked out by step 0) refuses, exit 3, named; one the root
+# the toolchain's `toolchain.txt` row, all checked out by the cut) refuses, exit 3, named; one the root
 # .gitignore alone declares (`opt` here; coderoast-corpora on the desk) is
 # named as not swept and the run goes on. `s` stays on disk, so the old skip reads exit 0 over it.
 check "exports-verify: a declared repository that is not a clone-manifest one and is absent is named as not swept, never silently" \
@@ -6810,7 +6810,7 @@ echo "[7q11] conan is installed from a hash lock, into a job-scoped venv, never 
 # The property is the INSTALL LINE and the LOCK together: `--require-hashes` refuses a file whose
 # digest the lock does not list, and `--only-binary=:all:` keeps pip from fetching an unhashed build
 # dependency. Read from the action and the lock as committed; the network install is proven by every
-# job that runs setup-build-env, step 0's build and lint jobs first.
+# job that runs setup-build-env.
 cl_action="$MALF_ROOT/.github/actions/setup-build-env/action.yml"
 cl_default="$(awk '/^  conan-version:/{f=1} f && /default:/{gsub(/[^0-9.]/, "", $2); print $2; exit}' "$cl_action")"
 cl_lock="$MALF_ROOT/.github/actions/setup-build-env/conan-$cl_default.txt"
@@ -6943,10 +6943,9 @@ check "the step prints the patchelf that runs and its version" \
 rm -rf "$pe_tmp"
 echo
 
-echo "[7q16] store-create prints each step's time on its opening and closing lines, for step 0's timing sidecar (DN-119.D4)"
+echo "[7q16] store-create prints each step's time on its opening and closing lines, for a reader of the walk's log (DN-119.D4)"
 
-# note: the closing line's pattern is Pharos's STORE_STEP_CLOSED, spelled the same; the walk's own use
-# of the two functions is the cmd_store_create body arm below.
+# note: the walk's own use of the two functions is the cmd_store_create body arm below.
 st_tmp="$(realpath "$(mktemp -d)")"
 st_out="$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e
     _malf_store_clock "$2/times"; run_at="$_MALF_CLOCK_AT"

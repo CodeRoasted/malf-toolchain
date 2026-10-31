@@ -5618,7 +5618,7 @@ _malf_store_root() {
 
 # THE ACT'S PARAMETER DOCUMENT (DN-142.D2, DN-142.D19 (1)), the `parameters` half of every key's
 # `definition` beside malf's tree: `{argv, env, profile}`, the program and verb, each non-location
-# variable the driver handed, the profile name. A driver (Pharos at step 0) hands it in
+# variable the driver handed, the profile name. A driver hands it in
 # MALF_STORE_PARAMETERS, and artefact_store.py checks it against this act; an act no driver ran
 # composes its own with `env` empty, so a desk run and a driven one at the same parameters share keys.
 # pre: $1 is the act's profile name, $2... its program and verb.
@@ -5738,7 +5738,7 @@ _malf_store_create_in_environment() {   # <writer|ship> <package>...
 # MALF_UPSTREAM_SOURCES names (colon-separated, each also in MALF_UPSTREAM_ROOTS; DN-142.D31 (2)). A source-only
 # upstream ships no package, so no store holds a record to restore it from: a package of it that a step depends
 # on (coderoast_server's test_requires on coderoast-hub's insight_scenarios) is a step of this walk, created from
-# that source at the commit the candidate names, as step 0's workspace walk created it. A candidate upstream's
+# that source at the commit the candidate names. A candidate upstream's
 # root is never walked: its packages are restored from its own records, never built.
 # post: the steps on stdout, one graph over the source roots and the workspace, so a step's edge reaches a source
 #       root's package; else non-zero naming the refusal.
@@ -6022,12 +6022,12 @@ _malf_quote_log() {   # <log> <subject>
 }
 
 # THE BENCHMARKS (DN-142.D25 (5) calls D and E): MALF_BENCH, when set, names the parameter document
-# step 0's Pharos writes, `{"packages": [...]}`. Every create then carries `-c user.malf:bench=<document>`
+# the cut's bench job writes (`pharos candidates bench`), `{"packages": [...]}`. Every create then carries `-c user.malf:bench=<document>`
 # and the deadlock watchdog's path, so each package the document names runs its benchmarks inside its
 # create (malf_recipe_tests.py) and artefact_store.py records them as the verdict `<package>/bench`. A
 # benchmark measured beside another build is noise, so the walk runs them only while it holds the
-# machine's build slot: MALF_BENCH_SLOT_TOKEN must be the token of the slot as held now. Step 0 runs its
-# acts and this walk its steps in sequence, so nothing of step 0's own runs beside a bench.
+# machine's build slot: MALF_BENCH_SLOT_TOKEN must be the token of the slot as held now. The cut runs its
+# bench jobs one at a time inside its quiet window, so nothing of the cut's own runs beside a bench.
 # post: the create arguments, one per line (none when MALF_BENCH is unset); a single `REFUSED` line,
 #       the cause on stderr, when MALF_BENCH names no file or the slot is not held under that token.
 _malf_store_bench_args() {
@@ -6253,14 +6253,14 @@ _malf_store_create_in() {   # <name> <path> <store> <scratch> <prefixes> <step h
     [[ $rc -eq 0 ]] || { [[ $rc -eq 2 ]] && return "$_MALF_STEP_STOPPED"; return "$_MALF_STEP_UNRECORDED"; }
 }
 
-# A STEP'S TIME IS PRINTED ON ITS OWN TWO LINES, for step 0's timing sidecar (DN-119.D4), which reads
-# one act per step off them. The opening line names the step and the seconds since the walk began;
+# A STEP'S TIME IS PRINTED ON ITS OWN TWO LINES, so a reader of the walk's log reads one act per step
+# off them (DN-119.D4). The opening line names the step and the seconds since the walk began;
 # the closing line, `--- store-create [<n>] <name> <PASS|FAILED|UNRECORDED> · at <s> s · wall <s> s
 # · cpu <s> s ---`, adds the step's own wall and its children's CPU. The clock is the kernel's
 # seconds since boot (`/proc/uptime`), never the wall clock, so a clock step cannot move a step's
 # time; the CPU is bash's `times` for this shell's reaped children, which is why it must run in the
-# walking shell itself and never in a command substitution. Pharos's STORE_STEP_CLOSED reads the
-# closing line, and malf's selftest [7q11] parses what these functions print with the same pattern.
+# walking shell itself and never in a command substitution. malf's selftest [7q16] parses what these
+# functions print.
 # post: _MALF_CLOCK_AT holds the seconds since boot and _MALF_CLOCK_CPU this shell's children's
 #       user plus system CPU seconds.
 _malf_store_clock() {   # <times file>

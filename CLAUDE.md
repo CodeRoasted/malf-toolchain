@@ -27,7 +27,7 @@ Root CLAUDE.md owns malf *usage*; this file is for working ON the tooling.
   commit** (the Founder, 2026-10-14). Commit to `main` and stop; the cut's one
   re-pin (the superproject's `OPS-1.S15` layering rule: the self-references one
   commit per nesting layer, then the consumers) carries every commit since the
-  last one, and step 0 reds at the cut until it has (`pin_coherence` INV-17 (g),
+  last one, and the cut's `pins` preflight job reds until it has (`pin_coherence` INV-17 (g),
   `OPS-1.S3`). Re-pin between cuts only on a stated need, a consumer change that
   needs malf code the pin lacks, and name that need in the re-pin's message.
   **Every re-pin cuts a toolchain release** (`DN-108.D38`): `./pharos repin

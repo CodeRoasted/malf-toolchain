@@ -1044,7 +1044,7 @@ def step_backends() -> list:
     return json.loads(Path(named).read_text()) if named else []
 
 
-# THE FORM OF A CREATE (DN-142.D31 (1)): `writer`, step 0's create running every test and test_package,
+# THE FORM OF A CREATE (DN-142.D31 (1)): `writer`, the create running every test and test_package,
 # or `ship`, a candidate's create running its test_package alone (`malf_recipe_tests.CREATE_ARGS`). Two
 # acts, so two keys: the form is a member of every `conan-create` step, and through the step's key it
 # reaches its verdict's and its outcome's, so an outcome of one form never serves a request of the other.
@@ -2299,7 +2299,7 @@ def _link_step_files(results: Path, package: str, package_id: str, files: list[P
 
 
 # THE BENCH VERDICT (DN-142.D25 (5) calls D and E): a timing verdict run INSIDE the create of the
-# package that builds the benchmark, under the `user.malf:bench` conf step 0 sets, and recorded as a
+# package that builds the benchmark, under the `user.malf:bench` conf the bench walk sets, and recorded as a
 # generalized verdict of its own, `<package>/bench`. Its key is the build key, the helper that ran the
 # selection, the predicate and the runner it measured on; its objects are the google-benchmark JSONs,
 # one per executable, never compared (DN-142.D7: a timing verdict compares its verdict, never its
@@ -2586,8 +2586,8 @@ def _transport(home: Path, binary: str, scratch: Path, sources: bool = True) -> 
 # Its document names the step and its predicate with the predicate's parameters, the definition,
 # what it judged, the data it read (content digests), the toolchain and system, and `context`, only
 # what the predicate declares it reads (the date, V, the runner). Its outputs: the verdict, the
-# findings' digest and their entries, `record` (the exact fragment the step writes into the step-0
-# record, so a reused step reproduces it byte for byte) and named `objects`. A rebuild compares the
+# findings' digest and their entries, `record` (the exact fragment the step writes into its stage's
+# verdict, so a reused step reproduces it byte for byte) and named `objects`. A rebuild compares the
 # verdict, the findings and the record, NEVER an entry or an object: a timing verdict's numbers ride
 # its object, so equal verdicts over different numbers MATCH.
 VERDICT_DOCUMENT_MEMBERS = ("step", "definition", "judged", "data", "toolchain", "system", "context")
@@ -2617,7 +2617,7 @@ def judged_verdict(store: Path, document: dict, outputs: dict, objects: dict[str
                    name: str = "verdict") -> int:
     """Store or compare one generalized verdict: `outputs` holds the verdict, the findings as a list
     (kept as their digest), the entries and the record fragment; `objects` names the files kept as
-    the record's objects; `name` is the output's name, which the step-0 record's step id carries
+    the record's objects; `name` is the output's name, which the record's step id carries
     (`<subject>/<name>`), so a release verdict over a package (`consumer`) never shares an id with
     the package's test verdict. post: exit 0 stored or matching, 1 a mismatch; a shape that is not
     the kind's exits the process naming every defect (a refused record is never written)."""
@@ -3480,7 +3480,7 @@ def selftest() -> int:
         bench_run(ok)
         rc, printed = arm("a bench run that every executable passed is stored as the verdict `bench`", bench, None)
         key = next(iter(listing(bstore, "records")), "").removesuffix(".json")
-        expect("stored once, its verdict pass, its line read by step 0",
+        expect("stored once, its verdict pass, its STORED line printed",
                (rc, len(listing(bstore, "records")), f"STORED logcraft_core {BENCH_OUTPUT} key {key} verdict pass" in printed),
                (0, 1, True))
         if key:

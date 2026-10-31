@@ -1693,10 +1693,10 @@ def selftest() -> int:
 
             # -- the guard: the one visibility rule, through the API the token reads.
             for label, answers, said in (
-                    ("a public repository's store still private (before the Founder's flip)",
+                    ("a public repository's store still private, with the delete remedy (DN-142.D38 (7))",
                      {"orgs/coderoasted/packages/container/store-coderoast-ipc":
                       {"visibility": "private", "repository": {"full_name": "CodeRoasted/coderoast-ipc"}}},
-                     "not 'public'"),
+                     "never made public by a setting — delete it in"),
                     ("a public repository's store linked to no repository",
                      {"orgs/coderoasted/packages/container/store-coderoast-ipc": {"visibility": "public"}},
                      "linked to no repository"),

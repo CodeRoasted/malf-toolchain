@@ -79,7 +79,7 @@ jobs:
       - name: the golden's agreement is the compare job's verdict, so its upload follows the compare (DN-142.D25 (5), call A)
         run: bash tests/test_golden_compare_shape.sh
 
-      - name: attest admits a step-0 run only at a candidate of its version, naming that candidate, at a commit main contains (DN-108.D36 (15))
+      - name: attest admits a cut run only at a candidate of its version, naming that candidate, at a commit main contains (DN-108.D36 (15))
         run: bash tests/test_attest_listing.sh
 
       - name: malf_checkout selftest (a candidate's one malf, held by bytes outside .github/ across re-pin layers)

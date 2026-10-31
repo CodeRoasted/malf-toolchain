@@ -245,13 +245,22 @@ def package_defect(seen: dict | None, package: str, expected: Expected) -> str |
 
 
 def verify_package(view: Callable[[str], dict | None], org: str, package: str, expected: Expected) -> None:
-    """Refuse unless the package exists with the visibility and the link `expected` names."""
-    defect = package_defect(view(package), package, expected)
+    """Refuse unless the package exists with the visibility and the link `expected` names. A private
+    package of a public repository is never made public by a setting (DN-142.D38 (7)): its content was
+    written with no licence judged, so its remedy is deletion, and the next push recreates it public
+    and judges every third-party record it writes. Every other defect is set in the package's settings."""
+    seen = view(package)
+    defect = package_defect(seen, package, expected)
     if defect is None:
         return
     settings = f"https://github.com/orgs/{org}/packages/container/{package}/settings"
-    if defect.endswith("does not exist"):
+    if seen is None:
         raise Refused(f"{defect} after its sentinel push, so it cannot be verified")
+    if expected.visibility == "public" and seen.get("visibility") == "private":
+        raise Refused(f"{package} is 'private' and {expected.linked} is public: a private store's content was "
+                      f"written with no licence judged (DN-142.D38 (7)), so it is never made public by a "
+                      f"setting — delete it in {settings}; the next push recreates it public and judges every "
+                      f"third-party record it writes")
     raise Refused(f"{defect}: set it in {settings} (no API sets visibility or link); nothing more is "
                   f"pushed until a run verifies it")
 
@@ -465,9 +474,6 @@ def selftest() -> int:
                 ("a private repository's own store, private and linked to it, is accepted",
                  {"visibility": "private", "repository": {"full_name": "CodeRoasted/coderoast-ipc"}},
                  "private", None),
-                ("RED: a public repository's own store still private (before the flip) is refused",
-                 {"visibility": "private", "repository": {"full_name": "CodeRoasted/coderoast-ipc"}},
-                 "public", "not 'public'"),
                 ("RED: a public repository's own store linked to no repository is refused",
                  {"visibility": "public"}, "public", "linked to no repository, not coderoasted/coderoast-ipc"),
                 ("RED: an own store linked to ANOTHER repository is refused",
@@ -478,6 +484,25 @@ def selftest() -> int:
             fake, registry, view, said = scene()
             fake.package = {"name": PACKAGE, **package_view}
             arm(label, guarded(registry, view, said, expected_package(OWNER, REPOSITORY, own)), refusal)
+        fake, registry, view, said = scene()
+        fake.package = {"name": PACKAGE, "visibility": "private",
+                        "repository": {"full_name": "CodeRoasted/coderoast-ipc"}}
+        arm("RED: a public repository's own store still private is refused with the DELETE remedy, never a setting",
+            guarded(registry, view, said, expected_package(OWNER, REPOSITORY, "public")),
+            "is never made public by a setting — delete it in https://github.com/orgs/")
+        if fake.blobs or fake.manifests:
+            failures.append(f"the delete-remedy refusal pushed {len(fake.blobs)} blob(s) and "
+                            f"{len(fake.manifests)} manifest(s), want none")
+        fake, registry, view, said = scene()
+        fake.package = {"name": PACKAGE, "visibility": "public",
+                        "repository": {"full_name": "CodeRoasted/coderoast-ipc"}}
+        arm("RED: a private repository's own store made public keeps the set-it remedy",
+            guarded(registry, view, said, private), "is 'public', not 'private': set it in https://github.com/orgs/")
+        fake, registry, view, said = scene(created_visibility="public")
+        arm("a public repository with no package: the sentinel creates it public, and the guard passes",
+            guarded(registry, view, said, expected_package(OWNER, REPOSITORY, "public")), None)
+        if SENTINEL_TAG not in fake.tags:
+            failures.append(f"the public repository's registry holds tags {sorted(fake.tags)}, want the sentinel")
         arm("RED: an owned store of a visibility no rule names is refused",
             lambda: expected_package(OWNER, REPOSITORY, "internal"), "no rule names")
         if json.loads(sentinel_manifest(private)).get("annotations") != {

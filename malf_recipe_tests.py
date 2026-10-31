@@ -20,7 +20,7 @@ runs the same selection through `run_test_package(self)` and writes a second res
 (`<results>/<name>/<package id>.xml`): the step's verdict has two populations (DN-142.D13 (2)).
 
 THE THREE CONF SETS OF A `conan create` are defined here and nowhere else (DN-142.D13 (1),
-DN-142.D31 (1)). The WRITER (step 0's `malf store-create`) sets no skip conf: it builds and runs
+DN-142.D31 (1)). The WRITER (`malf store-create` without `--ship`) sets no skip conf: it builds and runs
 every test and every test_package. The SHIP-BENCH set is the ship form's when `MALF_BENCH` names a bench
 document (the cut's bench measurement, DN-142.D33): no skip conf, so the test and bench targets are configured,
 and `user.malf:bench_only`, so the build runs no test and only the named benchmarks. The SHIP form (a

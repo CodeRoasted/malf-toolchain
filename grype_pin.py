@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""The second CVE scanner step 0 runs beside trivy: one grype release and one grype vulnerability database build, each admitted only by its digest.
+"""The second CVE scanner the cut's `cve` job runs beside trivy: one grype release and one grype vulnerability database build, each admitted only by its digest.
 
 WHY GRYPE (the Founder, 2026-10-13, the N360 plan's ruling R-10 (c)). trivy matches a pkg:conan
 component by its NAME against its conan advisory source and ignores the CPE that `sbom_gen.py`
 curates, so most of a CodeRoast SBOM's C/C++ components are never matched (measured 2026-10-12 with
 trivy 0.74.0: nothing reported for curl 8.20.0, against which curl's own feed lists 27 advisories).
-grype matches those CPEs. Both are REPORT-ONLY at step 0: no finding of either ever blocks a cut;
+grype matches those CPEs. Both are REPORT-ONLY at the cut: no finding of either ever blocks a cut;
 a scanner that did not run, or failed, is red.
 
 WHY A DIGEST AND NEVER A TAG — for the binary, the same argument as `trivy_pin.py`'s: the scanner
-runs on the release runner, whose account holds the store writer's signing key, so a moved tag, a
+runs on the release runner, whose account runs the cut and its publications, so a moved tag, a
 replaced asset or a man in the middle must yield bytes that hash otherwise, and nothing is
 extracted or run.
 

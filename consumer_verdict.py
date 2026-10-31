@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A published executable's CONSUMER verdict at step 0: the stored bytes judged as a consumer's host would run them.
+"""A published executable's CONSUMER verdict in its candidate's store job: the stored bytes judged as a consumer's host would run them.
 
 N360 plan A2(d), DN-142.D20 (3): the gates a release used to run over its own tag-time rebuild of
 `sift` become ONE keyed verdict step over the STORED entry, by its entry digest, so the manifest
@@ -35,7 +35,7 @@ mount namespace, which on the release runner holds a private /tmp (step 0 run 38
 sh: 1: ./sift: not found`); the stdin stream reaches the container from any namespace, and the
 in-container digest check reds a container that ran anything else.
 
-THE CONSUMER BASELINE IS THE PRODUCT'S DECLARATION, read at the commit step 0 recorded from
+THE CONSUMER BASELINE IS THE PRODUCT'S DECLARATION, read at the commit the candidate builds from
 `<package path>/consumer/` of the package's repository: `baseline.json` (`container`, an image
 reference pinned by digest; `glibc_ceiling`; `smoke`: the two log files, the line that must be a
 change and the line that must not) and the two logs. Its git tree id and the container reference
@@ -292,7 +292,7 @@ def prepare(store: Path, steps: list[dict], package: str, entry: str, repository
     step = {row["id"]: row for row in steps}.get(f"{package}/package")
     record = artefact_store.LocalStore(store).record(step["key"]) if step else None
     if record is None:
-        raise Refused(f"step 0 stored no {package} package in this run")
+        raise Refused(f"this run stored no {package} package")
     output = record["outputs"]["package"]
     held = {path: digest for path, _mode, digest in output["entries"]}
     if entry not in held:
@@ -378,8 +378,8 @@ def conclude(store: Path, scratch: Path, member: dict, environ: dict) -> int:
 
 # ── a CANDIDATE's consumer verdicts (DN-142.D33, slice (a)'s rulings) ─────────────────────────────────
 #
-# The repository's candidate store job runs the verdict over its own ship-form entry, the act step 0's B2
-# act 5 ran: `prepare` and `conclude` in the pinned image through malf's launcher (`build_environment.py
+# The repository's candidate store job runs the verdict over its own ship-form entry:
+# `prepare` and `conclude` in the pinned image through malf's launcher (`build_environment.py
 # run`, the system attested to `--attest`), the consumer container as the launcher's `probe`, and the
 # `toolchain` member measured in that image, of the one tool the act runs, its python3.
 TOOLCHAIN_PROBE = ("import hashlib, json, os, sys; real = os.path.realpath(sys.executable); "

@@ -1,6 +1,6 @@
 # The build environment's Python, pinned `==` with the sha256 of the one file each version installs from
 # (DN-142.D30 (3)): the versions the desk's venv (~/venvs/common) ran on 2026-10-18, resolved for
-# CPython 3.12 on manylinux x86_64. conan and its closure, cmake, ninja, PyYAML and the jsonschema closure step 0's Pharos imports.
+# CPython 3.12 on manylinux x86_64. conan and its closure, cmake, ninja, PyYAML and the jsonschema closure the cut's Pharos imports.
 attrs==26.1.0 \
     --hash=sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309
 certifi==2026.2.25 \

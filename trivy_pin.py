@@ -4,8 +4,8 @@
 WHY A DIGEST AND NEVER A TAG. The gate used to run `curl …/aquasecurity/trivy/v<V>/contrib/install.sh |
 sh`: the script, and the binary it chose, were whatever that tag named at the moment of the run.
 Trivy's own release publishing was taken over on 2026-03-19 and shipped a malicious v0.69.4
-(GO-2026-4919), and insight-eidos's release runs the gate on the release runner, whose account
-holds the store writer's signing key. So the scanner is admitted here by the SHA-256 of its
+(GO-2026-4919), and the cut's `cve` job runs the scanner on the release runner, whose account
+runs the cut and its publications. So the scanner is admitted here by the SHA-256 of its
 release tarball, a constant of this file: a moved tag, a replaced asset or a man in the middle
 yields bytes that hash otherwise, and nothing is extracted or run.
 

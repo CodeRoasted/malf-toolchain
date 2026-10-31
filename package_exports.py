@@ -28,7 +28,7 @@ files whose bytes differ, or that one side alone exports), 2 when a package coul
 3 when the helper itself failed before a verdict — a command it runs exits non-zero, the
 workspace declares no such recipe, the arguments are malformed, or it raises. Exit 1 is the one
 code an uncaught Python exception also produces, so `main` maps every failure onto 3 and exit 1
-means a differing recipe and nothing else; step 0's B2 reads the code, never the text.
+means a differing recipe and nothing else; a caller reads the code, never the text.
 """
 
 from __future__ import annotations
@@ -129,7 +129,7 @@ def recipes(workspace: Path) -> int:
     the workspace's DECLARED ones (scripts/workspace_layout.py), never whatever sits on the disk.
 
     A repository the CLONE MANIFESTS declare (`required_repos`: repos.txt plus the toolchain's
-    `toolchain.txt` row, every one of them checked out by step 0) and absent from the disk refuses
+    `toolchain.txt` row, every one of them checked out by the cut) and absent from the disk refuses
     the population, naming it: skipping it would read green over recipes never judged. A
     repository the root `.gitignore` alone declares (`coderoast-corpora` today: no recipe, and a
     desk without access to the private warehouse does not hold it) is judged when present and

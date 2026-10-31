@@ -34,7 +34,7 @@ grammar is migrated by OPS-8 before it lands; there is no report-only window to 
 ONE CODE RULE RIDES THIS PHASE: the self-compare assertion (RUL-206). `EXPECT_EQ(count, count)` is a
 contract claim that cannot fail, and this phase is the one place every commit already judges every
 C++ source a change touches (Pharos's `cpp_format`), at the edit (`./pharos judge-comments`) and over
-every armed repository at step 0 — so the rule is a violation class here, printed and fixed like the
+every armed repository in the cut's `fleet` job — so the rule is a violation class here, printed and fixed like the
 others, rather than a second walk. It is the near-exact form only, and its blind side is declared
 beside it (`self_compares`): it never sees an operand compared with what it was computed from.
 

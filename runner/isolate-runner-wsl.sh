@@ -41,8 +41,8 @@
 # release runner executes, links or takes a verdict from. The account is that boundary — its home is
 # mode 700 with no ACL, and every file under it is its own. Its unit adds ProtectHome=tmpfs with its
 # own home bound back (no other home is visible from a release job), ProtectSystem=full, a private
-# /dev/shm and a private IPC namespace (step 0 runs the shared-memory transport's tests, and a
-# segment another account created under the same name would feed them). Its runner carries no
+# /dev/shm and a private IPC namespace (a release job that runs the shared-memory transport's
+# tests would otherwise be fed a segment another account created under the same name). Its runner carries no
 # label but `coderoast-release` and registers into the group `coderoast-release`.
 #
 # THE SEAT (DN-119.D9, RUL-3). Each instance runs in its own top-level slice, made a cpuset PARTITION
