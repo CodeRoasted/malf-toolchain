@@ -90,15 +90,15 @@ jobs:
 
       - name: malf at this workflow's commit, as git
         id: malf
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@cbd753fd00b470ec349490321e9bb1b0512f8075
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@cb7727a91eb9ea1e7213b9a4dcd149f692f8ca03
         with:
           workflow: coderoast-candidate.yml
 
       - name: The pinned gh the attestation reads run through
-        uses: CodeRoasted/malf-toolchain/.github/actions/setup-gh@cbd753fd00b470ec349490321e9bb1b0512f8075
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-gh@cb7727a91eb9ea1e7213b9a4dcd149f692f8ca03
 
       - name: The pinned build environment and the host's provisioning tools
-        uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-environment@cbd753fd00b470ec349490321e9bb1b0512f8075
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-environment@cb7727a91eb9ea1e7213b9a4dcd149f692f8ca03
 
       - name: The CI job's store (its source verdicts)
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -231,7 +231,7 @@ jobs:
       # here, in that job's home, before anything is stored.
       - name: The committed SBOM matches the ship form's resolved graph
         if: ${{ inputs.sbom-path != '' }}
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-sbom-check@cbd753fd00b470ec349490321e9bb1b0512f8075
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-sbom-check@cb7727a91eb9ea1e7213b9a4dcd149f692f8ca03
         env:
           CONAN_HOME: ${{ runner.temp }}/candidate-conan-host/cut-verify
         with:
