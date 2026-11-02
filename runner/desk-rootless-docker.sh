@@ -59,7 +59,7 @@ ROOTFUL_SOCK=/var/run/docker.sock
 RUNNER_CREDENTIAL=/home/ghrelease/actions-runner-release/.credentials
 # Public mirror (no Docker Hub pull), the digest coderoast-server's redis fixture and the runner
 # isolation script pin.
-SMOKE_IMAGE="ghcr.io/coderoasted/mirror/library/redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499"
+SMOKE_IMAGE="ghcr.io/coderoasted/mirror/library/redis:7-alpine@sha256:8da19c7399dca900c6822a1cf30f9d2285585e2c4b457ff4095b0f4500054d3f"
 
 render_child() {
     cat <<'EOF'

@@ -84,7 +84,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PACKAGES=(acl uidmap rootlesskit slirp4netns docker-buildx)
 # Public mirror (no Docker Hub pull), the same digest coderoast-server's redis fixture pins.
-SMOKE_IMAGE="ghcr.io/coderoasted/mirror/library/redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499"
+SMOKE_IMAGE="ghcr.io/coderoasted/mirror/library/redis:7-alpine@sha256:8da19c7399dca900c6822a1cf30f9d2285585e2c4b457ff4095b0f4500054d3f"
 SUBID_COUNT=65536
 
 APPLY=false
