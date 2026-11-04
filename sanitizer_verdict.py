@@ -28,7 +28,7 @@ here unchanged:
     REPLAY_SANITIZER_ENV. 124 and 137 are a replay past its bound (`timeout`); 126 and 127 `timeout`'s own failure
     to execute (unjudged). A green exit is judged by its POPULATION: the binary's closing
     `parse_fuzzer replay: N input(s) processed` line, the LAST one printed, N at least the committed seeds and
-    above zero, else it judged less than its subject (DN-108.D14). A red names the seed the binary named last
+    above zero, else it judged less than its subject (ADR-2.D13). A red names the seed the binary named last
     (`parse_fuzzer replay: input <path>`), the one it was on when it stopped — a committed, retrievable input.
 
   valgrind-replay — the repository's own driver (`fuzz/scripts/valgrind_replay.sh`) at the ship profile, the
@@ -175,7 +175,7 @@ def fuzz_replay(run: Runner, repository: Path, package: str, binary: str, corpus
 
     if seeds == 0:
         return verdict(UNJUDGED, f"the seed corpus {corpus} holds ZERO committed seeds: a replay over no seed is a "
-                                 f"green over nothing (DN-108.D14)")
+                                 f"green over nothing (ADR-2.D13)")
     built = act(run, repository, ASAN_PROFILE, [str(MALF), "build", package, "--asan"])
     exits["build"] = built.code if built.started() else None
     if not built.started() or built.code != 0:
@@ -225,7 +225,7 @@ def valgrind_replay(run: Runner, repository: Path, driver: str, corpus: str) -> 
 
     if seeds == 0:
         return verdict(UNJUDGED, f"the seed corpus {corpus} holds ZERO committed seeds: a replay over no seed is a "
-                                 f"green over nothing (DN-108.D14)")
+                                 f"green over nothing (ADR-2.D13)")
     replay = act(run, repository, SHIP_PROFILE, ["env", f"MALF={MALF}", "bash", driver, corpus], restore=True)
     if not replay.started():
         return verdict(UNJUDGED, f"malf source-act refused before the driver ran (exit {replay.code})")

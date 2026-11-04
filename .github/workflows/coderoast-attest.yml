@@ -326,7 +326,7 @@ jobs:
               refuse(f"the cut record for {version} is schema {record.get('schema')!r}, cuttable="
                      f"{record.get('cuttable')!r}. The record job writes its record on EVERY path but a cancel, so "
                      f"the existence of a record is not a pass: only a `pharos-cut-record/1` record whose cuttable "
-                     f"is the JSON literal `true` attests (DN-108.D14, DN-142.D33). Read its `problems` and re-run "
+                     f"is the JSON literal `true` attests (ADR-2.D13, DN-142.D33). Read its `problems` and re-run "
                      f"the cut in {record_repo}.")
 
           repos = record.get("repos")
