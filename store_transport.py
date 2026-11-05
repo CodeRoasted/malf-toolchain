@@ -1139,8 +1139,7 @@ def _put(registry: Registry, reference: str, manifest: bytes, blobs: list[bytes]
     for data in [store_replica.EMPTY_BYTES, *blobs]:
         registry.push_blob(sha256(data), data)
     written = registry.put_manifest(reference, manifest)
-    if registry.manifest_digest(reference) != written:
-        raise Refused(f"{registry.name}:{reference} did not read back as {written}")
+    registry.read_back(reference, written)
     return written[7:]
 
 

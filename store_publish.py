@@ -699,8 +699,10 @@ def publish_image(candidate: Candidate, declared: dict, target: store_replica.Re
             target.put_manifest(tag, body)
         except store_replica.Refused as refused:
             raise Refused(f"{image}: {refused}") from refused
-    if target.manifest_digest(tag) != manifest:
-        raise Refused(f"{target.name}:{tag} did not read back as {manifest}")
+    try:
+        target.read_back(tag, manifest)
+    except store_replica.Refused as refused:
+        raise Refused(f"{image}: {refused}") from refused
     say(f"store_publish: IMAGE {target.name}@{manifest} tagged {tag} (record {row['record']})")
     return manifest
 

@@ -30,6 +30,7 @@ import json
 import re
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -47,6 +48,11 @@ EMPTY_BYTES = b"{}"
 EMPTY_DIGEST = "sha256:" + hashlib.sha256(EMPTY_BYTES).hexdigest()
 TAGS_PAGE = 1000
 LINK_NEXT = re.compile(r'<([^>]+)>\s*;\s*rel="?next"?')
+# note: ghcr acknowledges a manifest PUT (201, its digest) before a read of the tag serves it — measured
+# 2026-11-05, insight-eidos candidate run 42070714060: the HEAD right after a 201 did not answer the
+# manifest the PUT stored, which ghcr then served. A tag still ABSENT is re-read after each of these
+# seconds (31 s in all); a tag answering ANOTHER digest is refused at once, never waited on.
+READ_BACK_DELAYS = (1, 2, 4, 8, 16)
 
 
 class Refused(Exception):
@@ -96,6 +102,7 @@ class Registry:
     name: str
     credentials: tuple[str, str] | None = None
     tokens: dict[str, str] = field(default_factory=dict)
+    sleep: Callable[[float], None] = time.sleep
 
     def _authorization(self, challenge: str, actions: str) -> str:
         fields = dict(re.findall(r'(\w+)="([^"]*)"', challenge))
@@ -151,6 +158,21 @@ class Registry:
         if answer.status != 200:
             raise Refused(f"HEAD manifest {self.name}:{reference}: HTTP {answer.status}")
         return answer.headers.get("docker-content-digest")
+
+    def read_back(self, reference: str, written: str) -> None:
+        """`reference` answers `written`, the digest just PUT there. A tag still absent is re-read on the
+        READ_BACK_DELAYS schedule, the registry's read-after-write lag; one answering another digest is refused
+        at once, and one still absent once the schedule is spent is refused naming the reads it took."""
+        for delay in (0, *READ_BACK_DELAYS):
+            if delay:
+                self.sleep(delay)
+            held = self.manifest_digest(reference)
+            if held == written:
+                return
+            if held is not None:
+                raise Refused(f"{self.name}:{reference} did not read back as {written}: it answers {held}")
+        raise Refused(f"{self.name}:{reference} did not read back as {written}: still absent after "
+                      f"{len(READ_BACK_DELAYS) + 1} reads over {sum(READ_BACK_DELAYS)} s")
 
     def push_blob(self, hex_digest: str, data: bytes) -> None:
         if self.call("HEAD", f"blobs/sha256:{hex_digest}", "pull,push").status == 200:
@@ -299,6 +321,9 @@ class Fake:
     package: dict | None = None
     created_visibility: str = "private"
     lie_manifest_digest: bool = False
+    tag_lag: int = 0
+    tag_answers: str = ""
+    lagging: dict[str, int] = field(default_factory=dict)
     corrupt_blobs: bool = False
     bearer: str = "fake-bearer"
     realm: str = ""
@@ -352,6 +377,7 @@ def _fake_server(fake: Fake) -> tuple[http.server.ThreadingHTTPServer, str]:
                     fake.manifests[digest] = data
                     if not reference.startswith("sha256:"):
                         fake.tags[reference] = digest
+                        fake.lagging[reference] = fake.tag_lag
                     if fake.package is None:
                         source = (json.loads(data).get("annotations") or {}).get(SOURCE_ANNOTATION, "")
                         fake.package = {"name": parts[3], "visibility": fake.created_visibility,
@@ -359,6 +385,13 @@ def _fake_server(fake: Fake) -> tuple[http.server.ThreadingHTTPServer, str]:
                                            if source else {})}
                     answered = ("sha256:" + "0" * 64) if fake.lie_manifest_digest else digest
                     self._reply(201, b"", {"Docker-Content-Digest": answered})
+                    return
+                if fake.lagging.get(reference, 0) > 0:
+                    fake.lagging[reference] -= 1
+                    self._reply(404)
+                    return
+                if fake.tag_answers and not reference.startswith("sha256:"):
+                    self._reply(200, b"", {"Docker-Content-Digest": fake.tag_answers, "Content-Type": OCI_MANIFEST})
                     return
                 digest = reference if reference.startswith("sha256:") else fake.tags.get(reference)
                 if digest is None or digest not in fake.manifests:
@@ -443,9 +476,7 @@ def selftest() -> int:
         manifest = object_manifest(good, len(payload))
         for data in (EMPTY_BYTES, payload):
             registry.push_blob(hashlib.sha256(data).hexdigest(), data)
-        registry.put_manifest(f"sha256-{good}", manifest)
-        if registry.manifest_digest(f"sha256-{good}") != "sha256:" + hashlib.sha256(manifest).hexdigest():
-            raise Refused("the object's tag did not read back as its manifest")
+        registry.read_back(f"sha256-{good}", registry.put_manifest(f"sha256-{good}", manifest))
         if registry.blob(good) != payload:
             raise Refused("the fetched bytes differ from the pushed object")
 
@@ -508,6 +539,27 @@ def selftest() -> int:
         if json.loads(sentinel_manifest(private)).get("annotations") != {
                 SOURCE_ANNOTATION: "https://github.com/coderoasted/coderoast-ipc"}:
             failures.append(f"the sentinel carries {sentinel_manifest(private)!r}, want the source annotation")
+
+        slept: list[float] = []
+        fake, registry, _view, said = scene(tag_lag=3)
+        registry.sleep = slept.append
+        arm("a tag the registry serves only after its read-after-write lag reads back once it does",
+            lambda: round_trip(registry), None)
+        if slept != list(READ_BACK_DELAYS[:3]):
+            failures.append(f"the lagging read back slept {slept}, want {list(READ_BACK_DELAYS[:3])}")
+        slept.clear()
+        fake, registry, _view, said = scene(tag_lag=len(READ_BACK_DELAYS) + 1)
+        registry.sleep = slept.append
+        arm("RED: a tag still absent once the read-back schedule is spent is refused, naming the reads",
+            lambda: round_trip(registry), f"still absent after {len(READ_BACK_DELAYS) + 1} reads over "
+                                          f"{sum(READ_BACK_DELAYS)} s")
+        slept.clear()
+        fake, registry, _view, said = scene(tag_answers="sha256:" + "e" * 64)
+        registry.sleep = slept.append
+        arm("RED: a tag answering another digest after the PUT is refused at once, never waited on",
+            lambda: round_trip(registry), "it answers sha256:" + "e" * 64)
+        if slept:
+            failures.append(f"the moved tag was waited on for {slept}, want no wait")
 
         _fake, registry, _view, said = scene(lie_manifest_digest=True)
         arm("a registry answering another manifest digest is refused",
