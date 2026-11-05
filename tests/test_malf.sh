@@ -32,6 +32,10 @@ MALF_BIN="$MALF_ROOT/malf"
 # outside it artefact_store refuses a system member (DN-142.D30 E4). The arms that run a store step on this
 # host hand the pin's digest to that step alone.
 MALF_TEST_SYSTEM="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["image"])' "$MALF_ROOT/config/build-environment.json")"
+# An arm that imports conan in-process (a recipe helper's code path) runs under the interpreter conan's own
+# script names in its shebang: CI's python3 is the system one, which has no conan (W515), and a desk whose
+# python3 happens to import conan hides the difference.
+MALF_CONAN_PYTHON="$(sed -n '1s/^#!//p' "$(readlink -f "$(command -v conan)")")"
 
 # A COPY of malf runs beside every file its home sync reads (_malf_sync_conan_conf, the overlay), as the real one
 # does: a missing one is a red there, never a skip (DN-142.D29 (7)). Nothing already in <dir> is replaced,
@@ -226,7 +230,9 @@ if setfacl -m "u:$(id -u nobody):r" "$ri_tmp/acl-src" 2>/dev/null && unshare -U 
           "rc=0 640 0" \
           "$(unshare -U --map-current-user bash -c "source <(sed -n '/^_malf_install_file() {/,/^}/p' '$MALF_ROOT/malf'); _malf_install_file '$ri_tmp/acl-src' '$ri_tmp/acl-dst'"; echo -n "rc=$? "; stat -c %a "$ri_tmp/acl-dst" | tr '\n' ' '; getfacl -cp "$ri_tmp/acl-dst" 2>/dev/null | grep -c '^user:[^:]')"
 else
-    check "the ACL-in-a-user-namespace arm needs setfacl and unprivileged user namespaces on this host" "present" "absent"
+    check "the ACL-in-a-user-namespace arm needs setfacl and unprivileged user namespaces on this host" \
+          "setfacl=present userns=present" \
+          "setfacl=$(command -v setfacl > /dev/null && echo present || echo absent) userns=$(unshare -U --map-current-user true 2>/dev/null && echo present || echo absent)"
 fi
 rm -rf "$ri_tmp"
 
@@ -3383,7 +3389,7 @@ check "a ship-form walk naming MALF_BENCH takes the ship-bench set, one without 
       "$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; MALF_PROFILE_NAME=linux-gcc16-release MALF_STEP_FORM=ship MALF_BENCH=/b _malf_writer_create_args && printf "%s\n" "${_MALF_FORM_ARGS[@]}" | paste -sd"|"' _ "$MALF_BIN") / $(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; MALF_PROFILE_NAME=linux-gcc16-release MALF_STEP_FORM=ship _malf_writer_create_args && printf "%s\n" "${_MALF_FORM_ARGS[@]}" | paste -sd"|"' _ "$MALF_BIN")"
 check "under user.malf:bench_only a create's build runs the benchmarks and no test (no ctest command)" \
       "bench" \
-      "$(python3 - "$MALF_ROOT" <<'PY'
+      "$($MALF_CONAN_PYTHON - "$MALF_ROOT" <<'PY'
 import sys
 sys.path.insert(0, sys.argv[1])
 import malf_recipe_tests as tests
@@ -6337,13 +6343,12 @@ check "every overlay recipe is pinned in malf/conan.lock at the revision the ove
             done
         done | tee "$ov_tmp/unpinned" | wc -l | tr -d ' ')"
 [[ -s "$ov_tmp/unpinned" ]] && sed 's/^/       /' "$ov_tmp/unpinned"
-# note: a recipe's module imports conan, so its helpers run under the interpreter conan's own script names; CI's python3 is the system one, which has no conan (W515)
-ov_conan_python="$(sed -n '1s/^#!//p' "$(readlink -f "$(command -v conan)")")"
+# note: a recipe's module imports conan, so its helpers run under MALF_CONAN_PYTHON
 check "the overlay recipes' helpers run under conan's own interpreter, read from conan's shebang, which imports conan" \
-      "conan" "$($ov_conan_python -c 'import conan; print(conan.__name__)')"
+      "conan" "$($MALF_CONAN_PYTHON -c 'import conan; print(conan.__name__)')"
 check "autoconf's frozen-state rewrite: a state without the prefix is unchanged, the prefix leaves every record re-measured, a record it does not know refuses" \
       "same|T4,8;namea/b.m4:1;D-1,3;x/y;F3,7;finbuiltin|refused" \
-      "$($ov_conan_python -c 'import runpy, sys
+      "$($MALF_CONAN_PYTHON -c 'import runpy, sys
 rewrite = runpy.run_path(sys.argv[1])["_without_prefix"]
 frozen = b"# frozen\nV1\nQ1,1\n[]\nT4,13\nname/src/a/b.m4:1\nD-1,8\n/src/x/y\nF3,7\nfinbuiltin\n"
 same = rewrite(frozen, b"/nothere/") == frozen
@@ -6359,7 +6364,7 @@ printf 'echo -L/home/seat/p/b/opens1/p/lib\n' > "$ov_tmp/pkg/bin/curl-config"; p
 printf 'echo x\n' > "$ov_tmp/pkg2/bin/curl-config"; printf 'curl' > "$ov_tmp/pkg2/bin/curl"
 check "libcurl's overlay ships no curl-config, whose configure echo names the build host's package folders, and keeps every other file" \
       "lib/libcurl.a|bin/curl" \
-      "$($ov_conan_python -c 'import runpy, sys
+      "$($MALF_CONAN_PYTHON -c 'import runpy, sys
 from pathlib import Path
 drop = runpy.run_path(sys.argv[1])["_drop_config_script"]
 for folder in sys.argv[2:]:

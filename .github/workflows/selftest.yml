@@ -57,6 +57,16 @@ jobs:
         # (config/build-environment/Dockerfile, DN-142.D30 E4): the same package at the same version.
         run: sudo apt-get update -qq && sudo apt-get install --yes --no-install-recommends strace=6.8-0ubuntu2
 
+      - name: setfacl, and unprivileged user namespaces, which the ACL-in-a-user-namespace install arm needs (tests/test_malf.sh [3b])
+        # The arm reds rather than skips on a host lacking either (measured 2026-10-28 on malf-runner: an ACL'd source
+        # installed inside a user namespace failed EINVAL). The hosted image restricts unprivileged user namespaces
+        # through AppArmor, lifted here by the same script setup-build-env runs for every consumer's test path, and
+        # setfacl is pinned as strace is, never taken from the image by chance.
+        run: |
+          set -euo pipefail
+          sudo apt-get install --yes --no-install-recommends acl=2.3.2-1build1.1
+          bash .github/actions/setup-build-env/lift-userns-restriction.sh
+
       - name: malf selftest (syntax + dispatch integrity + profile/build keys)
         run: bash tests/test_malf.sh
 
