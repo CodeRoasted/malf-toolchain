@@ -36,6 +36,12 @@ Root CLAUDE.md owns malf *usage*; this file is for working ON the tooling.
   `toolchain-v*` on origin. Never cut, move or delete a `toolchain-v*` tag by
   hand: consumers pin the SHA, and the tag is the version a human reads.
   Treat every edit as a cross-repo change all the same: it ships at the next cut.
+- **The release's version part is what a consumer receives** (`RUL-251`): major =
+  the compiler or build-environment image; minor = the BEHAVIOUR of an action or
+  reusable workflow a consumer calls; patch = everything else. malf's own CI
+  (`selftest.yml`), the re-pin's self-pin rewrite and message text never move
+  minor. Before `--toolchain X.Y.Z`, read `git diff toolchain-v<last>..HEAD` by
+  that rule; a patch is the normal case.
 - `profiles/` and `config/` are single-source by design — never fork a per-repo
   copy; repos symlink or fetch them.
 - The toolchain contracts (which compiler legs exist, why, their fix floors)
