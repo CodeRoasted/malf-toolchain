@@ -4391,6 +4391,67 @@ check "a member another member's bootstrap demoted ends the sweep in TARGET role
 rm -rf "$sw_tmp"
 echo
 
+echo "[7q3b] every fold of a repository's database keeps the entry of the tree whose build compiles the file"
+
+# note: insight-eidos's sift-corpus adds sift-tools/ under EXCLUDE_FROM_ALL, so its database lists
+# sift-tools' sources and its build compiles none but the gate; folded first, its entries won, and a
+# desk `malf lint --all-files` linted sift/src/cli and sift/src/crawl against interfaces that tree
+# never builds (ROADMAP N422, 2026-11-06).
+# note: real ninja over compiler-free manifests, so "the build compiles it" is ninja's own reading of
+# each tree's default target, never a model of it.
+bc_tmp="$(realpath "$(mktemp -d)")"
+bc_repo="$bc_tmp/ws"; bc_key="${MALF_DEFAULT_PROFILE#linux-}"
+mkdir -p "$bc_repo/tools/build-x" "$bc_repo/corpus/build-x/tools_build"
+git -C "$bc_repo" init -q
+echo '// cli' > "$bc_repo/tools/cli.cpp"; echo '// gate' > "$bc_repo/tools/gate.cpp"
+bc_tree() {   # <tree> <default-built stems...> — a manifest with both sources' edges, defaulting to those named
+    local tree="$1"; shift
+    {
+        printf 'rule cp\n  command = cp $in $out\n'
+        printf 'build cli.o: cp %s/tools/cli.cpp\nbuild gate.o: cp %s/tools/gate.cpp\n' "$bc_repo" "$bc_repo"
+        printf 'build all: phony'; printf ' %s.o' "$@"; printf '\ndefault all\n'
+    } > "$tree/build.ninja"
+}
+bc_db() {   # <tree> <entry directory> — a database listing both sources
+    printf '[{"directory": "%s", "command": "c++ -c cli.cpp", "file": "%s/tools/cli.cpp"},
+ {"directory": "%s", "command": "c++ -c gate.cpp", "file": "%s/tools/gate.cpp"}]\n' \
+        "$2" "$bc_repo" "$2" "$bc_repo" > "$1/compile_commands.json"
+}
+# corpus: lists both, its default target builds the gate only, and its entries name a subdirectory's
+# binary dir (the add_subdirectory shape); tools: lists and builds both.
+bc_tree "$bc_repo/corpus/build-x" gate; bc_db "$bc_repo/corpus/build-x" "$bc_repo/corpus/build-x/tools_build"
+bc_tree "$bc_repo/tools/build-x" cli gate; bc_db "$bc_repo/tools/build-x" "$bc_repo/tools/build-x"
+bc_owners() {   # <db> — each file's entry, as <file>=<the package its directory sits in>
+    python3 -c "import json,sys; print(' '.join(sorted(e['file'].rsplit('/',1)[1] + '=' + e['directory'].split('/ws/',1)[1].split('/',1)[0] for e in json.load(open(sys.argv[1])))))" "$1" 2>&1
+}
+bc_fold() {   # <function> <args...> — the function run from a sourced malf on the host, its output dropped
+    bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; unset MALF_SYSTEM; export MALF_PROFILE_NAME=""; shift; "$@" > /dev/null' \
+        _ "$MALF_BIN" "$@"
+}
+if ! command -v ninja > /dev/null; then
+    check "ninja is on PATH, which this arm and every malf build need" "ninja" "absent"
+else
+    bc_fold _malf_compose_repo_db "$bc_tmp/composed.json" "$bc_repo" "$bc_repo" \
+        "$bc_repo/corpus/build-x/compile_commands.json" "$bc_repo/tools/build-x/compile_commands.json"
+    check "RED-FIRST — a sweep's composed database keeps tools' entry for the file only tools builds, and corpus' (first) for the one both build" \
+          "cli.cpp=tools gate.cpp=corpus" "$(bc_owners "$bc_tmp/composed.json")"
+    mkdir -p "$bc_tmp/commands"
+    bc_fold _malf_merge_db_tree "$bc_tmp/commands" "$bc_repo/corpus/build-x" "$bc_repo/tools/build-x"
+    check "RED-FIRST — malf commands' fold keeps the same entries" \
+          "cli.cpp=tools gate.cpp=corpus" "$(bc_owners "$bc_tmp/commands/compile_commands.json")"
+    mkdir -p "$bc_repo/build-$bc_key"
+    cp "$bc_repo/tools/build-x/compile_commands.json" "$bc_repo/build-$bc_key/compile_commands.json"
+    bc_fold _malf_merge_compile_commands "$bc_repo/corpus/build-x" "$bc_repo/corpus"
+    check "RED-FIRST — a lone build's fold of corpus replaces the root's entry it builds, never the one only tools builds" \
+          "cli.cpp=tools gate.cpp=corpus" "$(bc_owners "$bc_repo/build-$bc_key/compile_commands.json")"
+    printf 'garbage\n' > "$bc_repo/tools/build-x/build.ninja"
+    check "a tree whose graph ninja cannot read fails the fold loudly, never keeps an entry by guess" \
+          "rc=1" "$(bc_fold _malf_compose_repo_db "$bc_tmp/unread.json" "$bc_repo" "$bc_repo" \
+              "$bc_repo/corpus/build-x/compile_commands.json" "$bc_repo/tools/build-x/compile_commands.json" 2>/dev/null; echo "rc=$?")"
+fi
+rm -rf "$bc_tmp"
+echo
+
 echo "[7q14] malf commands folds every built inventory cell's database, after the members"
 
 # note: `malf commands` cleared the root database and merged member and dependency trees only, so

@@ -904,14 +904,18 @@ _malf_settle_target_role_locked() {  # <pkg_dir> <build_dir>
     _malf_configure_and_build "$pkg_dir" "$build_dir" "${cmake_args[@]}"
 }
 
-# post: <repo_db> holds each member database's entries once, keyed by file, first member wins.
+# post: <repo_db> holds each member database's entries once, keyed by file: the first member whose
+# tree's build compiles the file wins, else the first member (compile_db.py, ROADMAP N422).
 # post: a sweep rooted below <repo> keeps the prior entries outside <sweep_root>; one at or above
 # the repo root keeps none, so an entry for a deleted or unbuilt TU cannot survive the sweep.
 _malf_compose_repo_db() {            # <repo_db> <sweep_root> <repo> <member_db>...
-    python3 - "$@" <<'PY'
+    MALF_DIR="$MALF_DIR" python3 - "$@" <<'PY'
 import json
 import os
 import sys
+
+sys.path.insert(0, os.environ["MALF_DIR"])
+from compile_db import fold
 
 repo_db, sweep_root, repo = (os.path.realpath(p) for p in sys.argv[1:4])
 member_dbs = [os.path.realpath(p) for p in sys.argv[4:]]
@@ -932,15 +936,10 @@ if not covers_repo and os.path.exists(repo_db):
     prior = [e for e in load(repo_db)
              if not under(os.path.realpath(os.path.join(e.get("directory", ""), e["file"])), sweep_root)]
 
-merged, seen, contributing = [], set(), 0
-for db in member_dbs:
-    if not os.path.exists(db):
-        continue
-    contributing += 1
-    for entry in load(db):
-        if entry["file"] not in seen:
-            seen.add(entry["file"])
-            merged.append(entry)
+members = [load(db) for db in member_dbs if os.path.exists(db)]
+contributing = len(members)
+merged = fold(members)
+seen = {entry["file"] for entry in merged}
 kept = 0
 for entry in prior:
     if entry["file"] not in seen:
@@ -1834,8 +1833,9 @@ _malf_merge_compile_commands() {
     # keyed by the ACTIVE profile — `<repo>/build-$(_malf_build_key)/`. This keeps the
     # editor's index in step with the incremental build WITHOUT the full `malf commands`
     # workspace walk: one file merge, no reconfigure. Entries are keyed by source file —
-    # the freshly built package's entries replace any stale entry for the same file, while
-    # entries contributed by *other* packages already in the root DB are preserved
+    # the freshly built package's entries replace any stale entry for the same file, unless
+    # its build does not compile a file the stale entry's tree does (compile_db.py, N422),
+    # while entries contributed by *other* packages already in the root DB are preserved
     # (multi-package repos).
     #
     # KEYED BY THE ACTIVE PROFILE, not by MALF_DEFAULT_PROFILE, and that was a real defect
@@ -1876,9 +1876,12 @@ _malf_merge_compile_commands() {
     # (insight-eidos), it IS that package's tree, and one created here unstamped is refused by the package's next act
     # in the build environment (measured 2026-10-29: insight-eidos's dev leg, after insight_llm's act).
     mkdir -p "$(dirname "$root_db")" && _malf_build_tree_environment "$(dirname "$root_db")" || return 1
-    python3 - "$pkg_db" "$root_db" <<'PY'
-import json, sys
+    MALF_DIR="$MALF_DIR" python3 - "$pkg_db" "$root_db" <<'PY'
+import json, os, sys
 from pathlib import Path
+
+sys.path.insert(0, os.environ["MALF_DIR"])
+from compile_db import fold
 
 pkg_db = Path(sys.argv[1])
 root_db = Path(sys.argv[2])
@@ -1895,10 +1898,9 @@ if root_db.exists():
     except Exception:
         root_entries = []  # stale/corrupt root DB is rebuilt from this package
 
-# Files just rebuilt take precedence: drop their prior root entries, then append.
-rebuilt = {e.get("file") for e in pkg_entries}
-merged = [e for e in root_entries if e.get("file") not in rebuilt]
-merged.extend(pkg_entries)
+# Files just rebuilt take precedence over the root's prior entries, unless the just-built tree does not
+# compile a file a prior entry's tree does (compile_db.py, ROADMAP N422).
+merged = fold([pkg_entries, root_entries])
 
 root_db.parent.mkdir(parents=True, exist_ok=True)
 root_db.write_text(json.dumps(merged, indent=2) + "\n")
@@ -3774,12 +3776,15 @@ for r in re.findall(r\"(?:test_)?requires\\s*\\(\\s*['\\\"]([^'\\\"]+)['\\\"]\\s
 _malf_merge_db_tree() {
     # Merge every compile_commands.json under the given build dirs into
     # <build_root>/compile_commands.json (what .clangd's CompilationDatabase
-    # points at). Structure-agnostic.
+    # points at). Structure-agnostic; one entry per file, by compile_db.py's rule.
     local build_root="$1"; shift
     local root_db="$build_root/compile_commands.json"
-    python3 - "$root_db" "$@" << 'PY'
-import json, sys
+    MALF_DIR="$MALF_DIR" python3 - "$root_db" "$@" << 'PY'
+import json, os, sys
 from pathlib import Path
+
+sys.path.insert(0, os.environ["MALF_DIR"])
+from compile_db import fold
 
 root_output = Path(sys.argv[1]).resolve()
 scan_dirs   = [Path(p) for p in sys.argv[2:]]
@@ -3802,18 +3807,14 @@ if not dbs:
     raise SystemExit(f"malf commands: no compile_commands.json under {', '.join(map(str, scan_dirs))} "
                      "(did every configure fail?)")
 
-merged, seen = [], set()
+groups = []
 for db in dbs:
     try:
-        entries = json.loads(db.read_text())
+        groups.append(json.loads(db.read_text()))
     except Exception as exc:
         print(f"malf commands: warning: {db}: {exc}", file=sys.stderr)
-        continue
-    for e in entries:                       # one entry per file (clangd convention)
-        key = e.get("file")
-        if key not in seen:
-            seen.add(key)
-            merged.append(e)
+# one entry per file (clangd convention): the first database whose tree compiles it (compile_db.py, N422)
+merged = fold(groups)
 
 root_output.write_text(json.dumps(merged, indent=2) + "\n")
 print(f"malf commands: merged {len(dbs)} database(s) -> {root_output} "
