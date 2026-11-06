@@ -2195,14 +2195,30 @@ _malf_lint_cost_line() {   # <scratch dir> <cwd> <file...>
 
 cmd_lint() {
     local console=false all_files=false
+    # THE NAMED FILES (`malf lint [FILE...]`): a caller that already holds the change hands it over,
+    # and the run lints exactly those files. The commit gate's `cpp_lint` module is that caller
+    # (DN-108.D41): it derives the change from the runner's scope and never from `git diff HEAD`
+    # here, so the population has two producers that must agree — the module's, and the SUMMARY
+    # this run prints. A path that names no file refuses: a typo must not lint nothing at exit 0.
+    local -a named=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -c|--console)   console=true ;;
             --all-files)    all_files=true ;;
-            *) _malf_refuse_option lint "$1" ;;
+            -*) _malf_refuse_option lint "$1" ;;
+            *)
+                if [[ ! -f "$1" ]]; then
+                    echo "malf lint: error: path names no file: $1" >&2; exit 1
+                fi
+                named+=("$1")
+                ;;
         esac
         shift
     done
+    if $all_files && (( ${#named[@]} > 0 )); then
+        echo "malf lint: error: --all-files walks the tree, and ${#named[@]} file(s) were named — one population per run" >&2
+        exit 1
+    fi
     _malf_refuse_undeclared_compiling_act lint
 
     # The file-selection mode, spelled out rather than named, because the summary below is read by
@@ -2211,6 +2227,8 @@ cmd_lint() {
     local lint_mode
     if $all_files; then
         lint_mode="--all-files (walk of source extensions under the tree)"
+    elif (( ${#named[@]} > 0 )); then
+        lint_mode="paths (the ${#named[@]} file(s) named on the command line, as the worktree holds them)"
     else
         lint_mode="default (git diff --name-only HEAD, worktree+index, --relative)"
     fi
@@ -2405,12 +2423,20 @@ PY
     mkdir -p "$lint_db"
     local -a _lint_conan_homes=()
     mapfile -t _lint_conan_homes < <(_malf_conan_homes)
+    # THE DATABASE IS RELOCATED FIRST when it was written in another checkout of this workspace
+    # (`_malf_lint_db_origin`): every path under that root is respelled under this one, in the same
+    # derived copy, so the membership filter, the platform gate and clang-tidy all read the sources
+    # this run lints. The build trees stay what they are — links into the origin — so the compiled
+    # module interfaces and the modmaps are the origin's last build: the instrument, never the subject.
+    local db_origin
+    db_origin="$(_malf_lint_db_origin "$comp_db/compile_commands.json" "$MALF_WORKSPACE_ROOT")" || exit 1
     local desystem_report
-    if ! desystem_report="$(python3 - "$comp_db/compile_commands.json" "$lint_db/compile_commands.json" \
+    if ! desystem_report="$(_MALF_LINT_DB_ORIGIN="$db_origin" python3 - "$comp_db/compile_commands.json" "$lint_db/compile_commands.json" \
             "$MALF_WORKSPACE_ROOT" "${_lint_conan_homes[@]}" <<'PY'
 import json, os, re, sys
 
 src, dst, workspace = sys.argv[1], sys.argv[2], sys.argv[3]
+origin, here = os.environ.get("_MALF_LINT_DB_ORIGIN", ""), workspace
 caches = [os.path.realpath(p) for p in sys.argv[4:] if p]
 workspace = os.path.realpath(workspace)
 
@@ -2463,6 +2489,19 @@ try:
 except Exception as exc:
     print(f"{src}: {exc}", file=sys.stderr)
     raise SystemExit(1)
+
+relocated = 0
+if origin:
+    def moved(text):
+        return text.replace(origin + os.sep, here + os.sep)
+
+    for entry in entries:
+        for key in ("file", "directory", "command", "output"):
+            if isinstance(entry.get(key), str):
+                entry[key] = moved(entry[key])
+        if "arguments" in entry:
+            entry["arguments"] = [moved(arg) for arg in entry["arguments"]]
+        relocated += 1
 
 before_fp, before_tp = scan(entries)
 files_before = [e.get("file") for e in entries]
@@ -2526,6 +2565,9 @@ except Exception as exc:
     print(f"{dst}: {exc}", file=sys.stderr)
     raise SystemExit(1)
 
+if origin:
+    print(f"compile database written in {origin}: {relocated} entr{'y' if relocated == 1 else 'ies'} "
+          f"relocated to {here}; its build trees, read through links, are {origin}'s last build.")
 # "left as system headers" counts every -isystem reference this run did NOT touch: the
 # third-party ones, and any path that no longer resolves to a directory. Both are correct to
 # leave alone and neither is first-party, so they are one number rather than two.
@@ -2547,7 +2589,7 @@ PY
         echo "malf lint: inspected. Re-index with 'malf commands' if the database is the problem." >&2
         exit 1
     fi
-    echo "malf lint: $desystem_report" >&2
+    sed "s/^/malf lint: /" <<< "$desystem_report" >&2
 
     local output_file=""
     if ! $console; then
@@ -2642,6 +2684,37 @@ PY
                 \( -type f \( -name "*.cpp" -o -name "*.cc" -o -name "*.cxx" -o -name "*.hpp" -o -name "*.h" -o -name "*.cppm" \) \
                    -size "-${MALF_SOURCE_MAX_FILE_KB}k" -print \)
         )
+    elif (( ${#named[@]} > 0 )); then
+        # THE NAMED LEG: each path is taken as the caller spelled it, relative to $CWD or absolute,
+        # and must sit under $CWD — the compile database and the header filter are both $CWD-keyed,
+        # so a file outside it would be judged under another tree's flags or reported nowhere. A
+        # file that is not C++ refuses rather than drops: the caller named it as a subject, and a
+        # silent drop would make the two producers of the population disagree with no word said.
+        # LSRC-1's exclusion applies as on every leg, and what it drops is NAMED, because here the
+        # caller chose the file.
+        local _named _abs _rel
+        local -a _lsrc=()
+        for _named in "${named[@]}"; do
+            if [[ "$_named" == /* ]]; then _abs="$_named"; else _abs="$CWD/$_named"; fi
+            _abs="$(realpath -s "$_abs")"
+            if [[ "$_abs" != "$CWD"/* ]]; then
+                echo "malf lint: error: $_named is not under the current directory ($CWD), whose compile database and header filter this run reads." >&2
+                exit 1
+            fi
+            _rel="${_abs#"$CWD"/}"
+            if [[ ! "$_rel" =~ \.(cpp|cc|cxx|h|hpp|cppm)$ ]]; then
+                echo "malf lint: error: $_named is not a C++ source or header (.cpp .cc .cxx .h .hpp .cppm) — nothing here can lint it." >&2
+                exit 1
+            fi
+            if _malf_lint_path_excluded "$_rel"; then _lsrc+=("$_rel"); else files+=("$_abs"); fi
+        done
+        if (( ${#_lsrc[@]} > 0 )); then
+            echo "malf lint: ${#_lsrc[@]} named file(s) under a directory LSRC-1 keeps off the lint surface, not linted by design:" >&2
+            printf '  %s\n' "${_lsrc[@]}" >&2
+        fi
+        if [[ ${#files[@]} -gt 0 ]]; then
+            mapfile -t files < <(printf '%s\n' "${files[@]}" | sort -u)
+        fi
     else
         # The SAME exclusion the --all-files walk prunes with, applied per path because this leg
         # has no tree to prune — derived from the one list, never restated. See LSRC-1.
@@ -2742,7 +2815,7 @@ PY
         local -A _db_files=()
         local _dbf
         while IFS= read -r _dbf; do [[ -n "$_dbf" ]] && _db_files["$_dbf"]=1; done < <(
-            _malf_db_lintable_files "$comp_db/compile_commands.json")
+            _malf_db_lintable_files "$lint_db/compile_commands.json")
         if [[ ${#_db_files[@]} -gt 0 ]]; then
             local -a _in_db=() _missing_tu=()
             local _rf
@@ -2756,7 +2829,7 @@ PY
                 esac
             done
             if [[ ${#_missing_tu[@]} -gt 0 ]]; then
-                _malf_lint_split_platform_refused "$comp_db/compile_commands.json" "${_missing_tu[@]}" \
+                _malf_lint_split_platform_refused "$lint_db/compile_commands.json" "${_missing_tu[@]}" \
                     || { echo "malf lint: the platform-gate classifier failed (its error is above); every uncovered TU stays a coverage hole." >&2
                          _MALF_LINT_STILL_MISSING=("${_missing_tu[@]}"); _MALF_LINT_REFUSED=(); }
                 _missing_tu=("${_MALF_LINT_STILL_MISSING[@]}")
@@ -3060,6 +3133,39 @@ _malf_lint_db_verdict() {
     else
         _MALF_LINT_VERDICT="missing"
     fi
+}
+
+# WHERE A COMPILE DATABASE WAS WRITTEN, when that is not where it is read: the root of the workspace
+# its paths name, printed when it differs from MALF_WORKSPACE_ROOT, nothing when it is the same one.
+# The case is a checkout whose build trees are LINKS into another checkout of the same workspace at the
+# same relative place — Pharos's commit-gate candidate links the desk's ignored build-<key>/ trees in
+# (DN-108.D20) — so the database names the desk's sources while this run lints the candidate's. Read
+# as is, every candidate file is "absent from the DB", and the default leg reports CHECKED 0 at exit 0:
+# measured 2026-11-06 on a candidate of logcraft, one changed TU, nothing inspected. DERIVED from the
+# operands, never configured: the database's path relative to this workspace, and where that path
+# really resolves. A link that does not land at the SAME relative place in another root is not a
+# mirrored checkout, and relocating it would be a guess, so it refuses. A database outside this
+# workspace (a fixture, a hand copy) is read as is.
+# pre: $1 is the database file this run reads, $2 the workspace root.
+# post: the origin root on stdout, or nothing; non-zero, the cause on stderr, when it cannot be placed.
+_malf_lint_db_origin() {   # <compile_commands.json> <workspace root>
+    python3 - "$1" "$2" <<'PY'
+import os, sys
+
+db, workspace = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
+if not db.startswith(workspace + os.sep):
+    raise SystemExit(0)
+rel = os.path.relpath(db, workspace)
+real = os.path.realpath(db)
+if real == os.path.join(os.path.realpath(workspace), rel):
+    raise SystemExit(0)
+suffix = os.sep + rel
+if not real.endswith(suffix):
+    print(f"malf lint: error: the compile database {db} resolves to {real}, which is not {rel} under "
+          f"another workspace root — it cannot be read as another checkout of this one.", file=sys.stderr)
+    raise SystemExit(1)
+print(real[:-len(suffix)])
+PY
 }
 
 # post: true for a header extension — the one authoring of "header" for the DB verdict and the summary.
@@ -5039,7 +5145,11 @@ Commands:
     test    [target] [--asan|--profile <name>] [--verbose] [--filter REGEX]
                                also runs, in each inventory cell it builds, the tests that
                                inventory project registers itself (ADR-3.D9); `build` never does
-    lint    [--all-files] [-c|--console]
+    lint    [--all-files | FILE...] [-c|--console]
+                               no argument: the files `git diff HEAD` names; FILE...: exactly the
+                               named files under the current directory (the commit gate's form);
+                               a database whose build tree links into another checkout of the
+                               workspace is relocated to this one before it is read.
                                a translation unit clang-tidy DIES on is reported as NOT LINTED,
                                by name and separately from the findings, and fails the run —
                                a crash dump is a coverage hole, never a finding. Each TU is

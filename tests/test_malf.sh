@@ -1256,6 +1256,88 @@ check "a walked HEADER is counted apart from the translation units, never among 
 check "and the header itself never reaches clang-tidy — it is linted only through the TU including it" \
       "0" "$(grep -c 'engine\.hpp$' "$lk_tmp/tidy.hdr.log" || true)"
 
+echo "[7j7] lint over NAMED files: exactly those, under the current directory, or a refusal (DN-108.D41)"
+
+# THE COMMIT GATE HANDS THE CHANGE OVER. Its `cpp_lint` module takes the change from the runner's scope
+# and names each file, so the population has two producers — the module and this run's SUMMARY — and
+# they must agree. Each arm is a way the two could silently part: a named file dropped, a file outside
+# the tree's database judged under foreign flags, a typo linting nothing at exit 0.
+lk_named() {   # <log> <arg>... — malf lint over named files from the repo root, the fake toolchain
+    (cd "$lk_repo" && PATH="$lk_bin:$PATH" LK_TIDY_LOG="$1" MALF_PROFILE_NAME="" \
+        bash "$MALF_BIN" lint --console "${@:2}" 2>&1)
+}
+lk_nm_out="$(lk_named "$lk_tmp/tidy.named.log" core/src/engine.cpp)"; lk_nm_rc=$?
+check "a named TU on a CLEAN tree is linted — the named form never reads git" \
+      "rc=0 core/src/engine.cpp |selected 1 = 1 translation unit(s) + 0 header(s), checked 1, 0 finding(s), 0 not linted" \
+      "rc=$lk_nm_rc $(lk_checked "$lk_tmp/tidy.named.log")|$(lk_counts "$lk_nm_out")"
+check "the named run names its mode" \
+      "named" "$([[ "$lk_nm_out" == *"mode=paths (the 1 file(s) named on the command line, as the worktree holds them)"* ]] && echo named || echo "GOT: $(lk_sum "$lk_nm_out")")"
+lk_nh_out="$(lk_named "$lk_tmp/tidy.namedh.log" core/src/engine.hpp "$lk_repo/sift/src/other.cpp")"; lk_nh_rc=$?
+check "a named header is counted as a header, an absolute path under the tree is accepted" \
+      "rc=0 sift/src/other.cpp |selected 2 = 1 translation unit(s) + 1 header(s), checked 1, 0 finding(s), 0 not linted" \
+      "rc=$lk_nh_rc $(lk_checked "$lk_tmp/tidy.namedh.log")|$(lk_counts "$lk_nh_out")"
+lk_nt_out="$(lk_named "$lk_tmp/tidy.namedt.log" core/tests/engine_probe.cpp)"; lk_nt_rc=$?
+check "a named file LSRC-1 keeps off the surface is LISTED as not linted by design, and never reaches the tool" \
+      "rc=0 listed 0" \
+      "rc=$lk_nt_rc $([[ "$lk_nt_out" == *"named file(s) under a directory LSRC-1 keeps off the lint surface"*"core/tests/engine_probe.cpp"* ]] && echo listed || echo "GOT: $lk_nt_out") $(grep -c 'engine_probe' "$lk_tmp/tidy.namedt.log" 2>/dev/null || echo 0)"
+for lk_bad in "core/src/absent.cpp|names no file" "core/build-$lk_key/compile_commands.json|is not a C++ source" \
+              "$lk_tmp/nonrepo/x.cpp|is not under the current directory"; do
+    printf 'int x();\n' > "$lk_tmp/nonrepo/x.cpp"
+    lk_bad_out="$(lk_named "$lk_tmp/tidy.bad.log" "${lk_bad%%|*}")"; lk_bad_rc=$?
+    check "a named path that ${lk_bad#*|} REFUSES (rc 1, named) — never a lint of nothing at exit 0" \
+          "rc=1 refused" "rc=$lk_bad_rc $([[ "$lk_bad_out" == *"${lk_bad#*|}"* ]] && echo refused || echo "GOT: $lk_bad_out")"
+done
+lk_both_out="$(lk_named "$lk_tmp/tidy.both.log" --all-files core/src/engine.cpp)"; lk_both_rc=$?
+check "--all-files beside named files REFUSES: one population per run" \
+      "rc=1 refused" "rc=$lk_both_rc $([[ "$lk_both_out" == *"one population per run"* ]] && echo refused || echo "GOT: $lk_both_out")"
+echo
+
+echo "[7j8] a database whose build tree LINKS into another checkout of the workspace is relocated, or refused"
+
+# THE COMMIT GATE'S CANDIDATE (DN-108.D20) is a checkout of the workspace at another root whose ignored
+# build-<key>/ trees are real directories of LINKS into the desk's. The database therefore names the
+# desk's sources, and every candidate file read against it was "absent from the DB": measured
+# 2026-11-06 on a candidate of logcraft, one changed TU, CHECKED 0 at exit 0. The fixture is that shape
+# in miniature — a desk workspace and a candidate workspace, the candidate's build tree a directory
+# whose database is a link to the desk's — and the observable is what the fake clang-tidy was handed:
+# the CANDIDATE's file, under a database that names it.
+lr_tmp="$(realpath "$(mktemp -d)")"
+lr_desk="$lr_tmp/desk/ws"; lr_cand="$lr_tmp/cand/ws"
+for lr_ws in "$lr_desk" "$lr_cand"; do
+    mkdir -p "$lr_ws/repo/src"
+    printf 'int unit() { return 1; }\n' > "$lr_ws/repo/src/unit.cpp"
+done
+lk_db "$lr_desk/repo" "$lr_desk/repo/src/unit.cpp"
+mkdir -p "$lr_cand/repo/build-$lk_key"
+ln -s "$lr_desk/repo/build-$lk_key/compile_commands.json" "$lr_cand/repo/build-$lk_key/compile_commands.json"
+lr_run() {   # <workspace root> <log> — malf lint over src/unit.cpp in the candidate's repo
+    (cd "$lr_cand/repo" && PATH="$lk_bin:$PATH" LK_TIDY_LOG="$2" LK_TIDY_DB_LOG="$2.db" \
+        MALF_WORKSPACE_ROOT="$1" MALF_PROFILE_NAME="" bash "$MALF_BIN" lint --console src/unit.cpp 2>&1)
+}
+lr_out="$(lr_run "$lr_cand" "$lr_tmp/tidy.reloc.log")"; lr_rc=$?
+check "the candidate's file reaches clang-tidy, under a database naming the candidate and not the desk" \
+      "rc=0 $lr_cand/repo/src/unit.cpp|cand-only" \
+      "rc=$lr_rc $(grep -E '\.cpp$' "$lr_tmp/tidy.reloc.log" 2>/dev/null)|$(grep -q "$lr_cand/repo/src/unit.cpp" "$lr_tmp/tidy.reloc.log.db" 2>/dev/null && ! grep -q "$lr_desk" "$lr_tmp/tidy.reloc.log.db" && echo cand-only || echo "GOT: $(cat "$lr_tmp/tidy.reloc.log.db" 2>/dev/null)")"
+check "the relocation is SAID, with both roots" \
+      "1" "$(grep -c "malf lint: compile database written in $lr_desk: 1 entry relocated to $lr_cand" <<< "$lr_out")"
+check "the desk's database is untouched — the relocated copy is the run's own" \
+      "desk" "$(grep -q "\"file\": \"$lr_desk/repo/src/unit.cpp\"" "$lr_desk/repo/build-$lk_key/compile_commands.json" && echo desk || echo moved)"
+# Anti-vacuity: the same candidate read with no workspace root to relocate to (a root that does not
+# hold it) is the measured false zero — or the arm above proves nothing about the relocation.
+lr_mut_out="$(lr_run "$lr_tmp/elsewhere" "$lr_tmp/tidy.mut.log")"; lr_mut_rc=$?
+check "WITHOUT the relocation the same run inspects nothing at exit 0 (the false zero, reproduced)" \
+      "rc=0 inspected-nothing" \
+      "rc=$lr_mut_rc $([[ "$lr_mut_out" == *"CHECKED 0 — NOTHING WAS INSPECTED"* ]] && echo inspected-nothing || echo "GOT: $(lk_sum "$lr_mut_out")")"
+# A link that lands at ANOTHER relative place is not a mirrored checkout: relocating it would be a guess.
+rm "$lr_cand/repo/build-$lk_key/compile_commands.json"
+mkdir -p "$lr_tmp/stray"; cp "$lr_desk/repo/build-$lk_key/compile_commands.json" "$lr_tmp/stray/compile_commands.json"
+ln -s "$lr_tmp/stray/compile_commands.json" "$lr_cand/repo/build-$lk_key/compile_commands.json"
+lr_stray_out="$(lr_run "$lr_cand" "$lr_tmp/tidy.stray.log")"; lr_stray_rc=$?
+check "a database linked to anywhere but the same place in another root REFUSES (rc 1, named)" \
+      "rc=1 refused" "rc=$lr_stray_rc $([[ "$lr_stray_out" == *"cannot be read as another checkout of this one"* ]] && echo refused || echo "GOT: $lr_stray_out")"
+rm -rf "$lr_tmp"
+echo
+
 rm -rf "$lk_tmp"
 echo
 
