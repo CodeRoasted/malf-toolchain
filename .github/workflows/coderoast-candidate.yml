@@ -164,7 +164,7 @@ jobs:
             bash "$MALF_CHECKOUT/malf" store-create --ship "${stored[@]}"
           python3 "$MALF_CHECKOUT/artefact_store.py" bound "$store" "${stored[@]}"
 
-      # A RELEASE PUBLISHES FROM ITS CANDIDATE (DN-142.D33 (3)): every byte a Release attaches, a benchmark
+      # A RELEASE PUBLISHES FROM ITS CANDIDATE (DN-142.D33): every byte a Release attaches, a benchmark
       # alone excepted (the cut measures it), is a record of this store, so what no ship-form create holds is
       # stored here: the tracked files, the hosted outputs of this run's own jobs, the consumer verdicts and the
       # images.

@@ -157,12 +157,12 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
         each `ingest:` and `candidate_verdicts:` row of packages.yml at <commit>,
         `<workflow>\t<artifact>\t<member>\t<class>` per line
     artefact_store.py candidate-ingest <store> <repository dir> <commit> <workflow file> <artifact dir> <run id> <attempt> <GitHub artifact digest>
-        a CANDIDATE's ingestion (DN-142.D33 (3)): the row's member, read from the artifact a job of this candidate's
+        a CANDIDATE's ingestion (DN-142.D33): the row's member, read from the artifact a job of this candidate's
         own run uploaded, stored as an object and the record `<repository>/ingest.<stem>`; prints its key. A
         `candidate_verdicts:` row's member is a sanitizer gate's verdict document, refused unless its `verdict` is `pass`
     artefact_store.py tracked-packages <repository dir> <commit>
         each package declaring a `tracked/<member>` object in packages.yml at <commit>, one per line,
-        sorted: the packages a candidate's store job runs `tracked-step` for (DN-142.D33 (3))
+        sorted: the packages a candidate's store job runs `tracked-step` for (DN-142.D33)
     artefact_store.py parameters <profile> <argv>...
         the act's parameter document (DN-142.D19 (1)), canonical JSON on one line: MALF_STORE_PARAMETERS
         when a driver hands one, checked equal to the act's argv and profile, every `env` member equal
@@ -2871,7 +2871,7 @@ def _described(output: dict) -> str:
 # stay its `entries` (DN-142.D22). A publication row resolves either the same way: step id -> the
 # record the candidate stored -> the output member. Two producers of such outputs live here: the
 # TRACKED step (a package's committed files, keyed on their git blob ids) and the INGESTION record
-# (an output a job of the candidate's own run uploaded, `candidate_ingest`, DN-142.D33 (3)).
+# (an output a job of the candidate's own run uploaded, `candidate_ingest`, DN-142.D33).
 OBJECTS_FIELD = "objects"
 PACKAGE_OUTPUT = "package"
 TRANSPORT_FIELD = "transport"
@@ -2990,7 +2990,7 @@ def declared_tracked(repository: Path, commit: str, package: str) -> tuple[str, 
 
 def tracked_packages(repository: Path, commit: str) -> list[str]:
     """Every package whose `packages.yml` entry at `commit` declares a `tracked/<member>` object, sorted:
-    the packages a candidate's store job runs `tracked-step` for (DN-142.D33 (3))."""
+    the packages a candidate's store job runs `tracked-step` for (DN-142.D33)."""
     import yaml
 
     document = yaml.safe_load(_git_bytes(repository, ["show", f"{commit}:packages.yml"])) or {}
@@ -3060,7 +3060,7 @@ def _declared_rows(repository: Path, commit: str) -> list[tuple[str, str, str, s
 def ingest_rows(repository: Path, commit: str) -> list[tuple[str, str, str, str]]:
     """Every `ingest:` and `candidate_verdicts:` row packages.yml declares at `commit`, as (workflow file, artifact,
     member, class), sorted: the hosted outputs and verdicts a candidate's store job ingests from its own run
-    (DN-142.D33 (3))."""
+    (DN-142.D33)."""
     return [row[:4] for row in _declared_rows(repository, commit)]
 
 
@@ -3100,7 +3100,7 @@ def _ingested_notices(workflow: str, artefact: str, artifact_dir: Path) -> bytes
 
 def candidate_ingest(store: Path, repository: Path, commit: str, workflow: str, artifact_dir: Path,
                      run: dict, github_digest: str) -> str:
-    """A CANDIDATE's ingestion (DN-142.D33 (3)): the member packages.yml's `ingest:` row for `workflow` declares,
+    """A CANDIDATE's ingestion (DN-142.D33): the member packages.yml's `ingest:` row for `workflow` declares,
     read from the artifact `artifact_dir` holds, which a job of THIS candidate's own run produced (the golden,
     insight-eidos's Windows leg), becomes an object and the record of the step `<repository>/ingest.<stem>`.
     Its key document is `{step: {kind: ingest, repository, artefact, workflow, class}, run: {id, attempt},

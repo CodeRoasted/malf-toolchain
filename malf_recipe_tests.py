@@ -105,7 +105,7 @@ PROFILE_CONF = "user.malf:profile"
 PROFILES_DIR = Path(__file__).resolve().parent / "profiles"
 # DN-142.D31 (1): the conf under which a test_package runs although `tools.build:skip_test` is set.
 TEST_PACKAGE_CONF = "user.malf:run_test_package"
-# DN-142.D33 slice (a) ruling (1): the cut's bench measurement over a ship-form walk. The tree configures its
+# DN-142.D33: the cut's bench measurement over a ship-form walk. The tree configures its
 # test and bench targets (no `tools.build:skip_test`, whose BUILD_TESTING=OFF configures no bench target) and the
 # build runs no test of its own, only the benchmarks `user.malf:bench` names.
 BENCH_ONLY_CONF = "user.malf:bench_only"

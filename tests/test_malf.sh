@@ -485,7 +485,7 @@ check "malf_closure selftest: at least 35 arms, 0 failed" \
 
 echo
 
-echo "[7j0] artefact_store's object producers carry their own refusal proof (selftest): the objects convention resolves step -> record -> output -> member, the tracked step is keyed on blob ids at a commit, a package member is extracted from its transport only at its digest, and a candidate's ingestion refuses a declared class its bytes contradict and a PE carrying a symbol table or a CodeView entry (DN-142.D25, DN-142.D33 (3))"
+echo "[7j0] artefact_store's object producers carry their own refusal proof (selftest): the objects convention resolves step -> record -> output -> member, the tracked step is keyed on blob ids at a commit, a package member is extracted from its transport only at its digest, and a candidate's ingestion refuses a declared class its bytes contradict and a PE carrying a symbol table or a CodeView entry (DN-142.D25, DN-142.D33)"
 objects_selftest_output="$(timeout 120 python3 "$MALF_ROOT/artefact_store.py" selftest 2>&1)"
 objects_selftest_status=$?
 check "artefact_store selftest: at least 51 arms, every refusal fired (an ingest row carrying the retired `commits:` or `after:` key among them), the system member refused outside the build environment, the transport extraction, the tracked record, a candidate's ingestion of its own run's artifact and its class, a candidate verdict stored only when it passed and only from a candidate_verdicts row of its shape, the bench verdict, the test_package member, the restore and the reuse decision intact, an ingested executable refused without format-1 notices beside it, and the per-label test flag on third_party and upstream members in both key derivations, which agree, a label carried by two references refused by both (DN-142.D39 (5), (7b))" \
@@ -493,7 +493,7 @@ check "artefact_store selftest: at least 51 arms, every refusal fired (an ingest
 
 echo
 
-echo "[7j1] store_image carries its own refusal proof (selftest): an image is built from a candidate's ship-form creates and a resolved runtime, judged as one linux/amd64 OCI image, and stored once per run (DN-142.D9, DN-142.D33 (3))"
+echo "[7j1] store_image carries its own refusal proof (selftest): an image is built from a candidate's ship-form creates and a resolved runtime, judged as one linux/amd64 OCI image, and stored once per run (DN-142.D9, DN-142.D33)"
 image_selftest_output="$(timeout 120 python3 "$MALF_ROOT/store_image.py" selftest 2>&1)"
 image_selftest_status=$?
 check "store_image selftest: at least 16 arms, every refusal fired, the staged context (each executable's package notices among it) and the stored record intact, the candidate's image from its one ship-form create, an image lacking /usr/share/doc/<package>/THIRD-PARTY-NOTICES.txt refused (DN-142.D39 (8))" \
@@ -4253,7 +4253,7 @@ check "shipped: the packages a release ships, release: true and a published exec
          && git -C "$d" add packages.yml && git -C "$d" -c user.name=t -c user.email=t@t commit -qm r \
          && python3 "$MALF_ROOT/artefact_store.py" shipped "$d" | tr '\n' ' ' | sed 's/ $//')|$(printf '  sv_more: {path: m, release: true}\n' >> "$sv_tmp/rel/packages.yml" \
          && python3 "$MALF_ROOT/artefact_store.py" shipped "$sv_tmp/rel" | tr '\n' ' ' | sed 's/ $//')"
-# THE CUT'S TOOLS (DN-142.D33, option (i)): declared `cut_tool: {why}` beside `release:`, stored with the candidate and
+# THE CUT'S TOOLS (DN-142.D33): declared `cut_tool: {why}` beside `release:`, stored with the candidate and
 # never released, so a cut tool that ships, publishes or carries no why is refused before anything is created.
 check "cut-tools and stored: a cut tool joins what the candidate stores and never what ships; a released or why-less cut tool is refused (exit 1)" \
       "sv_proof|sv_core sv_proof|sv_core|rc=1 1|rc=1 1" \

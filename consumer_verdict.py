@@ -376,7 +376,7 @@ def conclude(store: Path, scratch: Path, member: dict, environ: dict) -> int:
     return 0 if stored == 0 and verdict == "pass" else 1
 
 
-# ── a CANDIDATE's consumer verdicts (DN-142.D33, slice (a)'s rulings) ─────────────────────────────────
+# ── a CANDIDATE's consumer verdicts (DN-142.D33) ─────────────────────────────────
 #
 # The repository's candidate store job runs the verdict over its own ship-form entry:
 # `prepare` and `conclude` in the pinned image through malf's launcher (`build_environment.py

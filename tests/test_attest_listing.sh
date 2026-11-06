@@ -6,7 +6,7 @@
 # run at any other ref, a record naming another candidate, and a run whose commit the superproject's
 # default branch does not contain (DN-108.D36 (15)); and it hands on the candidate key the record names
 # for the caller, refusing a caller the record names no candidate of, or one built at another commit
-# (DN-142.D33 (3)). Those are behaviours of a bash program inside a
+# (DN-142.D33). Those are behaviours of a bash program inside a
 # YAML file, so this test extracts the step's `run:` text as the runner would execute it and runs it
 # with `gh` replaced by a stub that serves a fixture: the run listing, the tag's commit, the default
 # branch, the compare status of each run's commit, and each run's record artefact.
@@ -173,7 +173,7 @@ check "REFUSED, naming the permission: a compare the record token may not read (
 
 fx="$(fixture no-candidate)"
 run_at "$fx" 500 "$GOOD" aaaa ahead 1.10.7 "$GOOD" none
-check "REFUSED: a record naming no candidate of the caller, which has nothing to publish from (DN-142.D33 (3))" \
+check "REFUSED: a record naming no candidate of the caller, which has nothing to publish from (DN-142.D33)" \
       "rc=1  1" "$(attest "$fx" "names no candidate of insight-canon, and a release publishes from its repository's candidate")"
 
 fx="$(fixture candidate-elsewhere)"
