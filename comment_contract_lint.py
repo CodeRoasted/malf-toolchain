@@ -22,14 +22,14 @@ check mode — where clang-format rewrites nothing — this checker formats each
 itself and judges that; in write mode the disk already holds the formatted bytes. The selftest
 pins exactly that shape: the fixture is CLEAN before formatting and RED after.
 
-THE GATE REDS EVERYWHERE, WITH NO DECLARATION (ADR-26.D7, OPS-8.S13, the Founder 2026-09-09).
+THE GATE REDS EVERYWHERE, WITH NO DECLARATION (ADR-26.D7, the Founder 2026-09-09).
 Until 2026-09-09 a repo armed itself with a top-level `comment_contract: true` in its
 `packages.yml` and an unarmed repo was COUNTED and never failed, so that a repo's numbers existed
 before its migration was scheduled. That instrument's value expired with the last migration —
 all eight C++ repos read zero (STU-18) — and an opt-out no repo uses is dormant plumbing, so the
 key was ripped rather than defaulted: any file this checker is handed is judged, every violation
 is printed with its site, and one violation anywhere reds the run. A repo that starts outside the
-grammar is migrated by OPS-8 before it lands; there is no report-only window to land it into.
+grammar is migrated by ADR-26.D8 before it lands; there is no report-only window to land it into.
 
 ONE CODE RULE RIDES THIS PHASE: the self-compare assertion (RUL-206). `EXPECT_EQ(count, count)` is a
 contract claim that cannot fail, and this phase is the one place every commit already judges every

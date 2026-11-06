@@ -209,7 +209,8 @@ MALF_SOURCE_EXCLUDE_DIRS="${MALF_SOURCE_EXCLUDE_DIRS:-build build-* .conan2 .cac
 # never the repo. A future C++ collector under `<platform>_corpora/…/scripts/`
 # stays inside this surface, and is formatted like any other source once the
 # repository is armed: today no gate reaches `coderoast-corpora` (no `lint.yml`),
-# and `OPS-8.S13` brings it to zero the day one does, not before.
+# and the default gate (`ADR-26.D7`) reds it the day one does, with `ADR-26.D8`
+# bringing it to zero, not before.
 #
 # LINT NEEDS NO COUNTERPART, and that is a fact about the mechanism rather than a
 # second policy: `lint --all-files` filters its walk against the compile database,
@@ -3708,7 +3709,7 @@ cmd_format() {
     # clang-format 21.1.8: the reflow merges an overlong `// pre:` with the `// post:` line below
     # it and the second tag lands MID-LINE on an untagged continuation. A pre-format read passes
     # the pre and never sees the post vanish. The phase reds in EVERY repo with no declaration
-    # (OPS-8.S13, 2026-09-09): the per-repo `comment_contract` key that once made an unmigrated
+    # (ADR-26.D7, 2026-09-09): the per-repo `comment_contract` key that once made an unmigrated
     # repo report-only was ripped when the last migration closed. The two verdicts stay separate on purpose: fmt_rc's "rc≠0 with zero
     # violations" reading (clang-format failed for a non-format reason) would be wrong if the
     # grammar's rc were folded into it, so the format summary prints first and a red from either
