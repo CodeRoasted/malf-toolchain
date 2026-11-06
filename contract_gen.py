@@ -101,7 +101,7 @@ def join_declaration(lines: list[str], start: int) -> str:
 
     The first line alone is not a declaration: a `template <...>` header names nothing, and a
     signature wrapped over three lines names its function on the first and its parameters on the
-    rest. Measured 2026-09-09 (DN-91.D3's shakedown on the two smallest packages): with the head
+    rest. Measured 2026-09-09 (ADR-26.D15's shakedown on the two smallest packages): with the head
     alone, a cold reader mapped 8 of 30 questions to their declaration by ADJACENCY, because every
     class template rendered as a bare `template <...>` line and a source line number. A concept is
     carried to its closing `};` because its requirements are the interface obligation itself."""
