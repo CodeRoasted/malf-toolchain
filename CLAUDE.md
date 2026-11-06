@@ -42,6 +42,10 @@ Root CLAUDE.md owns malf *usage*; this file is for working ON the tooling.
   (`selftest.yml`), the re-pin's self-pin rewrite and message text never move
   minor. Before `--toolchain X.Y.Z`, read `git diff toolchain-v<last>..HEAD` by
   that rule; a patch is the normal case.
+- **`malf lint` never walks `tests/`, `benchmarks/`, `test_package/` or `technical_docs/`, by design** (law
+  `LSRC-1`, stated at the head of `config/.clang-tidy`): test and benchmark translation units are outside the
+  clang-tidy surface. A lint that selects 0 files on a test-only change is that policy working, not a coverage
+  gap — never report it as a defect, never widen the walk.
 - `profiles/` and `config/` are single-source by design — never fork a per-repo
   copy; repos symlink or fetch them.
 - The toolchain contracts (which compiler legs exist, why, their fix floors)
