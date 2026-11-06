@@ -32,6 +32,10 @@ MALF_BIN="$MALF_ROOT/malf"
 # outside it artefact_store refuses a system member (DN-142.D30 E4). The arms that run a store step on this
 # host hand the pin's digest to that step alone.
 MALF_TEST_SYSTEM="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["image"])' "$MALF_ROOT/config/build-environment.json")"
+# store-create hands every record step its walk's scratch (MALF_STEP_SCRATCH), and the step refuses a package
+# file holding it (ROADMAP N425); a store step these arms run directly gets this path, which no fixture
+# package holds unless an arm writes it there.
+export MALF_STEP_SCRATCH=/nonexistent/malf-selftest.step-scratch
 # An arm that imports conan in-process (a recipe helper's code path) runs under the interpreter conan's own
 # script names in its shebang: CI's python3 is the system one, which has no conan (W515), and a desk whose
 # python3 happens to import conan hides the difference.
@@ -4075,6 +4079,27 @@ cp "$bi_home/profiles/fixture" "$bi_home/profiles/fixture-b"
 check "two records holding the same bytes under two keys both answer the build-id lookup, and an unknown id answers nothing (exit 1)" \
       "rc=0 2 rc=1" \
       "$(bi_step "$bi_true" "$bi_tmp/store" fixture-b | tr -d '\n') $(python3 "$MALF_ROOT/artefact_store.py" build-id "$bi_tmp/store" "$bi_expected" | grep -c ' bi_tool/0.0.1.* bin/tool$') $(python3 "$MALF_ROOT/artefact_store.py" build-id "$bi_tmp/store" "$(printf '0%.0s' {1..40})" > /dev/null; echo "rc=$?")"
+# RED FIRST (2026-11-06, N425): insight-eidos's insight_e2e_bench carried store-create's random /tmp/malf-store.*
+# conan home as a compile definition (INSIGHT_SCENARIO_DIR), so two creates at one key differed by 32 bytes
+# (record 59f24f22, cut run 42062914899 attempt 2). The step refuses a package any of whose files holds THIS
+# create's home or its walk's scratch (MALF_STEP_SCRATCH); a path that is not this create's — insight-canon's
+# test data carries /tmp/build/foo.cc:42 and /home/user/project/src/main.cpp — is not a finding.
+bi_records() { ls "$bi_tmp/pstore/records" 2>/dev/null | wc -l | tr -d ' '; }
+bi_noted() {   # <notes.txt text> -> rc=<status> <REFUSED lines naming notes.txt> <records added>
+    local before; before="$(bi_records)"
+    printf '%s\n' "$1" > "$bi_pkg/notes.txt"
+    printf '%s %s %s' "$(bi_step "$bi_true" "$bi_tmp/pstore")" \
+        "$(grep -c "REFUSED bi_tool: 1 file(s) carry this create's build home or scratch path.*notes.txt" "$bi_tmp/step.log")" \
+        "$(( $(bi_records) - before ))"
+}
+check "RED: a package file holding its create's conan home is REFUSED, naming the file, and nothing is stored" \
+      "rc=1 1 0" "$(bi_noted "INSIGHT_SCENARIO_DIR=$bi_home/p/b/bi_too0123456789abc/b/scenarios")"
+check "RED: a package file holding its walk's scratch path is REFUSED, naming the file, and nothing is stored" \
+      "rc=1 1 0" "$(bi_noted "configured from $MALF_STEP_SCRATCH/home.bi_tool.Ab12Cd")"
+check "a package file holding paths that are not this create's (test data) is STORED" \
+      "rc=0 0 1" "$(bi_noted "at /tmp/build/foo.cc:42 and /home/user/project/src/main.cpp")"
+check "a conan-step with no MALF_STEP_SCRATCH REFUSES, naming the variable: the scratch is never assumed" \
+      "rc=1 1" "$(MALF_STEP_SCRATCH= bi_step "$bi_true" "$bi_tmp/pstore") $(grep -c 'REFUSED MALF_STEP_SCRATCH is' "$bi_tmp/step.log")"
 rm -rf "$bi_tmp"
 unset MALF_STEP_EXECUTABLES
 echo

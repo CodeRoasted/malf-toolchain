@@ -6203,7 +6203,7 @@ _malf_store_create_in() {   # <name> <path> <store> <scratch> <prefixes> <step h
     fi
     if ! MALF_STEP_EXECUTABLES="$scratch/$name.executables.json" MALF_STEP_KEY_FIRST="$scratch/$name.key-first.json" \
         MALF_STEP_TALLY="$_MALF_STEP_TALLY" \
-        MALF_STEP_TEST_FOLDER="$_MALF_TEST_FOLDER" CONAN_HOME="$step_home" python3 "$MALF_DIR/artefact_store.py" conan-step "$store" "$step_home" \
+        MALF_STEP_TEST_FOLDER="$_MALF_TEST_FOLDER" MALF_STEP_SCRATCH="$scratch" CONAN_HOME="$step_home" python3 "$MALF_DIR/artefact_store.py" conan-step "$store" "$step_home" \
         "$scratch/$name.graph.json" "$name" "$MALF_PROFILE_NAME" "$MALF_DIR" "$scratch/toolchain.json" "$prefixes" \
         "$step_home/malf-test-results"; then
         echo "malf store-create: recording $name failed, or differs at an equal key (above)" >&2

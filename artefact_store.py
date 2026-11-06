@@ -1092,6 +1092,31 @@ STEP_FORM_ENV = "MALF_STEP_FORM"
 STEP_FORMS = ("writer", "ship")
 
 
+STEP_SCRATCH_ENV = "MALF_STEP_SCRATCH"
+
+
+def build_paths(home: Path) -> list[str]:
+    """The paths of THIS create a stored file must not hold (ROADMAP N425): its conan home and its walk's
+    scratch, MALF_STEP_SCRATCH, each also as its resolved path when that differs. raises Refused when the
+    scratch is unset or not absolute: it is never assumed, since a step that checked only its home would
+    pass a file holding the scratch every act's TMPDIR and HOME live under."""
+    scratch = os.environ.get(STEP_SCRATCH_ENV) or ""
+    if not os.path.isabs(scratch):
+        raise Refused(f"{STEP_SCRATCH_ENV} is {scratch!r}, not an absolute path: a create's scratch is never "
+                      "assumed, and a stored file holding it is refused (ROADMAP N425)")
+    paths = {str(home), scratch}
+    return sorted(paths | {os.path.realpath(path) for path in paths})
+
+
+def build_path_findings(files: dict[str, bytes], paths: list[str]) -> list[str]:
+    """Each file of `files` whose bytes hold one of `paths`, named with the first it holds: its bytes then
+    depend on where the create ran, so two creates at one key differ (DN-142.D4 (a)). A path that is not
+    this create's (test data such as /tmp/build/foo.cc) is no finding."""
+    needles = [(path, path.encode()) for path in paths]
+    return [f"{name} ({next(path for path, needle in needles if needle in data)})"
+            for name, data in sorted(files.items()) if any(needle in data for _path, needle in needles)]
+
+
 def step_form() -> str:
     """The form MALF_STEP_FORM names. raises Refused when it is unset or names no form: a create's
     form is never assumed, since a ship act keyed as a writer would serve a writer request with no
@@ -1875,6 +1900,7 @@ def _declared_executables_env() -> dict:
 def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile: str,
                malf_dir: Path, toolchain: Path, prefixes: tuple[str, ...],
                results: Path | None = None) -> int:
+    paths = build_paths(home)
     built = built_third_party(graph_nodes(graph_json), prefixes)
     if built:
         print(f"artefact_store: REFUSED {package}: its create built or downloaded {len(built)} "
@@ -1910,6 +1936,12 @@ def conan_step(store: Path, home: Path, graph_json: Path, package: str, profile:
         print(f"artefact_store: REFUSED {package}: {len(missing)} linked ELF file(s) carry no GNU "
               f"build-id, so the store's index would not be total over what ships (DN-142.D15): "
               + ", ".join(missing), file=sys.stderr)
+        return 1
+    leaked = build_path_findings(files, paths)
+    if leaked:
+        print(f"artefact_store: REFUSED {package}: {len(leaked)} file(s) carry this create's build home or "
+              f"scratch path, so their bytes depend on where it ran and two creates at one key differ "
+              f"(ROADMAP N425, DN-142.D4 (a)): " + ", ".join(leaked), file=sys.stderr)
         return 1
     findings = executable_findings(entries, files, declared)
     if findings:
