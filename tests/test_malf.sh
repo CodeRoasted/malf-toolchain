@@ -65,6 +65,28 @@ check() {
     fi
 }
 
+# A module's own selftest, judged by its exit, its summary line and an arm FLOOR: `ok` when it exited 0
+# and its last line matching <ere> reports zero failures over at least <floor> arms. <ere> is the
+# module's whole summary line with its arm count as group 1; a `N/M` form captures M as group 2 and
+# must have N == M, so a partial pass never matches. Bash's own =~, so no grep or sed dialect decides.
+# A floor, not an equality: an arm a module adds must not red this suite — the equality broke on
+# every new arm (store_replica 21 -> 24 at malf 6db9cc08) and guarded nothing the exit and the
+# zero-failure line do not — while an arm lost below the floor (a guard that stops running, a
+# fixture list gone empty) still reds, and lowering a floor is a visible edit of this file.
+selftest_verdict() {   # <exit status> <output> <floor> <ere>
+    local status="$1" output="$2" floor="$3" ere="$4" text arms=""
+    while IFS= read -r text; do
+        if [[ "$text" =~ $ere ]] && [[ -z "${BASH_REMATCH[2]:-}" || "${BASH_REMATCH[2]}" == "${BASH_REMATCH[1]}" ]]; then
+            arms="${BASH_REMATCH[1]}"
+        fi
+    done <<< "$output"
+    if [[ "$status" -eq 0 && -n "$arms" ]] && (( arms >= floor )); then
+        echo ok
+    else
+        echo "failed: exit $status, ${arms:-no zero-failure summary line,} arm(s) against a floor of $floor: $(tail -3 <<< "$output")"
+    fi
+}
+
 echo "[1] syntax — every shell script parses"
 
 for script in "$MALF_BIN" "$MALF_ROOT"/*.sh "$MALF_ROOT"/runner/*.sh "$MALF_TEST_DIR"/*.sh; do
@@ -379,35 +401,35 @@ echo
 echo "[7c2] determinism_lint carries its own proof (selftest): both determinism gates' controls, every refusal, the packages.yml declaration and the budget, over fixture checkouts (DN-142.D33)"
 determinism_selftest_output="$(timeout 120 python3 "$MALF_ROOT/determinism_lint.py" selftest 2>&1)"
 determinism_selftest_status=$?
-check "determinism_lint selftest: 167 arms, the clock and std <random> registers and their 13 opt-out boundary cases each, the declared scope (roots, exemption, out-of-scope rows, NOT A SUBJECT), the per-repository budget against the contract caps, every refusal, and the tracked floor" \
-      "ok" "$([[ $determinism_selftest_status -eq 0 ]] && grep -q '^determinism_lint selftest: 167/167 arms green, 0 failure(s)$' <<< "$determinism_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$determinism_selftest_output")")"
+check "determinism_lint selftest: at least 167 arms, the clock and std <random> registers and their 13 opt-out boundary cases each, the declared scope (roots, exemption, out-of-scope rows, NOT A SUBJECT), the per-repository budget against the contract caps, every refusal, and the tracked floor" \
+      "ok" "$(selftest_verdict "$determinism_selftest_status" "$determinism_selftest_output" 167 '^determinism_lint selftest: ([0-9]+)/([0-9]+) arms green, 0 failure\(s\)$')"
 
 echo
 
 echo "[7c3] sanitizer_verdict carries its own proof (selftest): every verdict of a candidate's three sanitizer gates over a scripted act runner (DN-142.D33)"
 sanitizer_selftest_output="$(timeout 120 python3 "$MALF_ROOT/sanitizer_verdict.py" selftest 2>&1)"
 sanitizer_selftest_status=$?
-check "sanitizer_verdict selftest: 28 arms, the ASan suite red on its exit and unjudged over zero tests or a refused act, the fuzz replay's bound (124, 137), its unexecuted exits, its population (the last count wins, under the seeds or zero is unjudged) and the seed a red names, the valgrind driver's exit contract and its input count, zero seeds running no act, and the document written whole" \
-      "ok" "$([[ $sanitizer_selftest_status -eq 0 ]] && grep -q '^sanitizer_verdict selftest: 28 arm(s), 0 failure(s)$' <<< "$sanitizer_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$sanitizer_selftest_output")")"
+check "sanitizer_verdict selftest: at least 28 arms, the ASan suite red on its exit and unjudged over zero tests or a refused act, the fuzz replay's bound (124, 137), its unexecuted exits, its population (the last count wins, under the seeds or zero is unjudged) and the seed a red names, the valgrind driver's exit contract and its input count, zero seeds running no act, and the document written whole" \
+      "ok" "$(selftest_verdict "$sanitizer_selftest_status" "$sanitizer_selftest_output" 28 '^sanitizer_verdict selftest: ([0-9]+) arm\(s\), 0 failure\(s\)$')"
 echo
 
 echo "[7i] store_replica carries its own refusal proof (selftest): the ghcr client and the package guard of a repository's own store fire against an in-process registry (DN-142.D31 (3))"
 replica_selftest_output="$(timeout 120 python3 "$MALF_ROOT/store_replica.py" selftest 2>&1)"
 replica_selftest_status=$?
-check "store_replica selftest: 21 arms, every refusal fired, the one visibility rule both ways (DN-142.D31 (3)), a public repository's private package refused with the delete remedy (DN-142.D38 (7)), the sentinel linking a new package, the round trip byte-equal, the tag list followed across pages, a cached token reused, and no credential sent off the registry" \
-      "ok" "$([[ $replica_selftest_status -eq 0 ]] && grep -q '^store_replica selftest: 21 arm(s), 0 failure(s)$' <<< "$replica_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$replica_selftest_output")")"
+check "store_replica selftest: at least 24 arms, every refusal fired, a tag read back on its bounded schedule (absent re-read, another digest refused at once), the one visibility rule both ways (DN-142.D31 (3)), a public repository's private package refused with the delete remedy (DN-142.D38 (7)), the sentinel linking a new package, the round trip byte-equal, the tag list followed across pages, a cached token reused, and no credential sent off the registry" \
+      "ok" "$(selftest_verdict "$replica_selftest_status" "$replica_selftest_output" 24 '^store_replica selftest: ([0-9]+) arm\(s\), 0 failure\(s\)$')"
 
 echo
 
 echo "[7i1n] the third-party notices helper and the one SPDX reader carry their own proof (DN-142.D39 (3), (4))"
 notices_selftest_output="$(timeout 120 python3 "$MALF_ROOT/third_party_notices.py" selftest 2>&1)"
 notices_selftest_status=$?
-check "third_party_notices selftest: 16 arms, the committed format-1 golden, shuffled inputs rendering identical bytes, the round trip (a text with no final newline, one holding ===), an empty closure, no absolute path, the key from the reference's fields and never its printed timestamp, and every refusal" \
-      "ok" "$([[ $notices_selftest_status -eq 0 ]] && grep -q '^third_party_notices selftest: 16/16 arms passed$' <<< "$notices_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$notices_selftest_output")")"
+check "third_party_notices selftest: at least 16 arms, the committed format-1 golden, shuffled inputs rendering identical bytes, the round trip (a text with no final newline, one holding ===), an empty closure, no absolute path, the key from the reference's fields and never its printed timestamp, and every refusal" \
+      "ok" "$(selftest_verdict "$notices_selftest_status" "$notices_selftest_output" 16 '^third_party_notices selftest: ([0-9]+)/([0-9]+) arms passed$')"
 spdx_selftest_output="$(timeout 120 python3 "$MALF_ROOT/spdx_licence.py" selftest 2>&1)"
 spdx_selftest_status=$?
-check "spdx_licence selftest: 10 arms, expression_of on a string, a tuple and a list and refusing every other value, recipe_licences splitting as before" \
-      "ok" "$([[ $spdx_selftest_status -eq 0 ]] && grep -q '^spdx_licence selftest: 10/10 arms passed$' <<< "$spdx_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$spdx_selftest_output")")"
+check "spdx_licence selftest: at least 10 arms, expression_of on a string, a tuple and a list and refusing every other value, recipe_licences splitting as before" \
+      "ok" "$(selftest_verdict "$spdx_selftest_status" "$spdx_selftest_output" 10 '^spdx_licence selftest: ([0-9]+)/([0-9]+) arms passed$')"
 check "global.conf names the notices helper inside the home, and every CI action that stages global.conf stages it and the SPDX reader beside it" \
       "1 3 3" "$(grep -c "^user.malf:recipe_notices={{ os.path.join(conan_home_folder, 'third_party_notices.py')" "$MALF_ROOT/global.conf") $(grep -l 'third_party_notices.py' "$MALF_ROOT"/.github/actions/setup-{build-env,proof-linux,proof-msvc}/action.yml | wc -l | tr -d ' ') $(grep -l 'spdx_licence.py' "$MALF_ROOT"/.github/actions/setup-{build-env,proof-linux,proof-msvc}/action.yml | wc -l | tr -d ' ')"
 echo
@@ -415,8 +437,8 @@ echo
 echo "[7i2] store_transport carries its own proof (selftest): a repository's own store, pushed by its candidate and restored by digest through a cache, the index trusted only through its attestation (DN-142.D31 (3), (4), slice S4)"
 transport_selftest_output="$(timeout 300 python3 "$MALF_ROOT/store_transport.py" selftest 2>&1)"
 transport_selftest_status=$?
-check "store_transport selftest: 164 arms, a cut candidate tag trusted only on main, the runner cache shared across verbs and bounded, the candidate key, push and its ownership filter, publish-index last, the attestation verifier's eight ABSENT reds, the cache judged by digest, the mismatch tag, the one visibility rule and package-check's early read of it, a private package's link read through the peek token, a dependent candidate's upstreams read and checked, a source-only upstream's commit in the key, a private upstream never cloned and known private when unseen, a user-owned fork, the index verb (printed whole, ABSENT at 3), and the prune: a dry run that deletes nothing, an applied prune that leaves the kept closure whole and restorable, a young version kept by the grace bound, a refused delete naming the package setting, and six keep-sets refused before anything is deleted; the public-seat licence rule (DN-142.D38): eight breaking third-party records each refusing a public push whole with no blob pushed, D38's refusal text whole, a private store pushing them all, a passing public store carrying malf's recipe notice in its index (a curl and a Zlib record among its passes, RUL-233), the licence-audit passing it and naming every finding on the refused records, and the verb reading anonymously; complete third-party notices (DN-142.D39 (6)): eight defects each refusing a public AND a private push whole with no blob pushed, the green push leaving out the test, build and test-requirement closure members, the records rendering the very bytes the package carries, and a record from before the test flag refused unless its test labels are declared, each record's declaration its own (a label a record declares that its upstream ships refused naming both, a record not named declaring none, a declared record the walk never reaches refused, a malformed or repeated --tests refused, a component read from the holder whose transport the store holds)" \
-      "ok" "$([[ $transport_selftest_status -eq 0 ]] && grep -q '^store_transport selftest: 164 arm(s), 0 failure(s)$' <<< "$transport_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$transport_selftest_output")")"
+check "store_transport selftest: at least 164 arms, a cut candidate tag trusted only on main, the runner cache shared across verbs and bounded, the candidate key, push and its ownership filter, publish-index last, the attestation verifier's eight ABSENT reds, the cache judged by digest, the mismatch tag, the one visibility rule and package-check's early read of it, a private package's link read through the peek token, a dependent candidate's upstreams read and checked, a source-only upstream's commit in the key, a private upstream never cloned and known private when unseen, a user-owned fork, the index verb (printed whole, ABSENT at 3), and the prune: a dry run that deletes nothing, an applied prune that leaves the kept closure whole and restorable, a young version kept by the grace bound, a refused delete naming the package setting, and six keep-sets refused before anything is deleted; the public-seat licence rule (DN-142.D38): eight breaking third-party records each refusing a public push whole with no blob pushed, D38's refusal text whole, a private store pushing them all, a passing public store carrying malf's recipe notice in its index (a curl and a Zlib record among its passes, RUL-233), the licence-audit passing it and naming every finding on the refused records, and the verb reading anonymously; complete third-party notices (DN-142.D39 (6)): eight defects each refusing a public AND a private push whole with no blob pushed, the green push leaving out the test, build and test-requirement closure members, the records rendering the very bytes the package carries, and a record from before the test flag refused unless its test labels are declared, each record's declaration its own (a label a record declares that its upstream ships refused naming both, a record not named declaring none, a declared record the walk never reaches refused, a malformed or repeated --tests refused, a component read from the holder whose transport the store holds)" \
+      "ok" "$(selftest_verdict "$transport_selftest_status" "$transport_selftest_output" 164 '^store_transport selftest: ([0-9]+) arm\(s\), 0 failure\(s\)$')"
 
 echo
 
@@ -454,40 +476,40 @@ rm -rf "$uc_tmp"
 echo "[7k] malf_closure carries its own proof (selftest): an anchored reference, a function-level import and a directory reference each reach their target, a bare word and a computed path reach nothing, a cycle terminates; a store act's domain denies and counts a read of a sibling repository, another conan home, the store and a corpus not its own, behind a try/except too, and every other read its domain refuses (an entry created beside a denied root's ancestor after the act started, a symlink into the denied ground), and lets its own repository, malf whole, its home and a system path read; the act's trace is piped into the counter and never lands on disk, and a counter that returns no verdict refuses the act; every act writes into a TMPDIR and a HOME of its own under the walk's scratch, and a domain whose /tmp holds a denied root is refused before the act (DN-142.D29 (5), (8), DN-142.D30 (9) R8)"
 closure_selftest_output="$(timeout 120 python3 "$MALF_ROOT/malf_closure.py" selftest 2>&1)"
 closure_selftest_status=$?
-check "malf_closure selftest: 35 arms, 0 failed" \
-      "ok" "$([[ $closure_selftest_status -eq 0 ]] && grep -q '^malf_closure selftest: 35 passed, 0 failed$' <<< "$closure_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$closure_selftest_output")")"
+check "malf_closure selftest: at least 35 arms, 0 failed" \
+      "ok" "$(selftest_verdict "$closure_selftest_status" "$closure_selftest_output" 35 '^malf_closure selftest: ([0-9]+) passed, 0 failed$')"
 
 echo
 
 echo "[7j0] artefact_store's object producers carry their own refusal proof (selftest): the objects convention resolves step -> record -> output -> member, the tracked step is keyed on blob ids at a commit, a package member is extracted from its transport only at its digest, and a candidate's ingestion refuses a declared class its bytes contradict and a PE carrying a symbol table or a CodeView entry (DN-142.D25, DN-142.D33 (3))"
 objects_selftest_output="$(timeout 120 python3 "$MALF_ROOT/artefact_store.py" selftest 2>&1)"
 objects_selftest_status=$?
-check "artefact_store selftest: 51 arms, every refusal fired (an ingest row carrying the retired `commits:` or `after:` key among them), the system member refused outside the build environment, the transport extraction, the tracked record, a candidate's ingestion of its own run's artifact and its class, a candidate verdict stored only when it passed and only from a candidate_verdicts row of its shape, the bench verdict, the test_package member, the restore and the reuse decision intact, an ingested executable refused without format-1 notices beside it, and the per-label test flag on third_party and upstream members in both key derivations, which agree, a label carried by two references refused by both (DN-142.D39 (5), (7b))" \
-      "ok" "$([[ $objects_selftest_status -eq 0 ]] && grep -q '^artefact_store selftest: 51 arm(s), 0 failure(s)$' <<< "$objects_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$objects_selftest_output")")"
+check "artefact_store selftest: at least 51 arms, every refusal fired (an ingest row carrying the retired `commits:` or `after:` key among them), the system member refused outside the build environment, the transport extraction, the tracked record, a candidate's ingestion of its own run's artifact and its class, a candidate verdict stored only when it passed and only from a candidate_verdicts row of its shape, the bench verdict, the test_package member, the restore and the reuse decision intact, an ingested executable refused without format-1 notices beside it, and the per-label test flag on third_party and upstream members in both key derivations, which agree, a label carried by two references refused by both (DN-142.D39 (5), (7b))" \
+      "ok" "$(selftest_verdict "$objects_selftest_status" "$objects_selftest_output" 51 '^artefact_store selftest: ([0-9]+) arm\(s\), 0 failure\(s\)$')"
 
 echo
 
 echo "[7j1] store_image carries its own refusal proof (selftest): an image is built from a candidate's ship-form creates and a resolved runtime, judged as one linux/amd64 OCI image, and stored once per run (DN-142.D9, DN-142.D33 (3))"
 image_selftest_output="$(timeout 120 python3 "$MALF_ROOT/store_image.py" selftest 2>&1)"
 image_selftest_status=$?
-check "store_image selftest: 16 arms, every refusal fired, the staged context (each executable's package notices among it) and the stored record intact, the candidate's image from its one ship-form create, an image lacking /usr/share/doc/<package>/THIRD-PARTY-NOTICES.txt refused (DN-142.D39 (8))" \
-      "ok" "$([[ $image_selftest_status -eq 0 ]] && grep -q '^store_image selftest: 16 arm(s), 0 failure(s)$' <<< "$image_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$image_selftest_output")")"
+check "store_image selftest: at least 16 arms, every refusal fired, the staged context (each executable's package notices among it) and the stored record intact, the candidate's image from its one ship-form create, an image lacking /usr/share/doc/<package>/THIRD-PARTY-NOTICES.txt refused (DN-142.D39 (8))" \
+      "ok" "$(selftest_verdict "$image_selftest_status" "$image_selftest_output" 16 '^store_image selftest: ([0-9]+) arm\(s\), 0 failure\(s\)$')"
 
 echo
 
 echo "[7j1b] consumer_verdict carries its own refusal proof (selftest): every row reds on an executable built here or a fixture probe capture, a probe that cannot run is never a pass (N360 plan A2(d)), and its record attests the build environment's image (DN-142.D30 (11) R21)"
 consumer_selftest_output="$(timeout 120 python3 "$MALF_ROOT/consumer_verdict.py" selftest 2>&1)"
 consumer_selftest_status=$?
-check "consumer_verdict selftest: 26 arms, every row red on its fixture and green on a C executable, the record attesting {image: <pin>}, no docker argv built outside the launcher, a candidate's verdicts through the launcher over its one ship-form create" \
-      "ok" "$([[ $consumer_selftest_status -eq 0 ]] && grep -q '^consumer_verdict selftest: 26 arm(s), 0 failure(s)$' <<< "$consumer_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$consumer_selftest_output")")"
+check "consumer_verdict selftest: at least 26 arms, every row red on its fixture and green on a C executable, the record attesting {image: <pin>}, no docker argv built outside the launcher, a candidate's verdicts through the launcher over its one ship-form create" \
+      "ok" "$(selftest_verdict "$consumer_selftest_status" "$consumer_selftest_output" 26 '^consumer_verdict selftest: ([0-9]+) arm\(s\), 0 failure\(s\)$')"
 
 echo
 
 echo "[7j1c] trivy_pin admits the CVE scanner by its tarball digest, never by a tag (selftest), and setup-trivy is its one caller"
 trivy_selftest_output="$(timeout 60 python3 "$MALF_ROOT/trivy_pin.py" selftest 2>&1)"
 trivy_selftest_status=$?
-check "trivy_pin selftest: 8 arms, the pinned bytes admitted and every other byte, version, member count and machine refused" \
-      "ok" "$([[ $trivy_selftest_status -eq 0 ]] && grep -q '^trivy_pin selftest: 8 arm(s), 0 failure(s)$' <<< "$trivy_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$trivy_selftest_output")")"
+check "trivy_pin selftest: at least 8 arms, the pinned bytes admitted and every other byte, version, member count and machine refused" \
+      "ok" "$(selftest_verdict "$trivy_selftest_status" "$trivy_selftest_output" 8 '^trivy_pin selftest: ([0-9]+) arm\(s\), 0 failure\(s\)$')"
 check "setup-trivy fetches through trivy_pin.py, and no malf action or workflow fetches trivy any other way" \
       "1 " "$(grep -c 'trivy_pin.py" fetch' "$MALF_ROOT/.github/actions/setup-trivy/action.yml") $(grep -rlE 'aquasecurity/trivy|trivy/.*install\.sh' "$MALF_ROOT/.github" | tr '\n' ' ')"
 echo
@@ -495,8 +517,8 @@ echo
 echo "[7j1d] grype_pin admits the second CVE scanner AND its vulnerability database build by digest, never by a tag or 'latest' (selftest)"
 grype_selftest_output="$(timeout 60 python3 "$MALF_ROOT/grype_pin.py" selftest 2>&1)"
 grype_selftest_status=$?
-check "grype_pin selftest: 12 arms, the pinned binary and database admitted, a kept copy reused, every other byte, version, import, member count and machine refused, and a download naming its own agent (urllib's default is refused 403 at grype.anchore.io)" \
-      "ok" "$([[ $grype_selftest_status -eq 0 ]] && grep -q '^grype_pin selftest: 12 arm(s), 0 failure(s)$' <<< "$grype_selftest_output" && echo ok || echo "failed: $(tail -3 <<< "$grype_selftest_output")")"
+check "grype_pin selftest: at least 12 arms, the pinned binary and database admitted, a kept copy reused, every other byte, version, import, member count and machine refused, and a download naming its own agent (urllib's default is refused 403 at grype.anchore.io)" \
+      "ok" "$(selftest_verdict "$grype_selftest_status" "$grype_selftest_output" 12 '^grype_pin selftest: ([0-9]+) arm\(s\), 0 failure\(s\)$')"
 echo
 
 echo "[7h] comment_contract_lint carries its own grammar proof (--selftest), post-format leg included"
@@ -6192,8 +6214,9 @@ echo
 
 echo "[7q7s] gate G4's harness: a command under \`malf sandbox\` reads only beneath its declared roots, and a create whose build() opens an undeclared file reds with EACCES naming it (DN-142.D19 (5))"
 lb_out="$(timeout 120 python3 "$MALF_ROOT/landlock_sandbox.py" selftest 2>&1)"
-check "landlock_sandbox selftest: 12 arms, every denial fired" \
-      "ok" "$(grep -q '^landlock_sandbox selftest: 12 arm(s), 0 failure(s)$' <<< "$lb_out" && echo ok || echo "failed: $(tail -3 <<< "$lb_out")")"
+lb_status=$?
+check "landlock_sandbox selftest: at least 12 arms, every denial fired" \
+      "ok" "$(selftest_verdict "$lb_status" "$lb_out" 12 '^landlock_sandbox selftest: ([0-9]+) arm\(s\), 0 failure\(s\)$')"
 lb_tmp="$(realpath "$(mktemp -d)")"
 mkdir -p "$lb_tmp/src/lb_pkg" "$lb_tmp/outside" "$lb_tmp/tmp"
 printf 'undeclared\n' > "$lb_tmp/outside/secret"
