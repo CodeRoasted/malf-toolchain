@@ -24,7 +24,8 @@ ONE home share every path but the per-create folder hash, so they prove less.
         ON THE HOST, before a walk whose container has no network: every third-party recipe revision
         <lockfile> names that <home> lacks downloaded from <home>'s remotes and checked against its
         revision, and every source file a held lock recipe declares (its conandata `sources` entry, a url
-        and a sha256) that <source download cache> lacks downloaded and checked against its sha256. Exit 0
+        and a sha256) that <source download cache> lacks downloaded and checked against its sha256, a download
+        failing on the network alone retried once and its retried bytes checked alike. Exit 0
         everything held; 1 a revision or a source no remote serves, named; a fresh <home> is left alone
     package_twin.py missing <home> <released tsv> <owned prefixes> <host profile> <build profile> <lockfile>
         every released recipe exported into <home> (a seeded home, before any create), then its graph resolved
@@ -57,6 +58,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -190,6 +193,12 @@ def seed_recipes(lockfile: Path, prefixes: tuple[str, ...], target: Path, source
 
 SOURCE_TIMEOUT_S = 120
 SOURCE_CHUNK_BYTES = 1 << 20
+# One network failure of a source fetch is retried ONCE, after this pause: a hosted runner keeps no sources
+# backup, so a single unreachable attempt red a whole candidate store (coderoast-ipc candidate run 41883842940,
+# attempt 1, 2026-11-04: util-linux-libuuid/2.39.2, "[Errno 101] Network is unreachable"). Only a failure the
+# network can heal is retried; bytes that are not the pin, or an answer the server means (an HTTP 4xx other
+# than 408 and 429), are not, and the retried bytes are checked against the pin like the first attempt's.
+SOURCE_RETRY_DELAY_S = 10
 
 
 def enabled_remotes(home: Path) -> list[str]:
@@ -239,32 +248,53 @@ def source_entries(conandata: dict, version: str) -> list[tuple[list[str], str]]
             for item in listed]
 
 
+def transient(error: OSError | ValueError) -> bool:
+    """Whether a failed source download is one the network can heal: a connection, DNS or timeout failure, or
+    an HTTP 5xx, 408 or 429; never a malformed url or an HTTP 4xx the server means."""
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code >= 500 or error.code in (408, 429)
+    return isinstance(error, OSError)
+
+
+def download_source(url: str, staged: Path, sha256: str) -> tuple[str, bool] | None:
+    """One download of `url` into `staged`, checked against `sha256`; `staged` is removed unless it holds
+    exactly the pinned bytes. post: None when it does, else the failure and whether only the network failed."""
+    digest = hashlib.sha256()
+    try:
+        with urllib.request.urlopen(url, timeout=SOURCE_TIMEOUT_S) as answer, staged.open("wb") as out:
+            while chunk := answer.read(SOURCE_CHUNK_BYTES):
+                digest.update(chunk)
+                out.write(chunk)
+    except (OSError, ValueError) as error:
+        staged.unlink(missing_ok=True)
+        return str(error), transient(error)
+    if digest.hexdigest() != sha256:
+        staged.unlink(missing_ok=True)
+        return f"its bytes digest to {digest.hexdigest()}", False
+    return None
+
+
 def fetch_source(cache: Path, urls: list[str], sha256: str) -> str | None:
     """Download the file `sha256` names into conan's source download cache `cache` (`core.sources:
     download_cache`, read by conan at `<cache>/s/<sha256>`) from the first of `urls` whose bytes digest to
-    it, written beside and renamed in, so a reader never sees a partial file. post: None when stored, else
-    every url's failure."""
+    it, written beside and renamed in, so a reader never sees a partial file. A url whose download fails on
+    the network alone is retried once, after `SOURCE_RETRY_DELAY_S`, and its retried bytes are checked
+    against `sha256` as the first attempt's. post: None when stored, else every url's failure."""
     target = cache / "s" / sha256
     target.parent.mkdir(parents=True, exist_ok=True)
+    staged = target.parent / f"{sha256}.provisioning-{os.getpid()}"
     failures = []
     for url in urls:
-        staged = target.parent / f"{sha256}.provisioning-{os.getpid()}"
-        digest = hashlib.sha256()
-        try:
-            with urllib.request.urlopen(url, timeout=SOURCE_TIMEOUT_S) as answer, staged.open("wb") as out:
-                while chunk := answer.read(SOURCE_CHUNK_BYTES):
-                    digest.update(chunk)
-                    out.write(chunk)
-        except (OSError, ValueError) as error:
-            staged.unlink(missing_ok=True)
-            failures.append(f"{url}: {error}")
-            continue
-        if digest.hexdigest() != sha256:
-            staged.unlink(missing_ok=True)
-            failures.append(f"{url}: its bytes digest to {digest.hexdigest()}")
-            continue
-        os.replace(staged, target)
-        return None
+        failure = download_source(url, staged, sha256)
+        if failure is not None and failure[1]:
+            print(f"package_twin: {url}: {failure[0]}; retrying once in {SOURCE_RETRY_DELAY_S} s", file=sys.stderr)
+            time.sleep(SOURCE_RETRY_DELAY_S)
+            retried = download_source(url, staged, sha256)
+            failure = None if retried is None else (f"{failure[0]}, then on its retry {retried[0]}", False)
+        if failure is None:
+            os.replace(staged, target)
+            return None
+        failures.append(f"{url}: {failure[0]}")
     return "; ".join(failures)
 
 

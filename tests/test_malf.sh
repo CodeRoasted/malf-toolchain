@@ -5400,6 +5400,45 @@ check "RED: a source whose bytes are not the declared sha256 is refused, exit 1,
 check "a fresh home is left alone, for the walk that creates it to seed, exit 0" \
       "rc=0|package_twin: nothing provisioned — fresh is not a conan home yet, and the walk that creates it seeds it|" \
       "$(pv_run "$pv_tmp/conan.lock" "$pv_tmp/fresh")"
+# RED FIRST (2026-11-06, N415): a hosted runner keeps no sources backup, and ONE unreachable attempt red a whole
+# candidate store (coderoast-ipc candidate run 41883842940, attempt 1, 2026-11-04: util-linux-libuuid/2.39.2,
+# "[Errno 101] Network is unreachable"). urlopen is replaced by a script of answers, one per call: the runner's
+# unreachable network, an HTTP 404, or the pinned or other bytes. Each line: calls made, the verdict, whether
+# the cache holds the pinned bytes at the sha256, the staged leftovers, the failure. Before the retry the
+# first line read `1:refused:False:[]:…Network is unreachable`.
+check "RED: one network failure of a source fetch is retried once and stored; a second refuses; retried bytes that are not the pin refuse; a mismatch or a 404 is never retried" \
+      "2:stored:True:[]:None|2:refused:False:[]:https://mirror.example/f.tar.xz: <urlopen error [Errno 101] Network is unreachable>, then on its retry <urlopen error [Errno 101] Network is unreachable>|2:refused:False:[]:https://mirror.example/f.tar.xz: <urlopen error [Errno 101] Network is unreachable>, then on its retry its bytes digest to BAD|1:refused:False:[]:https://mirror.example/f.tar.xz: its bytes digest to BAD|1:refused:False:[]:https://mirror.example/f.tar.xz: HTTP Error 404: Not Found|" \
+      "$(python3 - "$MALF_ROOT" "$pv_tmp" 2>/dev/null <<'PY' | tr '\n' '|'
+import hashlib, io, sys, urllib.error
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import package_twin as twin
+twin.SOURCE_RETRY_DELAY_S = 0
+real, scratch = twin.urllib.request.urlopen, Path(sys.argv[2]) / "retry"
+scratch.mkdir()
+good, bad = scratch / "good.txt", scratch / "bad.txt"
+good.write_bytes(b"the source bytes\n"); bad.write_bytes(b"other bytes\n")
+sha, bad_sha = (hashlib.sha256(f.read_bytes()).hexdigest() for f in (good, bad))
+def run(index, answers):
+    calls = []
+    def urlopen(url, timeout):
+        answer = answers[len(calls)]; calls.append(answer)
+        if answer == "down":
+            raise urllib.error.URLError(OSError(101, "Network is unreachable"))
+        if answer == "404":
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO())
+        return real((good if answer == "good" else bad).as_uri(), timeout=timeout)
+    twin.urllib.request.urlopen = urlopen
+    cache = scratch / f"cache{index}"
+    failure = twin.fetch_source(cache, ["https://mirror.example/f.tar.xz"], sha)
+    stored = cache / "s" / sha
+    held = stored.is_file() and stored.read_bytes() == good.read_bytes()
+    leftovers = sorted(p.name for p in (cache / "s").iterdir() if p.name != sha)
+    print(f"{len(calls)}:{'stored' if failure is None else 'refused'}:{held}:{leftovers}:{failure}".replace(bad_sha, "BAD"))
+for index, answers in enumerate((["down", "good"], ["down", "down"], ["down", "bad"], ["bad"], ["404"])):
+    run(index, answers)
+PY
+)"
 # The driver: the host half of store-create provisions the home the walk reads its recipes from (the walk's
 # own, or the seed of a fresh one) BEFORE its container starts, and a refusal stops it at exit 2.
 pv_body="$(sed -n '/^_malf_store_create_in_environment()/,/^}/p' "$MALF_BIN")"
