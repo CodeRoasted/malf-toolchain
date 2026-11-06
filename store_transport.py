@@ -141,7 +141,7 @@ INDEX_SCHEMA = "coderoast.store.candidate/1"
 CANDIDATE_WORKFLOW = ".github/workflows/candidate.yml"
 SIGNER_PATH = ".github/workflows/coderoast-candidate.yml"
 SOURCE_REF = "refs/heads/main"
-# A cut runs each candidate at its candidate tag (DN-142.D33, DN-108.D36), so a push to main during the cut changes
+# A cut runs each candidate at its candidate tag (ADR-2.D14, DN-108.D36), so a push to main during the cut changes
 # nothing it judges; such an attestation is trusted only when its commit is on main's history.
 CANDIDATE_REF_PREFIX = "refs/tags/candidate/"
 PEEK_ENV = "MALF_PACKAGE_PEEK_TOKEN"
@@ -1895,7 +1895,7 @@ def selftest() -> int:
             expect("the verifier asks gh for the repository, the signer workflow and the malf commit; the ref it judges itself",
                    asked[-1][3:], ["--repo", "coderoasted/coderoast-ipc", "--signer-workflow", signer,
                                    "--format", "json", "--signer-digest", malf_commit])
-            arm("a cut's candidate tag whose commit is on main is trusted as main is (DN-142.D33)",
+            arm("a cut's candidate tag whose commit is on main is trusted as main is (ADR-2.D14)",
                 lambda: trusted_index(reader, "coderoasted/coderoast-ipc", key, verifier(
                     {"sourceRepositoryRef": "refs/tags/candidate/9.9.9/0123456789abcdef"}, digest=malf_commit)), None)
             on_main.clear()

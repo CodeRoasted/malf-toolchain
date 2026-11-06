@@ -148,7 +148,7 @@ jobs:
         uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-format-check@38d0150069a6d8c773230f4d90610cfc8ddea2f5
 
       # Cheap (no toolchain, no build — it reads the repository's declared core through git). Each
-      # repository judges its own deterministic-content core here (DN-142.D33: a lint that judges one
+      # repository judges its own deterministic-content core here (ADR-2.D14: a lint that judges one
       # repository's own files runs in that repository); the cross-repository budget sum stays in the
       # superproject.
       - name: Determinism gates (clock and std <random>)

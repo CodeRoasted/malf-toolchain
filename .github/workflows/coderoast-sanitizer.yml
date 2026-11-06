@@ -1,6 +1,6 @@
 name: CodeRoast Sanitizer Gate
 
-# One sanitizer gate of a repository's candidate (DN-142.D33, the cut tools' input roots and the sanitizer gates),
+# One sanitizer gate of a repository's candidate (ADR-2.D14, the cut tools' input roots and the sanitizer gates),
 # judging the repository's own sources inside the pinned build environment: `sanitizer_verdict.py <gate>`, each act
 # through `malf source-act` (the dev leg's container shape, the upstreams exported into the act's profile home, so an
 # ASan act compiles them from source at that profile; no store holds an ASan binary).

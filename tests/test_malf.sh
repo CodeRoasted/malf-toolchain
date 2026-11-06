@@ -402,7 +402,7 @@ check "sbom_gen --selftest" \
 
 echo
 
-echo "[7c2] determinism_lint carries its own proof (selftest): both determinism gates' controls, every refusal, the packages.yml declaration and the budget, over fixture checkouts (DN-142.D33)"
+echo "[7c2] determinism_lint carries its own proof (selftest): both determinism gates' controls, every refusal, the packages.yml declaration and the budget, over fixture checkouts (ADR-2.D14)"
 determinism_selftest_output="$(timeout 120 python3 "$MALF_ROOT/determinism_lint.py" selftest 2>&1)"
 determinism_selftest_status=$?
 check "determinism_lint selftest: at least 167 arms, the clock and std <random> registers and their 13 opt-out boundary cases each, the declared scope (roots, exemption, out-of-scope rows, NOT A SUBJECT), the per-repository budget against the contract caps, every refusal, and the tracked floor" \
@@ -410,7 +410,7 @@ check "determinism_lint selftest: at least 167 arms, the clock and std <random> 
 
 echo
 
-echo "[7c3] sanitizer_verdict carries its own proof (selftest): every verdict of a candidate's three sanitizer gates over a scripted act runner (DN-142.D33)"
+echo "[7c3] sanitizer_verdict carries its own proof (selftest): every verdict of a candidate's three sanitizer gates over a scripted act runner (ADR-2.D14)"
 sanitizer_selftest_output="$(timeout 120 python3 "$MALF_ROOT/sanitizer_verdict.py" selftest 2>&1)"
 sanitizer_selftest_status=$?
 check "sanitizer_verdict selftest: at least 28 arms, the ASan suite red on its exit and unjudged over zero tests or a refused act, the fuzz replay's bound (124, 137), its unexecuted exits, its population (the last count wins, under the seeds or zero is unjudged) and the seed a red names, the valgrind driver's exit contract and its input count, zero seeds running no act, and the document written whole" \
@@ -485,7 +485,7 @@ check "malf_closure selftest: at least 35 arms, 0 failed" \
 
 echo
 
-echo "[7j0] artefact_store's object producers carry their own refusal proof (selftest): the objects convention resolves step -> record -> output -> member, the tracked step is keyed on blob ids at a commit, a package member is extracted from its transport only at its digest, and a candidate's ingestion refuses a declared class its bytes contradict and a PE carrying a symbol table or a CodeView entry (DN-142.D25, DN-142.D33)"
+echo "[7j0] artefact_store's object producers carry their own refusal proof (selftest): the objects convention resolves step -> record -> output -> member, the tracked step is keyed on blob ids at a commit, a package member is extracted from its transport only at its digest, and a candidate's ingestion refuses a declared class its bytes contradict and a PE carrying a symbol table or a CodeView entry (DN-142.D25, ADR-2.D14)"
 objects_selftest_output="$(timeout 120 python3 "$MALF_ROOT/artefact_store.py" selftest 2>&1)"
 objects_selftest_status=$?
 check "artefact_store selftest: at least 51 arms, every refusal fired (an ingest row carrying the retired `commits:` or `after:` key among them), the system member refused outside the build environment, the transport extraction, the tracked record, a candidate's ingestion of its own run's artifact and its class, a candidate verdict stored only when it passed and only from a candidate_verdicts row of its shape, the bench verdict, the test_package member, the restore and the reuse decision intact, an ingested executable refused without format-1 notices beside it, and the per-label test flag on third_party and upstream members in both key derivations, which agree, a label carried by two references refused by both (DN-142.D39 (5), (7b))" \
@@ -493,7 +493,7 @@ check "artefact_store selftest: at least 51 arms, every refusal fired (an ingest
 
 echo
 
-echo "[7j1] store_image carries its own refusal proof (selftest): an image is built from a candidate's ship-form creates and a resolved runtime, judged as one linux/amd64 OCI image, and stored once per run (DN-142.D9, DN-142.D33)"
+echo "[7j1] store_image carries its own refusal proof (selftest): an image is built from a candidate's ship-form creates and a resolved runtime, judged as one linux/amd64 OCI image, and stored once per run (DN-142.D9, ADR-2.D14)"
 image_selftest_output="$(timeout 120 python3 "$MALF_ROOT/store_image.py" selftest 2>&1)"
 image_selftest_status=$?
 check "store_image selftest: at least 16 arms, every refusal fired, the staged context (each executable's package notices among it) and the stored record intact, the candidate's image from its one ship-form create, an image lacking /usr/share/doc/<package>/THIRD-PARTY-NOTICES.txt refused (DN-142.D39 (8))" \
@@ -3407,7 +3407,7 @@ check "the ship form's set is READ from the helper and rides the create alone: t
       "$(bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; MALF_PROFILE_NAME=linux-gcc16-release MALF_STEP_FORM=ship _malf_writer_create_args && echo "$(printf "%s\n" "${_MALF_WRITER_ARGS[@]}" | paste -sd"|") / $(printf "%s\n" "${_MALF_FORM_ARGS[@]}" | paste -sd"|")"' _ "$cs_tmp/shipmutant/malf")"
 check "store-create refuses an unknown option before anything runs" \
       "rc=1" "$(bash "$MALF_BIN" store-create --writer > /dev/null 2>&1; echo "rc=$?")"
-check "DN-142.D33 (the cut's bench measurement): the ship-bench conf set configures the bench targets (no skip_test) and runs only the benchmarks" \
+check "ADR-2.D14 (the cut's bench measurement): the ship-bench conf set configures the bench targets (no skip_test) and runs only the benchmarks" \
       "rc=0 -c|user.malf:bench_only=True|-c|user.malf:run_test_package=True" \
       "$(out="$(python3 "$MALF_ROOT/malf_recipe_tests.py" create-args ship-bench)"; echo "rc=$? $(paste -sd'|' <<< "$out")")"
 check "a ship-form walk naming MALF_BENCH takes the ship-bench set, one without it the ship set" \
@@ -4253,7 +4253,7 @@ check "shipped: the packages a release ships, release: true and a published exec
          && git -C "$d" add packages.yml && git -C "$d" -c user.name=t -c user.email=t@t commit -qm r \
          && python3 "$MALF_ROOT/artefact_store.py" shipped "$d" | tr '\n' ' ' | sed 's/ $//')|$(printf '  sv_more: {path: m, release: true}\n' >> "$sv_tmp/rel/packages.yml" \
          && python3 "$MALF_ROOT/artefact_store.py" shipped "$sv_tmp/rel" | tr '\n' ' ' | sed 's/ $//')"
-# THE CUT'S TOOLS (DN-142.D33): declared `cut_tool: {why}` beside `release:`, stored with the candidate and
+# THE CUT'S TOOLS (ADR-2.D14): declared `cut_tool: {why}` beside `release:`, stored with the candidate and
 # never released, so a cut tool that ships, publishes or carries no why is refused before anything is created.
 check "cut-tools and stored: a cut tool joins what the candidate stores and never what ships; a released or why-less cut tool is refused (exit 1)" \
       "sv_proof|sv_core sv_proof|sv_core|rc=1 1|rc=1 1" \
@@ -4295,7 +4295,7 @@ rm -f "$sv_tmp/repo/stray.txt"
 check "source-lint refuses a directory holding no packages.yml (exit 2), an unknown option (exit 1, as every verb), another workspace and a repository with no in-image dev-leg tree (exit 2)" \
       "rc=2 rc=1 rc=2 1 rc=2 1" \
       "$(bash "$MALF_BIN" source-lint "$sv_tmp" > /dev/null 2>&1; echo "rc=$?") $(bash "$MALF_BIN" source-lint --fast "$sv_tmp/repo" > /dev/null 2>&1; echo "rc=$?") $(CONAN_HOME="$sv_tmp/home" MALF_SYSTEM="$MALF_TEST_SYSTEM" MALF_WORKSPACE_ROOT="$sv_tmp" bash "$MALF_BIN" source-lint "$sv_tmp/repo" > "$sv_tmp/v.log" 2>&1; echo "rc=$?") $(grep -c "the postflight's workspace is its repository" "$sv_tmp/v.log") $(CONAN_HOME="$sv_tmp/home" MALF_SYSTEM="$MALF_TEST_SYSTEM" MALF_WORKSPACE_ROOT="$sv_tmp/repo" bash "$MALF_BIN" source-lint "$sv_tmp/repo" > "$sv_tmp/v.log" 2>&1; echo "rc=$?") $(grep -c 'no dev-leg build in the image at .*/build-clang21-libcxx-release.environment-.*/compile_commands.json' "$sv_tmp/v.log")"
-# A SANITIZER GATE'S ACT (`source-act`, DN-142.D33) refuses before any container: no packages.yml, a profile malf does
+# A SANITIZER GATE'S ACT (`source-act`, ADR-2.D14) refuses before any container: no packages.yml, a profile malf does
 # not hold, no command, an unknown option; inside the environment, another workspace.
 check "source-act refuses a directory holding no packages.yml, an unknown profile and a missing command (exit 2), an unknown option (exit 1), and inside the environment another workspace (exit 2)" \
       "rc=2 rc=2 1 rc=2 rc=1 rc=2 1" \

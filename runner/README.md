@@ -50,7 +50,7 @@ as its service's virtual account `NT SERVICE\<service>`, not the Founder. The pr
 superproject's `runner-isolation-probe.yml`, one `workflow_dispatch` run after the scripts, one leg
 per runner: it tries every door from inside a job and passes only if each is refused and every
 control works. That probe workflow was retired on 2026-10-30 with the superproject's other probes
-(`DN-142.D33`); its recorded runs below stay as the evidence of that date.
+(`ADR-2.D14`); its recorded runs below stay as the evidence of that date.
 The probe ran in a FRESH workspace, so it cannot see what earlier jobs left: the Windows script
 also re-owns and resets the runner's job workspace (`_work`), and the parts of it that need no
 elevation are proven on the Windows host by `pwsh -File malf\runner\isolate-runner-windows.selftest.ps1`.

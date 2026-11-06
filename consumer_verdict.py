@@ -50,7 +50,7 @@ are key members, so a new baseline re-keys the verdict.
         member file names, the system refused unless it is this container's MALF_SYSTEM; exit 0 when it
         passed and agrees with its record, 1 on a fail, a mismatch or a refusal
     consumer_verdict.py candidate <store> <repository dir> <scratch>
-        a repository's CANDIDATE store job (DN-142.D33): every consumer verdict packages.yml at HEAD names, over the
+        a repository's CANDIDATE store job (ADR-2.D14): every consumer verdict packages.yml at HEAD names, over the
         store's ONE ship-form create of its package: prepare and conclude in the build environment, the probe through
         the launcher, the toolchain member measured in the image; exit 0 when each passed and was stored
     consumer_verdict.py selftest
@@ -376,7 +376,7 @@ def conclude(store: Path, scratch: Path, member: dict, environ: dict) -> int:
     return 0 if stored == 0 and verdict == "pass" else 1
 
 
-# ── a CANDIDATE's consumer verdicts (DN-142.D33) ─────────────────────────────────
+# ── a CANDIDATE's consumer verdicts (ADR-2.D14) ─────────────────────────────────
 #
 # The repository's candidate store job runs the verdict over its own ship-form entry:
 # `prepare` and `conclude` in the pinned image through malf's launcher (`build_environment.py
@@ -476,7 +476,7 @@ def _built(root: Path, name: str, source: str, compiler: str, *flags: str) -> by
 
 
 def _candidate_arms(arm: Callable, root: Path) -> None:
-    """The candidate verb (DN-142.D33): the sites read from packages.yml, the four acts in their order through
+    """The candidate verb (ADR-2.D14): the sites read from packages.yml, the four acts in their order through
     the launcher over the ONE ship-form create, the member measured in the image, and the refusals."""
     repository = root / "repo"
     repository.mkdir(parents=True)

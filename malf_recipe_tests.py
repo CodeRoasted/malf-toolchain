@@ -22,7 +22,7 @@ runs the same selection through `run_test_package(self)` and writes a second res
 THE THREE CONF SETS OF A `conan create` are defined here and nowhere else (DN-142.D13 (1),
 DN-142.D31 (1)). The WRITER (`malf store-create` without `--ship`) sets no skip conf: it builds and runs
 every test and every test_package. The SHIP-BENCH set is the ship form's when `MALF_BENCH` names a bench
-document (the cut's bench measurement, DN-142.D33): no skip conf, so the test and bench targets are configured,
+document (the cut's bench measurement, ADR-2.D14): no skip conf, so the test and bench targets are configured,
 and `user.malf:bench_only`, so the build runs no test and only the named benchmarks. The SHIP form (a
 candidate's `malf store-create --ship`) sets
 `tools.build:skip_test=True` and keeps the test folder: the package's own tests are neither built
@@ -105,7 +105,7 @@ PROFILE_CONF = "user.malf:profile"
 PROFILES_DIR = Path(__file__).resolve().parent / "profiles"
 # DN-142.D31 (1): the conf under which a test_package runs although `tools.build:skip_test` is set.
 TEST_PACKAGE_CONF = "user.malf:run_test_package"
-# DN-142.D33: the cut's bench measurement over a ship-form walk. The tree configures its
+# ADR-2.D14: the cut's bench measurement over a ship-form walk. The tree configures its
 # test and bench targets (no `tools.build:skip_test`, whose BUILD_TESTING=OFF configures no bench target) and the
 # build runs no test of its own, only the benchmarks `user.malf:bench` names.
 BENCH_ONLY_CONF = "user.malf:bench_only"

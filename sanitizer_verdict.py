@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """sanitizer_verdict — a candidate's sanitizer gates, each judging its own repository's sources in the build
-environment, each leaving ONE verdict document its candidate's store job ingests (DN-142.D33, the cut tools'
+environment, each leaving ONE verdict document its candidate's store job ingests (ADR-2.D14, the cut tools'
 input roots and the sanitizer gates).
 
 Usage:
@@ -16,7 +16,7 @@ a red job's reader has it; exit 0 the verdict `pass`, 1 `fail` or `timeout` (the
 
 WHERE THIS CAME FROM. Until 2026-10-30 the three gates were the superproject's cut (`pharos build`'s A4:
 `canon_asan_suite`, `sanitizer_replay_gate`, `keyed_sanitizers`), compiling in the release seat's workspace. The
-Founder's ruling recorded in DN-142.D33 moved them into the repositories' candidates; their predicates are carried
+Founder's ruling recorded in ADR-2.D14 moved them into the repositories' candidates; their predicates are carried
 here unchanged:
 
   asan-suite — `malf test <package dir> --asan` under REPLAY_SANITIZER_ENV, so a UBSan report halts its test.

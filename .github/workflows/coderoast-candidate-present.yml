@@ -15,7 +15,7 @@ name: CodeRoast Candidate Present
 #
 # Trust: a PUBLIC repository's index counts only through its GitHub artifact attestation, signed by
 # malf's `coderoast-candidate.yml` at this very malf commit, from `refs/heads/main` of the repository
-# itself or a cut's candidate tag whose commit main holds (DN-142.D31 (4), DN-142.D33); a failed verification reads as ABSENT, never as a red. A PRIVATE repository
+# itself or a cut's candidate tag whose commit main holds (DN-142.D31 (4), ADR-2.D14); a failed verification reads as ABSENT, never as a red. A PRIVATE repository
 # has no attestation (item 6), so its index is read with `--private`, judged by digest. Every
 # identity is derived from the run (`github.repository`, the malf commit the run references): no
 # organisation is named here, so a fork runs the same computation over its own store (P7).
@@ -77,10 +77,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # note: a cut runs each candidate at its candidate tag, so a push to main during the cut judges nothing (DN-142.D33)
+          # note: a cut runs each candidate at its candidate tag, so a push to main during the cut judges nothing (ADR-2.D14)
           case "$REF" in
             refs/tags/candidate/*) ;;
-            *) echo "::error::a candidate stores only from refs/heads/main or a cut's refs/tags/candidate/..., and this run is on $REF (DN-142.D31 (4), DN-142.D33)"; exit 1 ;;
+            *) echo "::error::a candidate stores only from refs/heads/main or a cut's refs/tags/candidate/..., and this run is on $REF (DN-142.D31 (4), ADR-2.D14)"; exit 1 ;;
           esac
           status="$(gh api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...main" --jq .status)"
           case "$status" in

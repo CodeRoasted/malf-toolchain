@@ -12,7 +12,7 @@ REFUSAL: the gate could not judge, and a gate that cannot see its subject never 
 
 WHERE THIS CAME FROM. Until 2026-10-30 both gates were superproject Pharos check modules
 (`wallclock`, `random_determinism`) holding a hand-written SCOPE over five repositories. The
-Founder's ruling recorded in `DN-142.D33` ("each repo should be responsible from it's lint, except
+Founder's ruling recorded in `ADR-2.D14` ("each repo should be responsible from it's lint, except
 if the check is cross-repo by nature") moved them here: malf's `coderoast-preflight.yml` runs both
 over the calling repository, and each repository declares its own scope in its own `packages.yml`.
 What stayed cross-repo — the contract's opt-out budget summed over the repositories, and the one

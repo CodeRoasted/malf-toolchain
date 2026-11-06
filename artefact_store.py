@@ -41,7 +41,7 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
         the packages a release of <checkout> ships, from its packages.yml at HEAD, one per line: each
         `release: true` package and each package with a `published` executable (an image's binary)
     artefact_store.py cut-tools <checkout>
-        the cut's tools <checkout> declares (`cut_tool: {why}` beside `release:`, DN-142.D33), one per line;
+        the cut's tools <checkout> declares (`cut_tool: {why}` beside `release:`, ADR-2.D14), one per line;
         exit 1 refusing a malformed one or one that is also released or published
     artefact_store.py stored <checkout>
         what a candidate's store job creates and binds: `shipped` and `cut-tools`, one per line
@@ -157,12 +157,12 @@ result under an existing key is a COMPARE, a differing one recorded as a mismatc
         each `ingest:` and `candidate_verdicts:` row of packages.yml at <commit>,
         `<workflow>\t<artifact>\t<member>\t<class>` per line
     artefact_store.py candidate-ingest <store> <repository dir> <commit> <workflow file> <artifact dir> <run id> <attempt> <GitHub artifact digest>
-        a CANDIDATE's ingestion (DN-142.D33): the row's member, read from the artifact a job of this candidate's
+        a CANDIDATE's ingestion (ADR-2.D14): the row's member, read from the artifact a job of this candidate's
         own run uploaded, stored as an object and the record `<repository>/ingest.<stem>`; prints its key. A
         `candidate_verdicts:` row's member is a sanitizer gate's verdict document, refused unless its `verdict` is `pass`
     artefact_store.py tracked-packages <repository dir> <commit>
         each package declaring a `tracked/<member>` object in packages.yml at <commit>, one per line,
-        sorted: the packages a candidate's store job runs `tracked-step` for (DN-142.D33)
+        sorted: the packages a candidate's store job runs `tracked-step` for (ADR-2.D14)
     artefact_store.py parameters <profile> <argv>...
         the act's parameter document (DN-142.D19 (1)), canonical JSON on one line: MALF_STORE_PARAMETERS
         when a driver hands one, checked equal to the act's argv and profile, every `env` member equal
@@ -2298,7 +2298,7 @@ def _shipped(entry: dict) -> bool:
         or any(executable_class(value) == "published" for value in (entry.get("executables") or {}).values())
 
 
-# THE CUT'S TOOLS (DN-142.D33, the Founder's option (i), 2026-10-30): a package a cut gate runs on the release
+# THE CUT'S TOOLS (ADR-2.D14, the Founder's option (i), 2026-10-30): a package a cut gate runs on the release
 # seat, which no release ships. `cut_tool: {why: <the gate that runs it>}` beside `release:` makes the candidate's
 # store job create it in the ship form, bind it to its source verdict and store it with what ships, and the cut
 # restores it by key and runs it, building nothing. Never released: a cut tool that also ships, or that names a
@@ -2317,7 +2317,7 @@ def cut_tool_defects(package: str, entry: dict) -> list[str]:
         defects.append(f"{package}: `{CUT_TOOL_FIELD}:` is a mapping holding exactly a non-empty `why:`, not {declared!r}")
     if _shipped(entry) or entry.get("objects"):
         defects.append(f"{package}: a cut tool is never released, and this entry is `release: true`, classes an "
-                       "executable `published` or names an `objects:` site (DN-142.D33)")
+                       "executable `published` or names an `objects:` site (ADR-2.D14)")
     return defects
 
 
@@ -2871,7 +2871,7 @@ def _described(output: dict) -> str:
 # stay its `entries` (DN-142.D22). A publication row resolves either the same way: step id -> the
 # record the candidate stored -> the output member. Two producers of such outputs live here: the
 # TRACKED step (a package's committed files, keyed on their git blob ids) and the INGESTION record
-# (an output a job of the candidate's own run uploaded, `candidate_ingest`, DN-142.D33).
+# (an output a job of the candidate's own run uploaded, `candidate_ingest`, ADR-2.D14).
 OBJECTS_FIELD = "objects"
 PACKAGE_OUTPUT = "package"
 TRANSPORT_FIELD = "transport"
@@ -2990,7 +2990,7 @@ def declared_tracked(repository: Path, commit: str, package: str) -> tuple[str, 
 
 def tracked_packages(repository: Path, commit: str) -> list[str]:
     """Every package whose `packages.yml` entry at `commit` declares a `tracked/<member>` object, sorted:
-    the packages a candidate's store job runs `tracked-step` for (DN-142.D33)."""
+    the packages a candidate's store job runs `tracked-step` for (ADR-2.D14)."""
     import yaml
 
     document = yaml.safe_load(_git_bytes(repository, ["show", f"{commit}:packages.yml"])) or {}
@@ -3021,7 +3021,7 @@ CANDIDATE_INGEST_KEYS = {"artifact", "published"}
 # `licenses/THIRD-PARTY-NOTICES.txt` into the artifact beside it, and the ingestion stores it as a second member of
 # the same record, refused when absent or not format 1; the release publishes it as `<asset>.THIRD-PARTY-NOTICES.txt`.
 INGEST_NOTICES = "THIRD-PARTY-NOTICES.txt"
-# THE CANDIDATE'S OWN VERDICTS (DN-142.D33, the sanitizer gates): a gate a job of the candidate runs over the
+# THE CANDIDATE'S OWN VERDICTS (ADR-2.D14, the sanitizer gates): a gate a job of the candidate runs over the
 # repository's sources (canon core's ASan suite, insight-eidos's fuzz ASan replay and valgrind replay) leaves one
 # verdict document, declared under `candidate_verdicts:` as `{artifact, object}` and ingested exactly as an `ingest:`
 # row's member is. It is a block of its own because an `ingest:` row may be published and a verdict never is. The document is JSON whose `verdict` is `pass`: the job's exit and the document are two producers
@@ -3060,7 +3060,7 @@ def _declared_rows(repository: Path, commit: str) -> list[tuple[str, str, str, s
 def ingest_rows(repository: Path, commit: str) -> list[tuple[str, str, str, str]]:
     """Every `ingest:` and `candidate_verdicts:` row packages.yml declares at `commit`, as (workflow file, artifact,
     member, class), sorted: the hosted outputs and verdicts a candidate's store job ingests from its own run
-    (DN-142.D33)."""
+    (ADR-2.D14)."""
     return [row[:4] for row in _declared_rows(repository, commit)]
 
 
@@ -3100,7 +3100,7 @@ def _ingested_notices(workflow: str, artefact: str, artifact_dir: Path) -> bytes
 
 def candidate_ingest(store: Path, repository: Path, commit: str, workflow: str, artifact_dir: Path,
                      run: dict, github_digest: str) -> str:
-    """A CANDIDATE's ingestion (DN-142.D33): the member packages.yml's `ingest:` row for `workflow` declares,
+    """A CANDIDATE's ingestion (ADR-2.D14): the member packages.yml's `ingest:` row for `workflow` declares,
     read from the artifact `artifact_dir` holds, which a job of THIS candidate's own run produced (the golden,
     insight-eidos's Windows leg), becomes an object and the record of the step `<repository>/ingest.<stem>`.
     Its key document is `{step: {kind: ingest, repository, artefact, workflow, class}, run: {id, attempt},

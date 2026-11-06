@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A release job's whole act on the store: read this repository's CANDIDATE from its own store, verify, stage or push.
 
-DN-142.D33: a release publishes from its repository's candidate and builds nothing (DN-142.D9).
+ADR-2.D14: a release publishes from its repository's candidate and builds nothing (DN-142.D9).
 `coderoast-publish.yml` runs this after `attest` proved the tagged commit is the commit the cut's record
 names for this repository and handed on that candidate's KEY:
 1. the candidate is read from `ghcr.io/<owner>/store-<repository>` at `candidate-<key>` through
@@ -40,12 +40,12 @@ Nothing reaches the output directory or the registry unverified, and nothing her
 
     store_publish.py stage <owner/repository> <tag> <candidate key> <cut-record.json> <its sha256> <bench dir> <out dir> (--signer-workflow W --signer-digest D | --private)
         a `bench/<member>` row from <bench dir>/<package>/<member>, the cut's artifact `cut-bench-<repository>`,
-        by the digest the cut record attest attested names (DN-142.D33), every other row
+        by the digest the cut record attest attested names (ADR-2.D14), every other row
         from the candidate; <out dir>/release/ (this Release's files) and <out dir>/destinations/<destination>/ with
         <out dir>/destinations/destinations.tsv (`<destination> <tag>` per line). Token: GITHUB_TOKEN (the
         repository's own: its store package and its API)
     store_publish.py cut-tool <owner/repository> <candidate key> <package> <entry> <out file> (--signer-workflow W --signer-digest D | --private)
-        a CUT TOOL (DN-142.D33): the `run-from-cache` entry of the package's ship-form create in the
+        a CUT TOOL (ADR-2.D14): the `run-from-cache` entry of the package's ship-form create in the
         candidate, read through the same trusted reader, extracted to <out file> by its digest and made executable,
         so the cut runs the bytes the candidate bound to its source verdict and builds nothing. A repository
         GITHUB_TOKEN reads as private, or cannot see, is read through its privacy (an upstream's rule), a public
@@ -141,7 +141,7 @@ CUT_RECORD_SCHEMA = "pharos-cut-record/1"
 
 @dataclass
 class Measured:
-    """The cut's benchmarks of one repository (DN-142.D33): measured on the release
+    """The cut's benchmarks of one repository (ADR-2.D14): measured on the release
     seat from this very candidate, named by digest in the cut's record `attest` attested, the JSONs in
     `folder/<package>/<member>`."""
 
@@ -226,7 +226,7 @@ def release_rows(declared: dict, owner: str, version: str) -> tuple[list[dict], 
     for package, row in sorted((declared.get("packages") or {}).items()):
         row = row or {}
         at = f"{PACKAGES_FILE} {package}"
-        # note: a cut tool is stored with the candidate and never released (DN-142.D33), so a row it would derive is refused
+        # note: a cut tool is stored with the candidate and never released (ADR-2.D14), so a row it would derive is refused
         defects = artefact_store.cut_tool_defects(package, row)
         if defects:
             findings += [f"{PACKAGES_FILE} {defect}" for defect in defects]
@@ -301,7 +301,7 @@ def ship_create(candidate: Candidate, package: str) -> dict:
 
 
 def cut_tool(candidate: Candidate, package: str, entry: str, target: Path) -> dict:
-    """A CUT TOOL's executable (DN-142.D33): the entry `entry` of `package`'s ONE ship-form create in
+    """A CUT TOOL's executable (ADR-2.D14): the entry `entry` of `package`'s ONE ship-form create in
     the candidate, extracted to `target` by its digest and made executable; {package, entry, digest, record}.
     The create must class the entry `run-from-cache`: a cut tool runs from where the cut put it, with the
     profile's runpath, and is never in the published form. Nothing is built: the bytes are the ones the
@@ -310,7 +310,7 @@ def cut_tool(candidate: Candidate, package: str, entry: str, target: Path) -> di
     declared = record["inputs"]["step"].get("executables") or {}
     if declared.get(entry) != RUN_FROM_CACHE:
         raise Refused(f"{package}'s ship-form create classes {entry} {declared.get(entry)!r}, not `{RUN_FROM_CACHE}`: a "
-                      f"cut tool is an executable the cut runs from its restored bytes (DN-142.D22, DN-142.D33)")
+                      f"cut tool is an executable the cut runs from its restored bytes (DN-142.D22, ADR-2.D14)")
     output = record["outputs"]["package"]
     held = {path: digest for path, _mode, digest in output.get("entries") or []}
     if entry not in held:
@@ -352,7 +352,7 @@ def judged_by(candidate: Candidate, package: str, verdict: str, digest: str) -> 
 
 def benchmarked(candidate: Candidate, row: dict, measured: Measured | None) -> dict:
     """A `bench/<member>` row, resolved in the CUT's benchmarks of this candidate, never in its store: a
-    benchmark is measured on the release seat (DN-142.D33). The file must hash to the
+    benchmark is measured on the release seat (ADR-2.D14). The file must hash to the
     digest the attested record names."""
     if measured is None:
         raise Refused("it is a benchmark, and the cut's record names no benchmark of this repository: the cut "
@@ -949,7 +949,7 @@ def _candidate_scene(root: Path, packages: str = CANDIDATE_PACKAGES, perf_verdic
 
 
 def candidate_arms(arm: Callable, failures: list[str], root: Path, servers: list) -> None:
-    """The release from its candidate (DN-142.D33): every declared row resolved in the candidate restored
+    """The release from its candidate (ADR-2.D14): every declared row resolved in the candidate restored
     from the repository's own store, staged with its publication document; a row the candidate does not hold,
     a tree that is not the tag's, an unpassed producer and a moved image tag refused before anything lands."""
     quiet: Callable[[str], None] = lambda _line: None  # noqa: E731 — a sink for the lines

@@ -1,6 +1,6 @@
 name: CodeRoast publish image
 
-# AN IMAGE IS PUBLISHED AS ITS CANDIDATE STORED IT (DN-142.D33; DN-142.D9): the repository's candidate
+# AN IMAGE IS PUBLISHED AS ITS CANDIDATE STORED IT (ADR-2.D14; DN-142.D9): the repository's candidate
 # store job built it once from the ship form's stored binary (store_image.py `candidate`) and stored its OCI
 # archive under a record of the candidate; the tag COPIES that archive to ghcr.io/<owner>/<image> by digest
 # and builds nothing. The caller's `attest` job hands on `key`, the candidate key the cut's record names for

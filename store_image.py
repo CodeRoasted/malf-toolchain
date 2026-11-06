@@ -3,7 +3,7 @@
 
 DN-142.D9 (the Founder, 2026-10-10, N360 plan ruling R-5): an image is a build step whose inputs are
 stored bytes, built once and stored as an object; the tag's publish copies that archive to the
-registry by digest and builds nothing. DN-142.D33: it is built in the image's repository's
+registry by digest and builds nothing. ADR-2.D14: it is built in the image's repository's
 candidate store job (`candidate`, below). Its inputs, each identified by bytes or a git object:
   * every executable the image carries, by its ENTRY DIGEST in the candidate's ship-form create record
     of its package, written from the stored transport and verified against that digest (a stripped,
@@ -33,7 +33,7 @@ blob the manifest names present and hashing to its digest, so the publish side c
 and the registry's digest is the archive's.
 
     store_image.py candidate <store> <repository dir> <run> <scratch>
-        a repository's CANDIDATE store job (DN-142.D33): every image the repository's packages.yml at
+        a repository's CANDIDATE store job (ADR-2.D14): every image the repository's packages.yml at
         HEAD declares under `images:`, built from the ship-form create records of <store> (exactly one per
         package an `image` site names, its entry digest verified) and the runtime libraries the PINNED
         BUILD ENVIRONMENT's ship compiler resolves (the compiler runs in the image, never on the runner,
@@ -276,7 +276,7 @@ def _assemble(store: Path, image: str, repo: str, declared: dict, created: Creat
                         {"image": ("archive", lambda: archive)})
 
 
-# ── the candidate's image step (DN-142.D33) ─────────────────────────────────────────────────────
+# ── the candidate's image step (ADR-2.D14) ─────────────────────────────────────────────────────
 
 SHIP_PROFILE = Path(__file__).resolve().parent / "profiles" / "linux-gcc16-release"
 CXX_LINE = re.compile(r"^CXX=(\S+)$", re.MULTILINE)
@@ -497,7 +497,7 @@ def _fake_runtime(name: str, into: Path) -> str:
 
 
 def candidate_arms(arm: Callable, failures: list[str], root: Path) -> None:
-    """The candidate verb's arms (DN-142.D33): built from the one ship-form create, stored with the
+    """The candidate verb's arms (ADR-2.D14): built from the one ship-form create, stored with the
     resolved runtime; every declaration and record defect refused before anything is stored."""
     quiet: Callable[[str], None] = lambda _line: None  # noqa: E731 — a sink for the verb's lines
     store, repository = _candidate_fixture(root / "a", CANDIDATE_PACKAGES)

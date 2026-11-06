@@ -5128,7 +5128,7 @@ Commands:
                                    nothing and refuses (2) with no in-image database. Exit lint's
     source-act --profile <profile> [--restore-upstreams] <repository> -- <command>...
                                    one command of a candidate's sanitizer gate in the build
-                                   environment (DN-142.D33), the repository's upstreams exported
+                                   environment (ADR-2.D14), the repository's upstreams exported
                                    into <profile>'s home (built from source there), or also their
                                    stored ship packages restored; exit the command's, 2 refused
     store-transport licence-audit --repository <owner>/<repo>
@@ -5773,7 +5773,7 @@ _malf_store_walk_backends() {   # <out> [<package>...]
 # served for the other; a ship-form create that leaves a result of its own tests is refused. Its outcome
 # expects the package, and a test verdict only when the recipe tracks a test_package. A `stored: false`
 # step has nothing to create in this form and is left out of the walk, printed. MALF_BENCH under `--ship`
-# is the cut's bench measurement (DN-142.D33): each create takes the ship-bench conf set
+# is the cut's bench measurement (ADR-2.D14): each create takes the ship-bench conf set
 # (malf_recipe_tests.py), configuring its bench targets and running only the benchmarks, and stores its
 # bench verdict beside the package; its walk's store is the cut's scratch, never a candidate's. The
 # third-party phases run under the writer's set in both forms: one act.
@@ -7014,7 +7014,7 @@ cmd_source_lint() {
 }
 
 # malf source-act --profile <profile> [--restore-upstreams] <repository> -- <command>... — ONE command of a
-# candidate's sanitizer gate inside the build environment (DN-142.D33, the cut tools' input roots and the sanitizer
+# candidate's sanitizer gate inside the build environment (ADR-2.D14, the cut tools' input roots and the sanitizer
 # gates): the dev leg's container shape (_malf_source_verdict_in_environment: the repository its workspace, the
 # image's home, the recipe home read-only, the upstream roots and recipes MALF_UPSTREAM_ROOTS/MALF_UPSTREAM_RECIPES
 # name), with every upstream package EXPORTED into <profile>'s home, so the command builds the upstreams FROM SOURCE

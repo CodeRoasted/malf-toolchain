@@ -11,7 +11,7 @@ name: CodeRoast attest
 # dispatched AT the cut's candidate tag `candidate/<V>/<d16>` (DN-108.D36), runs the cut's preflight jobs
 # over every repository at that candidate, then dispatches each repository's candidate in dependency
 # waves, BEFORE any release tag exists, and its `record` job writes `cut-record.json` (artifact
-# `cut-record`, schema `pharos-cut-record/1`, DN-142.D33): the commit A1 recorded for every repository,
+# `cut-record`, schema `pharos-cut-record/1`, ADR-2.D14): the commit A1 recorded for every repository,
 # each candidate's commit and KEY, the hub commit, the toolchain tag and `cuttable`. The `attest` job
 # proves that the commit the CALLER's tag points at is the commit that record names for the caller and,
 # for a repository that owns a candidate, the commit its candidate was built at, and refuses the tag
@@ -27,7 +27,7 @@ name: CodeRoast attest
 # the superproject passes `coderoast-release` (DN-119.D8).
 #
 # WHAT IT HANDS ON. Four outputs: `key`, the candidate key the record names for the caller, from which
-# its release publishes (DN-142.D33; empty for the superproject, which owns no candidate); `hub`, the
+# its release publishes (ADR-2.D14; empty for the superproject, which owns no candidate); `hub`, the
 # coderoast-hub commit the attested record names (a job that tests the scenario set this cut ships reads
 # it); `run`, the cut run whose record was attested; and `record-sha256`, the digest of the
 # `cut-record.json` it judged. The superproject's own `attach-record` job fetches the record from `run`
@@ -326,7 +326,7 @@ jobs:
               refuse(f"the cut record for {version} is schema {record.get('schema')!r}, cuttable="
                      f"{record.get('cuttable')!r}. The record job writes its record on EVERY path but a cancel, so "
                      f"the existence of a record is not a pass: only a `pharos-cut-record/1` record whose cuttable "
-                     f"is the JSON literal `true` attests (ADR-2.D13, DN-142.D33). Read its `problems` and re-run "
+                     f"is the JSON literal `true` attests (ADR-2.D13, ADR-2.D14). Read its `problems` and re-run "
                      f"the cut in {record_repo}.")
 
           repos = record.get("repos")
@@ -351,7 +351,7 @@ jobs:
                      f"published tag is the Founder's), or make a new candidate with `./pharos cut {version} "
                      f"--dispatch` in {record_repo} and re-tag from its green run.")
 
-          # A RELEASE PUBLISHES FROM ITS CANDIDATE (DN-142.D33): every repository but the record's own owns
+          # A RELEASE PUBLISHES FROM ITS CANDIDATE (ADR-2.D14): every repository but the record's own owns
           # a candidate the cut dispatched, built at the very commit the tag names, and its key is what the
           # release publishes from. The superproject owns none; any other repository the record names no
           # candidate of has nothing to publish from, and is refused.
@@ -359,7 +359,7 @@ jobs:
           if candidate_entry is None:
               if package != record_repo.split("/", 1)[1]:
                   refuse(f"the cut record for {version} names no candidate of {package}, and a release publishes "
-                         f"from its repository's candidate (DN-142.D33). The record's candidates: "
+                         f"from its repository's candidate (ADR-2.D14). The record's candidates: "
                          f"{', '.join(sorted(candidates))}. Put {package} in a wave of cut.yml and re-run the cut.")
               key = ""
           else:
