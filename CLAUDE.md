@@ -27,8 +27,8 @@ Root CLAUDE.md owns malf *usage*; this file is for working ON the tooling.
   commit** (the Founder, 2026-10-14). Commit to `main` and stop; the cut's one
   re-pin (the superproject's `OPS-1.S15` layering rule: the self-references one
   commit per nesting layer, then the consumers) carries every commit since the
-  last one, and the cut's `pins` preflight job reds until it has (`pin_coherence` INV-17 (g),
-  `OPS-1.S3`). Re-pin between cuts only on a stated need, a consumer change that
+  last one. NO GATE ENFORCES IT TODAY: the candidate freezes the pin, so `pin_coherence` INV-17 (g)
+  cannot see a cut that made no re-pin (`OPS-1.S3`). Re-pin between cuts only on a stated need, a consumer change that
   needs malf code the pin lacks, and name that need in the re-pin's message.
   **Every re-pin cuts a toolchain release** (`DN-108.D38`): `./pharos repin
   --toolchain X.Y.Z` and `./pharos bump <V> --toolchain X.Y.Z` tag the commit the
