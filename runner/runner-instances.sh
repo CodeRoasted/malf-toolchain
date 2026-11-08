@@ -51,6 +51,9 @@ INSTANCES=(ci release)
 # (8 vCPUs, the remainder, about 6.5 GiB guaranteed), ci 8-9, release 10-15. A change to .wslconfig `processors` or `memory` changes this
 # table in the same act: a cpuset naming a CPU the VM no longer has is refused by the partition unit,
 # and the seat stays offline.
+# The seats also need .wslconfig `[wsl2] isolateDistroCgroup=false` (WSL 3.0 and later default it to
+# true): in the cgroup namespace WSL otherwise gives the distro, no seat can be partitioned or
+# protected, and the partition unit refuses with that cause (README § Seats).
 # The release cap holds only once malf derives its width from the seat (DN-119.D9 (1), build row
 # R5): a width read off the VM-wide MemAvailable plans for about 21 GiB inside a 10 GiB seat with no
 # swap, and every heavy build is OOM-killed.

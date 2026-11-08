@@ -113,6 +113,20 @@ UNDO="sudo bash $HERE/isolate-runner-wsl-rollback.sh --instance $INSTANCE --appl
 [[ "$(ps -o comm= -p 1)" == systemd ]] || die "PID 1 is not systemd — this box's runners are systemd units; /etc/wsl.conf needs [boot] systemd=true"
 [[ $EUID -eq 0 ]] || die "run it as root, plan included (it reads $STATE_DIR, which is root's): sudo bash $0 --instance $INSTANCE"
 
+# The seat needs the INIT cgroup namespace (the kernel's fixed PROC_CGROUP_INIT_INO). WSL 3.0 and later
+# put the distro in wsl-user/distro-<pid> under a cgroup namespace of its own (`.wslconfig` [wsl2]
+# isolateDistroCgroup, default true; the wsl-user cgroup shows in dmesg as "WSL user cgroup created").
+# Inside it the kernel ignores a cgroup2 remount's flags, so memory_recursiveprot never applies though
+# the remount exits 0, and nsdelegate makes the namespace root's cpuset.cpus.partition unwritable, so
+# no seat can become a partition root (2026-11-08, WSL 3.0.3: both seat-partition units failed at boot).
+# The apply and the proof refuse here, changing nothing; the plan only reads, and its drift names it.
+INIT_CGROUP_NS="cgroup:[4026531835]"
+CGROUP_NS_NOW="$(readlink /proc/self/ns/cgroup)"
+CGROUP_NS_CAUSE="the cgroup namespace is $CGROUP_NS_NOW, not the init namespace $INIT_CGROUP_NS: WSL >= 3.0 isolates the distro in a cgroup namespace of its own, where a cgroup2 remount's flags are ignored (memory_recursiveprot never applies) and the namespace root's cpuset.cpus.partition cannot be written, so no seat can be protected or partitioned. DO: add isolateDistroCgroup=false under [wsl2] in %UserProfile%\\.wslconfig, then wsl --shutdown"
+if [[ "$CGROUP_NS_NOW" != "$INIT_CGROUP_NS" ]] && { $APPLY || $PROVE_ONLY; }; then
+    die "$CGROUP_NS_CAUSE"
+fi
+
 unit_key() { sed -n "s/^$1=//p" "$UNIT_FILE" | head -n1; }
 manifest_of() { sed -n "s/^$2=//p" "$1/manifest"; }
 
@@ -541,6 +555,12 @@ render_partition_script() {
 # slice's MemoryMin=/MemoryLow= protects nothing. WSL's /init mounts cgroup2 before systemd with
 # nsdelegate only, so systemd's default never applies; the remount names every option the mount has,
 # because a cgroup2 remount clears each flag it does not name. Exits 1 unless the mount reads it back.
+# Before either, it refuses unless it runs in the INIT cgroup namespace: WSL 3.0 and later put the
+# distro in wsl-user/distro-<pid> under a cgroup namespace of its own (`.wslconfig` [wsl2]
+# isolateDistroCgroup, default true), where the kernel ignores a cgroup2 remount's flags (the remount
+# exits 0 and changes nothing) and nsdelegate makes the namespace root's cpuset.cpus.partition
+# unwritable from inside, so neither the protection nor the partition could take.
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -572,6 +592,14 @@ def cgroup2_options():
 
 slice_name = sys.argv[1]
 group = CGROUP / slice_name
+# PROC_CGROUP_INIT_INO (0xEFFFFFFB): the kernel's fixed inode of the initial cgroup namespace.
+INIT_CGROUP_NS = "cgroup:[4026531835]"
+namespace = os.readlink(ROOT / "proc/self/ns/cgroup")
+if namespace != INIT_CGROUP_NS:
+    refuse(f"the cgroup namespace is {namespace}, not the init namespace {INIT_CGROUP_NS}: WSL >= 3.0 isolates the distro "
+           "in a cgroup namespace of its own, where a cgroup2 remount's flags are ignored (memory_recursiveprot never applies) "
+           "and the namespace root's cpuset.cpus.partition cannot be written, so the seat can be neither protected nor "
+           "partitioned. DO: add isolateDistroCgroup=false under [wsl2] in %UserProfile%\\.wslconfig, then wsl --shutdown")
 options = cgroup2_options()
 if "memory_recursiveprot" not in options:
     remount = subprocess.run(["mount", "-o", ",".join(["remount", *options, "memory_recursiveprot"]), str(CGROUP)],
@@ -681,6 +709,7 @@ for unit in "$UNIT" "$DOCKER_UNIT"; do
 done
 partition_now="$(cat "/sys/fs/cgroup/$SEAT_SLICE/cpuset.cpus.partition" 2>/dev/null)" || partition_now="<no such cgroup>"
 printf '  %-20s %s cpuset.cpus.partition: %s%s\n' "partition now" "$SEAT_SLICE" "$partition_now" "$([[ "$partition_now" == root ]] || echo " — DRIFT")"
+printf '  %-20s %s%s\n' "cgroup namespace" "$CGROUP_NS_NOW" "$([[ "$CGROUP_NS_NOW" == "$INIT_CGROUP_NS" ]] && echo " — the init namespace" || echo " — DRIFT: $CGROUP_NS_CAUSE")"
 cgroup2_now="$(awk '$2=="/sys/fs/cgroup" && $3=="cgroup2" {print $4}' /proc/mounts)"
 printf '  %-20s cgroup2 mount options: %s%s\n' "protection now" "${cgroup2_now:-<no cgroup2 mount>}" "$([[ ",$cgroup2_now," == *,memory_recursiveprot,* ]] || echo " — DRIFT: no memory_recursiveprot, the seat's memory protection reaches no cgroup holding its pages")"
 if [[ -e "$RETIRED_SLOT_ROOT" ]]; then

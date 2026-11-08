@@ -78,6 +78,21 @@ every option the mount already has (a cgroup2 remount clears each flag it does n
 changes nothing for the desk. Measured 2026-10-18 before it: the release seat's `--prove` kept 20 of
 2 064 MiB of its page cache under desk pressure with `memory.min` at 10 GiB.
 
+**WSL 3.0 and later: `isolateDistroCgroup=false` is a precondition.** From WSL 3.0, `/init` puts
+every distro in a `wsl-user/distro-<pid>` cgroup under a cgroup namespace of its own (`.wslconfig`
+`[wsl2] isolateDistroCgroup`, default `true`; dmesg reads `WSL user cgroup created with memory.max=…`).
+Inside a non-init cgroup namespace the kernel ignores a cgroup2 remount's flags — the remount exits 0
+and `memory_recursiveprot` never appears — and `nsdelegate` makes the namespace root's
+`cpuset.cpus.partition` (which reads `member`) unwritable from inside, so no seat can become a
+partition root. Measured 2026-11-08 after WSL updated overnight to 3.0.3 (kernel 6.6.87.2 →
+6.18.54.1): both `seat-partition@` units failed at boot with `cgroup2 reads
+'rw,nosuid,nodev,noexec,relatime,nsdelegate' after a remount with memory_recursiveprot`, the
+distro's `/proc/self/ns/cgroup` reading `cgroup:[4026532211]`, not the init namespace
+`cgroup:[4026531835]`. The partition script and the installer's `--apply` and `--prove` now refuse,
+naming that cause, unless they run in the init cgroup namespace; the plan prints it as DRIFT. The fix
+is `isolateDistroCgroup=false` under `[wsl2]` in `%UserProfile%\.wslconfig`, then `wsl --shutdown`;
+without the `wsl-user` cgroup, WSL makes no namespace.
+
 Each seat keeps its **build slot in its own account's state**, `~/.local/state/coderoast-build/slot`
 (mode 700), named in the runner's `.env`: no account can open another seat's slot, so the stall class
 of a shared lock (a ci job holding a release job's mutex through a read-only descriptor) is gone by
@@ -101,7 +116,7 @@ onto CPUs 10–15 and unpinned desk loops sampled on them 6 873 times.
 3. `--prove` for both instances, with the desk idle: the memory arms swap desk memory out.
 4. `malf slot status` from the desk reads FREE, then `sudo rm -rf /var/lib/coderoast-build`: the
    retired shared root, which the plan names while it is on the box.
-5. After any `.wslconfig` change: steps 2 and 3 again. After a `wsl --shutdown`:
+5. After any `.wslconfig` change (it must keep `isolateDistroCgroup=false`, above): steps 2 and 3 again. After a `wsl --shutdown`:
    `systemctl status seat-partition@release seat-partition@ci` reads success (the partition is
    re-made at every boot).
 
