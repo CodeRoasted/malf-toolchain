@@ -7249,9 +7249,11 @@ pp_render() {   # <dest>
     bash -c "$body"$'\n'render_partition_script > "$1.orig"
     sed "s|^ROOT = Path(\"/\")\$|ROOT = Path(\"$pp_tmp/fx\")|" "$1.orig" > "$1"
 }
-pp_fixture() {   # <mount options> <mode: honour|ignore>
+pp_fixture() {   # <mount options> <mode: honour|ignore> [<cgroup namespace link>, default the init namespace]
     rm -rf "$pp_tmp/fx" "$pp_tmp/bin"
-    mkdir -p "$pp_tmp/fx/sys/fs/cgroup/seat_release.slice" "$pp_tmp/fx/sys/devices/system/cpu" "$pp_tmp/fx/proc" "$pp_tmp/bin"
+    mkdir -p "$pp_tmp/fx/sys/fs/cgroup/seat_release.slice" "$pp_tmp/fx/sys/devices/system/cpu" "$pp_tmp/fx/proc/self/ns" "$pp_tmp/bin"
+    # The script refuses before any remount unless /proc/self/ns/cgroup is the init namespace (c5659263).
+    ln -s "${3:-cgroup:[4026531835]}" "$pp_tmp/fx/proc/self/ns/cgroup"
     printf '10-15\n' > "$pp_tmp/fx/sys/fs/cgroup/seat_release.slice/cpuset.cpus"
     printf '10-15\n' > "$pp_tmp/fx/sys/fs/cgroup/seat_release.slice/cpuset.cpus.effective"
     printf 'member\n' > "$pp_tmp/fx/sys/fs/cgroup/seat_release.slice/cpuset.cpus.partition"
@@ -7298,6 +7300,13 @@ pp_fixture "rw,nosuid,nodev,noexec,relatime,nsdelegate,memory_recursiveprot" hon
 pp_out="$(pp_run)"
 check "a mount that already carries memory_recursiveprot: no remount, exit 0" \
       "rc=0 no-mount" "${pp_out%% *} $([[ -e "$pp_tmp/mount.log" ]] && cat "$pp_tmp/mount.log" || echo no-mount)"
+# WSL >= 3.0 isolates the distro in a cgroup namespace of its own (isolateDistroCgroup), where the kernel ignores a
+# cgroup2 remount's flags though the remount exits 0: the script must refuse on the namespace, before any remount.
+pp_fixture "rw,nosuid,nodev,noexec,relatime,nsdelegate" honour "cgroup:[4026532301]"
+pp_out="$(pp_run)"
+check "a non-init cgroup namespace (WSL's isolateDistroCgroup): exit 1 naming the fix, before any remount" \
+      "rc=1 isolateDistroCgroup no-mount" \
+      "${pp_out%% *} $([[ "$pp_out" == *"isolateDistroCgroup=false"* ]] && echo isolateDistroCgroup || echo "GOT: $pp_out") $([[ -e "$pp_tmp/mount.log" ]] && cat "$pp_tmp/mount.log" || echo no-mount)"
 rm -rf "$pp_tmp"
 echo
 
