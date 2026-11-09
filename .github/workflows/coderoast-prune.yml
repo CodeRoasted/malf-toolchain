@@ -9,7 +9,8 @@ name: CodeRoast prune
 # producers of one digest), then `store_transport.py prune` deletes, with the repository's OWN token, every
 # version of `store-<repository>` the keep-set's closure does not name.
 #
-# THE FIRST RUN IS A DRY RUN: `apply` defaults to false, and a dry run prints each version it would delete.
+# `apply` defaults to false, a dry run printing each version it would delete; `pharos cut` dispatches every prune
+# with apply=true (RUL-263). The `store-sentinel` version, the package's creation artifact, is never deleted.
 #
 # THE TOKEN'S RIGHT TO DELETE (GitHub's "Deleting and restoring a package", read 2026-10-30): a GITHUB_TOKEN deletes a
 # package version through the REST API only when its repository holds the Admin role on the package, granted by
