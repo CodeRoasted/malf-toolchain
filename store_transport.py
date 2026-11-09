@@ -69,7 +69,8 @@ package's privacy and every read judged by digest.
     store_transport.py prune <owner/repo> <keep-set> [--apply]
         DN-142.D32 (2): every version of store-<repo> the keep-set's closure does not name (each kept index, the
         records it pins by manifest digest, the objects they name, the notices it names; a version younger than
-        PRUNE_GRACE_SECONDS before the keep-set's `computed_at` is kept too), printed WOULD-DELETE, or deleted with --apply. Refused,
+        PRUNE_GRACE_SECONDS before the keep-set's `computed_at` and the `store-sentinel` version are kept too),
+        printed WOULD-DELETE, or deleted with --apply. Refused,
         deleting nothing, on an unreadable, foreign-schema or empty keep-set and on a kept candidate the store
         does not hold. Env: GITHUB_TOKEN, the repository's own, whose repository holds the Admin role on the
         package (granted by default to the repository whose workflow first published it).
@@ -1374,11 +1375,14 @@ def kept_closure(reader: Reader, repository: str, keys: list[str]) -> tuple[set[
 
 def prune_plan(versions: list[Version], digests: set[str], tags: set[str], computed: int
                ) -> tuple[list[Version], list[Version]]:
-    """(kept, deleted): a version is kept when the closure names its digest or one of its tags, or when it was
-    created within PRUNE_GRACE_SECONDS before the keep-set was computed, or after."""
+    """(kept, deleted): a version is kept when the closure names its digest or one of its tags, when it carries
+    the `store-sentinel` tag (store_replica's SENTINEL_TAG, the empty artifact that created the package: no
+    keep-set names it, and nothing has ruled it may go, RUL-263), or when it was created within PRUNE_GRACE_SECONDS before the keep-set
+    was computed, or after."""
     kept, deleted = [], []
     for version in sorted(versions, key=lambda each: each.id):
-        named = version.digest in digests or bool(tags.intersection(version.tags))
+        named = (version.digest in digests or bool(tags.intersection(version.tags))
+                 or store_replica.SENTINEL_TAG in version.tags)
         (kept if named or version.created >= computed - PRUNE_GRACE_SECONDS else deleted).append(version)
     return kept, deleted
 
@@ -2445,6 +2449,11 @@ def selftest() -> int:
                     [line for line in lines if "WOULD-DELETE" in line and object_tag(stale_object) not in line]),
                    (0, True, ["store_transport: WOULD-DELETE store-coderoast-ipc version "
                               f"{sorted(fake.manifests).index(fake.tags[object_tag(stale_object)]) + 1}"], []))
+            sentinel = Version(1, "a" * 64, (store_replica.SENTINEL_TAG,), computed - 7 * 3600)
+            stray = Version(2, "b" * 64, ("sha256-" + "c" * 64,), computed - 7 * 3600)
+            expect("prune never selects the store-sentinel version, past the grace bound and named by no closure",
+                   [[version.id for version in part] for part in prune_plan([sentinel, stray], set(), set(), computed)],
+                   [[1], [2]])
             young.clear()
             lines.clear()
             closure_tags = kept_closure(prune_reader, "coderoasted/coderoast-ipc", [key])[1]
