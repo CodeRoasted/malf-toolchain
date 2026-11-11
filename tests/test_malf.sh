@@ -1328,6 +1328,46 @@ lr_mut_out="$(lr_run "$lr_tmp/elsewhere" "$lr_tmp/tidy.mut.log")"; lr_mut_rc=$?
 check "WITHOUT the relocation the same run inspects nothing at exit 0 (the false zero, reproduced)" \
       "rc=0 inspected-nothing" \
       "rc=$lr_mut_rc $([[ "$lr_mut_out" == *"CHECKED 0 — NOTHING WAS INSPECTED"* ]] && echo inspected-nothing || echo "GOT: $(lk_sum "$lr_mut_out")")"
+# A TU OUTSIDE ITS TARGET'S SOURCE DIRECTORY. CMake spells such a TU's object and module map as a RELATIVE
+# path that embeds the source's absolute path — `@CMakeFiles/<target>.dir/<desk root>/…/x.cpp.o.modmap` — and
+# it resolves from the entry's directory through the linked build tree to the desk's own modmap. Measured
+# 2026-11-11 (W670): insight-eidos's sift-tools compiles sift/src/cli/explain/narrative.cpp so; the
+# relocation respelled the desk root INSIDE that relative path, the modmap named no file, clang-tidy read
+# no `-fmodule-file=std=…`, and the commit gate refused the change with "module 'std' not found". The
+# observable is functional: every `@` response file the relocated database names opens from its entry's
+# directory, while an absolute path, bare or as a flag's operand, is still respelled to the candidate.
+lr_obj="CMakeFiles/t.dir$lr_desk/repo/src/unit.cpp.o"
+mkdir -p "$(dirname "$lr_desk/repo/build-$lk_key/$lr_obj")"
+printf -- '-fmodule-file="std=CMakeFiles/std.dir/std.pcm"\n' > "$lr_desk/repo/build-$lk_key/$lr_obj.modmap"
+ln -s "$lr_desk/repo/build-$lk_key/CMakeFiles" "$lr_cand/repo/build-$lk_key/CMakeFiles"
+python3 - "$lr_desk/repo/build-$lk_key" "$lr_desk/repo/src" "$lr_obj" <<'PYOOT'
+import json, sys
+build, src, obj = sys.argv[1:]
+json.dump([{"directory": build, "file": f"{src}/unit.cpp", "output": obj,
+            "command": f"clang++-21 -std=c++23 -I{src} @{obj}.modmap -o {obj} -c {src}/unit.cpp"}],
+          open(f"{build}/compile_commands.json", "w"))
+PYOOT
+lr_oot_out="$(lr_run "$lr_cand" "$lr_tmp/tidy.oot.log")"; lr_oot_rc=$?
+check "an out-of-source TU's relative modmap still opens from its directory; its absolute paths name the candidate" \
+      "rc=0 @ok -I=cand -c=cand" \
+      "rc=$lr_oot_rc $(python3 - "$lr_tmp/tidy.oot.log.db" "$lr_cand" <<'PYOOTCHK'
+import json, os, re, sys
+try:
+    entries = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception as exc:
+    raise SystemExit(print(f"GOT no database ({exc})"))
+cand, said = sys.argv[2], []
+for entry in entries:
+    toks = re.findall(r"\S+", entry["command"])
+    rsp = [t[1:] for t in toks if t.startswith("@")]
+    bad = [p for p in rsp if not os.path.isfile(os.path.join(entry["directory"], p))]
+    said.append("@ok" if rsp and not bad else f"@MISSING {bad}")
+    inc = [t[2:] for t in toks if t.startswith("-I")]
+    said.append("-I=cand" if inc and all(p.startswith(cand + "/") for p in inc) else f"-I={inc}")
+    said.append("-c=cand" if toks[toks.index("-c") + 1].startswith(cand + "/") else f"-c={toks[toks.index('-c') + 1]}")
+print(" ".join(said))
+PYOOTCHK
+)"
 # A link that lands at ANOTHER relative place is not a mirrored checkout: relocating it would be a guess.
 rm "$lr_cand/repo/build-$lk_key/compile_commands.json"
 mkdir -p "$lr_tmp/stray"; cp "$lr_desk/repo/build-$lk_key/compile_commands.json" "$lr_tmp/stray/compile_commands.json"

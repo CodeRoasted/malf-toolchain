@@ -2492,9 +2492,28 @@ except Exception as exc:
     raise SystemExit(1)
 
 relocated = 0
+# The origin root is respelled only where it BEGINS an absolute path: at the start of a token, after a
+# delimiter (`-fmacro-prefix-map=<path>`, `-fmodule-file=std=<path>`, `@<path>`), or as a flag's glued
+# operand (`-I<path>`, `-isystem<path>`) — never as a component inside a RELATIVE path. CMake spells the
+# object and module map of a TU outside its target's source directory as
+# `CMakeFiles/<target>.dir/<the source's absolute path>.o`, relative to the entry's directory, where it
+# resolves through the linked build tree to the origin's own file. Respelling the root inside it named a
+# modmap that does not exist, so clang-tidy read no `-fmodule-file=` and reported "module 'std' not found":
+# measured 2026-11-11 on insight-eidos's sift-tools (sift/src/cli/explain/narrative.cpp), the commit gate
+# refusing the change it could not judge (W670).
+DELIMITER = set(" \t\n\"'=@,;:")
+FLAG = re.compile(r"-{1,2}[A-Za-z][A-Za-z0-9_-]*")
 if origin:
     def moved(text):
-        return text.replace(origin + os.sep, here + os.sep)
+        needle, out, at = origin + os.sep, [], 0
+        while (hit := text.find(needle, at)) >= 0:
+            lead = hit
+            while lead > 0 and text[lead - 1] not in DELIMITER:
+                lead -= 1
+            starts_path = lead == hit or FLAG.fullmatch(text[lead:hit]) is not None
+            out.append(text[at:hit] + (here + os.sep if starts_path else needle))
+            at = hit + len(needle)
+        return "".join(out) + text[at:]
 
     for entry in entries:
         for key in ("file", "directory", "command", "output"):
