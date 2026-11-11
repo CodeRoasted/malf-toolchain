@@ -156,7 +156,7 @@ _VERSION_PAYLOAD_SHAPES = ("OneToken",)
 _MARKER_ROLES = ("Opens", "Closes")
 _ROLE_ROW_KEYS = ("prefix", "kind", "role", "dialect_gate", "channel_gate", "why")
 _LOG_LEVELS = ("Trace", "Debug", "Info", "Warn", "Error", "Fatal")
-_RUN_OUTCOMES = ("Unknown", "Success", "Failure", "Unstable", "Aborted")
+_RUN_OUTCOMES = ("Unknown", "Success", "Failure", "Unstable", "Aborted", "Cancelled")
 
 # The gate spelling is `self` / `any`, NEVER a literal dialect name. `all_dialect_gates_owned`
 # admits exactly two values per gated row — `kAnyDialect` or the manifest's own name — so a
@@ -1577,6 +1577,15 @@ def selftest() -> int:
               "this tool's prose as the author's: "
               + repr(sorted(_marked - _declared_prose)[:3])))
 
+    # ── every class of the core's RunOutcome is admitted, the sixth included (DN-146.D8) ──
+    # A row naming `Cancelled` is admitted AND reaches the emitted row as the core's
+    # enumerator: the closed list is the only thing between a declaration and the enum.
+    _case("outcome: a row naming Cancelled is admitted and emitted as the core enumerator",
+          failures, lambda: _assert(
+              "insight::RunOutcome::Cancelled" in render_fixture(text=_SYNTHETIC.replace(
+                  "        outcome: Unknown", "        outcome: Cancelled")),
+              "a Cancelled outcome row did not reach the emitted rows"))
+
     # ── declared order is CONTENT, and this is the one that must never be `sorted` ──
     # Reversing the level lifts must move the emitted bytes AND the content hash. If this
     # arm ever goes green with the rows unmoved, the emitter has grown a sort.
@@ -2055,6 +2064,10 @@ def selftest() -> int:
                       "outside the closed core vocabulary",
                       lambda: _parse_fixture(_SYNTHETIC.replace(
                           "        level: Warn", "        level: Screaming")))
+    _expect_rejection("refuse: a run outcome outside the closed core vocabulary", failures,
+                      "outside the closed core vocabulary",
+                      lambda: _parse_fixture(_SYNTHETIC.replace(
+                          "        outcome: Unknown", "        outcome: Timeout")))
     _expect_rejection("refuse: a name that disagrees with the file name", failures,
                       "one dialect, one file",
                       lambda: _parse_fixture(_SYNTHETIC, stem="elsewhere"))
