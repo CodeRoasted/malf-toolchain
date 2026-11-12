@@ -76,12 +76,12 @@ jobs:
     steps:
       - name: malf at this workflow's commit, as git (its tools, and the attestation's signer digest)
         id: malf
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@7d32ea841a63eaef35a769eeb7051a2dac49f349
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@718400870dc316b258685b19ac2b0c83e11a54a2
         with:
           workflow: coderoast-publish.yml
 
       - name: The pinned gh the attestation reads run through
-        uses: CodeRoasted/malf-toolchain/.github/actions/setup-gh@7d32ea841a63eaef35a769eeb7051a2dac49f349
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-gh@718400870dc316b258685b19ac2b0c83e11a54a2
 
       - name: The cut's record attest attested, and this repository's benchmarks the cut measured (GATING)
         # A BENCHMARK IS THE CUT'S (ADR-2.D14): measured on the release seat from this
