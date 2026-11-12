@@ -1577,7 +1577,7 @@ def selftest() -> int:
               "this tool's prose as the author's: "
               + repr(sorted(_marked - _declared_prose)[:3])))
 
-    # ── every class of the core's RunOutcome is admitted, the sixth included (DN-146.D8) ──
+    # ── every class of the core's RunOutcome is admitted, the sixth included (ADR-17.D5) ──
     # A row naming `Cancelled` is admitted AND reaches the emitted row as the core's
     # enumerator: the closed list is the only thing between a declaration and the enum.
     _case("outcome: a row naming Cancelled is admitted and emitted as the core enumerator",
