@@ -73,6 +73,14 @@ with lines that are content. The emitted row carries the shape in the bytes memb
 `.match = RoleMatchKind::Shape`; a prefix row emits no match kind, so a declaration of prefix
 rows alone keeps its content hash and its emitted bytes.
 
+A DIALECT MAY DECLARE ITS PLATFORM'S STOP ANNOUNCEMENTS (DN-146.D10). A row of the optional
+`stop_announcements:` section is a whole line a runner writes into a step it stops, matched as
+a role row's `shape:` is, except that a hole is admitted and not required: a runner's stop line
+is usually fixed text. The row declares no role and no level, because a stop announcement keeps
+both (a line holds one role); it is a second declaration about the line, read by a consumer that
+orders a unit's own errors against the stop. A declaration with no such section keeps its
+content hash and emits the bytes it emitted before, the manifest member included.
+
 A MARKER ROW MAY CLOSE THE STEPS OF ITS JOB. The optional `role: Closes` states that the
 row's line enters the current job's epilogue, a step-level unit the core supplies and names
 (ADR-20.D32): the runner's own teardown, which no line names. A closing row is legal only on
@@ -122,7 +130,7 @@ from codegen_common import (
     required_scalar,
 )
 
-TOOL_VERSION = "7"  # 7: a marker row may close the steps of its job
+TOOL_VERSION = "8"  # 8: a dialect may declare its stop announcements
 SCHEMA_VERSION = "1"
 
 DIALECT_FILE_SUFFIX = ".dialect.yaml"
@@ -178,7 +186,8 @@ _CHANNEL_GATE_ANY = "any"
 # declared-absence seat, which lives at the intersection.
 
 _ROW_SECTIONS = ("roles", "markers", "level_lifts", "outcome_tokens",
-                 "outcome_markers", "locations", "value_classes", "declared_values")
+                 "outcome_markers", "locations", "value_classes", "declared_values",
+                 "stop_announcements")
 _VOCABULARY_SECTIONS = ("channels", "revisions")
 _SECTION_NAMES = _ROW_SECTIONS + _VOCABULARY_SECTIONS
 
@@ -391,16 +400,17 @@ def _prefix(node: dict, key: str, context: str, source: str) -> str:
     return value
 
 
-def _shape(node: dict, context: str, source: str) -> str:
+def _shape(node: dict, context: str, source: str, *, hole_required: bool) -> str:
     """A whole-line SHAPE: literal bytes with `{n}` holes, each a decimal number.
 
     The core matches it against the line's whole content after the transport peel and a
     trailing-whitespace trim, greedily and without backtracking, so every refusal below
     names a shape whose match would depend on how much a hole takes: a hole is exactly the
-    number the line prints, never a part of one.
+    number the line prints, never a part of one. A role row's shape samples a quantity, so it
+    requires a hole; a stop announcement is usually fixed text, so it admits one.
     """
     value = _prefix(node, "shape", context, source)
-    if _SHAPE_HOLE not in value:
+    if hole_required and _SHAPE_HOLE not in value:
         fail(source, None,
              f"{context}: `shape: {value}` has no hole — a shape carries at least one hole "
              f"`{_SHAPE_HOLE}`, the sampled quantity; a line with none is no sample")
@@ -452,7 +462,7 @@ def _validate_role_row(row: dict, context: str, source: str) -> dict:
                  "that are content (ADR-17.D14)")
         matched = {"prefix": _prefix(row, "prefix", context, source)}
     else:
-        matched = {"shape": _shape(row, context, source)}
+        matched = {"shape": _shape(row, context, source, hole_required=True)}
     return {
         **matched,
         "role": role,
@@ -606,7 +616,22 @@ def _validate_declared_value_row(row: dict, context: str, source: str) -> dict:
     }
 
 
+def _validate_stop_announcement_row(row: dict, context: str, source: str) -> dict:
+    """A whole line a runner writes into a step it stops, matched as a whole-line shape.
+
+    It declares no role and no level: the line keeps both, and the row only lets a consumer
+    order a unit's own errors against the stop (DN-146.D10).
+    """
+    expect_keys(row, ("shape", "dialect_gate", "why"), context, source, _DIALECT_REJECTIONS)
+    return {
+        "shape": _shape(row, context, source, hole_required=False),
+        "dialect_gate": _dialect_gate(row, context, source),
+        "why": _validate_why(row, context, source),
+    }
+
+
 _ROW_VALIDATORS = {
+    "stop_announcements": _validate_stop_announcement_row,
     "declared_values": _validate_declared_value_row,
     "roles": _validate_role_row,
     "level_lifts": _validate_level_lift_row,
@@ -859,6 +884,7 @@ def _check_row_uniqueness(declaration: dict, source: str) -> None:
         "level_lifts": lambda row: (row["prefix"], row["dialect_gate"]),
         "outcome_tokens": lambda row: (row["token"], row["dialect_gate"]),
         "declared_values": lambda row: (row["key"],),
+        "stop_announcements": lambda row: (row["shape"], row["dialect_gate"]),
     }
     for section, key_of in keys.items():
         seen: dict[tuple, int] = {}
@@ -1043,6 +1069,7 @@ def emit_inc(declaration: dict, *, module_suffix: str, source_name: str) -> str:
     _emit_level_lift_rows(out, declaration)
     _emit_outcome_token_rows(out, declaration)
     _emit_declared_value_rows(out, declaration)
+    _emit_stop_announcement_rows(out, declaration)
     _emit_declared_absences(out, declaration)
     _emit_manifest(out, declaration)
 
@@ -1292,6 +1319,27 @@ def _emit_declared_value_rows(out: list[str], declaration: dict) -> None:
     out.append("")
 
 
+def _emit_stop_announcement_rows(out: list[str], declaration: dict) -> None:
+    section = declaration.get("stop_announcements")
+    if section is None or not section["rows"]:
+        return
+    _emit_why(out, section["why"])
+    _emit_array(out, "StopAnnouncementRow", "kStopAnnouncements", len(section["rows"]))
+    for row in section["rows"]:
+        _emit_row(out, [
+            ("shape", _quoted(row["shape"])),
+            ("dialect_gate", _gate_expression(row["dialect_gate"])),
+        ], row["why"])
+    out.append("}};")
+    name = declaration["name"]
+    out.append("static_assert(std::ranges::all_of(kStopAnnouncements, "
+               "insight::semantic::stop_announcement_row_well_formed),")
+    out.append(f'              "{name}: a stop announcement is not a well-formed whole-line '
+               'shape -- "')
+    out.append('              "composition would refuse the package");')
+    out.append("")
+
+
 def _emit_declared_absences(out: list[str], declaration: dict) -> None:
     """An empty section's argument is emitted where the manifest member is left empty.
 
@@ -1336,6 +1384,10 @@ def _emit_manifest(out: list[str], declaration: dict) -> None:
         ("declared_values",
          "kDeclaredValues" if declaration.get("declared_values", {}).get("rows") else "{}"),
     ]
+    # The member is named only where rows are declared, so a declaration with none emits the
+    # bytes it emitted before the section existed and builds against a core without the member.
+    if declaration.get("stop_announcements", {}).get("rows"):
+        members.append(("stop_announcements", "kStopAnnouncements"))
     for kind in _HOOK_KINDS:
         entry = tier.get(kind)
         if entry is not None:
@@ -1943,6 +1995,70 @@ def selftest() -> int:
                           "        why: [\"Both spellings name the run's own request.\"]\n"
                           "      - key: pull_request\n        markers: [\"MR-\"]\n"
                           "        dialect_gate: self\n", 1)))
+    # ── a stop announcement: a whole line a runner writes into a step it stops ───────────
+    _stop_row = ('      - shape: "##[error]The operation was canceled."\n'
+                 '        dialect_gate: self\n'
+                 '        why: ["The runner writes it into the step it stops."]\n')
+    _with_stop = _SYNTHETIC.replace(
+        "  outcome_markers:\n",
+        "  stop_announcements:\n    why: [\"Stops order a unit's errors; they keep their role.\"]\n"
+        "    rows:\n" + _stop_row + "  outcome_markers:\n", 1)
+    _case("stop: a declared row reaches kStopAnnouncements and the manifest, with its argument",
+          failures, lambda: _assert(
+              '    {.shape = "##[error]The operation was canceled.",\n'
+              "     .dialect_gate = kDialect},"
+              in render_fixture(text=_with_stop)
+              and ".stop_announcements = kStopAnnouncements," in render_fixture(text=_with_stop)
+              and "stop_announcement_row_well_formed" in render_fixture(text=_with_stop)
+              and "// > The runner writes it into the step it stops."
+              in render_fixture(text=_with_stop),
+              "the stop announcement did not reach kStopAnnouncements and the manifest whole"))
+    _case("stop: declaring none emits no member and leaves the content hash alone", failures,
+          lambda: _assert(
+              "stop_announcements" not in rendered and "StopAnnouncement" not in rendered
+              and declaration_hash(_parse_fixture(_SYNTHETIC)) == base_hash
+              and declaration_hash(_parse_fixture(_with_stop)) != base_hash,
+              "an undeclared section reached the output, or a declared one did not move the "
+              "hash"))
+    _case("stop: a shape with a hole is admitted, and one without is too", failures,
+          lambda: _assert(
+              '{.shape = "##[error]Step {n} canceled.",' in render_fixture(
+                  text=_with_stop.replace("The operation was canceled.", "Step {n} canceled.",
+                                          1)),
+              "a stop shape carrying a hole was not emitted"))
+    _case("stop: an empty section with its argument is a declared absence, no member", failures,
+          lambda: _assert(
+              "DECLARED ABSENCE -- the manifest's `.stop_announcements` below is empty"
+              in render_fixture(text=_with_stop.replace("    rows:\n" + _stop_row,
+                                                        "    rows: []\n", 1))
+              and ".stop_announcements =" not in render_fixture(
+                  text=_with_stop.replace("    rows:\n" + _stop_row, "    rows: []\n", 1)),
+              "an empty stop section did not read as a declared absence"))
+    _expect_rejection("refuse: a stop announcement declaring a role", failures,
+                      "unknown key `role:`",
+                      lambda: _parse_fixture(_with_stop.replace(
+                          "        dialect_gate: self\n        why: [\"The runner",
+                          "        role: Terminator\n        dialect_gate: self\n"
+                          "        why: [\"The runner", 1)))
+    _expect_rejection("refuse: a stop announcement by prefix", failures,
+                      "unknown key `prefix:`",
+                      lambda: _parse_fixture(_with_stop.replace(
+                          '      - shape: "##[error]The operation was canceled."\n',
+                          '      - prefix: "##[error]The operation"\n', 1)))
+    _expect_rejection("refuse: a stop shape ending in whitespace", failures,
+                      "trailing whitespace",
+                      lambda: _parse_fixture(_with_stop.replace(
+                          "The operation was canceled.\"", "The operation was canceled. \"",
+                          1)))
+    _expect_rejection("refuse: a stop shape with a stray brace", failures, "spelled `{n}`",
+                      lambda: _parse_fixture(_with_stop.replace(
+                          "The operation was canceled.", "The {operation} was canceled.", 1)))
+    _expect_rejection("refuse: two stop rows on one shape and gate", failures,
+                      "could never fire",
+                      lambda: _parse_fixture(_with_stop.replace(
+                          _stop_row, _stop_row + _stop_row.replace(
+                              '        why: ["The runner writes it into the step it stops."]\n',
+                              ""), 1)))
     # ── a role row matching a whole-line SHAPE (ADR-17.D14) ─────────────────────────────
     _shape = "Received {n} of {n} ({n}%), {n} MBs/sec"
     _shape_row = (f'      - shape: "{_shape}"\n        role: Progress\n'
