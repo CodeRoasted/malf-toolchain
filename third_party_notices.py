@@ -353,11 +353,11 @@ def selftest() -> int:
         canon = _fixture_package(root, "canon", {MEMBER: render(upstream_notices), "licenses/LICENSE": b"Apache\n"})
         dependencies = [("zlib/1.3.1#cccc", "Zlib", zlib), ("fmt/12.1.0#bbbb", ("MIT",), fmt),
                         ("insight_canon/1.0.0#dddd", "Apache-2.0", canon)]
-        made = notices_of("insight_sift_tools/1.0.0", dependencies)
+        made = notices_of("insight_tamys_tools/1.0.0", dependencies)
         data = render(made)
         expect("the fixture closure renders the committed golden", data, GOLDEN.read_bytes() if GOLDEN.is_file() else None)
         expect("the same inputs in shuffled order render identical bytes",
-               render(notices_of("insight_sift_tools/1.0.0", list(reversed(dependencies)))), data)
+               render(notices_of("insight_tamys_tools/1.0.0", list(reversed(dependencies)))), data)
         expect("a first-party upstream is no component, its components join the union",
                [each.key for each in made.components], ["fmt/12.1.0#bbbb", "simdjson/4.6.3#aaaa", "zlib/1.3.1#cccc"])
         expect("parse(render(x)) == x, a text with no final newline and one holding === included", parse(data), made)

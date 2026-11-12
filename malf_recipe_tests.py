@@ -33,7 +33,7 @@ producer) sets `tools.build:skip_test=True` and `--test-folder=`: no test runs a
 is built. All three keep conan's default graph, test requirements expanded, so each computes the
 writer's package id. `tools.graph:skip_test` is never set on a path that resolves a first-party
 package: it prunes the test requirements, and a `test_requires` already in the graph merges into
-that node and enters the declaring package's id, so pruning it gives metalog, eidos and sift
+that node and enters the declaring package's id, so pruning it gives metalog, eidos and tamys
 another id. Every caller reads its set through `create-args <writer|ship|ship-bench|consumer>`.
 
 A TEST LOCATES ITS INPUTS THROUGH A COMPILE DEFINITION, never through the translation unit's own

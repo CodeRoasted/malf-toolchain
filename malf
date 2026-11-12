@@ -176,7 +176,7 @@ MALF_BUILD_SLOT_WAIT_S="${MALF_BUILD_SLOT_WAIT_S:-10}"
 MALF_SOURCE_EXCLUDE_DIRS="${MALF_SOURCE_EXCLUDE_DIRS:-build build-* .conan2 .cache .git data node_modules .venv venv third_party vendor _deps .model .model-build}"
 # ─── D-LSRC-2 · the corpus EVIDENCE shelf is OUTSIDE the clang-format surface ─
 # THE LAW. `format` never walks a directory named `sift_assessment`.
-# `coderoast-corpora/sift_assessment/<version>/` holds Sift measurement runs —
+# `coderoast-corpora/sift_assessment/<version>/` holds Tamys measurement runs —
 # "evidence, not tooling" (`coderoast-corpora/README.md`). A `.cpp` sitting there
 # is the program that produced the `census_output.txt` and `RESULTS.md` beside
 # it, kept so those numbers have a provenance. Reformatting it edits a record to
@@ -190,7 +190,7 @@ MALF_SOURCE_EXCLUDE_DIRS="${MALF_SOURCE_EXCLUDE_DIRS:-build build-* .conan2 .cac
 #   * exactly ONE file in the whole repository carries a source extension:
 #     `sift_assessment/1.10.2/m3_where_anchor/m3_where_anchor_census_test.cpp`,
 #     12 clang-format violations, committed red long before this ruling. It could
-#     not build here anyway: it imports `insight.sift.test`, a module owned by
+#     not build here anyway: it imports `insight.tamys.test`, a module owned by
 #     another repo, with no build file within reach.
 #   * its own first line declares what it is — "throwaway measurement code
 #     (`DN-59.O2` M3) … its source and its numbers live beside each other" — and
@@ -291,7 +291,7 @@ MALF_LINT_EXCLUDE_EXTRA="${MALF_LINT_EXCLUDE_EXTRA:-test_package technical_docs 
 # checks: cppcoreguidelines-owning-memory (2026-07-23) and modernize-use-std-print
 # (2026-08-30) — with symbolization suppressed the same crash returns in 0.22 s, so the whole
 # cost is the stack walk. The ceiling sits roughly twenty times above the worst legitimate TU
-# measured here: run serially on an idle box, insight-eidos/sift/src/engine/diff_engine.cpp
+# measured here: run serially on an idle box, insight-eidos/tamys/src/engine/diff_engine.cpp
 # costs 30.3 s and coderoast-server/server/src/main.cpp 14.7 s (2026-08-30).
 MALF_LINT_TU_TIMEOUT_DEFAULT_S=600
 MALF_LINT_TU_TIMEOUT_S="${MALF_LINT_TU_TIMEOUT_S:-$MALF_LINT_TU_TIMEOUT_DEFAULT_S}"
@@ -664,7 +664,7 @@ MALF_EDITABLE_BUILD_DIR="build-$(_malf_build_key)"
 MALF_BUILD_PROFILE="${MALF_BUILD_PROFILE:-$MALF_PROFILE}"
 # The profile `--asan` selects (sugar for `--profile $MALF_ASAN_PROFILE`): clang-21 +
 # libc++ + ASan/UBSan. Under it insight-eidos's parse_fuzzer builds as the standalone ASan/UBSan
-# replay, never libFuzzer (its SIFT_LIBFUZZER branch needs clang + libstdc++, which no profile
+# replay, never libFuzzer (its TAMYS_LIBFUZZER branch needs clang + libstdc++, which no profile
 # here builds). Requires clang-21 + libc++-21 installed.
 MALF_ASAN_PROFILE="${MALF_ASAN_PROFILE:-linux-clang21-asan}"
 
@@ -777,7 +777,7 @@ _malf_resolve_target() {
 # the short build exits 0, so the operator reads a green over a surface that was
 # never compiled. Measured 2026-09-04 during the `N135` suite rename — the renamed
 # gtest suites were verified by `ctest -N`, which reported the OLD names as still
-# live because `malf build insight-eidos` had left `insight-eidos/sift` at the
+# live because `malf build insight-eidos` had left `insight-eidos/tamys` at the
 # previous day's binary. The rename looked incomplete; it was the build that was.
 #
 # Rebuilding one package of a multi-package repo is still a real need — eidos's
@@ -1158,7 +1158,7 @@ _malf_ship_lock_args() {
 # reads `user.malf:editable_build_dir` for the libraries and build-tree config a consumer links, and the
 # profile carries it WITHOUT the environment's suffix. Inside the image the consumer then linked each
 # editable's HOST tree beside BMIs it synthesised from the current sources: measured 2026-10-19, the
-# sanitizer replay's parse_fuzzer linked an Oct 12 host libinsight_sift.a (RankedChange 448 bytes) with
+# sanitizer replay's parse_fuzzer linked an Oct 12 host libinsight_tamys.a (RankedChange 448 bytes) with
 # a 472-byte RankedChange destructor, and ASan reported a stack-buffer-overflow in emit_level.
 # MALF_EDITABLE_BUILD_DIR is malf's own tree name, so the two cannot disagree.
 # `--build=missing` compiles a binary the home lacks, so the install is handed the build's width
@@ -2499,7 +2499,7 @@ relocated = 0
 # `CMakeFiles/<target>.dir/<the source's absolute path>.o`, relative to the entry's directory, where it
 # resolves through the linked build tree to the origin's own file. Respelling the root inside it named a
 # modmap that does not exist, so clang-tidy read no `-fmodule-file=` and reported "module 'std' not found":
-# measured 2026-11-11 on insight-eidos's sift-tools (sift/src/cli/explain/narrative.cpp), the commit gate
+# measured 2026-11-11 on insight-eidos's tamys-tools (tamys/src/cli/explain/narrative.cpp), the commit gate
 # refusing the change it could not judge (W670).
 DELIMITER = set(" \t\n\"'=@,;:")
 FLAG = re.compile(r"-{1,2}[A-Za-z][A-Za-z0-9_-]*")
@@ -2824,7 +2824,7 @@ PY
     #   * a file ABSENT from the DB gets clang-tidy's flag-less fallback, which on a module TU cannot
     #     find `import std`, the third-party -isystem headers (glaze/curl), or the BMIs — a FLOOD of
     #     clang-diagnostic-error that mimics real findings (measured 2026-07-23: an incremental-build
-    #     DB held 0 sift-cli entries -> 293 phantom errors, gone once `malf commands` rebuilt the DB);
+    #     DB held 0 tamys-cli entries -> 293 phantom errors, gone once `malf commands` rebuilt the DB);
     #   * a file whose entry's `directory` is a MISSING build dir (sub-package not built in this
     #     profile) makes clang-tidy abort with `LLVM ERROR: Cannot chdir` and hang symbolizing.
     # _malf_db_lintable_files handles both: it lists only entries with an existing directory, so a
@@ -4105,7 +4105,7 @@ _malf_commands_tree_role() {          # <build_dir> -> _MALF_TREE_ROLE, _MALF_TR
 #                not sum while reading as though it did.
 #
 # Entries are attributed to the LONGEST matching member prefix, never the first match: members
-# NEST (insight-eidos is a package and also the parent of insight-eidos/sift), so a shortest-prefix
+# NEST (insight-eidos is a package and also the parent of insight-eidos/tamys), so a shortest-prefix
 # attribution bills every subpackage's TU to the parent and reports full coverage for a member that
 # contributed nothing.
 _malf_commands_summary() {            # <db> <root> <sel> <content_only> <buildless> <tp_present> <tp_conf> <tp_failed> [<role> <dir>]...
@@ -4507,7 +4507,7 @@ cmd_compile_commands() {
 #
 # `malf bench` used to answer it from the build OUTPUT — build the package, then look for a
 # *bench* executable and skip if none. Correct, and it pays a full compile for every benchless
-# package in a sweep (llm, fuzz, insight-mcp, sift today) purely to learn there was nothing
+# package in a sweep (llm, fuzz, insight-mcp, tamys today) purely to learn there was nothing
 # to run. That was most of the sweep's marginal cost.
 #
 # The predicate is the same one the output check applies, evaluated one step earlier: a bench
@@ -4797,11 +4797,11 @@ cmd_editables() {
 # Every SBOM the workspace publishes, as "<package dir>|<sbom path>". These are DERIVED
 # artifacts (malf/sbom_gen.py projects the resolved conan graph) — the hand-maintained
 # predecessor drifted three minors before anyone noticed, and since sbom-cve.yml scans the
-# file, its accuracy is the ceiling on our CVE detection. The Sift binary's SBOM is projected
-# from insight_sift_tools, the package the binary is (DN-142.D16), and stays at the path the
+# file, its accuracy is the ceiling on our CVE detection. The Tamys binary's SBOM is projected
+# from insight_tamys_tools, the package the binary is (DN-142.D16), and stays at the path the
 # release uploads and the CVE scan reads.
 _MALF_SBOM_TARGETS=(
-    "insight-eidos/sift-tools|insight-eidos/sift/sbom.cdx.json"
+    "insight-eidos/tamys-tools|insight-eidos/tamys/sbom.cdx.json"
     "coderoast-server/server|coderoast-server/server/sbom.cdx.json"
 )
 
@@ -5224,7 +5224,7 @@ Commands:
                                    party only) + the SBOM, prune stale cache. It VERIFIES NOTHING:
                                    `./pharos bump X.Y.Z` is the post-cut verb (OPS-1.S15) and runs
                                    this one, `lock --update`, `sbom --check`, the layered toolchain
-                                   re-pin, then the `pins` family last. Does NOT touch the Sift
+                                   re-pin, then the `pins` family last. Does NOT touch the Tamys
                                    Action engine pin — that tracks the PUBLISHED engine and is
                                    sift-action/bump.sh's.
     twin-verify                    the released set's path independence (ROADMAP N366, DN-142.D4):
@@ -5501,7 +5501,7 @@ cmd_bump() {
     # version behind and the next `malf lock --update` refused 19 roots.
 
     # ── sift-action is NOT part of a platform bump, by design ────────────────
-    # This used to rewrite src/sift-version.ts to $target and re-bundle dist/index.js.
+    # This used to rewrite src/tamys-version.ts to $target and re-bundle dist/index.js.
     # It cannot: the engine binary for $target is published by the eidos Release during
     # $target's OWN cut, so between the post-cut bump and the next cut the pin named a
     # release that did not exist. The result was a commit that could not be pushed
@@ -6613,7 +6613,7 @@ _malf_store_third_party_in() {   # <name> <path> <prefixes> <store> <scratch> <g
 # into the repository root's. Folding as each act ends is not enough where the root is itself a package
 # (insight-eidos): CMake rewrites that package's compile_commands.json, which IS the root database, whenever the
 # package reconfigures as a later act's dependency, and erases what was folded before (measured 2026-10-29,
-# insight-eidos's candidate: llm's, sift's and fuzz's 47 translation units absent from the postflight's subject).
+# insight-eidos's candidate: llm's, tamys's and fuzz's 47 translation units absent from the postflight's subject).
 # post: the root database holds every package's and every inventory cell's entries, each package's own entries winning.
 _malf_merge_repository_dbs() {   # <repository> <package dir>...
     local repo="$1" path inventory

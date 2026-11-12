@@ -8,7 +8,7 @@ private repo none of us can see.
 
 CodeRoast distils a raw log stream into a **MetaLog**: a small, deterministic fingerprint of what
 your system actually did — *bit-identical across runs*, citable, and re-derivable to the exact
-source line. Every product — Sift's structural CI diff, anomaly detection, AI triage — is just a
+source line. Every product — Tamys's structural CI diff, anomaly detection, AI triage — is just a
 lens on that one artifact. "Bit-identical across runs" isn't a slogan; it's the property that lets
 a structural fact sit behind a hard CI gate instead of a dashboard.
 
@@ -30,7 +30,7 @@ source, and the exact recipe that produced it are all right here.
 ## The three compiler legs
 
 CodeRoast builds C++23 (named modules + `import std`) on three toolchains, each with a distinct
-job. Determinism is proven *across* them — the MetaLog and the Sift diff are bit-identical on all
+job. Determinism is proven *across* them — the MetaLog and the Tamys diff are bit-identical on all
 three on the shared **plain-text** corpus — so this is the diagonal, not a fallback ladder. (The
 JSON-ingestion surfaces — numeric/ordinal drift, OTEL fields — are now bit-identical by execution on
 all three too, end to end: the canon→metalog instrument **and** the eidos detection leg, with no cell
@@ -83,7 +83,7 @@ Insiders channel (the version-agnostic Preview component); `setup-msvc1452` inst
 EXACTLY toolset 14.52 (`-vcvars_ver=14.52`, never the newest installed; a channel that stops serving
 14.52 fails the leg and the pin is bumped on purpose), and exports `MSVC1452_INSTALL` so Conan points
 `vcvars` at it.
-The MSVC build is bit-identical to the Linux golden across canon, metalog, and the Sift diff
+The MSVC build is bit-identical to the Linux golden across canon, metalog, and the Tamys diff
 (eidos) on the shared **plain-text** determinism corpus — the cross-OS half of the claim, measured,
 not assumed. The JSON-ingestion surfaces (W1 ordinal histograms, OTEL trace/severity fields) are now
 **bit-identical by execution on MSVC too**, end to end: a JSON-ordinal corpus line forces the simdjson
@@ -150,7 +150,7 @@ disagree with the first.
 Everything that defines *how we build* now lives here: the three pinned compiler legs (gcc-16.2,
 clang-21/libc++, MSVC 14.52), the conan profiles, the shared dev config, the CI actions, and `malf`
 itself. The cross-toolchain × cross-OS determinism diagonal is measured green — the MetaLog and the
-Sift structural diff are bit-identical across gcc/libstdc++, clang/libc++, and MSVC, on Linux and
+Tamys structural diff are bit-identical across gcc/libstdc++, clang/libc++, and MSVC, on Linux and
 Windows alike, on the shared plain-text corpus — and the JSON-ingestion surfaces (numeric/ordinal
 drift, OTEL fields) are now bit-identical **by execution** on all three too, end to end — the
 canon→metalog instrument and the eidos structural-diff leg alike, with no cell left by construction.

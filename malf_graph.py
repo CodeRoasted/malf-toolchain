@@ -111,7 +111,7 @@ def scan(root: pathlib.Path) -> dict:
     replaced the first wherever its path sorted later — and nothing downstream could tell. Measured
     2026-10-13 on the self-hosted `malf-runner`: insight-eidos's golden legs check the repository
     out at `insight-eidos/`, while that runner's persistent workspace still held another workflow's
-    checkout of the same repository at its ROOT, a day older. `llm/`, `sift/` and `sift-tools/` sort
+    checkout of the same repository at its ROOT, a day older. `llm/`, `tamys/` and `tamys-tools/` sort
     after `insight-eidos/`, so the stale copies won, while `insight_eidos`, `insight_fuzz` and
     `insight_e2e` resolved to the fresh ones: the determinism proof built a mixed tree. It went red
     only because the stale `llm` still required libcurl 8.20.0, which the lock no longer names; a

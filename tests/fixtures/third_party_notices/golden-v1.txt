@@ -1,5 +1,5 @@
 THIRD-PARTY-NOTICES 1
-package: insight_sift_tools/1.0.0
+package: insight_tamys_tools/1.0.0
 note: This package contains, or is built to link, the third-party software listed below. Each component's licence files follow verbatim, as its own package ships them.
 components: 3
 component: fmt/12.1.0#bbbb licence: MIT

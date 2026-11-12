@@ -3,10 +3,10 @@
 
 THE DEFECT THIS CLOSES, measured 2026-11-06 (ROADMAP N422). A repository's database is folded from its
 packages' trees, one entry per file, and the folds kept the FIRST tree's entry (or, in a lone build's
-fold, the latest). Since insight-eidos `0e098563`, `sift-corpus` adds `sift-tools/` as a subdirectory
-under `EXCLUDE_FROM_ALL`: its database lists every `sift-tools` translation unit, and its build compiles
-none of them but `sift_gate_tests`. It folds before `sift-tools`, so its entries won, and a desk
-`malf lint --all-files` of insight-eidos linted `sift/src/cli` and `sift/src/crawl` against module
+fold, the latest). Since insight-eidos `0e098563`, `tamys-corpus` adds `tamys-tools/` as a subdirectory
+under `EXCLUDE_FROM_ALL`: its database lists every `tamys-tools` translation unit, and its build compiles
+none of them but `tamys_gate_tests`. It folds before `tamys-tools`, so its entries won, and a desk
+`malf lint --all-files` of insight-eidos linted `tamys/src/cli` and `tamys/src/crawl` against module
 interfaces that tree never builds: false findings (`module 'std' not found`).
 
 THE RULE: an entry from a tree whose build compiles the file outranks one from a tree whose build does

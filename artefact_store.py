@@ -3377,52 +3377,52 @@ def selftest() -> int:
         arm("RED: a member the transport does not hold is refused",
             lambda: extract(transport, "bin/absent", hashlib.sha256(tool).hexdigest(), root / "absent"), "holds 0")
         repo = root / "eidos"
-        (repo / "sift").mkdir(parents=True)
+        (repo / "tamys").mkdir(parents=True)
         git = ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t"]
         (repo / "packages.yml").write_text(
-            "packages:\n  insight_sift:\n    path: sift\n    objects:\n"
+            "packages:\n  insight_tamys:\n    path: tamys\n    objects:\n"
             "      tracked/sbom.cdx.json: {published: {assets: [{name: sbom.cdx.json}]}}\n"
             "      bench/run.json: {published: {assets: [{name: bench.json}]}}\n"
-            "  bare:\n    path: sift\n")
-        (repo / "sift" / "sbom.cdx.json").write_text('{"bom": 1}\n')
-        (repo / "sift" / "main.cpp").write_text("int main() {}\n")
+            "  bare:\n    path: tamys\n")
+        (repo / "tamys" / "sbom.cdx.json").write_text('{"bom": 1}\n')
+        (repo / "tamys" / "main.cpp").write_text("int main() {}\n")
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
         subprocess.run([*git, "add", "-A"], check=True)
         subprocess.run([*git, "commit", "-qm", "one"], check=True)
         first = _run(["git", "-C", str(repo), "rev-parse", "HEAD"]).strip()
-        (repo / "sift" / "main.cpp").write_text("int main() { return 0; }\n")
+        (repo / "tamys" / "main.cpp").write_text("int main() { return 0; }\n")
         subprocess.run([*git, "commit", "-qam", "two: only a source moves"], check=True)
         second = _run(["git", "-C", str(repo), "rev-parse", "HEAD"]).strip()
-        (repo / "sift" / "sbom.cdx.json").write_text('{"bom": "a disk edit nobody committed"}\n')
+        (repo / "tamys" / "sbom.cdx.json").write_text('{"bom": "a disk edit nobody committed"}\n')
         tstore = root / "tracked-store"
         declared, _out = arm("the tracked members are the package's `tracked/` objects, read at the commit",
-                             lambda: declared_tracked(repo, first, "insight_sift"), None)
-        expect("the declared tracked members", declared, ("sift", ["sbom.cdx.json"]))
+                             lambda: declared_tracked(repo, first, "insight_tamys"), None)
+        expect("the declared tracked members", declared, ("tamys", ["sbom.cdx.json"]))
         tracked, printed = arm("a tracked step is stored, keyed on its blob ids at the commit",
-                               lambda: tracked_step(tstore, repo, first, "eidos", "insight_sift", "sift",
+                               lambda: tracked_step(tstore, repo, first, "eidos", "insight_tamys", "tamys",
                                                     ["sbom.cdx.json"]), None)
         if tracked:
-            blob = _run(["git", "-C", str(repo), "rev-parse", f"{first}:sift/sbom.cdx.json"]).strip()
+            blob = _run(["git", "-C", str(repo), "rev-parse", f"{first}:tamys/sbom.cdx.json"]).strip()
             record = json.loads((tstore / "records" / f"{tracked}.json").read_text())
             expect("the tracked document and its output", (record["inputs"], record["outputs"]),
-                   ({"step": {"kind": "tracked", "repository": "eidos", "package": "insight_sift"},
+                   ({"step": {"kind": "tracked", "repository": "eidos", "package": "insight_tamys"},
                      "files": [["sbom.cdx.json", blob]], "system": {"image": pinned}},
                     {"tracked": {"objects": {"sbom.cdx.json": hashlib.sha256(b'{"bom": 1}\n').hexdigest()}}}))
-            expect("the STORED line names the step and its output", "STORED insight_sift/tracked tracked key" in printed, True)
+            expect("the STORED line names the step and its output", "STORED insight_tamys/tracked tracked key" in printed, True)
             resolved, _out = arm("the tracked object resolves, its bytes the commit's and never the disk's",
                                  lambda: output_object(tstore, tracked, TRACKED_OUTPUT, "sbom.cdx.json"), None)
             expect("the stored bytes are the committed ones",
                    (tstore / "objects" / str(resolved)).read_bytes() if resolved else None, b'{"bom": 1}\n')
         again, printed = arm("a commit that leaves the tracked blobs equal is a key hit",
-                             lambda: tracked_step(tstore, repo, second, "eidos", "insight_sift", "sift",
+                             lambda: tracked_step(tstore, repo, second, "eidos", "insight_tamys", "tamys",
                                                   ["sbom.cdx.json"]), None)
         expect("the same key, matched, one record", (again == tracked, "MATCH" in printed,
                len(listing(tstore, "records"))), (True, True, 1))
         arm("RED: a tracked member absent at the commit is refused",
-            lambda: tracked_step(tstore, repo, first, "eidos", "insight_sift", "sift", ["absent.json"]),
-            "sift/absent.json is no blob of eidos")
+            lambda: tracked_step(tstore, repo, first, "eidos", "insight_tamys", "tamys", ["absent.json"]),
+            "tamys/absent.json is no blob of eidos")
         arm("RED: a tracked member climbing out of the package path is refused",
-            lambda: tracked_step(tstore, repo, first, "eidos", "insight_sift", "sift", ["../packages.yml"]),
+            lambda: tracked_step(tstore, repo, first, "eidos", "insight_tamys", "tamys", ["../packages.yml"]),
             "not distinct relative paths")
         arm("RED: a package declaring no tracked object has no tracked step",
             lambda: declared_tracked(repo, first, "bare"), "declares no `tracked/<member>` object")

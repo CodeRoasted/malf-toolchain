@@ -70,7 +70,7 @@ runs:
         # so the full provision still runs.
         # patchelf is in the base because a published executable's package() runs it
         # (`patchelf --remove-rpath`, DN-142.D20 (3)) and artefact_store's key measures it in the
-        # toolchain member: a create of coderoast_server or insight_sift_tools, and every
+        # toolchain member: a create of coderoast_server or insight_tamys_tools, and every
         # `malf store-create`, fails on a seat without it. Every hosted Ubuntu image ships it.
         need_apt=0
         for pkg in ninja-build python3-pip build-essential patchelf $EXTRA_APT; do
@@ -115,7 +115,7 @@ runs:
         # into the conan cache. CI is the environment that can declare, so it declares.
         #
         # WHY HERE: a workflow's own bare `conan create` in a `run:` block (eidos's
-        # `sift-windows.yml`) builds with whatever this job
+        # `tamys-windows.yml`) builds with whatever this job
         # exports; until 2026-10-16 the release job of every consumer repository built that way with
         # the variable unset. `setup-build-env` is the step every such path does run, before any
         # build, and it derives the path from one fact (this action's own location inside the pinned
@@ -129,7 +129,7 @@ runs:
         # setup-build-env`, so `../../..` is the toolchain repo root — the same arithmetic this
         # action already uses to read `profiles/`, `global.conf` and `settings_user.yml`. Observed in
         # a real run log (coderoast-web
-        # src/assets/sift-showcase/logcraft__ci-build__green-b.log:564).
+        # src/assets/tamys-showcase/logcraft__ci-build__green-b.log:564).
         toolchain_root="$(cd -- "$ACTION_PATH/../../.." && pwd)"
         echo "MALF_TOOLCHAIN_DIR=$toolchain_root" >> "$GITHUB_ENV"
         echo "MALF_TOOLCHAIN_DIR=$toolchain_root"

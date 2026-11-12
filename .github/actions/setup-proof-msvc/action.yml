@@ -1,7 +1,7 @@
 name: 'Setup an MSVC leg (Windows)'
 description: |
   The provisioning half of every CodeRoast MSVC leg — the brick insight-canon's, insight-metalog's
-  and insight-eidos's golden `proof-msvc` legs and insight-eidos's `sift-windows` build share; they
+  and insight-eidos's golden `proof-msvc` legs and insight-eidos's `tamys-windows` build share; they
   keep only WHAT they build and prove. MSVC 14.52 installed, activated and verified equal to the
   pinned toolset; CMake 4.3.x and Ninja; Conan; zstd; the restore of a keyed conan cache; the MSVC conan
   profile staged from a malf-toolchain checkout.

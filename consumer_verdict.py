@@ -2,7 +2,7 @@
 """A published executable's CONSUMER verdict in its candidate's store job: the stored bytes judged as a consumer's host would run them.
 
 N360 plan A2(d), DN-142.D20 (3): the gates a release used to run over its own tag-time rebuild of
-`sift` become ONE keyed verdict step over the STORED entry, by its entry digest, so the manifest
+`tamys` become ONE keyed verdict step over the STORED entry, by its entry digest, so the manifest
 admits the public `sift-linux-x64` only when this verdict passed over the very bytes it publishes.
 Six rows, each `passed`, `failed` or `not-judged`; the verdict is `pass` only when every row
 passed, so a probe that could not run is a fail, never a pass:
@@ -32,7 +32,7 @@ both streams there; `conclude` runs in the image, judges rows E and F from that 
 verdict, its `system` member `{image: <the pinned config digest>}` and its `toolchain` the one the seam
 measured in that image. No `docker` argv is built here. A bind mount's source would resolve in dockerd's
 mount namespace, which on the release runner holds a private /tmp (step 0 run 38296956741: `exit 127:
-sh: 1: ./sift: not found`); the stdin stream reaches the container from any namespace, and the
+sh: 1: ./tamys: not found`); the stdin stream reaches the container from any namespace, and the
 in-container digest check reds a container that ran anything else.
 
 THE CONSUMER BASELINE IS THE PRODUCT'S DECLARATION, read at the commit the candidate builds from
@@ -552,7 +552,7 @@ def selftest() -> int:
               "glibc-floor": PASSED}, True))
         runpath = _built(root, "runpath", c_source, "cc", "-Wl,-rpath,/opt/gcc-16.2/lib64",
                          "-Wl,--enable-new-dtags")
-        arm("RED: a RUNPATH reds the runpath row (store-d16's sift, N360 plan F1)",
+        arm("RED: a RUNPATH reds the runpath row (store-d16's tamys, N360 plan F1)",
             outcomes(byte_rows(runpath, "2.39"))["runpath"], FAILED)
         rpath = _built(root, "rpath", c_source, "cc", "-Wl,-rpath,/opt/x", "-Wl,--disable-new-dtags")
         arm("RED: a DT_RPATH reds the runpath row too", outcomes(byte_rows(rpath, "2.39"))["runpath"], FAILED)
@@ -583,11 +583,11 @@ def selftest() -> int:
 
         arm("the probe's capture names the added line once and the shared one never, and its glibc is the ceiling",
             outcomes(container_rows(probed(), baseline)), {"container-glibc": PASSED, "consumer-container": PASSED})
-        script = probe_script("sift", "a" * 64, baseline["smoke"])
+        script = probe_script("tamys", "a" * 64, baseline["smoke"])
         arm("the probe's script prints the glibc line and the mark, then hashes the unpacked executable against "
             "the judged digest before running it",
             (script.index("ldd --version") < script.index(REPORT_MARK) < script.index("tar -x -f -")
-             < script.index(f"echo '{'a' * 64}  sift' | sha256sum -c") < script.index("./sift --help")), True)
+             < script.index(f"echo '{'a' * 64}  tamys' | sha256sum -c") < script.index("./tamys --help")), True)
         arm("RED: a container holding other bytes than the judged entry reds row E (the script's digest check exits 1)",
             outcomes(container_rows(probed(1, "", err="sha256sum: WARNING: 1 computed checksum did NOT match"),
                                     baseline))["consumer-container"], FAILED)
@@ -615,7 +615,7 @@ def selftest() -> int:
         act = root / "act"
         act.mkdir()
         (act / PREPARED).write_text(json.dumps({
-            "package": "tools", "entry": "bin/sift", "digest": "a" * 64, "baseline": baseline, "tree": "b" * 40,
+            "package": "tools", "entry": "bin/tamys", "digest": "a" * 64, "baseline": baseline, "tree": "b" * 40,
             "rows": byte_rows(green, "2.39")}))
         (act / CAPTURE).write_text(json.dumps(probed()))
         store = root / "store"

@@ -417,12 +417,12 @@ gh variable set WINDOWS_RUNNER --org CodeRoasted --body self-hosted --visibility
 gh variable set WINDOWS_RUNNER --org CodeRoasted --body hosted --visibility private       # → windows-2025
 ```
 
-Unset reads as `hosted`. Under `self-hosted`, `sift-windows.yml`'s `build` (the Windows engine a
+Unset reads as `hosted`. Under `self-hosted`, `tamys-windows.yml`'s `build` (the Windows engine a
 candidate stores and a release publishes) runs on the Windows release runner, `coderoast-release-windows`;
 `golden.yaml`'s `proof-msvc` (the candidate's golden, the weekly schedule, a plain dispatch) runs on this
 runner, whose label `malf-windows` the leg's expression names; `WINDOWS_RUNNER` is the Windows legs' ONE org variable (the superproject's
 `workflow_source` refuses a runner reading a second, ROADMAP N394).
-The legs: insight-eidos's `golden.yaml` `proof-msvc` and `sift-windows.yml` `build`. The
+The legs: insight-eidos's `golden.yaml` `proof-msvc` and `tamys-windows.yml` `build`. The
 superproject's `workflow_source` check module reds on a private repository's Windows leg that
 hard-codes a hosted image. canon + metalog (and sift-action) Windows legs stay on hosted runners
 with no switch: public = free minutes, and the runner groups refuse public repositories. First run installs
@@ -436,7 +436,7 @@ the runner solves *minutes*, not that source blocker.)
 `NT SERVICE\actions.runner.CodeRoasted.malf-release-win`, from `C:\actions-runner-release-win`, in the
 group `coderoast-release`. It carries **one label, `coderoast-release-windows`, and none of the
 defaults**. It builds what a release publishes or is gated on from Windows: the public
-`sift-windows-x64.exe` (insight-eidos `sift-windows.yml`, job `build`) and the golden proof's MSVC
+`sift-windows-x64.exe` (insight-eidos `tamys-windows.yml`, job `build`) and the golden proof's MSVC
 leg (`golden.yaml`, job `proof-msvc`). Until 2026-09-30 both ran on `malf-runner-win`, as the one
 account every private repository's Windows CI runs as.
 
@@ -488,7 +488,7 @@ PATH. Only an access refusal counts: a target that does not exist is `BROKEN`, a
   targets of `malf-runner-win` refused. Each: 40 attempts, 9 controls, 0 failed.
 
 **The routing** (insight-eidos), behind the switch above. With `WINDOWS_RUNNER=self-hosted`,
-`sift-windows.yml`'s `build` (which runs only at the release and on the pre-tag reading) and
+`tamys-windows.yml`'s `build` (which runs only at the release and on the pre-tag reading) and
 `golden.yaml`'s `proof-msvc` at those two coordinates run here, so the release runner's MSVC build
 is read before the first tag; by default they run on `windows-2025`, the image the release then
 uses too. The label appears only inside expressions, which actionlint does not check as runner
@@ -501,7 +501,7 @@ runs, and each runner's `.env` carries the PATH as it was when its script last r
 ## Notes
 
 - **Host-tool invariant: `patchelf` is installed on every Linux build seat.** Three consumers:
-  the `package()` of `coderoast_server` and `insight_sift_tools` (`patchelf --remove-rpath` on
+  the `package()` of `coderoast_server` and `insight_tamys_tools` (`patchelf --remove-rpath` on
   the published executable, `DN-142.D20` (3)), `artefact_store`'s key, which measures it in the
   toolchain member, and the eidos release packaging of `sift-linux-x64`. `setup-build-env`
   provisions it in its apt base and prints the one that runs; on these self-hosted accounts the

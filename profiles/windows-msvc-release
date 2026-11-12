@@ -31,10 +31,10 @@ os=Windows
 # can load any DLL as a provider or engine. conancenter's recipe defaults it, off Linux, to the BUILD
 # host's package folder: `engine-v1.10.6`'s sift-windows-x64.exe carries
 # `C:\actions-runner-release-win\_work\...\opensf35e3807db321\p\res`, a path any standard user of
-# the machine running sift can create. This is OpenSSL's own Windows default (%CommonProgramFiles%\SSL),
+# the machine running tamys can create. This is OpenSSL's own Windows default (%CommonProgramFiles%\SSL),
 # writable by administrators only. Third-party, so INV-25 (no option on a FIRST-party package) holds.
 # It changes openssl's package id on this profile alone, so openssl rebuilds once per Windows conan
-# home; insight-eidos's sift-windows.yml reds a release asset whose OPENSSLDIR is outside C:\Program Files.
+# home; insight-eidos's tamys-windows.yml reds a release asset whose OPENSSLDIR is outside C:\Program Files.
 openssl/*:openssldir=C:\Program Files\Common Files\SSL
 # OPENSSL LOADS NO DLL AT ALL: no-dso (CWE-427, W499). libcrypto also compiles in ENGINESDIR and
 # MODULESDIR, where a provider or engine named without a path is loaded from, and the recipe pins
@@ -44,9 +44,9 @@ openssl/*:openssldir=C:\Program Files\Common Files\SSL
 # cannot be moved without forking it; no-dso removes the loader they feed instead. OpenSSL's
 # Configure then defines DSO_NONE, every DSO_load fails with DSO_R_UNSUPPORTED, and module and
 # dynamic-engine are disabled with it: no provider or engine DLL loads from those directories, from
-# OPENSSL_MODULES or OPENSSL_ENGINES, or from an absolute path in a config. sift needs none of that:
+# OPENSSL_MODULES or OPENSSL_ENGINES, or from an absolute path in a config. tamys needs none of that:
 # it uses the built-in default provider (TLS through libcurl, SHA-256) and links openssl statically.
-# The two strings stay in the binary as text; insight-eidos's sift-windows.yml gate reads that the
+# The two strings stay in the binary as text; insight-eidos's tamys-windows.yml gate reads that the
 # loader is the NULL one, and reds a binary carrying the win32 loader with either directory outside
 # C:\Program Files. Windows-only, like openssldir: no Linux package id moves.
 openssl/*:no_dso=True

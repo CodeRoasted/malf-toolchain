@@ -4,7 +4,7 @@ its own conan home (DN-142.D30 (10) R20).
 
 THE DEFECT THIS CLOSES, measured 2026-10-19 (WIP W559, malf `19fa219`). Inside the build environment a
 compiling act linked its editable dependencies from the HOST build trees: the sanitizer replay's fuzz
-tree named `insight-eidos/sift/build-clang21-asan/libinsight_sift.a`, an archive a host compiler had
+tree named `insight-eidos/tamys/build-clang21-asan/libinsight_tamys.a`, an archive a host compiler had
 written on 2026-10-12, beside module interfaces the image compiled from the current sources. One binary
 held two `RankedChange` layouts, and ASan read the ODR violation as a stack-buffer-overflow. The route
 was a recipe's `layout()` reading a conf that named the host tree; `19fa219` closed that route, and the

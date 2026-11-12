@@ -934,18 +934,18 @@ LKTIDY
 chmod +x "$lk_bin/clang-21" "$lk_bin/clang-tidy"
 
 lk_repo="$lk_tmp/repo"
-mkdir -p "$lk_repo/core/src" "$lk_repo/core/tests" "$lk_repo/sift/src"
+mkdir -p "$lk_repo/core/src" "$lk_repo/core/tests" "$lk_repo/tamys/src"
 git -C "$lk_repo" init -q 2>/dev/null
 git -C "$lk_repo" -c user.email=t@t -c user.name=t checkout -q -b main 2>/dev/null || true
 printf 'int engine() { return 1; }\n'  > "$lk_repo/core/src/engine.cpp"
 printf 'int probe() { return 1; }\n'   > "$lk_repo/core/tests/engine_probe.cpp"
-printf 'int other() { return 1; }\n'   > "$lk_repo/sift/src/other.cpp"
+printf 'int other() { return 1; }\n'   > "$lk_repo/tamys/src/other.cpp"
 git -C "$lk_repo" add -A
 git -C "$lk_repo" -c user.email=t@t -c user.name=t commit -q -m fixture
 # The change under test: every TU edited in the worktree, none staged.
 printf 'int engine() { return 2; }\n'  > "$lk_repo/core/src/engine.cpp"
 printf 'int probe() { return 2; }\n'   > "$lk_repo/core/tests/engine_probe.cpp"
-printf 'int other() { return 2; }\n'   > "$lk_repo/sift/src/other.cpp"
+printf 'int other() { return 2; }\n'   > "$lk_repo/tamys/src/other.cpp"
 
 lk_db() {   # <dir> <file>... — a clang database covering exactly these TUs, keyed as malf keys it
     local dir="$1"; shift
@@ -958,7 +958,7 @@ json.dump([{"directory": build, "command": f"clang++-21 -std=c++23 -c {f} -o out
 PYDB
 }
 lk_db "$lk_repo/core" "$lk_repo/core/src/engine.cpp"
-lk_db "$lk_repo"      "$lk_repo/core/src/engine.cpp" "$lk_repo/sift/src/other.cpp"
+lk_db "$lk_repo"      "$lk_repo/core/src/engine.cpp" "$lk_repo/tamys/src/other.cpp"
 
 lk_run() {   # <dir> <log> — malf lint (default mode, console) from <dir> with the fake toolchain
     (cd "$1" && PATH="$lk_bin:$PATH" LK_TIDY_LOG="$2" MALF_PROFILE_NAME="" bash "$MALF_BIN" lint --console 2>&1)
@@ -976,7 +976,7 @@ check "lint from the subdirectory says how many it checked (never 'no files to c
 
 lk_root_out="$(lk_run "$lk_repo" "$lk_tmp/tidy.root.log")"; lk_root_rc=$?
 check "lint from the repo ROOT checks both product TUs and not the tests/ one (unchanged behaviour)" \
-      "rc=0 core/src/engine.cpp sift/src/other.cpp " "rc=$lk_root_rc $(lk_checked "$lk_tmp/tidy.root.log")"
+      "rc=0 core/src/engine.cpp tamys/src/other.cpp " "rc=$lk_root_rc $(lk_checked "$lk_tmp/tidy.root.log")"
 
 # Anti-vacuity: the historical authoring, restated as the MUTANT, must LOSE on this fixture from
 # the subdirectory — or the first arm above proves nothing about the resolution.
@@ -991,7 +991,7 @@ lk_historical() {   # the pre-2026-09-02 leg: $CWD prepended to git's repo-relat
 check "the historical leg selects NOTHING from the subdirectory (the false zero, reproduced)" \
       "" "$(lk_historical "$lk_repo/core")"
 check "the historical leg selects both product TUs from the root (the asymmetry Kleio measured)" \
-      "core/src/engine.cpp sift/src/other.cpp " "$(lk_historical "$lk_repo")"
+      "core/src/engine.cpp tamys/src/other.cpp " "$(lk_historical "$lk_repo")"
 
 # The two refusals: an empty set reached by a FAILED listing is never a pass.
 lk_nonrepo="$lk_tmp/nonrepo"; mkdir -p "$lk_nonrepo"
@@ -1048,9 +1048,9 @@ rm -rf "$tc_tmp"
 lk_cost_out="$(lk_run "$lk_repo" "$lk_tmp/tidy.cost.log")"; lk_cost_rc=$?
 check "each progress line carries its translation unit's three figures" \
       "rc=0 2" \
-      "rc=$lk_cost_rc $(grep -cE '^\[[0-9]+/2\] (core/src/engine|sift/src/other)\.cpp  [0-9]+\.[0-9] s  rss [0-9]+ MiB  vm [0-9]+ MiB$' <<< "$lk_cost_out")"
+      "rc=$lk_cost_rc $(grep -cE '^\[[0-9]+/2\] (core/src/engine|tamys/src/other)\.cpp  [0-9]+\.[0-9] s  rss [0-9]+ MiB  vm [0-9]+ MiB$' <<< "$lk_cost_out")"
 check "the run ends with one COST line naming the heaviest and the longest translation unit" \
-      "named" "$(grep -qE '^malf lint: COST · 2 translation unit\(s\) measured · heaviest rss [0-9]+ MiB \((core/src/engine|sift/src/other)\.cpp\) · heaviest address space [0-9]+ MiB \([^)]+\) · longest [0-9]+\.[0-9] s \([^)]+\)$' <<< "$lk_cost_out" && echo named || echo "GOT: $(grep -E 'COST|SUMMARY' <<< "$lk_cost_out")")"
+      "named" "$(grep -qE '^malf lint: COST · 2 translation unit\(s\) measured · heaviest rss [0-9]+ MiB \((core/src/engine|tamys/src/other)\.cpp\) · heaviest address space [0-9]+ MiB \([^)]+\) · longest [0-9]+\.[0-9] s \([^)]+\)$' <<< "$lk_cost_out" && echo named || echo "GOT: $(grep -E 'COST|SUMMARY' <<< "$lk_cost_out")")"
 check "a timed-out translation unit still leaves its cost, and the verdict is unchanged" \
       "rc=1 1 timed-out" \
       "$(out="$(cd "$lk_repo/core" && PATH="$lk_bin:$PATH" LK_TIDY_LOG="$lk_tmp/tidy.cost2.log" LK_TIDY_SLEEP_ON=engine.cpp MALF_LINT_TU_TIMEOUT_S=1 MALF_PROFILE_NAME="" bash "$MALF_BIN" lint --console 2>&1)"; echo "rc=$? $(grep -cE '^\[1/1\] src/engine\.cpp  [0-9]+\.[0-9] s  rss ' <<< "$out") $([[ "$out" == *"TIMED OUT at 1 s"* ]] && echo timed-out || echo no-timeout)")"
@@ -1272,9 +1272,9 @@ check "a named TU on a CLEAN tree is linted — the named form never reads git" 
       "rc=$lk_nm_rc $(lk_checked "$lk_tmp/tidy.named.log")|$(lk_counts "$lk_nm_out")"
 check "the named run names its mode" \
       "named" "$([[ "$lk_nm_out" == *"mode=paths (the 1 file(s) named on the command line, as the worktree holds them)"* ]] && echo named || echo "GOT: $(lk_sum "$lk_nm_out")")"
-lk_nh_out="$(lk_named "$lk_tmp/tidy.namedh.log" core/src/engine.hpp "$lk_repo/sift/src/other.cpp")"; lk_nh_rc=$?
+lk_nh_out="$(lk_named "$lk_tmp/tidy.namedh.log" core/src/engine.hpp "$lk_repo/tamys/src/other.cpp")"; lk_nh_rc=$?
 check "a named header is counted as a header, an absolute path under the tree is accepted" \
-      "rc=0 sift/src/other.cpp |selected 2 = 1 translation unit(s) + 1 header(s), checked 1, 0 finding(s), 0 not linted" \
+      "rc=0 tamys/src/other.cpp |selected 2 = 1 translation unit(s) + 1 header(s), checked 1, 0 finding(s), 0 not linted" \
       "rc=$lk_nh_rc $(lk_checked "$lk_tmp/tidy.namedh.log")|$(lk_counts "$lk_nh_out")"
 lk_nt_out="$(lk_named "$lk_tmp/tidy.namedt.log" core/tests/engine_probe.cpp)"; lk_nt_rc=$?
 check "a named file LSRC-1 keeps off the surface is LISTED as not linted by design, and never reaches the tool" \
@@ -1331,7 +1331,7 @@ check "WITHOUT the relocation the same run inspects nothing at exit 0 (the false
 # A TU OUTSIDE ITS TARGET'S SOURCE DIRECTORY. CMake spells such a TU's object and module map as a RELATIVE
 # path that embeds the source's absolute path — `@CMakeFiles/<target>.dir/<desk root>/…/x.cpp.o.modmap` — and
 # it resolves from the entry's directory through the linked build tree to the desk's own modmap. Measured
-# 2026-11-11 (W670): insight-eidos's sift-tools compiles sift/src/cli/explain/narrative.cpp so; the
+# 2026-11-11 (W670): insight-eidos's tamys-tools compiles tamys/src/cli/explain/narrative.cpp so; the
 # relocation respelled the desk root INSIDE that relative path, the modmap named no file, clang-tidy read
 # no `-fmodule-file=std=…`, and the commit gate refused the change with "module 'std' not found". The
 # observable is functional: every `@` response file the relocated database names opens from its entry's
@@ -2368,7 +2368,7 @@ check "one variable OFF is enough to demote, and only the OFF one is named" \
       "$_MALF_TREE_ROLE $_MALF_TREE_ROLE_VARS"
 
 # --- the summary: nested members, and the first-party/external split --------------------------
-# Members NEST — insight-eidos is a package AND the parent of insight-eidos/sift — so every entry
+# Members NEST — insight-eidos is a package AND the parent of insight-eidos/tamys — so every entry
 # is billed to the LONGEST matching member prefix. Under a shortest-prefix attribution the parent
 # absorbs each subpackage's TUs and a member that contributed NOTHING still reports coverage,
 # which is precisely the misreading this section exists to make impossible.
@@ -3510,7 +3510,7 @@ echo "[9b] a create's two conf sets, its test_package population and the test-lo
 
 # DN-142.D13 (1): the consumer path runs no test and builds no test_package on conan's DEFAULT graph,
 # so it computes the writer's package id; `tools.graph:skip_test` prunes the test requirements and
-# gave metalog, eidos and sift another id. (2): a test_package runs in the writer's create through
+# gave metalog, eidos and tamys another id. (2): a test_package runs in the writer's create through
 # the same helper and writes a second result file. (3): a test locates its inputs by a compile
 # definition, never by the translation unit's own name, which a create's path map makes an
 # identifier. Each is driven through a real `conan create` of a fixture recipe whose build folder
@@ -4033,8 +4033,8 @@ check "the declaration is read from packages.yml at HEAD, never the disk: a work
 # THE SITE FORM (DN-142.D24 (2)): a `published` row may name where it is published; the row is read
 # whole, its sites are the publication plan's, and the create's key holds the class alone.
 check "the site form is read whole from packages.yml, and a row in neither form is refused naming it" \
-      "{\"bin/img\": {\"published\": {\"image\": \"srv\"}}, \"bin/sift\": {\"published\": {\"assets\": [{\"name\": \"sift-linux-x64\", \"repository\": \"sift-action\"}]}}, \"bin/tool\": \"run-from-cache\"}|rc=2 1" \
-      "$(rm -rf "$bi_tmp/sites"; mkdir -p "$bi_tmp/sites/pkg"; cd "$bi_tmp/sites" && git init -q && printf 'packages:\n  bi_tool:\n    path: pkg\n    executables:\n      bin/sift: {published: {assets: [{repository: sift-action, name: sift-linux-x64}]}}\n      bin/img: {published: {image: srv}}\n      bin/tool: run-from-cache\n  bi_bad:\n    path: pkg\n    executables: {bin/x: {publshed: {}}}\n' > packages.yml && git add packages.yml && git -c user.email=t@t -c user.name=t commit -qm sites && python3 "$MALF_ROOT/artefact_store.py" executables "$bi_tmp/sites/pkg" bi_tool)|$(out="$(python3 "$MALF_ROOT/artefact_store.py" executables "$bi_tmp/sites/pkg" bi_bad 2>&1)"; echo -n "rc=$? "; grep -c '^artefact_store: REFUSED bi_bad: .*bin/x: {.publshed' <<< "$out")"
+      "{\"bin/img\": {\"published\": {\"image\": \"srv\"}}, \"bin/tamys\": {\"published\": {\"assets\": [{\"name\": \"sift-linux-x64\", \"repository\": \"sift-action\"}]}}, \"bin/tool\": \"run-from-cache\"}|rc=2 1" \
+      "$(rm -rf "$bi_tmp/sites"; mkdir -p "$bi_tmp/sites/pkg"; cd "$bi_tmp/sites" && git init -q && printf 'packages:\n  bi_tool:\n    path: pkg\n    executables:\n      bin/tamys: {published: {assets: [{repository: sift-action, name: sift-linux-x64}]}}\n      bin/img: {published: {image: srv}}\n      bin/tool: run-from-cache\n  bi_bad:\n    path: pkg\n    executables: {bin/x: {publshed: {}}}\n' > packages.yml && git add packages.yml && git -c user.email=t@t -c user.name=t commit -qm sites && python3 "$MALF_ROOT/artefact_store.py" executables "$bi_tmp/sites/pkg" bi_tool)|$(out="$(python3 "$MALF_ROOT/artefact_store.py" executables "$bi_tmp/sites/pkg" bi_bad 2>&1)"; echo -n "rc=$? "; grep -c '^artefact_store: REFUSED bi_bad: .*bin/x: {.publshed' <<< "$out")"
 bi_sited() {   # <asset name> -> the step's line, into one store kept across calls
     printf '{"bin/tool": {"published": {"assets": [{"repository": "sift-action", "name": "%s"}]}}}' "$1" > "$bi_tmp/declared.json"
     MALF_STEP_EXECUTABLES="$bi_tmp/declared.json" bi_step "$bi_tmp/pub-clean" "$bi_tmp/sstore" | tr -d '\n'
@@ -4515,9 +4515,9 @@ echo
 
 echo "[7q3b] every fold of a repository's database keeps the entry of the tree whose build compiles the file"
 
-# note: insight-eidos's sift-corpus adds sift-tools/ under EXCLUDE_FROM_ALL, so its database lists
-# sift-tools' sources and its build compiles none but the gate; folded first, its entries won, and a
-# desk `malf lint --all-files` linted sift/src/cli and sift/src/crawl against interfaces that tree
+# note: insight-eidos's tamys-corpus adds tamys-tools/ under EXCLUDE_FROM_ALL, so its database lists
+# tamys-tools' sources and its build compiles none but the gate; folded first, its entries won, and a
+# desk `malf lint --all-files` linted tamys/src/cli and tamys/src/crawl against interfaces that tree
 # never builds (ROADMAP N422, 2026-11-06).
 # note: real ninja over compiler-free manifests, so "the build compiles it" is ninja's own reading of
 # each tree's default target, never a model of it.
@@ -5102,7 +5102,7 @@ echo
 
 echo "[7j6] lint --all-files NAMES a TU the build gates off this platform, and refuses nothing else"
 
-# note: two sift *_win32.cpp files are named only inside if(WIN32), so no Linux compile command can
+# note: two tamys *_win32.cpp files are named only inside if(WIN32), so no Linux compile command can
 # exist; --all-files treated them as a fatal coverage hole and the eidos gate could never pass.
 # note: the verdict comes from the repo's CMake text evaluated by cmake -P, never a file name — so a
 # *_win32.cpp no CMake file names, one under a project option, and one under if(UNIX) all stay fatal.
@@ -5167,8 +5167,8 @@ check "a TU under if(UNIX) and absent from the database is fatal — the branch 
       "rc=$pg_rc $(grep -qE '^  src/unix_only\.cpp$' <<< "$pg_out" && echo missing || echo "GOT: $pg_out")"
 rm -f "$pg_repo/src/unix_only.cpp"
 
-# note: measured 2026-10-10, DN-142.D16 moved the two sift *_win32.cpp files into sift-tools'
-# CMakeLists, which names the library's tree through a variable (`${SIFT_LIBRARY_TREE}/src/...`): the
+# note: measured 2026-10-10, DN-142.D16 moved the two tamys *_win32.cpp files into tamys-tools'
+# CMakeLists, which names the library's tree through a variable (`${TAMYS_LIBRARY_TREE}/src/...`): the
 # gate skipped every `${`-token, so both were "no CMake file names it" and eidos's lint redded.
 mkdir -p "$pg_repo/tools"
 cat > "$pg_repo/tools/CMakeLists.txt" <<'CM'
@@ -6733,7 +6733,7 @@ echo
 
 echo "[7q7j] malf lock accumulates every root under every profile of malf/profiles/, so a requirement one OS alone adds is in the lock a strict resolve on that OS reads (W486 G2)"
 # note: measured 2026-10-10, malf/conan.lock accumulated under the desk profile alone, and a strict
-# resolve of the Windows sift graph failed on `Requirement 'nasm/2.16.01' not in lockfile
+# resolve of the Windows tamys graph failed on `Requirement 'nasm/2.16.01' not in lockfile
 # 'build_requires'`: openssl's recipe adds nasm and strawberryperl on os=Windows only. The fixture is
 # that shape in miniature: one root whose tool requirement exists only under a Windows profile, a
 # registry holding a Linux and a Windows profile, and no remote.

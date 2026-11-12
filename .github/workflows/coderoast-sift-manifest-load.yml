@@ -1,6 +1,6 @@
-name: CodeRoast Sift Manifest Load
+name: CodeRoast Tamys Manifest Load
 
-# The Sift Action's manifest, LOADED the way a consumer's runner loads it: the caller's own checkout
+# The Tamys Action's manifest, LOADED the way a consumer's runner loads it: the caller's own checkout
 # runs `uses: ./` on a one-line smoke log. actionlint lints WORKFLOWS, never `action.yml`, so a broken
 # manifest (an expression using a context invalid in action metadata, `needs` or `github.event`)
 # ships silently and fails EVERY consumer at `uses:`, which the TypeScript suite cannot catch; only

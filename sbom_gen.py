@@ -3,7 +3,7 @@
 
 Why this exists
 ---------------
-The Sift SBOM used to be hand-maintained, and on 2026-07-21 it was measured three minors
+The Tamys SBOM used to be hand-maintained, and on 2026-07-21 it was measured three minors
 stale: it still named four long-removed packages (``insight_detection`` /
 ``insight_explain`` / ``insight_engine`` / ``insight_diff``) which no longer exist, pinned
 first-party at ``1.5.4`` against an actual ``1.8.3``, and omitted ``insight_llm`` plus the
@@ -149,7 +149,7 @@ def shipped_components(graph: dict) -> tuple[dict, list[dict]]:
     nodes = graph["graph"]["nodes"]
     root_node, comps = None, []
     # A package required by several consumers is several NODES in the graph (glaze is pulled
-    # by eidos, llm and sift, each with visible=False). An SBOM is an inventory, so it
+    # by eidos, llm and tamys, each with visible=False). An SBOM is an inventory, so it
     # wants one row per distinct ref — dedupe on the full name/version, NOT on the name, so a
     # genuine two-version split (measured: lz4 1.9.4 vs 1.10.0 across roots) still shows up as
     # two rows instead of being collapsed into a false single answer.
@@ -288,7 +288,7 @@ def selftest() -> int:
     crash: the host/test/build filter, and the CPE vendor+product mapping.
     """
     graph = {"graph": {"nodes": {
-        "0": {"ref": "insight_sift/1.8.3", "context": "host"},
+        "0": {"ref": "insight_tamys/1.8.3", "context": "host"},
         "1": {"ref": "openssl/3.6.3#abc", "context": "host"},
         "2": {"ref": "libcurl/8.20.0#def", "context": "host"},
         "3": {"ref": "gtest/1.17.0#ghi", "context": "host", "test": True},
@@ -296,7 +296,7 @@ def selftest() -> int:
         "5": {"ref": "insight_canon/1.8.3", "context": "host"},
         # Same ref reached via two consumers -> ONE row. Regression guard: the first cut of
         # this tool emitted glaze four times because glaze is pulled by eidos, llm and
-        # sift independently.
+        # tamys independently.
         "6": {"ref": "openssl/3.6.3#abc", "context": "host"},
         # A genuine two-VERSION split must survive dedup as two rows (measured: lz4 1.9.4 vs
         # 1.10.0 across roots). Deduping on name would hide exactly the skew we care about.
@@ -308,7 +308,7 @@ def selftest() -> int:
     expect = ["insight_canon/1.8.3", "libcurl/8.20.0", "lz4/1.10.0", "lz4/1.9.4",
               "openssl/3.6.3"]
     assert got == expect, f"filter/dedupe: got {got}, expected {expect}"
-    assert (root.get("ref") or "").startswith("insight_sift"), "root node misidentified"
+    assert (root.get("ref") or "").startswith("insight_tamys"), "root node misidentified"
 
     curl, has_cpe = to_component({"ref": "libcurl/8.20.0#def"})
     assert has_cpe, "libcurl must carry a CPE"
@@ -337,16 +337,16 @@ def selftest() -> int:
     assert "LINKED-CLOSURE" in note_for("coderoast_server", None), "server note override lost"
     assert note_for("coderoast_server", "custom") == "custom", "explicit --note must win"
     # The routing assertion, stated so it can FAIL. It used to read
-    # `note_for("insight_sift", None) == DEFAULT_NOTE` — which compares the function against
+    # `note_for("insight_tamys", None) == DEFAULT_NOTE` — which compares the function against
     # the constant it returns for any non-server root, and is therefore true for every
     # possible prose. That tautology is why 74/74 stayed green while a note edit left
     # coderoast-server's committed SBOM stale for three days and reded the v1.9.0 tag.
     # What is actually worth pinning is the ROUTING: a non-server root must not receive the
     # server's boundary note. That is a real distinction and a wrong ARTIFACT_NOTE key
     # breaks it.
-    assert note_for("insight_sift", None) != note_for("coderoast_server", None), \
-        "sift must NOT receive the server's linked-closure note"
-    assert "LINKED-CLOSURE" not in note_for("insight_sift", None), \
+    assert note_for("insight_tamys", None) != note_for("coderoast_server", None), \
+        "tamys must NOT receive the server's linked-closure note"
+    assert "LINKED-CLOSURE" not in note_for("insight_tamys", None), \
         "the linked-closure boundary must not travel onto a non-server artifact"
 
     # The tripwire the stale-SBOM defect actually needed. The notes are document CONTENT, so

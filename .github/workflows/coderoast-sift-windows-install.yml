@@ -1,7 +1,7 @@
-name: CodeRoast Sift Windows Install
+name: CodeRoast Tamys Windows Install
 
 # THE PUBLICLY DOCUMENTED WINDOWS INSTALL PATH, EXECUTED (`OPS-7.S112` cell 1). sift-action's README
-# tells a Windows user to run `irm .../install.ps1 | iex`, and resolve-sift.ts prints the same advice
+# tells a Windows user to run `irm .../install.ps1 | iex`, and resolve-tamys.ts prints the same advice
 # when the Action meets a non-Linux runner. The script downloads a published asset, sha256-verifies it
 # fatally and installs it; this job runs it at the caller's checkout the way a user does, then asserts
 # the PRODUCT ACT on what it installed.
@@ -63,23 +63,23 @@ jobs:
           # An explicit dir, not the default per-user Programs path: the assertion below has to open
           # the file the installer wrote, and the default would be a path this job restates rather
           # than reads. No -Version — the baked pin IS the thing under test.
-          SIFT_INSTALL_DIR: ${{ github.workspace }}\sift-bin
+          TAMYS_INSTALL_DIR: ${{ github.workspace }}\tamys-bin
         run: ./install.ps1
 
-      - name: The installed binary must BE sift and must DIFF
-        # Not `Test-Path` (a zero-byte file passes it) and not a meta-flag probe (sift has NO version
+      - name: The installed binary must BE tamys and must DIFF
+        # Not `Test-Path` (a zero-byte file passes it) and not a meta-flag probe (tamys has NO version
         # flag; a `--version` probe reds a good binary): the PRODUCT ACT — two logs in, a report out,
         # exit 0. `--fail-on none` is explicit so a future default change cannot turn a significant
         # diff into a red here; this step reds on a broken engine only.
         shell: pwsh
         env:
-          SIFT_EXE: ${{ github.workspace }}\sift-bin\sift.exe
+          TAMYS_EXE: ${{ github.workspace }}\tamys-bin\tamys.exe
         run: |
-          $exe = $env:SIFT_EXE
+          $exe = $env:TAMYS_EXE
           if (-not (Test-Path $exe)) { Write-Host "::error::install.ps1 reported success but wrote no $exe"; exit 1 }
           Set-Content -Path baseline.log -Value @('build start', 'compiling a.cpp', 'ok', 'build ok')
           Set-Content -Path changed.log  -Value @('build start', 'compiling a.cpp', 'error: a.cpp:3 undefined symbol', 'build failed')
           $out = & $exe baseline.log changed.log --format md --fail-on none 2>&1 | Out-String
-          if ($LASTEXITCODE -ne 0) { Write-Host "::error::the installed sift.exe exits $LASTEXITCODE on a plain two-log diff"; Write-Host $out; exit 1 }
-          if ([string]::IsNullOrWhiteSpace($out)) { Write-Host "::error::the installed sift.exe produced an EMPTY report on a two-log diff"; exit 1 }
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::the installed tamys.exe exits $LASTEXITCODE on a plain two-log diff"; Write-Host $out; exit 1 }
+          if ([string]::IsNullOrWhiteSpace($out)) { Write-Host "::error::the installed tamys.exe produced an EMPTY report on a two-log diff"; exit 1 }
           Write-Host "the installed engine diffed two logs and wrote $($out.Length) chars of report"

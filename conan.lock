@@ -19,7 +19,7 @@
         "libpq/17.11#492684c71526baac9592d864d9770bd9%1794078060.885906",
         "libcurl/8.22.0#58488ad978224809c9bec7df8661b071%1794078170.0854416",
         "jsoncpp/1.9.5#9415a4cf4d2e8965408f3a01a8339b48%1726135495.806",
-        "insight_sift/1.10.12",
+        "insight_tamys/1.10.12",
         "insight_semantic_test_frameworks/1.10.12",
         "insight_semantic_package_managers/1.10.12",
         "insight_semantic_jenkins/1.10.12",

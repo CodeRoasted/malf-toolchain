@@ -641,7 +641,7 @@ def pull_record(reader: Reader, store: Path, key: str, verifier: Verifier | None
 # and its package carries its notice; copyleft is never admitted. An allowlist, never a denylist: an identifier
 # outside it is refused, copyleft and an unknown permissive one alike, and a new permissive identifier enters by
 # a ruling recorded in DN-142.D38. The first three derived from what the three public stores held on 2026-10-31;
-# `curl` and `Zlib` admitted the same day by the Founder (RUL-233), because the published Sift binary links libcurl
+# `curl` and `Zlib` admitted the same day by the Founder (RUL-233), because the published Tamys binary links libcurl
 # and zlib.
 PERMISSIVE = ("Apache-2.0", "BSD-3-Clause", "MIT", "curl", "Zlib")
 APACHE = "Apache-2.0"

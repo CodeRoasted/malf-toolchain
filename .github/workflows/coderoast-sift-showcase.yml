@@ -1,6 +1,6 @@
-name: CodeRoast Sift Showcase
+name: CodeRoast Tamys Showcase
 
-# CLIENT-FACING TRANSPARENCY, as one reusable job: install the PUBLIC, sha256-verified `sift` engine
+# CLIENT-FACING TRANSPARENCY, as one reusable job: install the PUBLIC, sha256-verified `tamys` engine
 # through the caller's `install.sh` (the exact binary a user gets), run it over the PUBLIC CI-log
 # samples fetched from coderoast-hub with the caller's `scripts/samples_showcase.sh`, and publish the
 # render — the run summary and an Actions artifact. It tells the two-part story, silent-on-green and
@@ -22,11 +22,11 @@ name: CodeRoast Sift Showcase
 on:
   workflow_call:
     inputs:
-      sift-version:
+      tamys-version:
         # NO DEFAULT, deliberately. A literal default once read '1.7.5' while the shipped pin was
         # 1.9.6, so every run that named no version rendered the public showcase on an engine two
         # releases old. Empty resolves to the pin, which follows bump.sh instead of rotting beside it.
-        description: 'Published engine version to install (X.Y.Z). Empty: an engine-v<X> release-tag wins, else the pin in the caller''s src/sift-version.ts.'
+        description: 'Published engine version to install (X.Y.Z). Empty: an engine-v<X> release-tag wins, else the pin in the caller''s src/tamys-version.ts.'
         type: string
         required: false
         default: ''
@@ -56,49 +56,49 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Install the public sift engine (download + sha256-verify — the honest client path)
+      - name: Install the public tamys engine (download + sha256-verify — the honest client path)
         env:
-          SIFT_VERSION_INPUT: ${{ inputs.sift-version }}
+          TAMYS_VERSION_INPUT: ${{ inputs.tamys-version }}
           RELEASE_TAG: ${{ inputs.release-tag }}
         run: |
           set -euo pipefail
           # An explicit version wins; else an engine-v<X> release installs THAT engine; else the PIN,
-          # read from src/sift-version.ts (written ONLY by bump.sh, which pins a PUBLISHED engine), so
+          # read from src/tamys-version.ts (written ONLY by bump.sh, which pins a PUBLISHED engine), so
           # this arm cannot name a version that does not exist and cannot fall behind the pin.
-          VER="$SIFT_VERSION_INPUT"
+          VER="$TAMYS_VERSION_INPUT"
           if [ -z "$VER" ]; then
             case "$RELEASE_TAG" in
               engine-v*) VER="${RELEASE_TAG#engine-v}" ;;
-              *) VER="$(grep -oE "SIFT_VERSION[[:space:]]*=[[:space:]]*['\"][^'\"]+['\"]" src/sift-version.ts \
+              *) VER="$(grep -oE "TAMYS_VERSION[[:space:]]*=[[:space:]]*['\"][^'\"]+['\"]" src/tamys-version.ts \
                         | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | sed -n 1p || true)" ;;
             esac
           fi
           # An unparseable pin is a broken instrument, never a reason to install something else.
-          [ -n "$VER" ] || { echo "::error::could not resolve a sift engine version — no input, no engine-v* release tag, and src/sift-version.ts did not parse. Refusing to render a showcase on a guessed engine."; exit 1; }
-          echo "sift engine version: $VER"
-          # install.sh falls back to ~/.local/bin unless SIFT_INSTALL_DIR already EXISTS and is
+          [ -n "$VER" ] || { echo "::error::could not resolve a tamys engine version — no input, no engine-v* release tag, and src/tamys-version.ts did not parse. Refusing to render a showcase on a guessed engine."; exit 1; }
+          echo "tamys engine version: $VER"
+          # install.sh falls back to ~/.local/bin unless TAMYS_INSTALL_DIR already EXISTS and is
           # writable, so it is created first; install.sh proves liveness itself, fatally.
           mkdir -p "$PWD/bin"
-          SIFT_INSTALL_DIR="$PWD/bin" sh install.sh "$VER"
-          echo "SIFT=$PWD/bin/sift" >> "$GITHUB_ENV"
+          TAMYS_INSTALL_DIR="$PWD/bin" sh install.sh "$VER"
+          echo "TAMYS=$PWD/bin/tamys" >> "$GITHUB_ENV"
 
-      - name: Render the Sift showcase
-        run: bash scripts/samples_showcase.sh "$SIFT" hub/samples showcase
+      - name: Render the Tamys showcase
+        run: bash scripts/samples_showcase.sh "$TAMYS" hub/samples showcase
 
       - name: Bundle + step summary
         run: |
           set -euo pipefail
           tar --sort=name --mtime='2026-01-01 00:00:00Z' --owner=0 --group=0 --numeric-owner \
-              -C showcase -czf sift-samples-showcase.tar.gz .
+              -C showcase -czf tamys-samples-showcase.tar.gz .
           {
-            echo "## Sift over our public CI-log samples"
+            echo "## Tamys over our public CI-log samples"
             echo
             cat showcase/README.md
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: sift-samples-showcase
+          name: tamys-samples-showcase
           path: showcase
           if-no-files-found: error
 

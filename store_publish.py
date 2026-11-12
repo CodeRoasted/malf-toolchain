@@ -1027,8 +1027,8 @@ def candidate_arms(arm: Callable, failures: list[str], root: Path, servers: list
             arm("CANDIDATE: the destination Release read back equals its staged files and is not Latest",
                 lambda: check_destination(destination, hosted, releases, "engine-v9.9.9"), None)
             arm("RED: one extra asset on the destination Release reds its after-reading",
-                lambda: check_destination(destination, {"assets": hosted["assets"] + [{"name": "sift-extra"}]},
-                                          releases, "engine-v9.9.9"), "attached and never staged ['sift-extra']")
+                lambda: check_destination(destination, {"assets": hosted["assets"] + [{"name": "tamys-extra"}]},
+                                          releases, "engine-v9.9.9"), "attached and never staged ['tamys-extra']")
             arm("RED: a destination Release wearing the Latest badge reds its after-reading",
                 lambda: check_destination(destination, hosted, [{"tagName": "engine-v9.9.9", "isLatest": True}],
                                           "engine-v9.9.9"), "never claims its repository's badge")

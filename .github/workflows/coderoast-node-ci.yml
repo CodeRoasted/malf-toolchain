@@ -2,8 +2,8 @@ name: CodeRoast Node CI
 
 # The CI build job of every CodeRoast TypeScript repository (coderoast-web, sift-action), as one
 # reusable workflow: checkout, Node with the npm cache, `npm ci`, the caller's checks, the commands
-# whose output Sift diffs (each appended to build.log), the caller's post-build checks, then the
-# advisory Sift dogfood over build.log. The commands are the caller's; the job around them is here.
+# whose output Tamys diffs (each appended to build.log), the caller's post-build checks, then the
+# advisory Tamys dogfood over build.log. The commands are the caller's; the job around them is here.
 #
 # PIPEFAIL IS THE WORD THAT MATTERS. `cmd 2>&1 | tee -a build.log` under the default `bash -e` reads
 # tee's status, which always succeeds: measured 2026-08-22 on both callers, those steps were
@@ -11,10 +11,10 @@ name: CodeRoast Node CI
 # job read SUCCESS). Every logged command here runs under `set -o pipefail`, so its own status is the
 # verdict, and the first red stops the job as separate steps would.
 #
-# THE SIFT DOGFOOD IS ADVISORY at the step boundary (`continue-on-error`), skipped on a fork's pull
-# request (a read-only token), and diffs THIS run's build.log. `sift: local` runs the action at the
+# THE TAMYS DOGFOOD IS ADVISORY at the step boundary (`continue-on-error`), skipped on a fork's pull
+# request (a read-only token), and diffs THIS run's build.log. `tamys: local` runs the action at the
 # caller's checkout (sift-action dogfooding its own code); `published` runs CodeRoasted/sift-action@v1.
-# `walltime-record: true` brackets it with one advisory `SIFT-WALLTIME` line (input bytes and lines,
+# `walltime-record: true` brackets it with one advisory `TAMYS-WALLTIME` line (input bytes and lines,
 # step wall time, change counts), which never gates: CI wall time on a shared runner is noise.
 
 on:
@@ -30,7 +30,7 @@ on:
         required: false
         default: ''
       logged:
-        description: 'Newline-separated commands whose output is appended to build.log (what Sift diffs), in order; the first red stops the job.'
+        description: 'Newline-separated commands whose output is appended to build.log (what Tamys diffs), in order; the first red stops the job.'
         type: string
         required: true
       post-checks:
@@ -38,13 +38,13 @@ on:
         type: string
         required: false
         default: ''
-      sift:
+      tamys:
         description: '`published` (CodeRoasted/sift-action@v1), `local` (the action at the caller''s checkout) or `off`.'
         type: string
         required: false
         default: 'published'
       walltime-record:
-        description: 'true: record the dogfood''s input size and wall time as one advisory SIFT-WALLTIME line.'
+        description: 'true: record the dogfood''s input size and wall time as one advisory TAMYS-WALLTIME line.'
         type: boolean
         required: false
         default: false
@@ -87,7 +87,7 @@ jobs:
             echo "::endgroup::"
           done <<< "$COMMANDS"
 
-      - name: Logged build (each command appended to build.log, which Sift diffs)
+      - name: Logged build (each command appended to build.log, which Tamys diffs)
         shell: bash
         env:
           COMMANDS: ${{ inputs.logged }}
@@ -118,9 +118,9 @@ jobs:
             echo "::endgroup::"
           done <<< "$COMMANDS"
 
-      - name: Sift dogfood — record the input size (advisory)
-        id: sift-input
-        if: ${{ always() && inputs.walltime-record && inputs.sift != 'off' && github.event.pull_request.head.repo.fork != true }}
+      - name: Tamys dogfood — record the input size (advisory)
+        id: tamys-input
+        if: ${{ always() && inputs.walltime-record && inputs.tamys != 'off' && github.event.pull_request.head.repo.fork != true }}
         continue-on-error: true
         run: |
           set -uo pipefail
@@ -135,11 +135,11 @@ jobs:
             echo "lines=$lines"
             echo "started=$(date +%s.%N)"
           } >> "$GITHUB_OUTPUT"
-          echo "sift-dogfood: input build.log = $bytes bytes, $lines lines"
+          echo "tamys-dogfood: input build.log = $bytes bytes, $lines lines"
 
-      - name: Sift — structural diff of this run's build log (advisory; the action at this checkout)
-        id: sift-local
-        if: ${{ always() && inputs.sift == 'local' && github.event.pull_request.head.repo.fork != true }}
+      - name: Tamys — structural diff of this run's build log (advisory; the action at this checkout)
+        id: tamys-local
+        if: ${{ always() && inputs.tamys == 'local' && github.event.pull_request.head.repo.fork != true }}
         continue-on-error: true
         uses: ./
         with:
@@ -148,9 +148,9 @@ jobs:
           commit-comment: regression
           changed-outcome: ${{ job.status }}   # the NATIVE token — the engine maps it four-class (ADR-17.D5)
 
-      - name: Sift — structural diff of this run's build log (advisory; the published action)
-        id: sift-published
-        if: ${{ always() && inputs.sift == 'published' && github.event.pull_request.head.repo.fork != true }}
+      - name: Tamys — structural diff of this run's build log (advisory; the published action)
+        id: tamys-published
+        if: ${{ always() && inputs.tamys == 'published' && github.event.pull_request.head.repo.fork != true }}
         continue-on-error: true
         uses: CodeRoasted/sift-action@v1
         with:
@@ -159,16 +159,16 @@ jobs:
           commit-comment: regression
           changed-outcome: ${{ job.status }}   # the NATIVE token — the engine maps it four-class (ADR-17.D5)
 
-      - name: Sift dogfood — emit the wall-time record (advisory; never gates)
-        if: ${{ always() && inputs.walltime-record && inputs.sift != 'off' && github.event.pull_request.head.repo.fork != true }}
+      - name: Tamys dogfood — emit the wall-time record (advisory; never gates)
+        if: ${{ always() && inputs.walltime-record && inputs.tamys != 'off' && github.event.pull_request.head.repo.fork != true }}
         continue-on-error: true
         env:
-          IN_BYTES: ${{ steps.sift-input.outputs.bytes }}
-          IN_LINES: ${{ steps.sift-input.outputs.lines }}
-          STARTED: ${{ steps.sift-input.outputs.started }}
-          TOTAL_CHANGES: ${{ steps.sift-local.outputs.total-changes || steps.sift-published.outputs.total-changes }}
-          SIG_CHANGES: ${{ steps.sift-local.outputs.significant-changes || steps.sift-published.outputs.significant-changes }}
-          STATE: ${{ steps.sift-local.outputs.state || steps.sift-published.outputs.state }}
+          IN_BYTES: ${{ steps.tamys-input.outputs.bytes }}
+          IN_LINES: ${{ steps.tamys-input.outputs.lines }}
+          STARTED: ${{ steps.tamys-input.outputs.started }}
+          TOTAL_CHANGES: ${{ steps.tamys-local.outputs.total-changes || steps.tamys-published.outputs.total-changes }}
+          SIG_CHANGES: ${{ steps.tamys-local.outputs.significant-changes || steps.tamys-published.outputs.significant-changes }}
+          STATE: ${{ steps.tamys-local.outputs.state || steps.tamys-published.outputs.state }}
           RUNNER_LABEL: ${{ inputs.runs-on }}
         run: |
           set -uo pipefail
@@ -176,13 +176,13 @@ jobs:
           if [ -n "${STARTED:-}" ]; then
             elapsed=$(echo "$(date +%s.%N) - $STARTED" | bc || echo "")
           fi
-          # ONE line, fixed `SIFT-WALLTIME` prefix and `k=v` fields: the run log spans the whole
+          # ONE line, fixed `TAMYS-WALLTIME` prefix and `k=v` fields: the run log spans the whole
           # history, so the prefix makes it parseable in one sweep. `significant=0` is recorded rather
           # than hidden because it disqualifies the row as a throughput sample (nothing was ranked or
           # rendered); a reader must see such rows to exclude them.
-          echo "SIFT-WALLTIME runner=${RUNNER_LABEL} bytes=${IN_BYTES:-} lines=${IN_LINES:-} elapsed_s=${elapsed:-} total_changes=${TOTAL_CHANGES:-} significant=${SIG_CHANGES:-} state=${STATE:-}"
+          echo "TAMYS-WALLTIME runner=${RUNNER_LABEL} bytes=${IN_BYTES:-} lines=${IN_LINES:-} elapsed_s=${elapsed:-} total_changes=${TOTAL_CHANGES:-} significant=${SIG_CHANGES:-} state=${STATE:-}"
           {
-            echo "### Sift dogfood — wall time (advisory)"
+            echo "### Tamys dogfood — wall time (advisory)"
             echo ""
             echo "| input bytes | input lines | step wall time | total changes | significant | state |"
             echo "|---:|---:|---:|---:|---:|:--|"

@@ -147,8 +147,8 @@ def mentions(cmakelists: str, targets: set[str]) -> list[tuple[str, int, list[Fr
     """Every (target, line, enclosing if-frames) a non-conditional command of the file names.
 
     A path spelled through a variable resolves when the variable has ONE unconditional value in
-    the file: a `set(NAME value)` outside every if(), set once (sift-tools names the library's
-    tree `${SIFT_LIBRARY_TREE}`). From a second set on, and from a first set inside a branch, the
+    the file: a `set(NAME value)` outside every if(), set once (tamys-tools names the library's
+    tree `${TAMYS_LIBRARY_TREE}`). From a second set on, and from a first set inside a branch, the
     variable resolves to nothing, and a path through it is not a mention."""
     base = os.path.dirname(cmakelists)
     with open(cmakelists, encoding="utf-8", errors="replace") as handle:
