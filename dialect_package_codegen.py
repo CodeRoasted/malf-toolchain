@@ -73,7 +73,7 @@ with lines that are content. The emitted row carries the shape in the bytes memb
 `.match = RoleMatchKind::Shape`; a prefix row emits no match kind, so a declaration of prefix
 rows alone keeps its content hash and its emitted bytes.
 
-A DIALECT MAY DECLARE ITS PLATFORM'S STOP ANNOUNCEMENTS (DN-146.D10). A row of the optional
+A DIALECT MAY DECLARE ITS PLATFORM'S STOP ANNOUNCEMENTS (ADR-17.D15). A row of the optional
 `stop_announcements:` section is a whole line a runner writes into a step it stops, matched as
 a role row's `shape:` is, except that a hole is admitted and not required: a runner's stop line
 is usually fixed text. The row declares no role and no level, because a stop announcement keeps
@@ -620,7 +620,7 @@ def _validate_stop_announcement_row(row: dict, context: str, source: str) -> dic
     """A whole line a runner writes into a step it stops, matched as a whole-line shape.
 
     It declares no role and no level: the line keeps both, and the row only lets a consumer
-    order a unit's own errors against the stop (DN-146.D10).
+    order a unit's own errors against the stop (ADR-17.D15).
     """
     expect_keys(row, ("shape", "dialect_gate", "why"), context, source, _DIALECT_REJECTIONS)
     return {
