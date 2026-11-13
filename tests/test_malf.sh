@@ -5889,6 +5889,43 @@ check "RED-FIRST — the repository's final fold restores a package's entries af
         cp "$2/root.json" "$root/compile_commands.json"; printf "%s\n" "$MALF_SYSTEM" > "$root/.malf-environment"
         _malf_merge_repository_dbs "$2" "$2/llm" "$2" >/dev/null 2>&1
         python3 -c "import json, sys; print(*sorted(e[\"file\"] for e in json.load(open(sys.argv[1]))))" "$root/compile_commands.json"' _ "$MALF_BIN" "$e3_tmp/rootpkg")"
+# A LONE PACKAGE BUILD KEEPS THE REPOSITORY'S DATABASE (ROADMAP N436). Building one package of a repository whose root
+# is a package reconfigures the root as its dependency, tests off, and CMake rewrites the root database to the root
+# library's entries alone: measured 2026-11-13, insight-eidos 338 entries before `malf build insight-eidos/tamys-tools`
+# and 110 after; every dependency the target reaches is demoted so, the root and llm alike. The fixture drives the build flow with the reconfigure and the target's build stubbed.
+n436_tmp="$(mktemp -d)"
+n436_build() {   # <removed source or empty> — the root database's files after a lone build of tools/
+    local fx="$n436_tmp/repo" key=clang21-libcxx-release p
+    rm -rf "$fx"; mkdir -p "$fx/src" "$fx/tests" "$fx/llm" "$fx/tools" "$fx/build-$key" "$fx/llm/build-$key" "$fx/tools/build-$key"
+    git -C "$fx" init -q 2>/dev/null
+    for p in .:ex_root llm:ex_llm tools:ex_tools; do
+        printf 'from conan import ConanFile\n\n\nclass P(ConanFile):\n    name = "%s"\n    version = "0.1"\n' "${p#*:}" > "$fx/${p%%:*}/conanfile.py"
+    done
+    : > "$fx/tools/CMakeLists.txt"; mkdir -p "$fx/llm/tests"; touch "$fx/src/root.cpp" "$fx/tests/root_test.cpp" "$fx/llm/a.cpp" "$fx/llm/tests/l_test.cpp" "$fx/tools/t.cpp"
+    n436_db() {   # <database> (<directory> <file>)... — a compile database of those entries
+        python3 -c 'import json, sys; a = sys.argv[2:]; json.dump([{"file": f, "directory": d, "command": "c++"} for d, f in zip(a[::2], a[1::2])], open(sys.argv[1], "w"))' "$@"
+    }
+    n436_db "$fx/build-$key/compile_commands.json" "$fx/build-$key" "$fx/src/root.cpp" "$fx/build-$key" "$fx/tests/root_test.cpp" \
+        "$fx/llm/build-$key" "$fx/llm/a.cpp" "$fx/llm/build-$key" "$fx/llm/tests/l_test.cpp" "$fx/tools/build-$key" "$fx/tools/t.cpp"
+    printf 'EX_BUILD_TESTS:BOOL=ON\n' | tee "$fx/build-$key/CMakeCache.txt" > "$fx/llm/build-$key/CMakeCache.txt"
+    n436_db "$fx/llm/build-$key/compile_commands.json" "$fx/llm/build-$key" "$fx/llm/a.cpp"
+    n436_db "$fx/tools/build-$key/compile_commands.json" "$fx/tools/build-$key" "$fx/tools/t.cpp"
+    [[ -z "$1" ]] || rm "$fx/$1"
+    bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; unset MALF_SYSTEM MALF_SWEEP; export MALF_PROFILE_NAME=linux-clang21-libcxx-release MALF_WORKSPACE_ROOT="$2"
+        fx="$2" root="$2/build-$(_malf_build_key)"
+        _malf_bootstrap_workspace_deps() {   # llm and the root reconfigured as dependencies: tests off, each database rewritten
+            printf "EX_BUILD_TESTS:BOOL=OFF\n" | tee "$root/CMakeCache.txt" > "$fx/llm/build-$(_malf_build_key)/CMakeCache.txt"
+            printf "[{\"file\": \"%s\", \"directory\": \"%s\", \"command\": \"c++\"}]\n" "$fx/src/root.cpp" "$root" > "$root/compile_commands.json"
+        }
+        _malf_build_flow_locked() { _malf_merge_compile_commands "$2" "$1"; }
+        _malf_build_flow "$fx/tools" >/dev/null 2>&1; printf "rc=%s " "$?"
+        python3 -c "import json, os, sys; print(*sorted(os.path.relpath(e[\"file\"], sys.argv[2]) for e in json.load(open(sys.argv[1]))))" "$root/compile_commands.json" "$2"' _ "$MALF_BIN" "$fx"
+}
+check "RED-FIRST — a lone package build of a repository whose root is a package keeps every entry of the repository's database (N436)" \
+      "rc=0 llm/a.cpp llm/tests/l_test.cpp src/root.cpp tests/root_test.cpp tools/t.cpp" "$(n436_build "")"
+check "RED — an entry a dependency reconfigure dropped is not kept once its source is gone" \
+      "rc=0 llm/a.cpp llm/tests/l_test.cpp src/root.cpp tools/t.cpp" "$(n436_build tests/root_test.cpp)"
+rm -rf "$n436_tmp"
 # seed-recipes over a fixture source home: one third-party recipe, and the lock naming it beside a
 # revision no home holds (the MSVC leg's build tools, in the real lock).
 mkdir -p "$e3_tmp/recipe/tps"

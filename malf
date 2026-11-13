@@ -1931,13 +1931,99 @@ _malf_build_flow() {
     build_dir="$(_malf_build_dir "$target")"
     mkdir -p "$build_dir"
 
+    local prior="" rc=0
+    prior="$(_malf_repository_db_prior "$target")" || return 1
+
     # DELIBERATELY OUTSIDE the target lock below. Each dependency takes and releases its own
     # build-dir lock inside _malf_build_editable_package, so no run ever holds two locks at once —
     # the property that makes the scheme deadlock-free. Hoisting the lock to cover this call would
     # break it the moment two runs disagreed on dependency order.
     _malf_bootstrap_workspace_deps "$target"
 
-    _malf_with_build_lock "$build_dir" _malf_build_flow_locked "$target" "$build_dir"
+    _malf_with_build_lock "$build_dir" _malf_build_flow_locked "$target" "$build_dir" || rc=$?
+    if [[ -n "$prior" ]]; then
+        [[ $rc -ne 0 ]] || _malf_desk_repository_fold "$target" "$prior" || rc=$?
+        rm -f "$prior"
+    fi
+    return "$rc"
+}
+
+# THE REPOSITORY'S DATABASE AFTER A LONE PACKAGE BUILD (ROADMAP N436). Where the repository root is itself a package
+# (insight-eidos), building any other package of it reconfigures the root as that package's dependency, tests off,
+# and CMake rewrites the root package's database — which IS the repository's — to the root library's entries alone.
+# The target's own merge then adds its entries and nothing else: measured 2026-11-13, insight-eidos 338 entries
+# before `malf build insight-eidos/tamys-tools` and 110 after, and the commit gate's `cpp_lint` then refused every
+# change to another package's file until a full repository build. A sweep recomposes the database itself
+# (`_malf_sweep_settle_db`), so a sweep member takes no copy.
+# post: prints the path of a copy of the repository's database as it stands before the build, when <target>'s
+#       repository root is a package and this is no sweep member; else prints nothing.
+_malf_repository_db_prior() {   # <target>
+    local repo db prior
+    [[ -z "${MALF_SWEEP:-}" ]] || return 0
+    repo="$(_malf_repo_root "$1")"
+    [[ -f "$repo/conanfile.py" ]] || return 0
+    db="$repo/build-$(_malf_build_key)/compile_commands.json"
+    prior="$(mktemp -t malf-repository-db.XXXXXX.json)" || return 1
+    if [[ -f "$db" ]]; then
+        cp "$db" "$prior" || { rm -f "$prior"; return 1; }
+    else
+        printf '[]\n' > "$prior"
+    fi
+    echo "$prior"
+}
+
+# pre: <target> has just been built, and <prior> is `_malf_repository_db_prior`'s copy for it.
+# post: the repository's database holds every package's and every inventory cell's entries (the fold
+#       `source-verdict` runs, `_malf_merge_repository_dbs`); and, for each package tree of the repository standing
+#       in dependency role, each entry <prior> held from that tree whose source still exists and that no tree now
+#       claims — its tests and benches, which only its target-role configure lists. The bootstrap demotes every
+#       dependency the target reaches, not the root alone: measured 2026-11-13, insight-eidos's llm tree, 5 test
+#       entries absent once the root's were kept (333 of 338).
+# note: an entry whose source is gone is dropped, so a deleted translation unit cannot outlive the build; one
+#       whose source exists but that its package's CMake no longer lists lives until that package's next
+#       target-role configure (its own build, or a sweep) rewrites the database.
+_malf_desk_repository_fold() {   # <target> <prior>
+    local target="$1" prior="$2" repo root_db ref dir tree
+    local -a members=() demoted=()
+    repo="$(_malf_repo_root "$target")"
+    _malf_member_packages "$repo"
+    while IFS=$'\t' read -r ref dir; do
+        [[ -n "$ref" && -n "$dir" ]] && members+=("$dir")
+    done < <(_malf_graph_rows)
+    _malf_merge_repository_dbs "$repo" "${members[@]}" > /dev/null \
+        || { echo "malf: folding the repository database of $repo failed (above)" >&2; return 1; }
+    root_db="$repo/build-$(_malf_build_key)/compile_commands.json"
+    [[ -f "$root_db" ]] || return 0
+    for dir in "${members[@]}"; do
+        tree="$(_malf_build_dir "$dir")"
+        _malf_commands_tree_role "$tree"
+        [[ "$_MALF_TREE_ROLE" != "dependency" ]] || demoted+=("$tree")
+    done
+    python3 - "$root_db" "$prior" "${demoted[@]}" <<'PY'
+import json, os, sys
+
+db_path, prior_path = sys.argv[1], sys.argv[2]
+demoted = [os.path.realpath(tree) for tree in sys.argv[3:]]
+db = json.load(open(db_path, encoding="utf-8"))
+claimed = {entry["file"] for entry in db}
+kept = 0
+for entry in json.load(open(prior_path, encoding="utf-8")):
+    directory = os.path.realpath(entry.get("directory") or "")
+    if entry["file"] in claimed or not any(directory == tree or directory.startswith(tree + os.sep) for tree in demoted):
+        continue
+    if not os.path.exists(os.path.join(directory, entry["file"])):
+        continue
+    claimed.add(entry["file"])
+    db.append(entry)
+    kept += 1
+if kept:
+    tmp = db_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(db, indent=2) + "\n")
+    os.replace(tmp, db_path)
+print(f"malf: folded the repository database {db_path} ({len(db)} entries, {kept} kept from"
+      f" {len(demoted)} package tree(s) in dependency role)")
+PY
 }
 
 # The guarded half of the target build — see _malf_with_build_lock for why this is serialized.
