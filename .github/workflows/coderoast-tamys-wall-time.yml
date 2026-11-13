@@ -63,7 +63,7 @@ jobs:
           ver="$(scripts/engine_pin.sh)"
           echo "engine pin: $ver"
           base="https://github.com/CodeRoasted/tamys-action/releases/download/engine-v$ver"
-          # The asset is named by the release it comes from (DN-155.D11): every engine release up
+          # The asset is named by the release it comes from (ADR-14.D6): every engine release up
           # to 1.10.11 published `sift-linux-x64`, each from 1.10.12 on `tamys-linux-x64`. The pin
           # read above may be either side of that line while the caller's pin and this file's
           # re-pin move apart, so the name is read off the pinned version, never assumed.
