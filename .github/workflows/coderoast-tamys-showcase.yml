@@ -15,7 +15,7 @@ name: CodeRoast Tamys Showcase
 # showcase shows the engine's structural verdict, not an LLM narrative.
 #
 # PUBLIC and anonymous end to end — the engine asset and coderoast-hub are public, no secret is read
-# to install or fetch. HOSTED, with no runner input: its one caller (sift-action) is public, and a
+# to install or fetch. HOSTED, with no runner input: its one caller (tamys-action) is public, and a
 # self-hosted runner a fork can reach is a remote code execution. No `permissions:` here: a called
 # workflow can only downgrade its caller's grant, and this one needs `contents: read` only.
 

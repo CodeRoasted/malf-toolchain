@@ -4,7 +4,7 @@ name: CodeRoast Tamys Wall Time
 # instrument, not a gate: the caller dispatches it when someone asks.
 #
 # HOSTED, with no runner input, for two reasons that do not depend on each other: its one caller
-# (sift-action) is PUBLIC, so a fork must never reach our box; and the number a claim about "your CI"
+# (tamys-action) is PUBLIC, so a fork must never reach our box; and the number a claim about "your CI"
 # may quote is the one a stranger's CI produces, which our fleet's hardware is not.
 #
 # The engine under test is the PUBLISHED pin (the caller's scripts/engine_pin.sh, then the release
@@ -62,7 +62,7 @@ jobs:
           # binary its "engine pin is PUBLISHED" gate probes.
           ver="$(scripts/engine_pin.sh)"
           echo "engine pin: $ver"
-          base="https://github.com/CodeRoasted/sift-action/releases/download/engine-v$ver"
+          base="https://github.com/CodeRoasted/tamys-action/releases/download/engine-v$ver"
           # The asset is named by the release it comes from (DN-155.D11): every engine release up
           # to 1.10.11 published `sift-linux-x64`, each from 1.10.12 on `tamys-linux-x64`. The pin
           # read above may be either side of that line while the caller's pin and this file's

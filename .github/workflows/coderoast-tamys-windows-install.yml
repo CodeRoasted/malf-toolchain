@@ -1,6 +1,6 @@
 name: CodeRoast Tamys Windows Install
 
-# THE PUBLICLY DOCUMENTED WINDOWS INSTALL PATH, EXECUTED (`OPS-7.S112` cell 1). sift-action's README
+# THE PUBLICLY DOCUMENTED WINDOWS INSTALL PATH, EXECUTED (`OPS-7.S112` cell 1). tamys-action's README
 # tells a Windows user to run `irm .../install.ps1 | iex`, and resolve-tamys.ts prints the same advice
 # when the Action meets a non-Linux runner. The script downloads a published asset, sha256-verifies it
 # fatally and installs it; this job runs it at the caller's checkout the way a user does, then asserts
@@ -10,7 +10,7 @@ name: CodeRoast Tamys Windows Install
 # Founder, 2026-10-08: hosted by default, our own runners selectable), so a private caller can pass
 # `vars.WINDOWS_RUNNER`. A PUBLIC caller MUST omit it: hosted minutes are free there, and both
 # self-hosted runner groups refuse public repositories because a fork's pull request reaching our box
-# is a remote code execution. sift-action is public and omits it (the Founder's ruling: a public
+# is a remote code execution. tamys-action is public and omits it (the Founder's ruling: a public
 # repository's Windows leg stays on a hosted image).
 #
 # THE NEGATIVE ARM IS FIRST, deliberately: a green installer proves nothing unless the job can go red.

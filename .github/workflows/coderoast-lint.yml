@@ -201,7 +201,7 @@ jobs:
       # the log, at the coordinate where the coverage is missing.
       #
       # It fires only for a caller that asked for at least one C++ gate, because only there is the
-      # absence a hole: a caller with every C++ gate off (sift-action, a TypeScript repository that
+      # absence a hole: a caller with every C++ gate off (tamys-action, a TypeScript repository that
       # calls this workflow for actionlint alone) has no C++ for clang-tidy to judge, and a warning
       # on its every run would be a false statement that trains readers to skip the true ones. The
       # message names the C++ gates that DID run, read from the inputs, so it is true for every

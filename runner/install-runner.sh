@@ -7,7 +7,7 @@
 #    repo — a fork PR would execute attacker code on this box. On GitHub Free an org
 #    runner is visible to ALL repos, so safety is enforced at the WORKFLOW layer: only
 #    PRIVATE repos carry `runs-on: ${{ vars.CI_RUNS_ON || 'ubuntu-24.04' }}`; every
-#    public repo (canon, metalog, ipc, web, sift-action, malf-toolchain) stays pinned
+#    public repo (canon, metalog, ipc, web, tamys-action, malf-toolchain) stays pinned
 #    to ubuntu-24.04 and can never target this runner. Do not add the `malf-local`
 #    label to a public repo's workflow.
 #

@@ -1,19 +1,19 @@
 name: CodeRoast Node CI
 
-# The CI build job of every CodeRoast TypeScript repository (coderoast-web, sift-action), as one
+# The CI build job of every CodeRoast TypeScript repository (coderoast-web, tamys-action), as one
 # reusable workflow: checkout, Node with the npm cache, `npm ci`, the caller's checks, the commands
 # whose output Tamys diffs (each appended to build.log), the caller's post-build checks, then the
 # advisory Tamys dogfood over build.log. The commands are the caller's; the job around them is here.
 #
 # PIPEFAIL IS THE WORD THAT MATTERS. `cmd 2>&1 | tee -a build.log` under the default `bash -e` reads
 # tee's status, which always succeeds: measured 2026-08-22 on both callers, those steps were
-# structurally incapable of failing (sift-action's suite crashed before a single assertion and the
+# structurally incapable of failing (tamys-action's suite crashed before a single assertion and the
 # job read SUCCESS). Every logged command here runs under `set -o pipefail`, so its own status is the
 # verdict, and the first red stops the job as separate steps would.
 #
 # THE TAMYS DOGFOOD IS ADVISORY at the step boundary (`continue-on-error`), skipped on a fork's pull
 # request (a read-only token), and diffs THIS run's build.log. `tamys: local` runs the action at the
-# caller's checkout (sift-action dogfooding its own code); `published` runs CodeRoasted/sift-action@v1.
+# caller's checkout (tamys-action dogfooding its own code); `published` runs CodeRoasted/tamys-action@v1.
 # `walltime-record: true` brackets it with one advisory `TAMYS-WALLTIME` line (input bytes and lines,
 # step wall time, change counts), which never gates: CI wall time on a shared runner is noise.
 
@@ -21,7 +21,7 @@ on:
   workflow_call:
     inputs:
       node-version:
-        description: 'The Node major the job proves on (sift-action: the runtime its action.yml declares).'
+        description: 'The Node major the job proves on (tamys-action: the runtime its action.yml declares).'
         type: string
         required: true
       checks:
@@ -39,7 +39,7 @@ on:
         required: false
         default: ''
       tamys:
-        description: '`published` (CodeRoasted/sift-action@v1), `local` (the action at the caller''s checkout) or `off`.'
+        description: '`published` (CodeRoasted/tamys-action@v1), `local` (the action at the caller''s checkout) or `off`.'
         type: string
         required: false
         default: 'published'
@@ -152,7 +152,7 @@ jobs:
         id: tamys-published
         if: ${{ always() && inputs.tamys == 'published' && github.event.pull_request.head.repo.fork != true }}
         continue-on-error: true
-        uses: CodeRoasted/sift-action@v1
+        uses: CodeRoasted/tamys-action@v1
         with:
           log: build.log
           fail-on: none

@@ -4,7 +4,7 @@ A single **org-level** self-hosted GitHub Actions runner that serves CodeRoast's
 **private** repos, so their CI + `release-publish` stop burning GitHub-hosted minutes.
 Self-hosted runners are **unmetered** — you supply the compute, GitHub bills nothing.
 
-Public repos (canon, metalog, ipc, web, sift-action, malf-toolchain) already get
+Public repos (canon, metalog, ipc, web, tamys-action, malf-toolchain) already get
 **free** unlimited GitHub-hosted minutes, so they are *not* moved here — and **must not
 be**, see the safety rule.
 
@@ -424,7 +424,7 @@ runner, whose label `malf-windows` the leg's expression names; `WINDOWS_RUNNER` 
 `workflow_source` refuses a runner reading a second, ROADMAP N394).
 The legs: insight-eidos's `golden.yaml` `proof-msvc` and `tamys-windows.yml` `build`. The
 superproject's `workflow_source` check module reds on a private repository's Windows leg that
-hard-codes a hosted image. canon + metalog (and sift-action) Windows legs stay on hosted runners
+hard-codes a hosted image. canon + metalog (and tamys-action) Windows legs stay on hosted runners
 with no switch: public = free minutes, and the runner groups refuse public repositories. First run installs
 MSVC 14.52 (Insiders Preview, ~GBs) on the host via `setup-msvc1452`; needs git + python +
 gh on Windows. (The eidos probe also needs Heph's `provision.cpp` Win32 port to go green —

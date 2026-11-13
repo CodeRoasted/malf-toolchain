@@ -5343,7 +5343,7 @@ Commands:
                                    this one, `lock --update`, `sbom --check`, the layered toolchain
                                    re-pin, then the `pins` family last. Does NOT touch the Tamys
                                    Action engine pin — that tracks the PUBLISHED engine and is
-                                   sift-action/bump.sh's.
+                                   tamys-action/bump.sh's.
     twin-verify                    the released set's path independence (ROADMAP N366, DN-142.D4):
                                    store-create of the released set into TWO fresh conan homes at
                                    two absolute paths, the second under another user (a user
@@ -5547,9 +5547,9 @@ cmd_bin_dir() {
 # version) first-party binaries. Both were the recurring post-bump footgun left
 # to human memory — editable version skew after a bump, and cache hygiene across
 # multiple conan homes; chaining them in makes a bump leave a
-# coherent workspace by construction, never one cache behind. sift-action is
+# coherent workspace by construction, never one cache behind. tamys-action is
 # deliberately OUT of scope — its engine pin tracks published releases, not the
-# line being opened, and `sift-action/bump.sh` owns it (see the note at the end).
+# line being opened, and `tamys-action/bump.sh` owns it (see the note at the end).
 # Tested for 1.5.0; from then on the founder owns pulling this trigger.
 cmd_bump() {
     local target="${1:-}"
@@ -5617,17 +5617,17 @@ cmd_bump() {
     # STRANDED the re-sync, the prune and the SBOM — the 1.9.4 bump left every cache one
     # version behind and the next `malf lock --update` refused 19 roots.
 
-    # ── sift-action is NOT part of a platform bump, by design ────────────────
+    # ── tamys-action is NOT part of a platform bump, by design ────────────────
     # This used to rewrite src/tamys-version.ts to $target and re-bundle dist/index.js.
     # It cannot: the engine binary for $target is published by the eidos Release during
     # $target's OWN cut, so between the post-cut bump and the next cut the pin named a
     # release that did not exist. The result was a commit that could not be pushed
-    # without 404-ing every consumer at download — sift-action sat deliberately dirty
+    # without 404-ing every consumer at download — tamys-action sat deliberately dirty
     # for a whole cycle, and the cut runbook carried it as a standing preflight
     # exception ("expected to be behind").
     #
     # The Action's engine pin is derived from what has been PUBLISHED, not from the line
-    # we are opening, so it is not a workspace axis at all. `sift-action/bump.sh` owns
+    # we are opening, so it is not a workspace axis at all. `tamys-action/bump.sh` owns
     # it end to end — resolve the latest published engine, refuse one whose binary and
     # .sha256 are not both live, rewrite the source pin and the Jenkins example, and
     # repackage the bundle (this step, moved to where the pin now changes). Run it after

@@ -15,7 +15,7 @@ name: CodeRoast Tamys Manifest Load
 # pins) fails fast and runs at the desk too; this job is the backstop for what preflight cannot
 # reach — manifest validity, input plumbing, the `--explain` pair — and is post-push by nature.
 #
-# HOSTED, with no runner input: its one caller (sift-action) is PUBLIC, and a self-hosted runner a
+# HOSTED, with no runner input: its one caller (tamys-action) is PUBLIC, and a self-hosted runner a
 # fork's pull request can reach is a remote code execution on our box. No `permissions:` here: a
 # called workflow can only downgrade its caller's grant, and the caller grants `contents: read`.
 
