@@ -1931,8 +1931,12 @@ _malf_build_flow() {
     build_dir="$(_malf_build_dir "$target")"
     mkdir -p "$build_dir"
 
-    local prior="" rc=0
-    prior="$(_malf_repository_db_prior "$target")" || return 1
+    local priors="" repo prior rc=0
+    _malf_repository_db_repos "$target"
+    if [[ ${#_MALF_FOLD_REPOS[@]} -gt 0 ]]; then
+        priors="$(mktemp -d -t malf-repository-dbs.XXXXXX)" || return 1
+        _malf_repository_db_priors "$priors" "${_MALF_FOLD_REPOS[@]}" || { rm -rf "$priors"; return 1; }
+    fi
 
     # DELIBERATELY OUTSIDE the target lock below. Each dependency takes and releases its own
     # build-dir lock inside _malf_build_editable_package, so no run ever holds two locks at once —
@@ -1941,38 +1945,66 @@ _malf_build_flow() {
     _malf_bootstrap_workspace_deps "$target"
 
     _malf_with_build_lock "$build_dir" _malf_build_flow_locked "$target" "$build_dir" || rc=$?
-    if [[ -n "$prior" ]]; then
-        [[ $rc -ne 0 ]] || _malf_desk_repository_fold "$target" "$prior" || rc=$?
-        rm -f "$prior"
+    # The fold runs whatever the target's own build did: the bootstrap rewrote the databases before it.
+    if [[ -n "$priors" ]]; then
+        while IFS=$'\t' read -r repo prior; do
+            _malf_desk_repository_fold "$repo" "$prior" || rc=1
+        done < "$priors/index"
+        rm -rf "$priors"
     fi
     return "$rc"
 }
 
-# THE REPOSITORY'S DATABASE AFTER A LONE PACKAGE BUILD (ROADMAP N436). Where the repository root is itself a package
-# (insight-eidos), building any other package of it reconfigures the root as that package's dependency, tests off,
-# and CMake rewrites the root package's database — which IS the repository's — to the root library's entries alone.
-# The target's own merge then adds its entries and nothing else: measured 2026-11-13, insight-eidos 338 entries
-# before `malf build insight-eidos/tamys-tools` and 110 after, and the commit gate's `cpp_lint` then refused every
-# change to another package's file until a full repository build. A sweep recomposes the database itself
-# (`_malf_sweep_settle_db`), so a sweep member takes no copy.
-# post: prints the path of a copy of the repository's database as it stands before the build, when <target>'s
-#       repository root is a package and this is no sweep member; else prints nothing.
-_malf_repository_db_prior() {   # <target>
-    local repo db prior
-    [[ -z "${MALF_SWEEP:-}" ]] || return 0
-    repo="$(_malf_repo_root "$1")"
-    [[ -f "$repo/conanfile.py" ]] || return 0
-    db="$repo/build-$(_malf_build_key)/compile_commands.json"
-    prior="$(mktemp -t malf-repository-db.XXXXXX.json)" || return 1
-    if [[ -f "$db" ]]; then
-        cp "$db" "$prior" || { rm -f "$prior"; return 1; }
-    else
-        printf '[]\n' > "$prior"
-    fi
-    echo "$prior"
+# THE REPOSITORY'S DATABASE AFTER A LONE PACKAGE BUILD (ROADMAP N436, N449). Where a repository's root is itself a
+# package (insight-eidos), a build that reaches that root as a dependency reconfigures it, tests off, and CMake rewrites
+# the root package's database — which IS the repository's — to the root library's entries alone. Two shapes reach it:
+#   * a build of another package of the same repository (N436): measured 2026-11-13, insight-eidos 338 entries before
+#     `malf build insight-eidos/tamys-tools` and 110 after;
+#   * a build of a package of ANOTHER repository that requires the root (N449): coderoast-server's `server` requires
+#     `insight_eidos`: measured 2026-11-13, insight-eidos 338 entries before `malf build coderoast-server` and 44 after.
+# Either way the commit gate's `cpp_lint` then refused every change to that repository's other files until a full
+# repository build. A sweep recomposes its OWN repository's database (`_malf_sweep_settle_db`), so a sweep member
+# leaves its own repository to it and still keeps every other one.
+# post: _MALF_FOLD_REPOS names, once each, every repository whose root is a package and whose database this build may
+#       rewrite: <target>'s own unless this is a sweep member, and that of each workspace dependency it reaches.
+_malf_repository_db_repos() {   # <target>
+    local target="$1" own repo ref dir
+    local -A seen=()
+    _MALF_FOLD_REPOS=()
+    own="$(_malf_repo_root "$target")"
+    seen["$own"]=1
+    [[ -n "${MALF_SWEEP:-}" || ! -f "$own/conanfile.py" ]] || _MALF_FOLD_REPOS+=("$own")
+    [[ "$MALF_AUTO_WORKSPACE_DEPS" != "0" ]] || return 0
+    _malf_workspace_dep_entries "$target"
+    while IFS=$'\t' read -r ref dir; do
+        [[ -n "$ref" && -n "$dir" ]] || continue
+        repo="$(_malf_repo_root "$dir")"
+        [[ -z "${seen[$repo]:-}" ]] || continue
+        seen["$repo"]=1
+        [[ -f "$repo/conanfile.py" ]] && _MALF_FOLD_REPOS+=("$repo")
+    done < <(_malf_graph_rows)
+    return 0
 }
 
-# pre: <target> has just been built, and <prior> is `_malf_repository_db_prior`'s copy for it.
+# post: <dir>/index holds one `<repository>\t<copy>` row per repository given, each copy that repository's database
+#       as it stands before the build (an empty database where it has none yet).
+_malf_repository_db_priors() {   # <dir> <repository>...
+    local dir="$1" repo db n=0
+    shift
+    : > "$dir/index" || return 1
+    for repo in "$@"; do
+        n=$((n + 1))
+        db="$repo/build-$(_malf_build_key)/compile_commands.json"
+        if [[ -f "$db" ]]; then
+            cp "$db" "$dir/$n.json" || return 1
+        else
+            printf '[]\n' > "$dir/$n.json" || return 1
+        fi
+        printf '%s\t%s\n' "$repo" "$dir/$n.json" >> "$dir/index" || return 1
+    done
+}
+
+# pre: a build reaching <repository> has just run, and <prior> is `_malf_repository_db_priors`' copy of its database.
 # post: the repository's database holds every package's and every inventory cell's entries (the fold
 #       `source-verdict` runs, `_malf_merge_repository_dbs`); and, for each package tree of the repository standing
 #       in dependency role, each entry <prior> held from that tree whose source still exists and that no tree now
@@ -1982,10 +2014,9 @@ _malf_repository_db_prior() {   # <target>
 # note: an entry whose source is gone is dropped, so a deleted translation unit cannot outlive the build; one
 #       whose source exists but that its package's CMake no longer lists lives until that package's next
 #       target-role configure (its own build, or a sweep) rewrites the database.
-_malf_desk_repository_fold() {   # <target> <prior>
-    local target="$1" prior="$2" repo root_db ref dir tree
+_malf_desk_repository_fold() {   # <repository> <prior>
+    local repo="$1" prior="$2" root_db ref dir tree
     local -a members=() demoted=()
-    repo="$(_malf_repo_root "$target")"
     _malf_member_packages "$repo"
     while IFS=$'\t' read -r ref dir; do
         [[ -n "$ref" && -n "$dir" ]] && members+=("$dir")

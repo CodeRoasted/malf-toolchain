@@ -5926,6 +5926,46 @@ check "RED-FIRST — a lone package build of a repository whose root is a packag
 check "RED — an entry a dependency reconfigure dropped is not kept once its source is gone" \
       "rc=0 llm/a.cpp llm/tests/l_test.cpp src/root.cpp tools/t.cpp" "$(n436_build tests/root_test.cpp)"
 rm -rf "$n436_tmp"
+# A DEPENDENCY BUILD FROM ANOTHER REPOSITORY KEEPS THE ROOT PACKAGE'S REPOSITORY DATABASE (ROADMAP N449). A package of a
+# repository whose root is no package (coderoast-server) that requires another repository's root package (insight_eidos)
+# reconfigures that root, and every member of its repository it reaches, as its dependencies, tests off: CMake rewrites
+# that repository's database, and N436's fold covered the target's own repository alone.
+n449_tmp="$(mktemp -d)"
+n449_build() {   # <removed source under lib/ or empty> <MALF_SWEEP or empty> — lib's database files after a build of app/svc
+    local ws="$n449_tmp/ws" key=clang21-libcxx-release p
+    rm -rf "$ws"; mkdir -p "$ws/lib/src" "$ws/lib/tests" "$ws/lib/llm/tests" "$ws/lib/build-$key" "$ws/lib/llm/build-$key" "$ws/app/svc/build-$key"
+    git -C "$ws/lib" init -q 2>/dev/null; git -C "$ws/app" init -q 2>/dev/null
+    for p in lib:ex_root lib/llm:ex_llm; do
+        printf 'from conan import ConanFile\n\n\nclass P(ConanFile):\n    name = "%s"\n    version = "0.1"\n' "${p#*:}" > "$ws/${p%%:*}/conanfile.py"
+    done
+    printf 'from conan import ConanFile\n\n\nclass P(ConanFile):\n    name = "ex_svc"\n    version = "0.1"\n\n    def requirements(self):\n        self.requires("ex_root/0.1")\n' > "$ws/app/svc/conanfile.py"
+    : > "$ws/app/svc/CMakeLists.txt"; touch "$ws/lib/src/root.cpp" "$ws/lib/tests/root_test.cpp" "$ws/lib/llm/a.cpp" "$ws/lib/llm/tests/l_test.cpp" "$ws/app/svc/s.cpp"
+    n449_db() {   # <database> (<directory> <file>)... — a compile database of those entries
+        python3 -c 'import json, sys; a = sys.argv[2:]; json.dump([{"file": f, "directory": d, "command": "c++"} for d, f in zip(a[::2], a[1::2])], open(sys.argv[1], "w"))' "$@"
+    }
+    n449_db "$ws/lib/build-$key/compile_commands.json" "$ws/lib/build-$key" "$ws/lib/src/root.cpp" "$ws/lib/build-$key" "$ws/lib/tests/root_test.cpp" \
+        "$ws/lib/llm/build-$key" "$ws/lib/llm/a.cpp" "$ws/lib/llm/build-$key" "$ws/lib/llm/tests/l_test.cpp"
+    printf 'EX_BUILD_TESTS:BOOL=ON\n' | tee "$ws/lib/build-$key/CMakeCache.txt" > "$ws/lib/llm/build-$key/CMakeCache.txt"
+    n449_db "$ws/lib/llm/build-$key/compile_commands.json" "$ws/lib/llm/build-$key" "$ws/lib/llm/a.cpp"
+    n449_db "$ws/app/svc/build-$key/compile_commands.json" "$ws/app/svc/build-$key" "$ws/app/svc/s.cpp"
+    [[ -z "$1" ]] || rm "$ws/lib/$1"
+    bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e; unset MALF_SYSTEM MALF_SWEEP; [[ -z "$3" ]] || export MALF_SWEEP="$3"; export MALF_PROFILE_NAME=linux-clang21-libcxx-release MALF_WORKSPACE_ROOT="$2"
+        ws="$2" root="$2/lib/build-$(_malf_build_key)"
+        _malf_bootstrap_workspace_deps() {   # lib root and llm reconfigured as dependencies: tests off, each database rewritten
+            printf "EX_BUILD_TESTS:BOOL=OFF\n" | tee "$root/CMakeCache.txt" > "$ws/lib/llm/build-$(_malf_build_key)/CMakeCache.txt"
+            printf "[{\"file\": \"%s\", \"directory\": \"%s\", \"command\": \"c++\"}]\n" "$ws/lib/src/root.cpp" "$root" > "$root/compile_commands.json"
+        }
+        _malf_build_flow_locked() { _malf_merge_compile_commands "$2" "$1"; }
+        _malf_build_flow "$ws/app/svc" >/dev/null 2>&1; printf "rc=%s " "$?"
+        python3 -c "import json, os, sys; print(*sorted(os.path.relpath(e[\"file\"], sys.argv[2]) for e in json.load(open(sys.argv[1]))))" "$root/compile_commands.json" "$ws/lib"' _ "$MALF_BIN" "$ws" "$2"
+}
+check "RED-FIRST — a lone build of another repository's package keeps every entry of the database of the root package it requires (N449)" \
+      "rc=0 llm/a.cpp llm/tests/l_test.cpp src/root.cpp tests/root_test.cpp" "$(n449_build "" "")"
+check "RED — there too, an entry the dependency reconfigure dropped is not kept once its source is gone" \
+      "rc=0 llm/a.cpp src/root.cpp tests/root_test.cpp" "$(n449_build llm/tests/l_test.cpp "")"
+check "RED — the same build as a member of a sweep of its own repository (malf build coderoast-server) keeps it too: the sweep settles its own repository alone" \
+      "rc=0 llm/a.cpp llm/tests/l_test.cpp src/root.cpp tests/root_test.cpp" "$(n449_build "" 1)"
+rm -rf "$n449_tmp"
 # seed-recipes over a fixture source home: one third-party recipe, and the lock naming it beside a
 # revision no home holds (the MSVC leg's build tools, in the real lock).
 mkdir -p "$e3_tmp/recipe/tps"
