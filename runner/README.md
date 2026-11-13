@@ -436,7 +436,7 @@ the runner solves *minutes*, not that source blocker.)
 `NT SERVICE\actions.runner.CodeRoasted.malf-release-win`, from `C:\actions-runner-release-win`, in the
 group `coderoast-release`. It carries **one label, `coderoast-release-windows`, and none of the
 defaults**. It builds what a release publishes or is gated on from Windows: the public
-`sift-windows-x64.exe` (insight-eidos `tamys-windows.yml`, job `build`) and the golden proof's MSVC
+`tamys-windows-x64.exe` (insight-eidos `tamys-windows.yml`, job `build`) and the golden proof's MSVC
 leg (`golden.yaml`, job `proof-msvc`). Until 2026-09-30 both ran on `malf-runner-win`, as the one
 account every private repository's Windows CI runs as.
 
@@ -503,7 +503,7 @@ runs, and each runner's `.env` carries the PATH as it was when its script last r
 - **Host-tool invariant: `patchelf` is installed on every Linux build seat.** Three consumers:
   the `package()` of `coderoast_server` and `insight_tamys_tools` (`patchelf --remove-rpath` on
   the published executable, `DN-142.D20` (3)), `artefact_store`'s key, which measures it in the
-  toolchain member, and the eidos release packaging of `sift-linux-x64`. `setup-build-env`
+  toolchain member, and the eidos release packaging of `tamys-linux-x64`. `setup-build-env`
   provisions it in its apt base and prints the one that runs; on these self-hosted accounts the
   apt state is the host's, so it is already present (patchelf 0.18.0 since 2026-08-16) and no job
   needs sudo for it. A rebuilt host restores it with `sudo apt-get install -y patchelf`, or the

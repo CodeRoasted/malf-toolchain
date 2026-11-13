@@ -3,7 +3,8 @@
 
 N360 plan A2(d), DN-142.D20 (3): the gates a release used to run over its own tag-time rebuild of
 `tamys` become ONE keyed verdict step over the STORED entry, by its entry digest, so the manifest
-admits the public `sift-linux-x64` only when this verdict passed over the very bytes it publishes.
+admits the public engine asset (`tamys-linux-x64`) only when this verdict passed over the very
+bytes it publishes.
 Six rows, each `passed`, `failed` or `not-judged`; the verdict is `pass` only when every row
 passed, so a probe that could not run is a fail, never a pass:
   libstdcxx-needed    no DT_NEEDED libstdc++: the standalone posture links it statically, and a

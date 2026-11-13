@@ -63,14 +63,25 @@ jobs:
           ver="$(scripts/engine_pin.sh)"
           echo "engine pin: $ver"
           base="https://github.com/CodeRoasted/sift-action/releases/download/engine-v$ver"
+          # The asset is named by the release it comes from (DN-155.D11): every engine release up
+          # to 1.10.11 published `sift-linux-x64`, each from 1.10.12 on `tamys-linux-x64`. The pin
+          # read above may be either side of that line while the caller's pin and this file's
+          # re-pin move apart, so the name is read off the pinned version, never assumed.
+          first_tamys="1.10.12"
+          if [ "$(printf '%s\n%s\n' "$first_tamys" "$ver" | sort -V | head -n 1)" = "$first_tamys" ]; then
+            asset="tamys-linux-x64"
+          else
+            asset="sift-linux-x64"
+          fi
+          echo "engine asset: $asset"
           mkdir -p "$RUNNER_TEMP/engine"
 
           # Timed separately from the diff: the marginal cost a user pays per CI run is the STEP,
           # and the engine download is a fixed part of it no engine speed removes.
           t0=$(date +%s.%N)
-          curl -fsSL "$base/sift-linux-x64" -o "$RUNNER_TEMP/engine/tamys"
+          curl -fsSL "$base/$asset" -o "$RUNNER_TEMP/engine/tamys"
           t1=$(date +%s.%N)
-          curl -fsSL "$base/sift-linux-x64.sha256" -o "$RUNNER_TEMP/engine/tamys.sha256"
+          curl -fsSL "$base/$asset.sha256" -o "$RUNNER_TEMP/engine/tamys.sha256"
           t2=$(date +%s.%N)
 
           bytes=$(stat -c%s "$RUNNER_TEMP/engine/tamys")
@@ -88,7 +99,7 @@ jobs:
           # Cold-cache re-download: "is this cached between runs?" answered by a measurement.
           # resolve-tamys.ts uses no tool-cache, so every consumer run pays this again.
           t3=$(date +%s.%N)
-          curl -fsSL "$base/sift-linux-x64" -o /dev/null
+          curl -fsSL "$base/$asset" -o /dev/null
           t4=$(date +%s.%N)
           echo "second download s : $(echo "$t4 - $t3" | bc)  (no tool-cache: every run pays it)"
 

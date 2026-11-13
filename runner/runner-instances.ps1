@@ -13,7 +13,7 @@
 #
 #   ci       malf-runner-win  - every private repository's Windows CI. Its lifecycle is a MOVE of a
 #            runner the desk account registered (ROADMAP N214).
-#   release  malf-release-win - the Windows legs of a release: the public sift-windows-x64.exe and the
+#   release  malf-release-win - the Windows legs of a release: the public tamys-windows-x64.exe and the
 #            golden proof's MSVC leg. Its lifecycle is a fresh INSTALL: this host never had one.
 
 $RunnerOrg = 'CodeRoasted'
