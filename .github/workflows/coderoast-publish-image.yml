@@ -51,12 +51,12 @@ jobs:
     steps:
       - name: malf at this workflow's commit, as git (its tools, and the attestation's signer digest)
         id: malf
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@ce9c54a0185e891fbcd3032fe81938b09f57cc76
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@796f2d0e36c3dcda00eaf3f9e44dac7848cd5ef9
         with:
           workflow: coderoast-publish-image.yml
 
       - name: The pinned gh the attestation reads run through
-        uses: CodeRoasted/malf-toolchain/.github/actions/setup-gh@ce9c54a0185e891fbcd3032fe81938b09f57cc76
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-gh@796f2d0e36c3dcda00eaf3f9e44dac7848cd5ef9
 
       - name: Read the candidate's image, and push it tagged with the release tag (GATING)
         env:
