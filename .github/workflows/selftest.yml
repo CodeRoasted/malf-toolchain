@@ -95,6 +95,9 @@ jobs:
       - name: malf_checkout selftest (a candidate's one malf, held by bytes outside .github/ across re-pin layers)
         run: python3 .github/actions/coderoast-malf-checkout/malf_checkout.py selftest
 
+      - name: lock_versions selftest (the lock's one-name-two-versions reader, NOTE and refusal, ADR-4.D4)
+        run: python3 lock_versions.py selftest
+
       - name: store_publish selftest (a release job's fetch, verify and stage, against an in-process registry)
         # Its own step until tests/test_malf.sh carries it beside store_replica's.
         run: timeout 120 python3 store_publish.py selftest

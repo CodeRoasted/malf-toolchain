@@ -4997,24 +4997,9 @@ cmd_lock() {
     fi
     mv "$tmp" "$out"
     echo "=== malf lock: $ok root(s) -> $out ==="
-    python3 - "$out" <<'PY'
-import json, sys
-d = json.load(open(sys.argv[1]))
-req = d.get("requires", [])
-pinned = [r for r in req if "#" in r]
-print(f"    requires        {len(req):>3}  ({len(pinned)} third-party pinned, "
-      f"{len(req) - len(pinned)} first-party floating)")
-print(f"    build_requires  {len(d.get('build_requires', [])):>3}  (all third-party pinned)")
-multi = {}
-for r in req + d.get("build_requires", []):
-    multi.setdefault(r.split("/")[0], set()).add(r.split("#")[0])
-multi = {k: sorted(v) for k, v in multi.items() if len(v) > 1}
-if multi:
-    print("    NOTE — pinned at MULTIPLE versions (two roots disagree; a link-time skew "
-          "hazard, not a lockfile error):")
-    for k, v in sorted(multi.items()):
-        print(f"      {k}: {', '.join(v)}")
-PY
+    # The counts and, on a split, ADR-4.D4's NOTE: computed by lock_versions.py, the one reader of
+    # a name at two versions, which `pharos bump` S2 also reads to REFUSE the split it notes here.
+    python3 "$MALF_DIR/lock_versions.py" summary "$out"
 
     # The lockfile IS the resolved graph, and the SBOM is a projection of it, so
     # writing one without re-deriving the other publishes a description of a graph that no
