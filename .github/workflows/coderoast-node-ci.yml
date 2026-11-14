@@ -13,7 +13,7 @@ name: CodeRoast Node CI
 #
 # THE TAMYS DOGFOOD IS ADVISORY at the step boundary (`continue-on-error`), skipped on a fork's pull
 # request (a read-only token), and diffs THIS run's build.log. `tamys: local` runs the action at the
-# caller's checkout (tamys-action dogfooding its own code); `published` runs CodeRoasted/tamys-action@v1.
+# caller's checkout (tamys-action dogfooding its own code); `published` runs CodeRoasted/tamys-action@v3.
 # `walltime-record: true` brackets it with one advisory `TAMYS-WALLTIME` line (input bytes and lines,
 # step wall time, change counts), which never gates: CI wall time on a shared runner is noise.
 
@@ -39,7 +39,7 @@ on:
         required: false
         default: ''
       tamys:
-        description: '`published` (CodeRoasted/tamys-action@v1), `local` (the action at the caller''s checkout) or `off`.'
+        description: '`published` (CodeRoasted/tamys-action@v3), `local` (the action at the caller''s checkout) or `off`.'
         type: string
         required: false
         default: 'published'
@@ -152,7 +152,7 @@ jobs:
         id: tamys-published
         if: ${{ always() && inputs.tamys == 'published' && github.event.pull_request.head.repo.fork != true }}
         continue-on-error: true
-        uses: CodeRoasted/tamys-action@v1
+        uses: CodeRoasted/tamys-action@v3
         with:
           log: build.log
           fail-on: none

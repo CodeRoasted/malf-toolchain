@@ -108,6 +108,6 @@ jobs:
       actions: read   # the selftest job's log and the baseline artifact
     steps:
       - name: Tamys — the selftest log against the last green run
-        uses: CodeRoasted/tamys-action@02066069ff16d9b8ce2487b19a3686a3acdf24d7 # v2.0.0
+        uses: CodeRoasted/tamys-action@9af06180552d823f5dfbf827c4a79db6f86761eb # v3.0.0
         with:
           target-job: selftest
