@@ -240,7 +240,7 @@ ARTIFACT_NOTE: dict[str, str] = {
         "third-party conan packages archived into the executable (readelf -d NEEDED lists "
         "only the C/C++ runtime) — covered by THIS artifact; (2) the Docker image's apt "
         "layer — scanned by coderoast-server/.github/workflows/ci-security-trivy.yml; "
-        "(3) the sidecar images (redis, postgres, clickhouse-server, llama) — covered by "
+        "(3) the sidecar images (redis, postgres, clickhouse-server) — covered by "
         "NEITHER, declared deliberately rather than silently omitted. DERIVED from the "
         "resolved conan graph by malf/sbom_gen.py — do not hand-edit; regenerate with "
         "`malf sbom`."
