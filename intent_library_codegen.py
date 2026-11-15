@@ -64,7 +64,7 @@ import re
 import sys
 from pathlib import Path
 
-TOOL_VERSION = "2"
+TOOL_VERSION = "3"  # 3: the canon-kind pin leaves the generated code for the consumer's TU (DN-162.D9)
 
 INTENT_FILE_SUFFIX = ".intent.yaml"
 
@@ -588,24 +588,6 @@ def emit_cpp(entries: dict[str, dict], resolution: dict[str, dict | None],
     out.append("{")
     out.append("")
     out.append("using namespace std::string_view_literals;")
-    out.append("")
-    out.append("// The canon-kind vocabulary pin: if canon grows a kind, -Werror=switch breaks THIS")
-    out.append("// function on the next build, forcing the mirror (IntentKind + to_canon_kind) and the")
-    out.append("// library to grow in the same commit. The mirror cannot drift silently.")
-    out.append("[[nodiscard]] consteval bool canon_kind_is_pinned(insight::tokenization::IntentMarkerKind kind)")
-    out.append("{")
-    out.append("    switch (kind)")
-    out.append("    {")
-    out.append("    case insight::tokenization::IntentMarkerKind::None:")
-    out.append("    case insight::tokenization::IntentMarkerKind::Job:")
-    out.append("    case insight::tokenization::IntentMarkerKind::Step:")
-    out.append("        return true;")
-    out.append("    }")
-    out.append("    return false;")
-    out.append("}")
-    out.append("static_assert(canon_kind_is_pinned(insight::tokenization::IntentMarkerKind::None) &&")
-    out.append("              canon_kind_is_pinned(insight::tokenization::IntentMarkerKind::Job) &&")
-    out.append("              canon_kind_is_pinned(insight::tokenization::IntentMarkerKind::Step));")
     out.append("")
     out.append("// sec 3.2 -- the kind comes FROM the package: a declared kind must be one the")
     out.append("// dialect's own reader rows declare. Consumed from canon's data; nothing mirrored.")
@@ -1264,6 +1246,16 @@ def selftest() -> int:
     _selftest_case("emit: byte-deterministic + input-order independent", failures,
                    lambda: _assert(rendered_a == rendered_b,
                                    "emission depends on input order"))
+    # The canon-kind pin is the CONSUMER's (logcraft's canon-touching TU), never this tool's: an
+    # exhaustive switch over canon's kinds could only follow canon in the same commit, which a
+    # toolchain pinned ahead of canon can never do (DN-162.D9). An entry still names its own kind.
+    _selftest_case("emit: no exhaustive switch over canon's intent kinds", failures,
+                   lambda: _assert(
+                       "case insight::tokenization::IntentMarkerKind::" not in rendered_a
+                       and "canon_kind_is_pinned" not in rendered_a,
+                       "the generated library enumerates canon's IntentMarkerKind closed set, so "
+                       "canon growing a kind breaks every consumer build until the toolchain is "
+                       "re-pinned"))
     _selftest_case("emit: ASCII only", failures, lambda: _assert(
         all(0x20 <= ord(c) <= 0x7E or c == "\n" for c in rendered_a),
         "emitted bytes outside printable ASCII + LF"))
