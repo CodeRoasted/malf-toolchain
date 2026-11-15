@@ -89,6 +89,26 @@ row's line enters the current job's epilogue, a step-level unit the core supplie
 dialect's. What the row does to the open unit is the core's algorithm; the derived emit row
 carries the role, so a writer never selects it as a banner.
 
+DECLARATION SCHEMA 2: A PACKAGE MAY RECOGNIZE SEVERAL VENDOR GENERATIONS (DN-162.D1, DN-162.D2).
+`revisions: names:` lists the generations the package recognizes, oldest first, and the order is
+content. With more than one, every row declares `since: <revision>`, the revision that
+INTRODUCED it: a lower bound, so its owning set is that revision and every later one, and a row
+a newer generation dropped is unspellable. A row that names none is refused, and so is
+`since:` on a one-revision declaration, where it would be one constant copied per row. Emitted
+rows carry it as their last member `.revision_since`, the derived emit row copying its marker
+row's, and the package asserts core's ownership fence; a one-revision declaration emits neither
+and keeps its content hash and every byte schema 1 emitted but the header's version line.
+Every revision after the first declares `backward_compatible_with:` its immediate predecessor
+and `oracle: revisions/<predecessor>.dialect.yaml`, the predecessor's declaration as it shipped,
+retained beside the live one. The oracle is read and never projected: no row, digest or byte of
+it reaches the output, and the claim enters this declaration's content hash and nothing the
+package's identity sees. Before emission the claim is checked: every oracle row has a live row
+equal on every hashed field but `since:`, owned no later than the predecessor (coverage and
+meaning); those rows keep the oracle's order (order); a row introduced later shares no literal
+prefix with an oracle row of its section on a stream both admit (no shadowing); and a row
+claiming the predecessor's ownership is held by the oracle. A failure names the oracle row and
+ADR-22.D8's forcing event: such a generation is not a superset and routes to a package of its own.
+
 DETERMINISM (DN-17.D19). Strict YAML subset -> canonical content hash -> byte-stable
 emission, strings end-to-end with no typed conversion, LF-only output, write-if-changed.
 The emitted text is Python output and cannot vary with the C++ compiler; the axes that
@@ -130,8 +150,8 @@ from codegen_common import (
     required_scalar,
 )
 
-TOOL_VERSION = "8"  # 8: a dialect may declare its stop announcements
-SCHEMA_VERSION = "1"
+TOOL_VERSION = "9"  # 9: declaration schema v2 — several ordered revisions (DN-162.D1, DN-162.D2)
+SCHEMA_VERSION = "2"
 
 DIALECT_FILE_SUFFIX = ".dialect.yaml"
 
@@ -181,7 +201,7 @@ _CHANNEL_GATE_ANY = "any"
 #
 # A section name has THREE independent statuses and they are not one axis: whether it is
 # LEGAL AT ALL (a fact about `SemanticPackageManifest`'s row surfaces, stable as dialects
-# come and go), whether it is authorable NON-EMPTY in schema v1 (does the schema specify a
+# come and go), whether it is authorable NON-EMPTY in this schema (does it specify a
 # row shape this tool can project?), and whether it is authorable EMPTY — the
 # declared-absence seat, which lives at the intersection.
 
@@ -191,7 +211,7 @@ _ROW_SECTIONS = ("roles", "markers", "level_lifts", "outcome_tokens",
 _VOCABULARY_SECTIONS = ("channels", "revisions")
 _SECTION_NAMES = _ROW_SECTIONS + _VOCABULARY_SECTIONS
 
-# Legal, but EMPTY-only in schema v1: the declared-absence seat and nothing more. The row
+# Legal, but EMPTY-only in this schema: the declared-absence seat and nothing more. The row
 # shape arrives with the dialect that needs it, which keeps "a generator capability no
 # declaration exercises is dormant plumbing" intact.
 _EMPTY_ONLY_SECTIONS = {
@@ -210,7 +230,7 @@ _DIALECT_REJECTIONS = {
               "projection. Each marker yields exactly one emit row with "
               "`emit = dual(extract)` (DN-17.D15) — two authorable projections is the "
               "silent divergence the concept exists to forbid."),
-    "recoverability": ("RESERVED in schema v1, and rejected rather than ignored "
+    "recoverability": ("RESERVED in this schema, and rejected rather than ignored "
                        "(DN-17.D18). The block is specified and its fence is expressible, "
                        "but a grammar that ACCEPTS a claim it cannot project lets someone "
                        "author a claim that silently does nothing. It arrives with the "
@@ -218,6 +238,10 @@ _DIALECT_REJECTIONS = {
 }
 
 _ROOT_KEYS = ("name", "version", "why", "code_tier") + _SECTION_NAMES
+
+# A revision's compatibility claim (DN-162.D2): the predecessor it is backward compatible with,
+# and the retained declaration that is its oracle. Keys of a `revisions:` entry, never a row's.
+_REVISION_CLAIM_KEYS = ("backward_compatible_with", "oracle")
 
 # The code tier is a mapping of CLOSED hook kinds — not a section: it carries no list and
 # has no empty-section seat. One key per nullable manifest member; an unknown key is a
@@ -639,7 +663,56 @@ _ROW_VALIDATORS = {
 }
 
 
-def _validate_section(node, name: str, source: str, channels: list[str] | None = None) -> dict:
+def _row_since(item: dict, revisions: list[str], context: str,
+               source: str) -> tuple[dict, str | None]:
+    """Split a row's `since:` from the fields its section's validator reads (DN-162.D1).
+
+    Required on every row of a multi-revision declaration and refused on a singleton one, so
+    "owned by every revision" has exactly one spelling per package shape: the key's absence at
+    cardinality one, and the first revision's name above it. The value is a lower bound in the
+    span's declared order, never a set, so a row a newer generation dropped is unspellable.
+    """
+    if "since" not in item:
+        if len(revisions) > 1:
+            fail(source, None,
+                 f"{context}: declares no `since:` — a declaration naming {len(revisions)} "
+                 "revisions states, on every row, the revision that INTRODUCED it "
+                 f"(one of {', '.join(revisions)}; DN-162.D1). A row with a defaulted owner is "
+                 "a row nobody decided.")
+        return item, None
+    if len(revisions) == 1:
+        fail(source, None,
+             f"{context}: `since:` on a singleton span — with one revision it would be one "
+             "constant copied onto every row, the per-row carriage ADR-17.D9 rejected. A row of "
+             "a one-revision declaration names no revision; `since:` arrives with the second.")
+    since = item["since"]
+    if not isinstance(since, str):
+        fail(source, None, f"{context}: `since:` must be a scalar")
+    _ascii_field(since, f"{context}: `since:`", source)
+    if since not in revisions:
+        fail(source, None,
+             f"{context}: `since: {since}` names no revision the span declares "
+             f"({', '.join(revisions)})")
+    return {key: value for key, value in item.items() if key != "since"}, since
+
+
+def _validate_rows(items: list, name: str, source: str, revisions: list[str],
+                   validate) -> list[dict]:
+    """Each row through its section's validator, carrying its `since:` when it declares one."""
+    rows: list[dict] = []
+    for position, item in enumerate(items):
+        context = f"section `{name}:` rows[{position}]"
+        fields, since = _row_since(_as_mapping(item, name, position, source), revisions, context,
+                                   source)
+        row = validate(fields, context)
+        if since is not None:
+            row["since"] = since
+        rows.append(row)
+    return rows
+
+
+def _validate_section(node, name: str, source: str, channels: list[str] | None = None,
+                      revisions: list[str] | None = None) -> dict:
     context = f"section `{name}:`"
     if not isinstance(node, dict):
         fail(source, None,
@@ -669,18 +742,17 @@ def _validate_section(node, name: str, source: str, channels: list[str] | None =
 
     if name in _EMPTY_ONLY_SECTIONS:
         fail(source, None,
-             f"{context}: `{name}` may be declared EMPTY with an argument in schema v1 — "
-             f"{_EMPTY_ONLY_SECTIONS[name]}. Schema v1 specifies no row shape for it, so "
-             "there is nothing this tool could project from the rows above.")
+             f"{context}: `{name}` may be declared EMPTY with an argument in schema "
+             f"v{SCHEMA_VERSION} — {_EMPTY_ONLY_SECTIONS[name]}. The schema specifies no row "
+             "shape for it, so there is nothing this tool could project from the rows above.")
 
     if name in _VOCABULARY_SECTIONS:
         return {"why": why, "names": _validate_vocabulary(items, name, source)}
 
     if name == "markers":
-        rows = [_validate_marker_row(_as_mapping(item, name, position, source),
-                                     channels or [],
-                                     f"section `{name}:` rows[{position}]", source)
-                for position, item in enumerate(items)]
+        rows = _validate_rows(items, name, source, revisions or [],
+                              lambda row, row_context: _validate_marker_row(
+                                  row, channels or [], row_context, source))
         named = {row["kind"] for row in rows if "role" not in row}
         for position, row in enumerate(rows):
             if row.get("role") == "Opens" and row["kind"] not in named:
@@ -691,9 +763,8 @@ def _validate_section(node, name: str, source: str, channels: list[str] | None =
                      "follows it, so this row could never take effect")
     else:
         validator = _ROW_VALIDATORS[name]
-        rows = [validator(_as_mapping(item, name, position, source),
-                          f"section `{name}:` rows[{position}]", source)
-                for position, item in enumerate(items)]
+        rows = _validate_rows(items, name, source, revisions or [],
+                              lambda row, row_context: validator(row, row_context, source))
     return {"why": why, "rows": rows}
 
 
@@ -719,16 +790,29 @@ def _validate_vocabulary(items: list, name: str, source: str) -> list[dict]:
     seen: set[str] = set()
     for position, item in enumerate(items):
         context = f"section `{name}:` names[{position}]"
+        claim: dict[str, str] = {}
         if isinstance(item, str):
             entry_name, why = item, []
         elif isinstance(item, dict):
-            expect_keys(item, ("name", "why"), context, source, _DIALECT_REJECTIONS)
+            if name != "revisions":
+                for key in _REVISION_CLAIM_KEYS:
+                    if key in item:
+                        fail(source, None,
+                             f"{context}: key `{key}:` is legal on `revisions:` alone — the "
+                             "compatibility claim is about a vendor generation, and a channel "
+                             "has no predecessor (DN-162.D2)")
+            expect_keys(item, ("name", "why") + _REVISION_CLAIM_KEYS, context, source,
+                        _DIALECT_REJECTIONS)
             entry_name = required_scalar(item, "name", context, source)
             why = _validate_why(item, context, source)
-            if not why:
+            for key in _REVISION_CLAIM_KEYS:
+                if key in item:
+                    claim[key] = _ascii_field(required_scalar(item, key, context, source),
+                                              f"{context}: `{key}:`", source)
+            if not why and not claim:
                 fail(source, None,
-                     f"{context}: the mapping form exists to carry a `why:` — an entry "
-                     "with no argument is written as a bare scalar")
+                     f"{context}: the mapping form exists to carry a `why:` or a revision's "
+                     "compatibility claim — an entry with neither is written as a bare scalar")
         else:
             fail(source, None, f"{context}: must be a scalar or a `{{name:, why:}}` mapping")
         _ascii_field(entry_name, context, source)
@@ -739,11 +823,56 @@ def _validate_vocabulary(items: list, name: str, source: str) -> list[dict]:
         if entry_name in seen:
             fail(source, None, f"{context}: duplicate name {entry_name!r}")
         seen.add(entry_name)
-        entries.append({"name": entry_name, "why": why})
+        entries.append({"name": entry_name, **claim, "why": why})
     return entries
 
 
-def _validate_code_tier(node, package_dir: Path, source: str) -> dict:
+def _check_revision_claims(entries: list[dict], source: str) -> None:
+    """The compatibility claim's shape, by position in the span (DN-162.D2 Q2, Q3, Q5).
+
+    Required on every revision after the first and refused on the first, so it is unspellable
+    at cardinality one. It names only the IMMEDIATELY preceding revision — older ones follow by
+    chaining, each step checked once — and its oracle is that revision's retained declaration
+    at the one path the retention check watches.
+    """
+    for position, entry in enumerate(entries):
+        context = f"section `revisions:` names[{position}] (`{entry['name']}`)"
+        present = [key for key in _REVISION_CLAIM_KEYS if key in entry]
+        if position == 0:
+            if present:
+                fail(source, None,
+                     f"{context}: `{present[0]}:` on the first revision — nothing precedes it, "
+                     "so there is nothing it could be compatible with")
+            continue
+        predecessor = entries[position - 1]["name"]
+        for key in _REVISION_CLAIM_KEYS:
+            if key not in entry:
+                fail(source, None,
+                     f"{context}: a revision after the first requires `{key}:` — it declares "
+                     f"`backward_compatible_with: {predecessor}` and names the retained "
+                     f"declaration `oracle: revisions/{predecessor}{DIALECT_FILE_SUFFIX}` the "
+                     "claim is checked against (DN-162.D2)")
+        claimed = entry["backward_compatible_with"]
+        if claimed == "false":
+            fail(source, None,
+                 f"{context}: `backward_compatible_with: false` — `false` is not spellable. One "
+                 "union package holds only generations that are supersets of their "
+                 "predecessor; a generation that is not one is ADR-22.D8's forcing event and "
+                 "routes to arm (a), a separate package (DN-162.D2 Q3)")
+        if claimed != predecessor:
+            fail(source, None,
+                 f"{context}: `backward_compatible_with: {claimed}` — the claim names the "
+                 f"IMMEDIATELY preceding revision, `{predecessor}`: compatibility with an older "
+                 "one follows by chaining, and each step is checked once (DN-162.D2 Q2)")
+        expected = f"revisions/{predecessor}{DIALECT_FILE_SUFFIX}"
+        if entry["oracle"] != expected:
+            fail(source, None,
+                 f"{context}: `oracle: {entry['oracle']}` — the oracle of `{entry['name']}` is "
+                 f"`{expected}`, the retained declaration of its predecessor at the one path "
+                 "the retention check holds append-only (DN-162.D2, DN-162.D3)")
+
+
+def _validate_code_tier(node, package_dir: Path, source: str, *, resolve_units: bool) -> dict:
     context = "`code_tier:`"
     if not isinstance(node, dict):
         fail(source, None, f"{context}: must be a mapping of hook kinds")
@@ -768,7 +897,8 @@ def _validate_code_tier(node, package_dir: Path, source: str) -> dict:
                  "not, because a C++ front end inside a generator is an algorithm tier")
         unit = required_scalar(entry, "unit", entry_context, source)
         _ascii_field(unit, entry_context, source)
-        _check_unit_path(unit, package_dir, entry_context, source)
+        if resolve_units:
+            _check_unit_path(unit, package_dir, entry_context, source)
         tier[kind] = {"symbol": symbol, "unit": unit,
                       "why": _validate_why(entry, entry_context, source)}
     return tier
@@ -797,11 +927,17 @@ def _check_unit_path(unit: str, package_dir: Path, context: str, source: str) ->
              "is REFERENCED by name, so the reference must resolve at generation time")
 
 
-def validate_declaration(document: dict, stem: str, package_dir: Path, source: str) -> dict:
+def validate_declaration(document: dict, stem: str, package_dir: Path, source: str, *,
+                         as_oracle: bool = False) -> dict:
     """Validate one dialect declaration; return the annotated declaration.
 
     The returned structure carries `why:` for emission; `hashed_content()` strips it, and
     that stripped view is exactly what the content hash covers.
+
+    `as_oracle` reads a RETAINED declaration as its successor's oracle (DN-162.D2): it is never
+    projected, so its code-tier units are not resolved, and its own compatibility claim is not
+    re-checked — that step was checked once, when it was the live declaration, and the
+    retention check holds its bytes to the ones that shipped (DN-162.D3).
     """
     expect_keys(document, ("dialect",), "document root", source, _DIALECT_REJECTIONS)
     if "dialect" not in document:
@@ -849,25 +985,27 @@ def validate_declaration(document: dict, stem: str, package_dir: Path, source: s
              "rows recognize. Core requires a non-empty vocabulary with unique, non-empty "
              "names (`all_revisions_named`): a package that recognizes nothing in "
              "particular is not a state the grammar admits.")
-    revisions = declaration["revisions"]["names"]
-    if len(revisions) != 1:
+    entries = declaration["revisions"]["names"]
+    if not entries:
         fail(source, None,
-             f"section `revisions:`: schema v1 admits exactly ONE revision, got "
-             f"{len(revisions)}. The bound is a SCHEMA bound, not a core one (ADR-17.D9): "
-             "core carries the general span so that the day a vendor ships a second syntax "
-             "generation is a data change rather than a redesign, and the v2 subject "
-             "re-opens this by bumping the declaration schema version.")
+             "section `revisions:`: names no revision — core requires a non-empty vocabulary "
+             "(`all_revisions_named`), so an empty span is not a declared absence")
+    _check_revision_claims(entries, source)
+    revisions = [entry["name"] for entry in entries]
 
     for section in _ROW_SECTIONS:
         if section in dialect:
             declaration[section] = _validate_section(dialect[section], section, source,
-                                                     channels)
+                                                     channels, revisions)
 
     if "code_tier" in dialect:
         declaration["code_tier"] = _validate_code_tier(dialect["code_tier"], package_dir,
-                                                       source)
+                                                       source, resolve_units=not as_oracle)
 
     _check_row_uniqueness(declaration, source)
+    if not as_oracle:
+        for position in range(1, len(entries)):
+            _check_against_oracle(declaration, position, package_dir, source)
     return declaration
 
 
@@ -898,6 +1036,165 @@ def _check_row_uniqueness(declaration: dict, source: str) -> None:
             seen[key] = position
 
 
+# ── the compatibility claim, checked against its oracle (DN-162.D2) ───────────────────
+#
+# Four mechanical properties, each judged section by section against the retained declaration
+# of the predecessor: COVERAGE and MEANING (every oracle row has a live row equal to it on every
+# hashed field but `since:`, owned no later than the predecessor), ORDER (those rows keep the
+# oracle's relative order, since first-match and `serialize_manifest` walk declared order), and
+# NO SHADOWING (a row introduced after the predecessor cannot take a line an oracle row of its
+# section can take). Every refusal names the oracle row and the forcing event it is.
+
+# The bytes a row is matched on: two rows sharing them and differing elsewhere are the
+# MEANING drift ADR-22.D8 names, rather than a removed row and an unrelated added one.
+_ROW_BYTES = {
+    "roles": lambda row: row.get("prefix", row.get("shape")),
+    "markers": lambda row: row["prefix"],
+    "level_lifts": lambda row: row["prefix"],
+    "outcome_tokens": lambda row: row["token"],
+    "declared_values": lambda row: row["key"],
+    "stop_announcements": lambda row: row["shape"],
+}
+
+# The literal bytes a row's match starts with: a prefix, or a shape's bytes before its first
+# hole. `declared_values` is absent: its rows match no line, they name a key, and a new key
+# cannot take an old key's value because the key is unique in the package.
+_ROW_LITERAL = {
+    "roles": lambda row: row["prefix"] if "prefix" in row else row["shape"].split(_SHAPE_HOLE)[0],
+    "markers": lambda row: row["prefix"],
+    "level_lifts": lambda row: row["prefix"],
+    "outcome_tokens": lambda row: row["token"],
+    "stop_announcements": lambda row: row["shape"].split(_SHAPE_HOLE)[0],
+}
+
+
+def _strip_why(node):
+    if isinstance(node, dict):
+        return {key: _strip_why(value) for key, value in node.items() if key != "why"}
+    if isinstance(node, list):
+        return [_strip_why(item) for item in node]
+    return node
+
+
+def _comparable(row: dict) -> dict:
+    """A row's hashed fields with its owner removed: what the compatibility claim compares."""
+    return {key: value for key, value in _strip_why(row).items() if key != "since"}
+
+
+def _share_a_stream(row: dict, other: dict) -> bool:
+    """Whether some stream admits both rows. The dialect gate never separates two rows of one
+    package — `self` and `any` both fire on a stream declared as this dialect — so only a
+    channel gate can: two concrete, different channels share no stream."""
+    left, right = row.get("channel_gate"), other.get("channel_gate")
+    return left is None or right is None or _CHANNEL_GATE_ANY in (left, right) or left == right
+
+
+def _load_oracle(declaration: dict, position: int, package_dir: Path, source: str) -> dict:
+    """The predecessor's retained declaration, read as an oracle and never projected."""
+    entry = declaration["revisions"]["names"][position]
+    context = f"section `revisions:` names[{position}] (`{entry['name']}`)"
+    oracle_path = package_dir / entry["oracle"]
+    if not oracle_path.is_file():
+        fail(source, None,
+             f"{context}: `oracle: {entry['oracle']}` names no file under {package_dir} — the "
+             "oracle is the predecessor's declaration as it shipped, retained beside the live one")
+    oracle_source = str(oracle_path)
+    document = parse_subset_yaml(read_text(oracle_path, ascii_only=False), oracle_source,
+                                 ascii_only=False)
+    root = document.get("dialect")
+    oracle_name = root.get("name") if isinstance(root, dict) else None
+    if oracle_name != declaration["name"]:
+        fail(source, None,
+             f"{context}: the oracle declares `name: {oracle_name}`, this declaration "
+             f"`name: {declaration['name']}` — an oracle is the retained declaration of THIS "
+             "package's predecessor revision")
+    oracle = validate_declaration(document, declaration["name"], package_dir, oracle_source,
+                                  as_oracle=True)
+    live_span = [item["name"] for item in declaration["revisions"]["names"]]
+    oracle_span = [item["name"] for item in oracle["revisions"]["names"]]
+    if oracle_span != live_span[:position]:
+        fail(source, None,
+             f"{context}: the oracle's span is [{', '.join(oracle_span)}], and the oracle of "
+             f"`{entry['name']}` declares exactly the span before it, "
+             f"[{', '.join(live_span[:position])}]")
+    return oracle
+
+
+def _check_against_oracle(declaration: dict, position: int, package_dir: Path,
+                          source: str) -> None:
+    """The step from revision `position - 1` to `position`, checked against its oracle."""
+    oracle = _load_oracle(declaration, position, package_dir, source)
+    span = [item["name"] for item in declaration["revisions"]["names"]]
+    claimant, predecessor = span[position], span[position - 1]
+    oracle_name = declaration["revisions"]["names"][position]["oracle"]
+
+    def refuse(section: str, oracle_position: int, oracle_row: dict, what: str) -> None:
+        fail(source, None,
+             f"revision `{claimant}` claims `backward_compatible_with: {predecessor}`, and "
+             f"oracle {oracle_name} section `{section}:` rows[{oracle_position}] "
+             f"({_ROW_BYTES[section](oracle_row)!r}) {what}. That is ADR-22.D8's forcing "
+             "event: a generation that is not a superset of its predecessor cannot share one "
+             "union package with it, and routes to arm (a), a package of its own (DN-162.D2).")
+
+    for section in _ROW_SECTIONS:
+        oracle_rows = oracle.get(section, {}).get("rows", [])
+        live_rows = declaration.get(section, {}).get("rows", [])
+        live_comparable = [_comparable(row) for row in live_rows]
+        held: set[int] = set()
+        previous: tuple[int, int] | None = None
+        for oracle_position, oracle_row in enumerate(oracle_rows):
+            wanted = _comparable(oracle_row)
+            if wanted not in live_comparable:
+                same_bytes = [live for live, row in enumerate(live_rows)
+                              if _ROW_BYTES[section](row) == _ROW_BYTES[section](oracle_row)]
+                if same_bytes:
+                    live = same_bytes[0]
+                    fields = sorted(key for key in wanted.keys() | live_comparable[live].keys()
+                                    if wanted.get(key) != live_comparable[live].get(key))
+                    refuse(section, oracle_position, oracle_row,
+                           f"is read differently by live rows[{live}], which changes its "
+                           f"{', '.join(f'`{key}:`' for key in fields)} — the same bytes called "
+                           "something else is the MEANING drift, not a compatible addition")
+                refuse(section, oracle_position, oracle_row,
+                       "has no equal row in the live declaration — a newer generation keeps "
+                       "every row its predecessor recognized (coverage)")
+            live = live_comparable.index(wanted)
+            owner = live_rows[live]["since"]
+            if span.index(owner) > position - 1:
+                refuse(section, oracle_position, oracle_row,
+                       f"is held by live rows[{live}] declaring `since: {owner}`, later than "
+                       f"`{predecessor}`, whose retained declaration already holds it")
+            if previous is not None and live < previous[0]:
+                refuse(section, oracle_position, oracle_row,
+                       f"is held by live rows[{live}], ahead of live rows[{previous[0]}] which "
+                       f"holds oracle rows[{previous[1]}] — rows match first in declared order, "
+                       "so a reorder is a meaning change")
+            previous = (live, oracle_position)
+            held.add(live)
+        for live, row in enumerate(live_rows):
+            if live in held:
+                continue
+            if span.index(row["since"]) <= position - 1:
+                fail(source, None,
+                     f"section `{section}:` rows[{live}] declares `since: {row['since']}`, and "
+                     f"oracle {oracle_name}, the retained `{predecessor}` declaration holds no "
+                     "equal row — `since:` names the revision that INTRODUCED a row "
+                     "(DN-162.D1), and a row the oracle lacks was introduced after it")
+            literal_of = _ROW_LITERAL.get(section)
+            if literal_of is None:
+                continue
+            literal = literal_of(row)
+            for oracle_position, oracle_row in enumerate(oracle_rows):
+                oracle_literal = literal_of(oracle_row)
+                if _share_a_stream(row, oracle_row) and (
+                        literal.startswith(oracle_literal) or oracle_literal.startswith(literal)):
+                    refuse(section, oracle_position, oracle_row,
+                           f"can be shadowed by live rows[{live}] ({literal!r}, `since: "
+                           f"{row['since']}`): one row's literal bytes are a prefix of the "
+                           "other's on a stream both admit, so the newer row can take lines "
+                           "the older one reads (judged on literal bytes, conservatively)")
+
+
 # ── the content hash (DN-17.D19 MUST 4 / DN-17.D20) ──────────────────────────
 
 
@@ -909,14 +1206,7 @@ def hashed_content(declaration: dict) -> dict:
     name stays out because resolution keys on it before any hash is compared, so a rename
     surfaces as a loud stale-record fault rather than as a quiet mismatch.
     """
-    def strip(node):
-        if isinstance(node, dict):
-            return {key: strip(value) for key, value in node.items() if key != "why"}
-        if isinstance(node, list):
-            return [strip(item) for item in node]
-        return node
-
-    return {key: strip(value) for key, value in declaration.items()
+    return {key: _strip_why(value) for key, value in declaration.items()
             if key not in ("why", "name")}
 
 
@@ -1003,6 +1293,18 @@ def _emit_row(out: list[str], fields: list[tuple[str, str]], why: list[str]) -> 
         out.append(f"{pad}.{name} = {value},")
     last_name, last_value = fields[-1]
     out.append(f"{pad}.{last_name} = {last_value}}},")
+
+
+def _owned(fields: list[tuple[str, str]], row: dict) -> list[tuple[str, str]]:
+    """The row's fields, then the revision that introduced it when it declares one.
+
+    LAST, because a core row struct gains `revision_since` as its last member, and only a
+    multi-revision declaration's rows carry it (DN-162.D1): a one-revision package emits the
+    bytes schema v1 emitted, and builds against a core without the member.
+    """
+    if "since" not in row:
+        return fields
+    return [*fields, ("revision_since", _quoted(row["since"]))]
 
 
 def _emit_array(out: list[str], cpp_type: str, symbol: str, count: int) -> None:
@@ -1122,7 +1424,7 @@ def _emit_role_rows(out: list[str], declaration: dict) -> None:
         ]
         if "shape" in row:
             fields.append(("match", "RoleMatchKind::Shape"))
-        _emit_row(out, fields, row["why"])
+        _emit_row(out, _owned(fields, row), row["why"])
     out.append("}};")
     out.append("")
 
@@ -1167,14 +1469,14 @@ def _emit_marker_rows(out: list[str], declaration: dict) -> None:
             # An opening or closing row carries no payload: its order and extractor are the
             # core's defaults, inert on a row that names nothing, and its role is the one fact
             # it adds.
-            _emit_row(out, [
+            _emit_row(out, _owned([
                 ("prefix", _quoted(row["prefix"])),
                 ("kind", f"insight::tokenization::IntentMarkerKind::{row['kind']}"),
                 ("dialect_gate", _gate_expression(row["dialect_gate"])),
                 ("extract", "PayloadExtract::None"),
                 ("channel_gate", _channel_expression(row["channel_gate"])),
                 ("role", f"MarkerRole::{row['role']}"),
-            ], row["why"])
+            ], row), row["why"])
             continue
         fields = [
             ("prefix", _quoted(row["prefix"])),
@@ -1193,7 +1495,7 @@ def _emit_marker_rows(out: list[str], declaration: dict) -> None:
                            f"{{.introducer = {_quoted(coordinate['introducer'])}, "
                            f".shape = VersionPayloadShape::{coordinate['shape']}}}"))
             why += coordinate["why"]
-        _emit_row(out, fields, why)
+        _emit_row(out, _owned(fields, row), why)
     out.append("}};")
     out.append("")
 
@@ -1214,24 +1516,26 @@ def _emit_marker_rows(out: list[str], declaration: dict) -> None:
     out.append("// clause then hold BY CONSTRUCTION rather than by assertion.")
     _emit_array(out, "IntentEmitRow", "kEmitMarkers", len(rows))
     for row in rows:
+        # The emit row copies its marker row's owner: the writer projection is derived, so
+        # it never declares one of its own (DN-162.D1 point 6).
         if "role" in row:
-            _emit_row(out, [
+            _emit_row(out, _owned([
                 ("prefix", _quoted(row["prefix"])),
                 ("kind", f"insight::tokenization::IntentMarkerKind::{row['kind']}"),
                 ("dialect_gate", _gate_expression(row["dialect_gate"])),
                 ("emit", "insight::semantic::dual(PayloadExtract::None)"),
                 ("channel_gate", _channel_expression(row["channel_gate"])),
                 ("role", f"MarkerRole::{row['role']}"),
-            ], [])
+            ], row), [])
             continue
-        _emit_row(out, [
+        _emit_row(out, _owned([
             ("prefix", _quoted(row["prefix"])),
             ("kind", f"insight::tokenization::IntentMarkerKind::{row['kind']}"),
             ("child_order", f"insight::tokenization::ChildOrder::{row['child_order']}"),
             ("dialect_gate", _gate_expression(row["dialect_gate"])),
             ("emit", f"insight::semantic::dual(PayloadExtract::{row['extract']})"),
             ("channel_gate", _channel_expression(row["channel_gate"])),
-        ], [])
+        ], row), [])
     out.append("}};")
     out.append("")
     out.append("export struct Dialect")
@@ -1268,11 +1572,11 @@ def _emit_level_lift_rows(out: list[str], declaration: dict) -> None:
     _emit_why(out, section["why"])
     _emit_array(out, "LevelLiftRow", "kLevelLifts", len(section["rows"]))
     for row in section["rows"]:
-        _emit_row(out, [
+        _emit_row(out, _owned([
             ("prefix", _quoted(row["prefix"])),
             ("level", f"insight::LogLevel::{row['level']}"),
             ("dialect_gate", _gate_expression(row["dialect_gate"])),
-        ], row["why"])
+        ], row), row["why"])
     out.append("}};")
     out.append("")
 
@@ -1284,11 +1588,11 @@ def _emit_outcome_token_rows(out: list[str], declaration: dict) -> None:
     _emit_why(out, section["why"])
     _emit_array(out, "OutcomeTokenRow", "kOutcomeTokens", len(section["rows"]))
     for row in section["rows"]:
-        _emit_row(out, [
+        _emit_row(out, _owned([
             ("token", _quoted(row["token"])),
             ("outcome", f"insight::RunOutcome::{row['outcome']}"),
             ("dialect_gate", _gate_expression(row["dialect_gate"])),
-        ], row["why"])
+        ], row), row["why"])
     out.append("}};")
     out.append("")
 
@@ -1304,11 +1608,11 @@ def _emit_declared_value_rows(out: list[str], declaration: dict) -> None:
                    f"kDeclaredValueMarkers{position}{{{{{values}}}}};")
     _emit_array(out, "DeclaredValueRow", "kDeclaredValues", len(section["rows"]))
     for position, row in enumerate(section["rows"]):
-        _emit_row(out, [
+        _emit_row(out, _owned([
             ("key", _quoted(row["key"])),
             ("markers", f"kDeclaredValueMarkers{position}"),
             ("dialect_gate", _gate_expression(row["dialect_gate"])),
-        ], row["why"])
+        ], row), row["why"])
     out.append("}};")
     name = declaration["name"]
     out.append("static_assert(std::ranges::all_of(kDeclaredValues, "
@@ -1326,10 +1630,10 @@ def _emit_stop_announcement_rows(out: list[str], declaration: dict) -> None:
     _emit_why(out, section["why"])
     _emit_array(out, "StopAnnouncementRow", "kStopAnnouncements", len(section["rows"]))
     for row in section["rows"]:
-        _emit_row(out, [
+        _emit_row(out, _owned([
             ("shape", _quoted(row["shape"])),
             ("dialect_gate", _gate_expression(row["dialect_gate"])),
-        ], row["why"])
+        ], row), row["why"])
     out.append("}};")
     name = declaration["name"]
     out.append("static_assert(std::ranges::all_of(kStopAnnouncements, "
@@ -1411,6 +1715,14 @@ def _emit_manifest(out: list[str], declaration: dict) -> None:
     out.append('              "non-empty names -- the coordinate is what a reader compares '
                'generations on, "')
     out.append('              "so an unnamed or repeated one is not a declaration");')
+    # The ownership fence, only where rows carry an owner: a one-revision package emits the
+    # bytes schema v1 emitted (DN-162.D1 points 5 and 7).
+    if len(declaration["revisions"]["names"]) > 1:
+        out.append("static_assert(insight::semantic::all_row_revisions_declared(kManifest),")
+        out.append(f'              "{name}: a row\'s revision_since is empty or names no '
+                   'revision of kDialectRevisions -- "')
+        out.append('              "in a multi-revision package every row names the revision that '
+                   'introduced it");')
     out.append("")
 
 
@@ -1517,6 +1829,50 @@ dialect:
 """
 
 
+def _sinced(text: str, revision: str = "v1") -> str:
+    """Every row of `text` declaring `since: <revision>` — the fixture's rows, not its names."""
+    out: list[str] = []
+    for line in text.split("\n"):
+        out.append(line)
+        if line.startswith(("      - prefix:", "      - token:", "      - key:", "      - shape:")):
+            out.append(f"        since: {revision}")
+    return "\n".join(out)
+
+
+# The synthetic dialect's second generation (DN-162.D1, DN-162.D2): the v1 rows keep their
+# bytes, their meaning and their order and declare `since: v1`; v2 adds one level lift and one
+# marker, each on bytes no v1 row of its section can take. Its oracle is `_SYNTHETIC` itself,
+# retained at `revisions/v1.dialect.yaml` — the live declaration v1 was.
+_V2_ENTRY = ("      - name: v2\n        backward_compatible_with: v1\n"
+             "        oracle: revisions/v1.dialect.yaml\n"
+             "        why: [\"The second generation adds rows and changes none.\"]\n")
+_V2_LIFT = ('      - prefix: "##[notice]"\n        level: Info\n        dialect_gate: self\n'
+            "        since: v2\n")
+_V2_MARKER = ('      - prefix: "Inner "\n        kind: Step\n        child_order: Ordered\n'
+              "        dialect_gate: self\n        extract: RemainderAfterPrefix\n"
+              "        channel_gate: marked\n        since: v2\n")
+_V1_LIFTS = ('      - prefix: "##[error]"\n        since: v1\n        level: Error\n'
+             "        dialect_gate: self\n"
+             '      - prefix: "##[warning]"\n        since: v1\n        level: Warn\n'
+             "        dialect_gate: self\n")
+_V1_LIFTS_SWAPPED = ('      - prefix: "##[warning]"\n        since: v1\n        level: Warn\n'
+                     "        dialect_gate: self\n"
+                     '      - prefix: "##[error]"\n        since: v1\n        level: Error\n'
+                     "        dialect_gate: self\n")
+_TWO_REVISIONS = (_sinced(_SYNTHETIC)
+                  .replace("    names: [v1]\n", "    names:\n      - v1\n" + _V2_ENTRY, 1)
+                  .replace("  level_lifts:\n", _V2_MARKER + "  level_lifts:\n", 1)
+                  .replace("  outcome_tokens:\n", _V2_LIFT + "  outcome_tokens:\n", 1))
+_THREE_REVISIONS = (_TWO_REVISIONS
+                    .replace(_V2_ENTRY, _V2_ENTRY
+                             + "      - name: v3\n        backward_compatible_with: v2\n"
+                               "        oracle: revisions/v2.dialect.yaml\n", 1)
+                    .replace("  outcome_tokens:\n",
+                             '      - prefix: "##[debug]"\n        level: Debug\n'
+                             "        dialect_gate: self\n        since: v3\n"
+                             "  outcome_tokens:\n", 1))
+
+
 def _write_fixture(directory: Path, text: str = _SYNTHETIC,
                    stem: str = "synthetic") -> Path:
     (directory / "hook.cpp").write_text("", encoding="utf-8")
@@ -1540,6 +1896,29 @@ def fixture_digest() -> str:
 def _parse_fixture(text: str, stem: str = "synthetic") -> dict:
     with tempfile.TemporaryDirectory() as tmp:
         return load_declaration(_write_fixture(Path(tmp), text, stem))
+
+
+_V1_ORACLE = {"revisions/v1.dialect.yaml": _SYNTHETIC}
+
+
+def _package_path(directory: Path, live: str, oracles: dict[str, str] | None) -> Path:
+    """A package directory holding the live declaration and its retained oracles."""
+    for relative, text in (_V1_ORACLE if oracles is None else oracles).items():
+        path = directory / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(text.encode("utf-8"))
+    return _write_fixture(directory, live)
+
+
+def _parse_package(live: str, oracles: dict[str, str] | None = None) -> dict:
+    with tempfile.TemporaryDirectory() as tmp:
+        return load_declaration(_package_path(Path(tmp), live, oracles))
+
+
+def _render_package(live: str, oracles: dict[str, str] | None = None) -> str:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = _package_path(Path(tmp), live, oracles)
+        return emit_inc(load_declaration(path), module_suffix="_gen", source_name=path.name)
 
 
 def _assert(condition: bool, message: str) -> None:
@@ -1824,7 +2203,7 @@ def selftest() -> int:
     _expect_rejection("refuse: an unknown key", failures, "unknown key",
                       lambda: _parse_fixture(_SYNTHETIC.replace(
                           "  roles:", "  vibes: [good]\n  roles:")))
-    _expect_rejection("refuse: `payload_excludes:` is not a v1 marker row key", failures,
+    _expect_rejection("refuse: `payload_excludes:` is not a marker row key", failures,
                       "unknown key",
                       lambda: _parse_fixture(_SYNTHETIC.replace(
                           "        channel_gate: any\n",
@@ -2163,10 +2542,6 @@ def selftest() -> int:
                           "    why: [\"This dialect emits no single run-verdict console "
                           "line, so there is nothing to declare.\"]\n    rows: []\n",
                           "    rows: []\n")))
-    _expect_rejection("refuse: more than one revision in schema v1", failures,
-                      "schema v1 admits exactly ONE revision",
-                      lambda: _parse_fixture(_SYNTHETIC.replace(
-                          "    names: [v1]", "    names: [v1, v2]")))
     _expect_rejection("refuse: a literal dialect name as a gate", failures,
                       "never a literal dialect name",
                       lambda: _parse_fixture(_SYNTHETIC.replace(
@@ -2215,6 +2590,175 @@ def selftest() -> int:
                       lambda: _parse_fixture(_SYNTHETIC.replace(
                           '    why: ["The vendor generation these rows recognize."]',
                           '    why: "The vendor generation these rows recognize."')))
+
+    # ── schema v2: several ORDERED revisions, each row's `since:` (DN-162.D1) ───────────
+    # Rendered inside each arm, so a refusal is that arm's failure rather than the run's.
+    def _two() -> str:
+        return _render_package(_TWO_REVISIONS)
+
+    _case("v2: a two-revision span generates, every row carrying the revision that introduced it",
+          failures, lambda: _assert(
+              'std::array<std::string_view, 2> kDialectRevisions{{"v1", "v2"}};' in _two()
+              and _two().count('.revision_since = "v1"') == 10
+              and _two().count('.revision_since = "v2"') == 3
+              and _row_prefixes(_two(), "kMarkers")
+              == ['"Job: "', '"Run "', '"Inner "']
+              and _row_prefixes(_two(), "kLevelLifts")
+              == ['"##[error]"', '"##[warning]"', '"##[notice]"'],
+              "the span, or a row's `.revision_since`, did not reach the emitted rows (want 10 "
+              "rows naming v1: 2 roles, 2 markers, 2 emit rows, 2 lifts, 2 tokens; and 3 naming "
+              "v2: a lift, a marker, its emit row): "
+              + repr([line.strip() for line in _two().split("\n")
+                      if ".revision_since = " in line])))
+    _case("v2: the derived emit row copies its marker row's revision (DN-162.D1 point 6)",
+          failures, lambda: _assert(
+              '.revision_since = "v2"' in _array_body(_two(), "kEmitMarkers")
+              and _array_body(_two(), "kEmitMarkers").count(".revision_since = ") == 3,
+              "an emit row does not carry its marker row's `revision_since` — the writer "
+              "projection is derived, so it copies the owner rather than declaring one"))
+    _case("v2: the ownership fence is emitted, and only for more than one revision", failures,
+          lambda: _assert(
+              _two().count("insight::semantic::all_row_revisions_declared(kManifest)")
+              == 1
+              and "all_row_revisions_declared" not in rendered
+              and "revision_since" not in rendered,
+              "the fence or a `.revision_since` member is missing from the two-revision package, "
+              "or reached a one-revision package, whose bytes must be the ones schema v1 emitted"))
+    _case("v2: the header names declaration schema 2", failures, lambda: _assert(
+        "declaration schema: 2" in rendered and "declaration schema: 2" in _two(),
+        "the generated header does not name schema 2"))
+    _case("v2: the compatibility claim is declaration content and reaches no emitted code",
+          failures, lambda: _assert(
+              "backward_compatible_with" in repr(hashed_content(_parse_package(_TWO_REVISIONS)))
+              and not any("backward_compatible_with" in line or "revisions/v1" in line
+                          for line in _two().split("\n")
+                          if not line.lstrip().startswith("//")),
+              "the claim is missing from the declaration's content, or reached an emitted C++ "
+              "line, which the package's semantic_identity would then see (DN-162.D2 Q4)"))
+    _case("v2: a new row on a channel the oracle row does not share does not shadow it", failures,
+          lambda: _assert(
+              _parse_package(_TWO_REVISIONS.replace(
+                  _V2_MARKER, _V2_MARKER.replace('"Inner "', '"Run"'), 1)) is not None,
+              "unreachable"))
+    _case("v2: a three-revision chain checks each step against its own oracle", failures,
+          lambda: _assert(
+              _render_package(_THREE_REVISIONS, {
+                  "revisions/v1.dialect.yaml": _SYNTHETIC,
+                  "revisions/v2.dialect.yaml": _TWO_REVISIONS}).count(
+                  '.revision_since = "v3"') == 1,
+              "the v3 row did not reach the emitted rows"))
+    # Refusals of the span and the per-row revision, each by its message.
+    for _label, _text, _needle in (
+            ("a row without `since:` in a multi-revision declaration",
+             _TWO_REVISIONS.replace("        since: v1\n", "", 1), "declares no `since:`"),
+            ("`since:` naming a revision the span does not declare",
+             _TWO_REVISIONS.replace("        since: v1\n", "        since: v9\n", 1),
+             "names no revision the span declares"),
+            ("`since:` on a singleton span", _sinced(_SYNTHETIC), "`since:` on a singleton span"),
+            ("a compatibility claim on the first revision",
+             _TWO_REVISIONS.replace("      - v1\n", "      - name: v1\n"
+                                    "        backward_compatible_with: v0\n"
+                                    "        oracle: revisions/v0.dialect.yaml\n", 1),
+             "nothing precedes it"),
+            ("a second revision with no claim",
+             _TWO_REVISIONS.replace(_V2_ENTRY, "      - v2\n", 1),
+             "requires `backward_compatible_with:`"),
+            ("a claim with no oracle",
+             _TWO_REVISIONS.replace("        oracle: revisions/v1.dialect.yaml\n", "", 1),
+             "requires `oracle:`"),
+            ("a claim naming a revision other than the immediate predecessor",
+             _THREE_REVISIONS.replace("backward_compatible_with: v2",
+                                      "backward_compatible_with: v1", 1),
+             "the IMMEDIATELY preceding revision"),
+            ("a claim of `false`",
+             _TWO_REVISIONS.replace("backward_compatible_with: v1",
+                                    "backward_compatible_with: false", 1),
+             "`false` is not spellable"),
+            ("an oracle outside `revisions/<predecessor>.dialect.yaml`",
+             _TWO_REVISIONS.replace("oracle: revisions/v1.dialect.yaml", "oracle: v1.yaml", 1),
+             "the oracle of `v2` is `revisions/v1.dialect.yaml`"),
+            ("a claim on a channel name",
+             _TWO_REVISIONS.replace("      - name: marked\n",
+                                    "      - name: marked\n"
+                                    "        backward_compatible_with: plain\n", 1),
+             "legal on `revisions:` alone")):
+        _expect_rejection(f"refuse v2: {_label}", failures, _needle,
+                          lambda text=_text: _parse_package(text))
+    _expect_rejection("refuse v2: an oracle path naming no file", failures,
+                      "names no file", lambda: _parse_package(_TWO_REVISIONS, {}))
+    _expect_rejection("refuse v2: an oracle declaring another name", failures,
+                      "the oracle declares `name: other`",
+                      lambda: _parse_package(_TWO_REVISIONS, {
+                          "revisions/v1.dialect.yaml":
+                          _SYNTHETIC.replace("  name: synthetic", "  name: other", 1)}))
+    _expect_rejection("refuse v2: an oracle whose span is not the live span's prefix", failures,
+                      "the oracle's span is [v0]",
+                      lambda: _parse_package(_TWO_REVISIONS, {
+                          "revisions/v1.dialect.yaml":
+                          _SYNTHETIC.replace("    names: [v1]", "    names: [v0]", 1)}))
+    # The mutation arms (DN-162.O2 arm 3): each drift of the live file from its oracle is
+    # refused, and the refusal NAMES the oracle row and the forcing event it is.
+    _oracle = "oracle revisions/v1.dialect.yaml section"
+    for _label, _text, _needle in (
+            ("an oracle row's role changed",
+             _TWO_REVISIONS.replace("        role: GroupEnd\n", "        role: Terminator\n", 1),
+             f"{_oracle} `roles:` rows[1]"),
+            ("an oracle row's level changed",
+             _TWO_REVISIONS.replace("        level: Warn\n", "        level: Error\n", 1),
+             f"{_oracle} `level_lifts:` rows[1]"),
+            ("an oracle row's extractor changed",
+             _TWO_REVISIONS.replace("        extract: RemainderAfterPrefix\n",
+                                    "        extract: RemainderToClosingParen\n", 1),
+             f"{_oracle} `markers:` rows[0]"),
+            ("an oracle row's channel gate changed",
+             _TWO_REVISIONS.replace("        channel_gate: plain\n", "        channel_gate: any\n",
+                                    1), f"{_oracle} `markers:` rows[1]"),
+            ("an oracle row deleted",
+             _TWO_REVISIONS.replace("      - token: skipped\n        since: v1\n"
+                                    "        outcome: Unknown\n        dialect_gate: self\n",
+                                    "", 1),
+             f"{_oracle} `outcome_tokens:` rows[1]"),
+            ("two oracle rows of a first-match section swapped",
+             _TWO_REVISIONS.replace(_V1_LIFTS, _V1_LIFTS_SWAPPED, 1),
+             f"{_oracle} `level_lifts:` rows[1]"),
+            ("a new row whose prefix is a prefix of an oracle row's",
+             _TWO_REVISIONS.replace('"##[notice]"', '"##[warn"', 1),
+             f"{_oracle} `level_lifts:` rows[1]"),
+            ("a new row whose prefix extends an oracle row's",
+             _TWO_REVISIONS.replace('"##[notice]"', '"##[error]x"', 1),
+             f"{_oracle} `level_lifts:` rows[0]"),
+            ("a new marker shadowing an oracle marker on a common channel",
+             _TWO_REVISIONS.replace(_V2_MARKER, _V2_MARKER.replace('"Inner "', '"Run"', 1)
+                                    .replace("channel_gate: marked", "channel_gate: any", 1), 1),
+             f"{_oracle} `markers:` rows[1]"),
+            ("an oracle row marked `since: v2`",
+             _TWO_REVISIONS.replace('"##[error]"\n        since: v1\n', '"##[error]"\n'
+                                    "        since: v2\n", 1),
+             f"{_oracle} `level_lifts:` rows[0]")):
+        _expect_rejection(f"mutation: {_label}", failures, _needle,
+                          lambda text=_text: _parse_package(text))
+        _expect_rejection(f"mutation: {_label} — the refusal names the forcing event", failures,
+                          "ADR-22.D8", lambda text=_text: _parse_package(text))
+    # A changed row is refused as the MEANING drift, naming the field, and not as a deleted row
+    # beside an unrelated new one: the bytes are the same, the reading is not.
+    for _label, _text, _field in (
+            ("role", _TWO_REVISIONS.replace("        role: GroupEnd\n",
+                                            "        role: Terminator\n", 1), "`role:`"),
+            ("level", _TWO_REVISIONS.replace("        level: Warn\n", "        level: Error\n", 1),
+             "`level:`"),
+            ("extractor", _TWO_REVISIONS.replace("        extract: RemainderAfterPrefix\n",
+                                                 "        extract: RemainderToClosingParen\n", 1),
+             "`extract:`"),
+            ("channel gate", _TWO_REVISIONS.replace("        channel_gate: plain\n",
+                                                    "        channel_gate: any\n", 1),
+             "`channel_gate:`")):
+        _expect_rejection(f"mutation: an oracle row's {_label} changed is the MEANING drift",
+                          failures, f"changes its {_field} — the same bytes called something else",
+                          lambda text=_text: _parse_package(text))
+    _expect_rejection("refuse v2: a row claiming `since: v1` that the v1 oracle does not hold",
+                      failures, "the retained `v1` declaration holds no equal row",
+                      lambda: _parse_package(_TWO_REVISIONS.replace(
+                          _V2_LIFT, _V2_LIFT.replace("since: v2", "since: v1", 1), 1)))
 
     # ── the encoding fences (DN-17.D24 / DN-17.D27) ──────────────────────────
     _expect_rejection("encoding: a non-ASCII byte in a ROW field", failures,
@@ -2292,10 +2836,15 @@ def selftest() -> int:
     return 0
 
 
+def _array_body(rendered: str, array_symbol: str) -> str:
+    """The emitted initializer text of ONE array, from its symbol to its closing brace."""
+    body = rendered[rendered.index(f"{array_symbol}{{{{"):]
+    return body[: body.index("\n}};")]
+
+
 def _row_prefixes(rendered: str, array_symbol: str) -> list[str]:
     """The `.prefix` (or `.token`) initializers of ONE emitted array, in emitted order."""
-    body = rendered[rendered.index(f"{array_symbol}{{{{"):]
-    body = body[: body.index("\n}};")]
+    body = _array_body(rendered, array_symbol)
     return [line.split(" = ", 1)[1].rstrip(",") for line in body.split("\n")
             if ".prefix = " in line or ".token = " in line]
 
