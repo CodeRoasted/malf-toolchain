@@ -95,7 +95,9 @@ the innermost open one. Extractor `KeyedFields` reads `key=value` pairs separate
 line-final `]`, and its row declares `fields:`, which payload key plays which part, as data, so
 core holds no platform's keys or literals. Each row shape declares an EXACT set of field roles
 (DN-162.O3 item 8): a naming row declares `name:`, `display:`, `segment:`, `ordinal:` and
-`anonymous:`, and an Ends row declares `extract: KeyedFields` with `outcome:` alone. A key role
+`anonymous:`, and an Ends row declares `extract: KeyedFields` with `outcome:` and
+`propagated_outcome:` (DN-162.O3 item 9), the ended unit's own declared outcome and the one its
+containing unit counted. A key role
 holds no `=`, `;` or `]`, a literal role no `;`, and two roles never read one key. `fields:` is
 required with `KeyedFields` and refused with any other extractor; a `KeyedFields` row declares no
 version coordinate, since an inner step's version is its own step banner's. The field roles are
@@ -163,7 +165,7 @@ from codegen_common import (
     required_scalar,
 )
 
-TOOL_VERSION = "10"  # 10: an inner step — InnerStep, Ends, KeyedFields (DN-162.D4)
+TOOL_VERSION = "11"  # 11: an Ends row reads the propagated outcome too (DN-162.O3 item 9)
 SCHEMA_VERSION = "2"
 
 DIALECT_FILE_SUFFIX = ".dialect.yaml"
@@ -192,14 +194,19 @@ _PAYLOAD_EXTRACTS = ("None", "RemainderAfterPrefix", "RemainderToClosingParen",
 _KEYED_FIELDS = "KeyedFields"
 # The field roles a `KeyedFields` row may declare, in the core's member order — a designated
 # initializer follows it, so they are emitted in this order and never in the declaration's.
-# `name`, `display` and `outcome` name a payload KEY; `segment`, `ordinal` and `anonymous` are
-# literal bytes the core applies to the name's value (DN-162.D5). Each row shape declares an
-# EXACT set: a role a shape could omit is a core branch no declaration exercises.
-_FIELD_ROLES = ("name", "display", "segment", "ordinal", "anonymous", "outcome")
-_FIELD_KEY_ROLES = ("name", "display", "outcome")
+# `name`, `display`, `outcome` and `propagated_outcome` name a payload KEY; `segment`, `ordinal`
+# and `anonymous` are literal bytes the core applies to the name's value (DN-162.D5). Each row
+# shape declares an EXACT set: a role a shape could omit is a core branch no declaration
+# exercises. `outcome` is the ended unit's OWN declared outcome and `propagated_outcome` the one
+# its containing unit counted (DN-162.D8): named for what they mean, never for a platform's key.
+_FIELD_ROLES = ("name", "display", "segment", "ordinal", "anonymous", "outcome",
+                "propagated_outcome")
+_FIELD_KEY_ROLES = ("name", "display", "outcome", "propagated_outcome")
 _FIELD_LITERAL_ROLES = ("segment", "ordinal", "anonymous")
 _NAMING_FIELD_ROLES = ("name", "display", "segment", "ordinal", "anonymous")
-_ENDS_SHAPE = "an Ends row declares exactly `extract: KeyedFields` and `fields: {outcome: …}`"
+_ENDS_FIELD_ROLES = ("outcome", "propagated_outcome")
+_ENDS_SHAPE = ("an Ends row declares exactly `extract: KeyedFields` and "
+               "`fields: {outcome: …, propagated_outcome: …}`")
 _PAYLOAD_SEPARATORS = ("=", ";", "]")
 # The payload shapes a marker row's version coordinate may name. A row that declares no
 # coordinate omits the key: the core's `None` shape is an ABSENCE here, never an authorable
@@ -547,7 +554,8 @@ def _validate_fields(node, *, ends: bool, context: str, source: str) -> dict:
 
     Ruled by DN-162.D4, DN-162.D5 and DN-162.O3 item 8. Each row shape declares an EXACT set: a
     row that names its unit declares `name`, `display`, `segment`, `ordinal` and `anonymous`, and
-    an Ends row declares `outcome` alone, the ended unit's declared outcome token. A key role names
+    an Ends row declares `outcome` and `propagated_outcome`, the ended unit's own declared outcome
+    token and the one its containing unit counted (DN-162.O3 item 9). A key role names
     a payload key, so it holds no separator; a literal role holds no `;`, at which a value ends.
     Two roles never read one key.
     """
@@ -557,22 +565,22 @@ def _validate_fields(node, *, ends: bool, context: str, source: str) -> dict:
     expect_keys(node, _FIELD_ROLES, f"{context} fields", source, _DIALECT_REJECTIONS)
     fields = {role: _prefix(node, role, f"{context} fields", source)
               for role in _FIELD_ROLES if role in node}
-    if ends:
-        if set(fields) != {"outcome"}:
-            fail(source, None, f"{context}: {_ENDS_SHAPE} — it names nothing, so the one field "
-                               "it reads is the ended unit's declared outcome token")
-    else:
-        expected = set(_NAMING_FIELD_ROLES)
-        missing = [role for role in _FIELD_ROLES if role in expected - set(fields)]
-        extra = [role for role in _FIELD_ROLES if role in set(fields) - expected]
-        if missing or extra:
+    expected = set(_ENDS_FIELD_ROLES if ends else _NAMING_FIELD_ROLES)
+    missing = [role for role in _FIELD_ROLES if role in expected - set(fields)]
+    extra = [role for role in _FIELD_ROLES if role in set(fields) - expected]
+    if missing or extra:
+        gaps = "; it ".join([*(f"lacks `{role}`" for role in missing),
+                              *(f"adds `{role}`" for role in extra)])
+        if ends:
             fail(source, None,
-                 f"{context}: a `KeyedFields` row that names its unit declares exactly `name`, "
-                 "`display`, `segment`, `ordinal` and `anonymous` — it "
-                 + "; it ".join([*(f"lacks `{role}`" for role in missing),
-                                 *(f"adds `{role}`" for role in extra)])
-                 + ". A role a row could omit is a core branch no declaration exercises; the "
-                   "declared outcome arrives on the line that ENDS the unit")
+                 f"{context}: {_ENDS_SHAPE} — it {gaps}. It names nothing, so the two fields it "
+                 "reads are the ended unit's own declared outcome token and the one its "
+                 "containing unit counted")
+        fail(source, None,
+             f"{context}: a `KeyedFields` row that names its unit declares exactly `name`, "
+             f"`display`, `segment`, `ordinal` and `anonymous` — it {gaps}. A role a row could "
+             "omit is a core branch no declaration exercises; the declared outcomes arrive on "
+             "the line that ENDS the unit")
     read: dict[str, str] = {}
     for role, value in fields.items():
         if role in _FIELD_LITERAL_ROLES:
@@ -599,8 +607,9 @@ def _validate_unit_role_row(row: dict, channels: list[str], context: str, source
     An opener's unit is named by the naming row that follows, and a closer's unit is the
     core's supplied epilogue, so everything a payload derives — the class, the instance, the
     version — is never this row's, and a row declaring any of it would be a second, silent
-    source of the same fact. An ending row names nothing either; its one payload is the ended
-    unit's declared outcome, read by `KeyedFields` from its `outcome:` field (DN-162.D4 point 2).
+    source of the same fact. An ending row names nothing either; its payload is the ended unit's
+    own declared outcome and the one its containing unit counted, read by `KeyedFields` from its
+    `outcome:` and `propagated_outcome:` fields (DN-162.D4 point 2, DN-162.O3 item 9).
     """
     role = _enum_value(row, "role", _MARKER_ROLES, context, source)
     forbidden = ("child_order", "version_coordinate") if role == "Ends" else (
@@ -638,10 +647,11 @@ def _validate_unit_role_row(row: dict, channels: list[str], context: str, source
         "why": _validate_why(row, context, source),
     }
     if role == "Ends":
-        # One shape: the ended unit's declared outcome, read by `KeyedFields` (DN-162.O3 item 8).
+        # One shape: the ended unit's two declared outcomes, read by `KeyedFields` (DN-162.O3
+        # items 8 and 9).
         if "extract" not in row:
             fail(source, None, f"{context}: {_ENDS_SHAPE} — it reads the ended unit's declared "
-                               "outcome token, so it declares the extractor that reads it")
+                               "outcome tokens, so it declares the extractor that reads them")
         extract = _enum_value(row, "extract", _PAYLOAD_EXTRACTS, context, source)
         if extract != _KEYED_FIELDS:
             fail(source, None, f"{context}: `extract: {extract}` — {_ENDS_SHAPE}")
@@ -2035,7 +2045,11 @@ def _parse_fixture(text: str, stem: str = "synthetic") -> dict:
 _V1_ORACLE = {"revisions/v1.dialect.yaml": _SYNTHETIC}
 
 # An inner step's two lines (DN-162.D4): a start line that NAMES an `InnerStep` from keyed fields,
-# and an end line that ENDS the innermost open one, carrying its declared outcome.
+# and an end line that ENDS the innermost open one, carrying the ended unit's own declared outcome
+# and the outcome its containing unit counted (DN-162.O3 item 9).
+# What every malformed Ends row's refusal says (DN-162.O3 item 9), spelled once for the arms.
+_ENDS_SHAPE_NEEDLE = ("an Ends row declares exactly `extract: KeyedFields` and "
+                      "`fields: {outcome: …, propagated_outcome: …}`")
 _INNER_START = ('      - prefix: "##[start-action "\n        kind: InnerStep\n'
                 "        child_order: Ordered\n        dialect_gate: self\n"
                 "        extract: KeyedFields\n        fields:\n          name: id\n"
@@ -2044,7 +2058,8 @@ _INNER_START = ('      - prefix: "##[start-action "\n        kind: InnerStep\n'
                 '        why: ["The id names the step; the display names an anonymous one."]\n')
 _INNER_END = ('      - prefix: "##[end-action "\n        kind: InnerStep\n        role: Ends\n'
               "        dialect_gate: self\n        extract: KeyedFields\n        fields:\n"
-              "          outcome: conclusion\n        channel_gate: marked\n")
+              "          outcome: outcome\n          propagated_outcome: conclusion\n"
+              "        channel_gate: marked\n")
 _WITH_INNER = _SYNTHETIC.replace("  level_lifts:\n", _INNER_START + _INNER_END + "  level_lifts:\n",
                                  1)
 _INNER_TWO = _sinced(_WITH_INNER).replace("    names: [v1]\n",
@@ -2492,14 +2507,23 @@ def selftest() -> int:
               and "// > The id names the step; the display names an anonymous one." in _inner(),
               "the start row's kind, extractor or field roles did not reach its recognition row "
               "and its emit row"))
-    _case("inner: an Ends row reaches both projections with its role, extractor and outcome field",
-          failures, lambda: _assert(
+    _ends_fields = '.fields = {.outcome = "outcome", .propagated_outcome = "conclusion"}'
+    _case("inner: an Ends row reaches both projections with its role, extractor and two outcome "
+          "fields", failures, lambda: _assert(
               _inner().count(".role = MarkerRole::Ends,") == 2
-              and _inner().count('.fields = {.outcome = "conclusion"}') == 2
+              and _inner().count(_ends_fields) == 2
               and _inner().count(".emit = insight::semantic::dual(PayloadExtract::KeyedFields),")
               == 2,
-              "the Ends row is not on both projections with `MarkerRole::Ends` and its outcome "
-              "field"))
+              "the Ends row is not on both projections with `MarkerRole::Ends` and both its outcome "
+              "fields, `outcome` then `propagated_outcome`"))
+    _case("inner: an Ends row's two outcome fields are emitted in the core's member order",
+          failures, lambda: _assert(
+              render_fixture(text=_WITH_INNER.replace(
+                  "          outcome: outcome\n          propagated_outcome: conclusion\n",
+                  "          propagated_outcome: conclusion\n          outcome: outcome\n",
+                  1)).count(_ends_fields) == 2,
+              "a designated initializer follows the struct's member order, so `outcome` precedes "
+              "`propagated_outcome` whatever the declaration's order"))
     _case("inner: the field roles are emitted in the core's member order, whatever the YAML order",
           failures, lambda: _assert(
               render_fixture(text=_WITH_INNER.replace(
@@ -2532,7 +2556,8 @@ def selftest() -> int:
                                  "        kind: Step\n        role: Ends\n", 1),
              "`kind: Step` on a row declaring `role: Ends`"),
             ("`extract: KeyedFields` without `fields:`",
-             _WITH_INNER.replace("        fields:\n          outcome: conclusion\n", "", 1),
+             _WITH_INNER.replace("        fields:\n          outcome: outcome\n"
+                                 "          propagated_outcome: conclusion\n", "", 1),
              "`extract: KeyedFields` requires `fields:`"),
             ("`fields:` with another extractor",
              _WITH_INNER.replace("        extract: KeyedFields\n        fields:\n"
@@ -2554,17 +2579,32 @@ def selftest() -> int:
                                    ("anonymous", '          anonymous: "__run"\n'))),
             ("`outcome:` on a naming row",
              _WITH_INNER.replace("          name: id\n", "          name: id\n"
-                                 "          outcome: conclusion\n", 1),
+                                 "          outcome: outcome\n", 1),
              "declares exactly `name`, `display`, `segment`, `ordinal` and `anonymous` — "
              "it adds `outcome`"),
-            ("an Ends row reading a field other than `outcome:`",
-             _WITH_INNER.replace("          outcome: conclusion\n", "          name: id\n", 1),
-             "an Ends row declares exactly `extract: KeyedFields` and `fields: {outcome: …}`"),
+            ("`propagated_outcome:` on a naming row",
+             _WITH_INNER.replace("          name: id\n", "          name: id\n"
+                                 "          propagated_outcome: conclusion\n", 1),
+             "declares exactly `name`, `display`, `segment`, `ordinal` and `anonymous` — "
+             "it adds `propagated_outcome`"),
+            ("an Ends row reading `outcome:` alone",
+             _WITH_INNER.replace("          propagated_outcome: conclusion\n", "", 1),
+             _ENDS_SHAPE_NEEDLE + " — it lacks `propagated_outcome`"),
+            ("an Ends row reading `propagated_outcome:` alone",
+             _WITH_INNER.replace("          outcome: outcome\n", "", 1),
+             _ENDS_SHAPE_NEEDLE + " — it lacks `outcome`"),
+            ("an Ends row reading a field other than its two",
+             _WITH_INNER.replace("          outcome: outcome\n", "          name: id\n", 1),
+             _ENDS_SHAPE_NEEDLE + " — it lacks `outcome`; it adds `name`"),
+            ("an Ends row reading both outcome roles from one key",
+             _WITH_INNER.replace("          propagated_outcome: conclusion\n",
+                                 "          propagated_outcome: outcome\n", 1),
+             "`outcome:` and `propagated_outcome:` both read key `outcome`"),
             ("an Ends row with no extractor",
              _WITH_INNER.replace(
-                 "        extract: KeyedFields\n        fields:\n          outcome: conclusion\n",
-                 "", 1),
-             "an Ends row declares exactly `extract: KeyedFields` and `fields: {outcome: …}`"),
+                 "        extract: KeyedFields\n        fields:\n          outcome: outcome\n"
+                 "          propagated_outcome: conclusion\n", "", 1),
+             _ENDS_SHAPE_NEEDLE),
             ("a literal field role holding a `;`",
              _WITH_INNER.replace('          segment: "."\n', '          segment: ".;"\n', 1),
              "a literal role holds no `;`"),
@@ -2584,10 +2624,11 @@ def selftest() -> int:
             ("an Ends row with an extractor other than KeyedFields",
              _WITH_INNER.replace("        role: Ends\n        dialect_gate: self\n"
                                  "        extract: KeyedFields\n        fields:\n"
-                                 "          outcome: conclusion\n",
+                                 "          outcome: outcome\n"
+                                 "          propagated_outcome: conclusion\n",
                                  "        role: Ends\n        dialect_gate: self\n"
                                  "        extract: RemainderAfterPrefix\n", 1),
-             "an Ends row declares exactly `extract: KeyedFields` and `fields: {outcome: …}`"),
+             _ENDS_SHAPE_NEEDLE),
             ("a KeyedFields row declaring a version coordinate",
              _WITH_INNER.replace('          anonymous: "__run"\n',
                                  '          anonymous: "__run"\n        version_coordinate:\n'
