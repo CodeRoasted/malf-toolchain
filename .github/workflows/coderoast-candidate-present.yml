@@ -93,12 +93,12 @@ jobs:
 
       - name: malf at this workflow's commit, as git
         id: malf
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@4d90442d460df459a045785e8762d82efe579175
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@69dc0be34598f843ecd0b919bbb83d49be5a8557
         with:
           workflow: coderoast-candidate-present.yml
 
       - name: The pinned gh the attestation reads run through
-        uses: CodeRoasted/malf-toolchain/.github/actions/setup-gh@4d90442d460df459a045785e8762d82efe579175
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-gh@69dc0be34598f843ecd0b919bbb83d49be5a8557
 
       - name: The store package's visibility and link, before anything is built
         shell: bash
