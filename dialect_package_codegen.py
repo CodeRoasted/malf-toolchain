@@ -49,7 +49,9 @@ A DIALECT MAY DECLARE A KEY A STREAM'S ACQUIRER SUPPLIES A VALUE UNDER. A row of
 optional `declared_values:` section names the key and the markers behind which the core
 masks a digit run equal to the declared value (DN-133.D1): the dialect owns the vocabulary
 (`PR-`), the acquirer owns the value (a run's own pull-request number), and the core owns the
-mechanism. No value appears here, ever. A declaration with no such section keeps its content
+mechanism. A row may instead declare `min_digits:` and no marker: a value at least that long
+is matched as a whole digit run anywhere, and the floor, never below 10, is what keeps it off
+ordinary words (DN-162.D13). No value appears here, ever. A declaration with no such section keeps its content
 hash and emits the bytes it emitted before.
 
 A MARKER ROW MAY OPEN A UNIT WITHOUT NAMING IT. The optional `role: Opens` states that the
@@ -729,14 +731,22 @@ def _validate_outcome_token_row(row: dict, context: str, source: str) -> dict:
     }
 
 
+# The fewest digits a markerless declared value may hold: with no marker in front of it, the
+# length is what keeps a declared value from meeting an ordinary word (DN-162.D13).
+_DECLARED_VALUE_FLOOR = 10
+
+
 def _validate_declared_value_row(row: dict, context: str, source: str) -> dict:
-    """A key a stream's acquirer supplies a value under, and the markers the core masks behind.
+    """A key a stream's acquirer supplies a value under, and how the core finds it in a line.
 
     The key is what a caller types (`--changed-context pull_request=<n>`), so it is spelled like
-    a dialect name. A marker ending in a digit is refused here as composition refuses it: the
-    digit run after it would not be the run the marker introduces.
+    a dialect name. A row declares exactly one of two matches: `markers:`, behind which the core
+    masks a digit run equal to the value, or `min_digits:`, a floor below which no value is
+    accepted, the core then masking any maximal digit run equal to the value (DN-162.D13). A
+    marker ending in a digit is refused here as composition refuses it: the digit run after it
+    would not be the run the marker introduces.
     """
-    expect_keys(row, ("key", "markers", "dialect_gate", "why"), context, source,
+    expect_keys(row, ("key", "markers", "min_digits", "dialect_gate", "why"), context, source,
                 _DIALECT_REJECTIONS)
     key = required_scalar(row, "key", context, source)
     _ascii_field(key, f"{context}: `key:`", source)
@@ -745,6 +755,30 @@ def _validate_declared_value_row(row: dict, context: str, source: str) -> dict:
         fail(source, None,
              f"{context}: `key: {key}` must match [a-z][a-z0-9_]* — it is what a caller "
              "declares a value under")
+    if "markers" in row and "min_digits" in row:
+        fail(source, None,
+             f"{context}: declares both `markers:` and `min_digits:` — a value is found behind "
+             "a marker or by its length behind a floor, never both")
+    if "markers" not in row and "min_digits" not in row:
+        fail(source, None,
+             f"{context}: declares neither `markers:` nor `min_digits:` — a key with no way to "
+             "find its value could never mask anything")
+    if "min_digits" in row:
+        spelled = row["min_digits"]
+        if not isinstance(spelled, str) or not spelled.isascii() or not spelled.isdigit():
+            fail(source, None, f"{context}: `min_digits:` must be an integer, got {spelled!r}")
+        floor = int(spelled)
+        if floor < _DECLARED_VALUE_FLOOR:
+            fail(source, None,
+                 f"{context}: `min_digits: {floor}` is below the floor of "
+                 f"{_DECLARED_VALUE_FLOOR} — with no marker, a shorter value would meet "
+                 "ordinary words (DN-162.D13)")
+        return {
+            "key": key,
+            "min_digits": floor,
+            "dialect_gate": _dialect_gate(row, context, source),
+            "why": _validate_why(row, context, source),
+        }
     markers = row.get("markers")
     if not isinstance(markers, list) or not markers:
         fail(source, None,
@@ -1747,23 +1781,34 @@ def _emit_declared_value_rows(out: list[str], declaration: dict) -> None:
         return
     _emit_why(out, section["why"])
     for position, row in enumerate(section["rows"]):
+        if "markers" not in row:
+            continue
         values = ", ".join(_quoted(marker) for marker in row["markers"])
         out.append(f"inline constexpr std::array<std::string_view, {len(row['markers'])}> "
                    f"kDeclaredValueMarkers{position}{{{{{values}}}}};")
     _emit_array(out, "DeclaredValueRow", "kDeclaredValues", len(section["rows"]))
     for position, row in enumerate(section["rows"]):
+        match = (("markers", f"kDeclaredValueMarkers{position}") if "markers" in row
+                 else ("min_digits", str(row["min_digits"])))
         _emit_row(out, _owned([
             ("key", _quoted(row["key"])),
-            ("markers", f"kDeclaredValueMarkers{position}"),
+            match,
             ("dialect_gate", _gate_expression(row["dialect_gate"])),
         ], row), row["why"])
     out.append("}};")
     name = declaration["name"]
     out.append("static_assert(std::ranges::all_of(kDeclaredValues, "
                "insight::semantic::declared_value_row_well_formed),")
-    out.append(f'              "{name}: a declared value names no key or no marker, or a '
-               'marker is empty or ends in a "')
-    out.append('              "digit -- composition would refuse the package");')
+    # A declaration holding only marker rows keeps the message it always carried, byte for byte.
+    if any("min_digits" in row for row in section["rows"]):
+        out.append(f'              "{name}: a declared value names no key, or neither markers '
+                   'nor a digit floor, or a "')
+        out.append('              "marker is empty or ends in a digit -- composition would '
+                   'refuse the package");')
+    else:
+        out.append(f'              "{name}: a declared value names no key or no marker, or a '
+                   'marker is empty or ends in a "')
+        out.append('              "digit -- composition would refuse the package");')
     out.append("")
 
 
@@ -2673,6 +2718,42 @@ def selftest() -> int:
                       "must be a non-empty sequence",
                       lambda: _parse_fixture(_with_value.replace(
                           'markers: [\"PR-\", \"pull-\"]', "markers: []")))
+    # ── a declared value matched by a digit FLOOR and no marker (DN-162.D13) ──────────────
+    _with_floor = _with_value.replace(
+        "      - key: pull_request\n        markers: [\"PR-\", \"pull-\"]\n",
+        "      - key: run_id\n        min_digits: 10\n", 1)
+    _case("declared value: a markerless row with a floor reaches the manifest, and no marker "
+          "array", failures, lambda: _assert(
+              '{.key = "run_id",\n     .min_digits = 10,\n     .dialect_gate = kDialect},'
+              in render_fixture(text=_with_floor)
+              and "kDeclaredValueMarkers" not in render_fixture(text=_with_floor)
+              and declaration_hash(_parse_fixture(_with_floor))
+              != declaration_hash(_parse_fixture(_with_value)),
+              "the floor row did not reach kDeclaredValues whole, or emitted a marker array"))
+    _case("declared value: a marker row's emission is unchanged by the floor grammar", failures,
+          lambda: _assert(
+              "insight::semantic::declared_value_row_well_formed" in render_fixture(
+                  text=_with_value)
+              and "min_digits" not in render_fixture(text=_with_value),
+              "a marker row's bytes moved with the floor grammar"))
+    _expect_rejection("refuse: a declared value with both markers and a floor", failures,
+                      "declares both `markers:` and `min_digits:`",
+                      lambda: _parse_fixture(_with_value.replace(
+                          "        dialect_gate: self\n        why: [\"Both spellings",
+                          "        min_digits: 10\n        dialect_gate: self\n"
+                          "        why: [\"Both spellings", 1)))
+    _expect_rejection("refuse: a declared value with neither markers nor a floor", failures,
+                      "declares neither `markers:` nor `min_digits:`",
+                      lambda: _parse_fixture(_with_floor.replace("        min_digits: 10\n", "",
+                                                                 1)))
+    _expect_rejection("refuse: a declared-value floor of 9 digits", failures,
+                      "below the floor of 10",
+                      lambda: _parse_fixture(_with_floor.replace("min_digits: 10",
+                                                                 "min_digits: 9", 1)))
+    _expect_rejection("refuse: a declared-value floor that is not an integer", failures,
+                      "`min_digits:` must be an integer",
+                      lambda: _parse_fixture(_with_floor.replace("min_digits: 10",
+                                                                 "min_digits: ten", 1)))
     _expect_rejection("refuse: a declared-value key outside the caller's spelling", failures,
                       "must match [a-z][a-z0-9_]*",
                       lambda: _parse_fixture(_with_value.replace(
