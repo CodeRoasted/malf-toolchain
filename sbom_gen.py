@@ -278,7 +278,7 @@ def note_fingerprint() -> str:
 # Bump this WITH the note edit, in the same commit, after running `malf sbom` so the
 # committed artifacts move with it. A mismatch is not a lint nit — it means every
 # committed SBOM in the workspace is now stale.
-NOTE_FINGERPRINT = "d432ac021939c88b"
+NOTE_FINGERPRINT = "8e67baa45252c2cf"
 
 
 def selftest() -> int:
