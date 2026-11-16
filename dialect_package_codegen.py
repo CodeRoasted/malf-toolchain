@@ -49,10 +49,24 @@ A DIALECT MAY DECLARE A KEY A STREAM'S ACQUIRER SUPPLIES A VALUE UNDER. A row of
 optional `declared_values:` section names the key and the markers behind which the core
 masks a digit run equal to the declared value (DN-133.D1): the dialect owns the vocabulary
 (`PR-`), the acquirer owns the value (a run's own pull-request number), and the core owns the
-mechanism. A row may instead declare `min_digits:` and no marker: a value at least that long
-is matched as a whole digit run anywhere, and the floor, never below 10, is what keeps it off
-ordinary words (DN-162.D13). No value appears here, ever. A declaration with no such section keeps its content
+mechanism. A row may also, or instead, declare `min_digits:`: a value at least that long is
+matched as a whole digit run anywhere, and the floor, never below 5, is what keeps it off ordinary
+words (DN-162.D13, DN-163.D5); a key declares at least one of the two. A later revision EXTENDS a
+key by a row of its own, `extends: <key>` with its own `since:`, adding markers or a floor and
+never removing or rewriting what the base row declares, so a retained oracle's base row stays
+byte-equal to it (DN-163.D4). A key may instead declare `value: Text`: the value is text, found as
+a whole token behind its declared `prefixes:`, and it takes no marker, no floor and no extension
+(DN-163.D6). No value appears here, ever. A declaration with no such section keeps its content
 hash and emits the bytes it emitted before.
+
+A DIALECT MAY DECLARE ITS RUNNER'S INSTANCE VALUES (DN-163.D1, DN-163.D7). A row of the optional
+`instance_values:` section names where a value that IS a runner instance stands, in one of three
+forms, and the core masks that value after every other rule: `line:`, a whole-line prefix whose
+quoted value after it masks whole; `shape:`, literal bytes with exactly one `{n}` hole, matched
+inside any token, the hole masking; and `argument:`, a line prefix whose `flags:` each mask the
+token after them, and whose optional `keys:` (`label=`) each mask their value inside a token. A
+row is gated to its own package. A declaration with no such section keeps its content hash and
+emits the bytes it emitted before, the manifest member included.
 
 A MARKER ROW MAY OPEN A UNIT WITHOUT NAMING IT. The optional `role: Opens` states that the
 row's line opens a unit of its kind and carries no identity; the unit is named by a
@@ -187,6 +201,10 @@ _STRUCTURAL_ROLES = ("None", "GroupBegin", "GroupEnd", "Terminator", "Progress")
 _SHAPE_ONLY_ROLES = ("Progress",)
 # The one hole a shape admits: a decimal number, `\d+(\.\d+)?`, matched by the core.
 _SHAPE_HOLE = "{n}"
+# The three forms an instance-value row takes, by the one key it declares (DN-163.D7), and the
+# enumerator each is emitted as.
+_INSTANCE_FORMS = ("line", "shape", "argument")
+_INSTANCE_FORM_ENUM = {"line": "Line", "shape": "Shape", "argument": "Argument"}
 _MARKER_KINDS = ("None", "Job", "Step", "InnerStep")
 _CHILD_ORDERS = ("Ordered", "Unordered")
 _PAYLOAD_EXTRACTS = ("None", "RemainderAfterPrefix", "RemainderToClosingParen",
@@ -243,7 +261,7 @@ _CHANNEL_GATE_ANY = "any"
 
 _ROW_SECTIONS = ("roles", "markers", "level_lifts", "outcome_tokens",
                  "outcome_markers", "locations", "value_classes", "declared_values",
-                 "stop_announcements")
+                 "stop_announcements", "instance_values")
 _VOCABULARY_SECTIONS = ("channels", "revisions")
 _SECTION_NAMES = _ROW_SECTIONS + _VOCABULARY_SECTIONS
 
@@ -731,54 +749,19 @@ def _validate_outcome_token_row(row: dict, context: str, source: str) -> dict:
     }
 
 
-# The fewest digits a markerless declared value may hold: with no marker in front of it, the
-# length is what keeps a declared value from meeting an ordinary word (DN-162.D13).
-_DECLARED_VALUE_FLOOR = 10
+# The fewest digits a declared value's floor may name: with no marker in front of it, the length is
+# what keeps a declared value from meeting an ordinary word (DN-162.D13). Five is the measured
+# length at which a random value of the key's length met nothing (DN-163.D5).
+_DECLARED_VALUE_FLOOR = 5
+# The closed kinds a declared value may name beside the default, a digit run. `Text` is a value
+# found as a whole token behind declared prefixes (DN-163.D6). The default has no spelling, so
+# "a digit value" is the key's absence, which keeps every existing row's hash and bytes.
+_DECLARED_VALUE_KINDS = ("Text",)
+_TEXT_VALUE = "Text"
 
 
-def _validate_declared_value_row(row: dict, context: str, source: str) -> dict:
-    """A key a stream's acquirer supplies a value under, and how the core finds it in a line.
-
-    The key is what a caller types (`--changed-context pull_request=<n>`), so it is spelled like
-    a dialect name. A row declares exactly one of two matches: `markers:`, behind which the core
-    masks a digit run equal to the value, or `min_digits:`, a floor below which no value is
-    accepted, the core then masking any maximal digit run equal to the value (DN-162.D13). A
-    marker ending in a digit is refused here as composition refuses it: the digit run after it
-    would not be the run the marker introduces.
-    """
-    expect_keys(row, ("key", "markers", "min_digits", "dialect_gate", "why"), context, source,
-                _DIALECT_REJECTIONS)
-    key = required_scalar(row, "key", context, source)
-    _ascii_field(key, f"{context}: `key:`", source)
-    if not key or not key.replace("_", "a").isalnum() or not key[0].isalpha() \
-            or key != key.lower():
-        fail(source, None,
-             f"{context}: `key: {key}` must match [a-z][a-z0-9_]* — it is what a caller "
-             "declares a value under")
-    if "markers" in row and "min_digits" in row:
-        fail(source, None,
-             f"{context}: declares both `markers:` and `min_digits:` — a value is found behind "
-             "a marker or by its length behind a floor, never both")
-    if "markers" not in row and "min_digits" not in row:
-        fail(source, None,
-             f"{context}: declares neither `markers:` nor `min_digits:` — a key with no way to "
-             "find its value could never mask anything")
-    if "min_digits" in row:
-        spelled = row["min_digits"]
-        if not isinstance(spelled, str) or not spelled.isascii() or not spelled.isdigit():
-            fail(source, None, f"{context}: `min_digits:` must be an integer, got {spelled!r}")
-        floor = int(spelled)
-        if floor < _DECLARED_VALUE_FLOOR:
-            fail(source, None,
-                 f"{context}: `min_digits: {floor}` is below the floor of "
-                 f"{_DECLARED_VALUE_FLOOR} — with no marker, a shorter value would meet "
-                 "ordinary words (DN-162.D13)")
-        return {
-            "key": key,
-            "min_digits": floor,
-            "dialect_gate": _dialect_gate(row, context, source),
-            "why": _validate_why(row, context, source),
-        }
+def _declared_value_markers(row: dict, context: str, source: str) -> list[str]:
+    """A declared value's markers: non-empty, ASCII, unique, and none ending in a digit."""
     markers = row.get("markers")
     if not isinstance(markers, list) or not markers:
         fail(source, None,
@@ -797,12 +780,244 @@ def _validate_declared_value_row(row: dict, context: str, source: str) -> dict:
         if marker in seen:
             fail(source, None, f"{marker_context}: duplicate marker {marker!r}")
         seen.add(marker)
-    return {
-        "key": key,
-        "markers": list(markers),
-        "dialect_gate": _dialect_gate(row, context, source),
-        "why": _validate_why(row, context, source),
-    }
+    return list(markers)
+
+
+def _declared_value_floor(row: dict, context: str, source: str) -> int:
+    """A declared value's digit floor: an integer, never below `_DECLARED_VALUE_FLOOR`."""
+    spelled = row["min_digits"]
+    if not isinstance(spelled, str) or not spelled.isascii() or not spelled.isdigit():
+        fail(source, None, f"{context}: `min_digits:` must be an integer, got {spelled!r}")
+    floor = int(spelled)
+    if floor < _DECLARED_VALUE_FLOOR:
+        fail(source, None,
+             f"{context}: `min_digits: {floor}` is below the floor of "
+             f"{_DECLARED_VALUE_FLOOR} — with no marker, a shorter value would meet "
+             "ordinary words (DN-162.D13, DN-163.D5)")
+    return floor
+
+
+def _token_list(row: dict, field: str, noun: str, context: str, source: str) -> list[str]:
+    """A non-empty sequence of unique, non-empty ASCII scalars, each one token (no whitespace)."""
+    items = row.get(field)
+    if not isinstance(items, list) or not items:
+        fail(source, None,
+             f"{context}: `{field}:` must be a non-empty sequence — declared, it names at least "
+             f"one {noun}")
+    seen: set[str] = set()
+    for position, item in enumerate(items):
+        item_context = f"{context} {field}[{position}]"
+        if not isinstance(item, str) or not item:
+            fail(source, None, f"{item_context}: a {noun} is a non-empty scalar")
+        _ascii_field(item, item_context, source)
+        if any(byte.isspace() for byte in item):
+            fail(source, None,
+                 f"{item_context}: {item!r} holds whitespace — a {noun} is one token, and the "
+                 "core reads it inside one")
+        if item in seen:
+            fail(source, None, f"{item_context}: duplicate {noun} {item!r}")
+        seen.add(item)
+    return list(items)
+
+
+def _validate_declared_value_row(row: dict, context: str, source: str) -> dict:
+    """A key a stream's acquirer supplies a value under, and how the core finds it in a line.
+
+    The key is what a caller types (`--changed-context pull_request=<n>`), so it is spelled like
+    a dialect name. A digit value declares at least one of two matches: `markers:`, behind which
+    the core masks a digit run equal to the value, and `min_digits:`, a floor below which no
+    value is accepted, the core then masking any maximal digit run equal to the value
+    (DN-162.D13, DN-163.D5). A marker ending in a digit is refused here as composition refuses
+    it: the digit run after it would not be the run the marker introduces. A text value
+    (`value: Text`) declares `prefixes:` and neither match (DN-163.D6). A row reading
+    `extends: <key>` is a later revision's addition to that key (DN-163.D4).
+    """
+    expect_keys(row, ("key", "extends", "value", "markers", "min_digits", "prefixes",
+                      "dialect_gate", "why"), context, source, _DIALECT_REJECTIONS)
+    if "key" in row and "extends" in row:
+        fail(source, None,
+             f"{context}: declares both `key:` and `extends:` — a row names a key, or extends "
+             "one a base row names (DN-163.D4)")
+    if "extends" in row:
+        return _validate_declared_value_extension(row, context, source)
+    key = required_scalar(row, "key", context, source)
+    _ascii_field(key, f"{context}: `key:`", source)
+    if not key or not key.replace("_", "a").isalnum() or not key[0].isalpha() \
+            or key != key.lower():
+        fail(source, None,
+             f"{context}: `key: {key}` must match [a-z][a-z0-9_]* — it is what a caller "
+             "declares a value under")
+    if "value" in row:
+        kind = _enum_value(row, "value", _DECLARED_VALUE_KINDS, context, source)
+        if "markers" in row or "min_digits" in row:
+            fail(source, None,
+                 f"{context}: a text value declares no `markers:` and no `min_digits:` — both "
+                 "find a digit run, and a text value is found as a whole token behind its "
+                 "declared `prefixes:` (DN-163.D6)")
+        validated: dict[str, object] = {"key": key, "value": kind}
+        if "prefixes" in row:
+            validated["prefixes"] = _token_list(row, "prefixes", "prefix", context, source)
+    else:
+        if "prefixes" in row:
+            fail(source, None,
+                 f"{context}: `prefixes:` is a text value's (`value: {_TEXT_VALUE}`) — a digit "
+                 "value is found behind `markers:` or by its length behind `min_digits:` "
+                 "(DN-163.D6)")
+        if "markers" not in row and "min_digits" not in row:
+            fail(source, None,
+                 f"{context}: declares neither `markers:` nor `min_digits:` — a key with no way "
+                 "to find its value could never mask anything")
+        validated = {"key": key}
+        if "markers" in row:
+            validated["markers"] = _declared_value_markers(row, context, source)
+        if "min_digits" in row:
+            validated["min_digits"] = _declared_value_floor(row, context, source)
+    validated["dialect_gate"] = _dialect_gate(row, context, source)
+    validated["why"] = _validate_why(row, context, source)
+    return validated
+
+
+def _validate_declared_value_extension(row: dict, context: str, source: str) -> dict:
+    """A later revision's addition to a declared key: markers, a floor, or both (DN-163.D4).
+
+    It carries no gate, no kind and no prefixes: what it may not add is unspellable, so it only
+    adds. Whether its key exists, is earlier and already holds what it adds is the section's
+    check, `_check_declared_value_extensions`.
+    """
+    if "dialect_gate" in row:
+        fail(source, None,
+             f"{context}: `dialect_gate:` on an extension — an extension carries its base's gate "
+             "and declares none, since a second gate would rewrite the key (DN-163.D4)")
+    for field in ("value", "prefixes"):
+        if field in row:
+            fail(source, None,
+                 f"{context}: `{field}:` on an extension — an extension adds markers or a floor, "
+                 "and a text value is extended by no row (DN-163.D4, DN-163.D6)")
+    extends = required_scalar(row, "extends", context, source)
+    _ascii_field(extends, f"{context}: `extends:`", source)
+    if "markers" not in row and "min_digits" not in row:
+        fail(source, None,
+             f"{context}: adds neither `markers:` nor `min_digits:` — an extension that adds "
+             "nothing is no extension (DN-163.D4)")
+    validated: dict[str, object] = {"extends": extends}
+    if "markers" in row:
+        validated["markers"] = _declared_value_markers(row, context, source)
+    if "min_digits" in row:
+        validated["min_digits"] = _declared_value_floor(row, context, source)
+    validated["why"] = _validate_why(row, context, source)
+    return validated
+
+
+def _check_declared_value_extensions(rows: list[dict], revisions: list[str],
+                                     source: str) -> None:
+    """Each extension names an earlier digit key, once per revision, and only adds (DN-163.D4).
+
+    A key composes as its base row plus its extensions, so "only adds" is judged against the
+    whole key: a marker any of its rows holds, or a second floor, would rewrite it.
+    """
+    bases = {row["key"]: position for position, row in enumerate(rows) if "key" in row}
+    extended: dict[tuple[str, str], int] = {}
+    for position, row in enumerate(rows):
+        if "extends" not in row:
+            continue
+        context = f"section `declared_values:` rows[{position}]"
+        key = row["extends"]
+        if "since" not in row:
+            fail(source, None,
+                 f"{context}: `extends: {key}` — an extension is a later revision's row: it "
+                 "names the revision that introduced it, after its base's, and a one-revision "
+                 "declaration has no later revision (DN-163.D4)")
+        if key not in bases:
+            fail(source, None,
+                 f"{context}: `extends: {key}` extends no key this section declares — an "
+                 "extension names an existing key (DN-163.D4)")
+        base = rows[bases[key]]
+        if "value" in base:
+            fail(source, None,
+                 f"{context}: `extends: {key}` names a text value, and a text value is extended "
+                 "by no row: an extension adds markers or a floor, which find a digit run "
+                 "(DN-163.D4, DN-163.D6)")
+        if revisions.index(row["since"]) <= revisions.index(base["since"]):
+            fail(source, None,
+                 f"{context}: `extends: {key}` declares `since: {row['since']}`, no later than "
+                 f"its base's `since: {base['since']}` (rows[{bases[key]}]) — an extension is "
+                 "introduced by a revision later than its base's (DN-163.D4)")
+        if (key, row["since"]) in extended:
+            fail(source, None,
+                 f"{context}: rows[{extended[(key, row['since'])]}] already extends `{key}` in "
+                 f"`{row['since']}` — a key takes at most one extension per revision (DN-163.D4)")
+        extended[(key, row["since"])] = position
+        for other_position, other in enumerate(rows):
+            if other_position == position or other.get("key", other.get("extends")) != key:
+                continue
+            for marker in row.get("markers", []):
+                if marker in other.get("markers", []):
+                    fail(source, None,
+                         f"{context}: `extends: {key}` — the key already holds the marker "
+                         f"{marker!r} (rows[{other_position}]); an extension only adds "
+                         "(DN-163.D4)")
+            if "min_digits" in row and "min_digits" in other:
+                fail(source, None,
+                     f"{context}: `extends: {key}` — the key already declares a floor "
+                     f"(rows[{other_position}]); an extension only adds, and a second floor "
+                     "would rewrite the first (DN-163.D4)")
+
+
+def _validate_instance_value_row(row: dict, context: str, source: str) -> dict:
+    """Where a value that IS a runner instance stands, in one of three forms (DN-163.D1, DN-163.D7).
+
+    `line:` is a whole-line prefix whose quoted value after it masks whole; `shape:` is literal
+    bytes with exactly one `{n}` hole, matched inside any token, the hole masking; `argument:`
+    is a line prefix whose `flags:` each mask the token after them and whose `keys:` each mask
+    their value inside a token. The row is gated to its own package: its reach is that
+    package's lines, by construction (DN-163.D1).
+    """
+    expect_keys(row, _INSTANCE_FORMS + ("flags", "keys", "dialect_gate", "why"), context, source,
+                _DIALECT_REJECTIONS)
+    forms = [form for form in _INSTANCE_FORMS if form in row]
+    if len(forms) != 1:
+        fail(source, None,
+             f"{context}: an instance row declares exactly one of `line:`, `shape:` and "
+             "`argument:` — a whole-line prefix, an in-token shape, or a command's arguments "
+             "(DN-163.D7)")
+    form = forms[0]
+    if form != "argument" and ("flags" in row or "keys" in row):
+        fail(source, None,
+             f"{context}: `flags:` and `keys:` belong to an argument row — a `{form}:` row masks "
+             "its own value and reads no argument")
+    gate = _dialect_gate(row, context, source)
+    if gate != _DIALECT_GATE_SELF:
+        fail(source, None,
+             f"{context}: `dialect_gate: {gate}` — an instance row is gated to its own package "
+             "(`self`): its reach is the lines that package declares, by construction "
+             "(DN-163.D1)")
+    validated: dict[str, object] = {}
+    if form == "shape":
+        spelled = row["shape"]
+        if isinstance(spelled, str) and any(byte.isspace() for byte in spelled):
+            fail(source, None,
+                 f"{context}: `shape: {spelled}` holds whitespace — an instance shape is "
+                 "matched inside a token, which holds none, so it could never match (DN-163.D7)")
+        if isinstance(spelled, str) and spelled.count(_SHAPE_HOLE) != 1:
+            fail(source, None,
+                 f"{context}: `shape: {spelled}` — an instance shape carries exactly one hole "
+                 f"`{_SHAPE_HOLE}`, the value it masks (DN-163.D7)")
+        validated["shape"] = _shape(row, context, source, hole_required=True)
+    else:
+        validated[form] = _prefix(row, form, context, source)
+    if form == "argument":
+        validated["flags"] = _token_list(row, "flags", "flag", context, source)
+        if "keys" in row:
+            keys = _token_list(row, "keys", "key", context, source)
+            for position, key in enumerate(keys):
+                if len(key) < 2 or not key.endswith("="):
+                    fail(source, None,
+                         f"{context} keys[{position}]: {key!r} — a key is spelled with its `=` "
+                         "(`label=`), and the value after it is what masks (DN-163.D7)")
+            validated["keys"] = keys
+    validated["dialect_gate"] = gate
+    validated["why"] = _validate_why(row, context, source)
+    return validated
 
 
 def _validate_stop_announcement_row(row: dict, context: str, source: str) -> dict:
@@ -821,6 +1036,7 @@ def _validate_stop_announcement_row(row: dict, context: str, source: str) -> dic
 
 _ROW_VALIDATORS = {
     "stop_announcements": _validate_stop_announcement_row,
+    "instance_values": _validate_instance_value_row,
     "declared_values": _validate_declared_value_row,
     "roles": _validate_role_row,
     "level_lifts": _validate_level_lift_row,
@@ -931,6 +1147,8 @@ def _validate_section(node, name: str, source: str, channels: list[str] | None =
         validator = _ROW_VALIDATORS[name]
         rows = _validate_rows(items, name, source, revisions or [],
                               lambda row, row_context: validator(row, row_context, source))
+        if name == "declared_values":
+            _check_declared_value_extensions(rows, revisions or [], source)
     return {"why": why, "rows": rows}
 
 
@@ -1187,8 +1405,10 @@ def _check_row_uniqueness(declaration: dict, source: str) -> None:
         "markers": lambda row: (row["prefix"], row["dialect_gate"], row["channel_gate"]),
         "level_lifts": lambda row: (row["prefix"], row["dialect_gate"]),
         "outcome_tokens": lambda row: (row["token"], row["dialect_gate"]),
-        "declared_values": lambda row: (row["key"],),
+        "declared_values": lambda row: ((row["key"],) if "key" in row
+                                        else ("extends", row["extends"], row["since"])),
         "stop_announcements": lambda row: (row["shape"], row["dialect_gate"]),
+        "instance_values": lambda row: _instance_form_bytes(row),
     }
     for section, key_of in keys.items():
         seen: dict[tuple, int] = {}
@@ -1218,13 +1438,17 @@ _ROW_BYTES = {
     "markers": lambda row: row["prefix"],
     "level_lifts": lambda row: row["prefix"],
     "outcome_tokens": lambda row: row["token"],
-    "declared_values": lambda row: row["key"],
+    "declared_values": lambda row: (row["key"] if "key" in row
+                                    else f"extends: {row['extends']}"),
     "stop_announcements": lambda row: row["shape"],
+    "instance_values": lambda row: _instance_form_bytes(row)[1],
 }
 
 # The literal bytes a row's match starts with: a prefix, or a shape's bytes before its first
 # hole. `declared_values` is absent: its rows match no line, they name a key, and a new key
-# cannot take an old key's value because the key is unique in the package.
+# cannot take an old key's value because the key is unique in the package. `instance_values` is
+# absent too: its rows only mask, after every other rule, so a newer row takes no line from an
+# older one and both apply.
 _ROW_LITERAL = {
     "roles": lambda row: row["prefix"] if "prefix" in row else row["shape"].split(_SHAPE_HOLE)[0],
     "markers": lambda row: row["prefix"],
@@ -1232,6 +1456,12 @@ _ROW_LITERAL = {
     "outcome_tokens": lambda row: row["token"],
     "stop_announcements": lambda row: row["shape"].split(_SHAPE_HOLE)[0],
 }
+
+
+def _instance_form_bytes(row: dict) -> tuple[str, str]:
+    """An instance row's form and the bytes it declares under that form's key."""
+    form = next(form for form in _INSTANCE_FORMS if form in row)
+    return form, row[form]
 
 
 def _strip_why(node):
@@ -1550,6 +1780,7 @@ def emit_inc(declaration: dict, *, module_suffix: str, source_name: str) -> str:
     _emit_outcome_token_rows(out, declaration)
     _emit_declared_value_rows(out, declaration)
     _emit_stop_announcement_rows(out, declaration)
+    _emit_instance_value_rows(out, declaration)
     _emit_declared_absences(out, declaration)
     _emit_manifest(out, declaration)
 
@@ -1781,26 +2012,48 @@ def _emit_declared_value_rows(out: list[str], declaration: dict) -> None:
         return
     _emit_why(out, section["why"])
     for position, row in enumerate(section["rows"]):
-        if "markers" not in row:
-            continue
-        values = ", ".join(_quoted(marker) for marker in row["markers"])
-        out.append(f"inline constexpr std::array<std::string_view, {len(row['markers'])}> "
-                   f"kDeclaredValueMarkers{position}{{{{{values}}}}};")
+        for member, symbol in (("markers", "kDeclaredValueMarkers"),
+                               ("prefixes", "kDeclaredValuePrefixes")):
+            if member not in row:
+                continue
+            values = ", ".join(_quoted(item) for item in row[member])
+            out.append(f"inline constexpr std::array<std::string_view, {len(row[member])}> "
+                       f"{symbol}{position}{{{{{values}}}}};")
+    gates = {row["key"]: row["dialect_gate"] for row in section["rows"] if "key" in row}
     _emit_array(out, "DeclaredValueRow", "kDeclaredValues", len(section["rows"]))
     for position, row in enumerate(section["rows"]):
-        match = (("markers", f"kDeclaredValueMarkers{position}") if "markers" in row
-                 else ("min_digits", str(row["min_digits"])))
-        _emit_row(out, _owned([
-            ("key", _quoted(row["key"])),
-            match,
-            ("dialect_gate", _gate_expression(row["dialect_gate"])),
-        ], row), row["why"])
+        # An extension is its own row under its base's key and gate, marked as one, so the core
+        # composes a key from its base row and its extensions (DN-163.D4). Members a row does not
+        # declare are not named, so a row of the earlier grammar emits the bytes it did before.
+        key = row.get("key", row.get("extends"))
+        fields = [("key", _quoted(key))]
+        if "markers" in row:
+            fields.append(("markers", f"kDeclaredValueMarkers{position}"))
+        if "min_digits" in row:
+            fields.append(("min_digits", str(row["min_digits"])))
+        if "value" in row:
+            fields.append(("value", f"DeclaredValueKind::{row['value']}"))
+        if "prefixes" in row:
+            fields.append(("prefixes", f"kDeclaredValuePrefixes{position}"))
+        fields.append(("dialect_gate", _gate_expression(gates[key])))
+        if "extends" in row:
+            fields.append(("extends", "true"))
+        _emit_row(out, _owned(fields, row), row["why"])
     out.append("}};")
     name = declaration["name"]
     out.append("static_assert(std::ranges::all_of(kDeclaredValues, "
                "insight::semantic::declared_value_row_well_formed),")
-    # A declaration holding only marker rows keeps the message it always carried, byte for byte.
-    if any("min_digits" in row for row in section["rows"]):
+    # The message names what the declaration's rows can get wrong, and a declaration of the
+    # earlier grammar keeps the message it always carried, byte for byte.
+    rows = section["rows"]
+    if any("extends" in row or "value" in row for row in rows):
+        out.append(f'              "{name}: a declared value names no key, a digit value '
+                   'neither markers nor a digit "')
+        out.append('              "floor, a text value a marker or a floor, or a marker or a '
+                   'prefix is empty or a "')
+        out.append('              "marker ends in a digit -- composition would refuse the '
+                   'package");')
+    elif any("min_digits" in row for row in rows):
         out.append(f'              "{name}: a declared value names no key, or neither markers '
                    'nor a digit floor, or a "')
         out.append('              "marker is empty or ends in a digit -- composition would '
@@ -1829,6 +2082,39 @@ def _emit_stop_announcement_rows(out: list[str], declaration: dict) -> None:
                "insight::semantic::stop_announcement_row_well_formed),")
     out.append(f'              "{name}: a stop announcement is not a well-formed whole-line '
                'shape -- "')
+    out.append('              "composition would refuse the package");')
+    out.append("")
+
+
+def _emit_instance_value_rows(out: list[str], declaration: dict) -> None:
+    section = declaration.get("instance_values")
+    if section is None or not section["rows"]:
+        return
+    _emit_why(out, section["why"])
+    for position, row in enumerate(section["rows"]):
+        for member, symbol in (("flags", "kInstanceValueFlags"), ("keys", "kInstanceValueKeys")):
+            if member not in row:
+                continue
+            values = ", ".join(_quoted(item) for item in row[member])
+            out.append(f"inline constexpr std::array<std::string_view, {len(row[member])}> "
+                       f"{symbol}{position}{{{{{values}}}}};")
+    _emit_array(out, "InstanceValueRow", "kInstanceValues", len(section["rows"]))
+    for position, row in enumerate(section["rows"]):
+        form, spelled = _instance_form_bytes(row)
+        fields = [("form", f"InstanceValueForm::{_INSTANCE_FORM_ENUM[form]}"),
+                  ("bytes", _quoted(spelled))]
+        if "flags" in row:
+            fields.append(("flags", f"kInstanceValueFlags{position}"))
+        if "keys" in row:
+            fields.append(("keys", f"kInstanceValueKeys{position}"))
+        fields.append(("dialect_gate", _gate_expression(row["dialect_gate"])))
+        _emit_row(out, _owned(fields, row), row["why"])
+    out.append("}};")
+    name = declaration["name"]
+    out.append("static_assert(std::ranges::all_of(kInstanceValues, "
+               "insight::semantic::instance_value_row_well_formed),")
+    out.append(f'              "{name}: an instance value is not a well-formed line, shape or '
+               'argument row -- "')
     out.append('              "composition would refuse the package");')
     out.append("")
 
@@ -1881,6 +2167,8 @@ def _emit_manifest(out: list[str], declaration: dict) -> None:
     # bytes it emitted before the section existed and builds against a core without the member.
     if declaration.get("stop_announcements", {}).get("rows"):
         members.append(("stop_announcements", "kStopAnnouncements"))
+    if declaration.get("instance_values", {}).get("rows"):
+        members.append(("instance_values", "kInstanceValues"))
     for kind in _HOOK_KINDS:
         entry = tier.get(kind)
         if entry is not None:
@@ -2736,20 +3024,30 @@ def selftest() -> int:
                   text=_with_value)
               and "min_digits" not in render_fixture(text=_with_value),
               "a marker row's bytes moved with the floor grammar"))
-    _expect_rejection("refuse: a declared value with both markers and a floor", failures,
-                      "declares both `markers:` and `min_digits:`",
-                      lambda: _parse_fixture(_with_value.replace(
-                          "        dialect_gate: self\n        why: [\"Both spellings",
-                          "        min_digits: 10\n        dialect_gate: self\n"
-                          "        why: [\"Both spellings", 1)))
+    # A key declares at least one of the two, so one row may declare both (DN-163.D5).
+    _with_both = _with_value.replace(
+        "        dialect_gate: self\n        why: [\"Both spellings",
+        "        min_digits: 5\n        dialect_gate: self\n        why: [\"Both spellings", 1)
+    _case("declared value: a row declaring markers AND a floor reaches the manifest with both "
+          "(DN-163.D5)", failures, lambda: _assert(
+              '{.key = "pull_request",\n     .markers = kDeclaredValueMarkers0,\n'
+              '     .min_digits = 5,\n     .dialect_gate = kDialect},'
+              in render_fixture(text=_with_both),
+              "a row declaring both matches did not emit both members, in the core's order: "
+              + _array_body(render_fixture(text=_with_both), "kDeclaredValues")))
     _expect_rejection("refuse: a declared value with neither markers nor a floor", failures,
                       "declares neither `markers:` nor `min_digits:`",
                       lambda: _parse_fixture(_with_floor.replace("        min_digits: 10\n", "",
                                                                  1)))
-    _expect_rejection("refuse: a declared-value floor of 9 digits", failures,
-                      "below the floor of 10",
+    _expect_rejection("refuse: a declared-value floor of 4 digits (DN-163.D5)", failures,
+                      "below the floor of 5",
                       lambda: _parse_fixture(_with_floor.replace("min_digits: 10",
-                                                                 "min_digits: 9", 1)))
+                                                                 "min_digits: 4", 1)))
+    _case("declared value: a floor of 5 digits, the lower bound, is accepted (DN-163.D5)",
+          failures, lambda: _assert(
+              ".min_digits = 5," in render_fixture(text=_with_floor.replace(
+                  "min_digits: 10", "min_digits: 5", 1)),
+              "a floor of exactly 5 did not reach the emitted row"))
     _expect_rejection("refuse: a declared-value floor that is not an integer", failures,
                       "`min_digits:` must be an integer",
                       lambda: _parse_fixture(_with_floor.replace("min_digits: 10",
@@ -2768,6 +3066,263 @@ def selftest() -> int:
                           "        why: [\"Both spellings name the run's own request.\"]\n"
                           "      - key: pull_request\n        markers: [\"MR-\"]\n"
                           "        dialect_gate: self\n", 1)))
+    # ── a declared value EXTENDED by a later revision's row (DN-163.D4, DN-163.D5) ───────
+    # The base row stays byte-equal to the v1 oracle; the extension is a row the oracle does not
+    # hold, `since: v2`, adding markers or a floor and never removing or rewriting one.
+    _ext_row = ("      - extends: pull_request\n        since: v2\n"
+                "        markers: [\"pull/\"]\n        min_digits: 5\n"
+                "        why: [\"The merge ref names the run's own request.\"]\n")
+    _value_two = (_sinced(_with_value)
+                  .replace("    names: [v1]\n", "    names:\n      - v1\n" + _V2_ENTRY, 1)
+                  .replace("  outcome_markers:\n", _ext_row + "  outcome_markers:\n", 1))
+    _value_oracle = {"revisions/v1.dialect.yaml": _with_value}
+
+    def _value_ext(text: str = _value_two) -> str:
+        return _render_package(text, _value_oracle)
+
+    _case("extension: a later revision's row extends a key and passes the v1 oracle check",
+          failures, lambda: _assert(
+              '{.key = "pull_request",\n     .markers = kDeclaredValueMarkers0,\n'
+              '     .dialect_gate = kDialect,\n     .revision_since = "v1"},' in _value_ext()
+              and 'kDeclaredValueMarkers1{{"pull/"}};' in _value_ext()
+              and '{.key = "pull_request",\n     .markers = kDeclaredValueMarkers1,\n'
+                  '     .min_digits = 5,\n     .dialect_gate = kDialect,\n'
+                  '     .extends = true,\n     .revision_since = "v2"},' in _value_ext()
+              and "// > The merge ref names the run's own request." in _value_ext(),
+              "the base row moved, or the extension did not reach kDeclaredValues as its own "
+              "row carrying its base's key and gate: "
+              + _array_body(_value_ext(), "kDeclaredValues")))
+    _case("extension: it enters the declaration's content hash", failures, lambda: _assert(
+        "extends" in repr(hashed_content(_parse_package(_value_two, _value_oracle))),
+        "the extension row is missing from the hashed content"))
+    for _label, _text, _needle in (
+            ("an extension of an unknown key",
+             _value_two.replace("extends: pull_request", "extends: merge_request", 1),
+             "extends no key this section declares"),
+            ("an extension re-declaring a marker its key holds",
+             _value_two.replace('markers: ["pull/"]', 'markers: ["pull-"]', 1),
+             "already holds the marker 'pull-'"),
+            ("an extension adding a floor to a key that has one",
+             _value_two.replace("        markers: [\"PR-\", \"pull-\"]\n",
+                                "        markers: [\"PR-\", \"pull-\"]\n"
+                                "        min_digits: 6\n", 1),
+             "already declares a floor"),
+            ("an extension introduced in its base's own revision",
+             _value_two.replace("extends: pull_request\n        since: v2",
+                                "extends: pull_request\n        since: v1", 1),
+             "later than its base's"),
+            ("two extensions of one key in one revision",
+             _value_two.replace(_ext_row, _ext_row + _ext_row.replace(
+                 '["pull/"]', '["pulls/"]', 1).replace("        min_digits: 5\n", "", 1), 1),
+             "a key takes at most one extension per revision"),
+            ("an extension declaring neither markers nor a floor",
+             _value_two.replace("        markers: [\"pull/\"]\n        min_digits: 5\n", "", 1),
+             "adds neither `markers:` nor `min_digits:`"),
+            ("an extension's floor of 4 digits",
+             _value_two.replace("        min_digits: 5\n        why: [\"The merge",
+                                "        min_digits: 4\n        why: [\"The merge", 1),
+             "below the floor of 5"),
+            ("an extension declaring its own dialect gate",
+             _value_two.replace("        min_digits: 5\n        why: [\"The merge",
+                                "        min_digits: 5\n        dialect_gate: self\n"
+                                "        why: [\"The merge", 1),
+             "an extension carries its base's gate"),
+            ("an extension declaring a key as well",
+             _value_two.replace("      - extends: pull_request\n",
+                                "      - extends: pull_request\n        key: pull_request\n", 1),
+             "declares both `key:` and `extends:`")):
+        _expect_rejection(f"refuse extension: {_label}", failures, _needle,
+                          lambda text=_text: _parse_package(text, _value_oracle))
+    # REMOVING a marker is unspellable in an extension, so the one way to write it is to take the
+    # marker off the base row: the v1 oracle refuses that as the MEANING drift it is.
+    _expect_rejection("mutation: a marker moved off the base row into its extension", failures,
+                      "oracle revisions/v1.dialect.yaml section `declared_values:` rows[0]",
+                      lambda: _parse_package(_value_two.replace(
+                          'markers: ["PR-", "pull-"]', 'markers: ["PR-"]', 1).replace(
+                          'markers: ["pull/"]', 'markers: ["pull/", "pull-"]', 1),
+                          _value_oracle))
+    _expect_rejection("refuse extension: in a one-revision declaration", failures,
+                      "an extension is a later revision's row",
+                      lambda: _parse_fixture(_with_value.replace(
+                          "  outcome_markers:\n",
+                          _ext_row.replace("        since: v2\n", "", 1)
+                          + "  outcome_markers:\n", 1)))
+
+    # ── a TEXT-valued declared key with declared prefixes (DN-163.D6) ─────────────────────
+    _text_row = ("      - key: head_ref\n        value: Text\n"
+                 "        prefixes: [\"refs/heads/\", \"refs/remotes/origin/\", \"origin/\"]\n"
+                 "        dialect_gate: self\n"
+                 "        why: [\"The head branch says which pull request this run is.\"]\n")
+    _with_text = _with_value.replace("  outcome_markers:\n", _text_row + "  outcome_markers:\n", 1)
+    _case("text value: a text key reaches kDeclaredValues with its prefixes, in declared order",
+          failures, lambda: _assert(
+              'kDeclaredValuePrefixes1{{"refs/heads/", "refs/remotes/origin/", "origin/"}};'
+              in render_fixture(text=_with_text)
+              and '{.key = "head_ref",\n     .value = DeclaredValueKind::Text,\n'
+                  '     .prefixes = kDeclaredValuePrefixes1,\n     .dialect_gate = kDialect},'
+              in render_fixture(text=_with_text)
+              and '{.key = "pull_request",\n     .markers = kDeclaredValueMarkers0,\n'
+                  '     .dialect_gate = kDialect},' in render_fixture(text=_with_text),
+              "the text key did not reach kDeclaredValues whole, or the digit key beside it "
+              "moved: " + _array_body(render_fixture(text=_with_text), "kDeclaredValues")))
+    for _label, _text, _needle in (
+            ("a text key with markers",
+             _with_text.replace("        value: Text\n",
+                                "        value: Text\n        markers: [\"HEAD-\"]\n", 1),
+             "a text value declares no `markers:` and no `min_digits:`"),
+            ("a text key with a floor",
+             _with_text.replace("        value: Text\n",
+                                "        value: Text\n        min_digits: 5\n", 1),
+             "a text value declares no `markers:` and no `min_digits:`"),
+            ("prefixes on a digit key",
+             _with_value.replace("        markers: [\"PR-\", \"pull-\"]\n",
+                                 "        markers: [\"PR-\", \"pull-\"]\n"
+                                 "        prefixes: [\"refs/\"]\n", 1),
+             "`prefixes:` is a text value's"),
+            ("a value kind outside the closed vocabulary",
+             _with_text.replace("value: Text", "value: Digits", 1),
+             "outside the closed core vocabulary {Text}"),
+            ("an empty prefix list",
+             _with_text.replace(
+                 '[\"refs/heads/\", \"refs/remotes/origin/\", \"origin/\"]', "[]", 1),
+             "`prefixes:` must be a non-empty sequence"),
+            ("a duplicate prefix",
+             _with_text.replace('\"origin/\"]', '\"refs/heads/\"]', 1),
+             "duplicate prefix"),
+            ("an empty prefix",
+             _with_text.replace('\"origin/\"]', '\"\"]', 1),
+             "a prefix is a non-empty scalar"),
+            ("an extension of a text key",
+             _with_text.replace("  outcome_markers:\n", "      - extends: head_ref\n"
+                                "        markers: [\"x-\"]\n" + "  outcome_markers:\n", 1),
+             "an extension is a later revision's row")):
+        _expect_rejection(f"refuse text value: {_label}", failures, _needle,
+                          lambda text=_text: _parse_fixture(text))
+    _expect_rejection("refuse text value: an extension of a text key, in a later revision",
+                      failures, "a text value is extended by no row",
+                      lambda: _parse_package(_value_two.replace(
+                          "  outcome_markers:\n",
+                          _text_row.replace("dialect_gate: self\n",
+                                            "dialect_gate: self\n        since: v2\n", 1)
+                          + "      - extends: head_ref\n        since: v2\n"
+                            "        markers: [\"x-\"]\n" + "  outcome_markers:\n", 1),
+                          _value_oracle))
+
+    # ── the INSTANCE-VALUE section: line, shape and argument rows (DN-163.D1, DN-163.D7) ─
+    _instance_rows = ('      - line: "Runner name: "\n        dialect_gate: self\n'
+                      '        why: ["The value is the machine."]\n'
+                      '      - shape: "productionresultssa{n}.blob.core.windows.net"\n'
+                      '        dialect_gate: self\n'
+                      '      - argument: "##[command]/usr/bin/docker "\n'
+                      '        flags: ["--name", "--label"]\n        keys: ["label="]\n'
+                      '        dialect_gate: self\n')
+    _with_instance = _SYNTHETIC.replace(
+        "  outcome_markers:\n",
+        "  instance_values:\n    why: [\"A runner's instance coordinates, masked whole.\"]\n"
+        "    rows:\n" + _instance_rows + "  outcome_markers:\n", 1)
+    _case("instance: the three forms reach kInstanceValues and the manifest, in declared order",
+          failures, lambda: _assert(
+              'kInstanceValueFlags2{{"--name", "--label"}};' in render_fixture(text=_with_instance)
+              and 'kInstanceValueKeys2{{"label="}};' in render_fixture(text=_with_instance)
+              and _array_body(render_fixture(text=_with_instance), "kInstanceValues").endswith(
+                  '{.form = InstanceValueForm::Line,\n     .bytes = "Runner name: ",\n'
+                  '     .dialect_gate = kDialect},\n'
+                  '    {.form = InstanceValueForm::Shape,\n'
+                  '     .bytes = "productionresultssa{n}.blob.core.windows.net",\n'
+                  '     .dialect_gate = kDialect},\n'
+                  '    {.form = InstanceValueForm::Argument,\n'
+                  '     .bytes = "##[command]/usr/bin/docker ",\n'
+                  '     .flags = kInstanceValueFlags2,\n     .keys = kInstanceValueKeys2,\n'
+                  '     .dialect_gate = kDialect},')
+              and "// > The value is the machine." in render_fixture(text=_with_instance)
+              and "    .instance_values = kInstanceValues,\n    .echoed_source = "
+              in render_fixture(text=_with_instance)
+              and "insight::semantic::instance_value_row_well_formed"
+              in render_fixture(text=_with_instance),
+              "the instance rows did not reach kInstanceValues and the manifest whole: "
+              + render_fixture(text=_with_instance)[
+                  render_fixture(text=_with_instance).find("kInstanceValue"):][:900]))
+    _case("instance: an argument row without `keys:` emits no key array", failures,
+          lambda: _assert(
+              "kInstanceValueKeys" not in render_fixture(text=_with_instance.replace(
+                  '        keys: ["label="]\n', "", 1))
+              and ".flags = kInstanceValueFlags2,\n     .dialect_gate = kDialect},"
+              in render_fixture(text=_with_instance.replace('        keys: ["label="]\n', "", 1)),
+              "an argument row with no key emitted a key array or member"))
+    _case("instance: declaring none emits none and leaves the content hash alone", failures,
+          lambda: _assert(
+              "instance_value" not in rendered.lower() and "InstanceValue" not in rendered
+              and declaration_hash(_parse_fixture(_with_instance)) != base_hash,
+              "an undeclared section reached the bytes, or a declared one did not move the hash"))
+    # In a two-revision package each row is `since: v2`: the v1 oracle holds none of them.
+    _instance_two = (_TWO_REVISIONS.replace(
+        "  outcome_markers:\n",
+        "  instance_values:\n    rows:\n"
+        + _instance_rows.replace("        dialect_gate: self\n",
+                                 "        dialect_gate: self\n        since: v2\n")
+        + "  outcome_markers:\n", 1))
+    _case("instance: in a two-revision package the rows are `since: v2` and pass the v1 oracle",
+          failures, lambda: _assert(
+              _array_body(_render_package(_instance_two), "kInstanceValues").count(
+                  '.revision_since = "v2"') == 3,
+              "the rows did not carry `.revision_since` as their last member"))
+    _expect_rejection("mutation: an instance row claiming `since: v1` the v1 oracle lacks "
+                      "(DN-163.D13)", failures, "the retained `v1` declaration holds no equal row",
+                      lambda: _parse_package(_instance_two.replace(
+                          "        since: v2\n", "        since: v1\n", 1)))
+    for _label, _text, _needle in (
+            ("a shape whose hole borders a digit",
+             _with_instance.replace("productionresultssa{n}", "productionresultssa1{n}", 1),
+             "puts a hole against a digit"),
+            ("a shape with no hole",
+             _with_instance.replace("productionresultssa{n}", "productionresultssa", 1),
+             "carries exactly one hole"),
+            ("a shape with two holes",
+             _with_instance.replace("productionresultssa{n}.blob", "productionresultssa{n}.b{n}x",
+                                    1), "carries exactly one hole"),
+            ("a shape holding whitespace",
+             _with_instance.replace("productionresultssa{n}.blob", "productionresultssa{n} blob",
+                                    1), "is matched inside a token"),
+            ("a row naming no form",
+             _with_instance.replace('      - line: "Runner name: "\n        dialect_gate: self\n',
+                                    '      - dialect_gate: self\n', 1),
+             "declares exactly one of `line:`, `shape:` and `argument:`"),
+            ("a row naming two forms",
+             _with_instance.replace('      - line: "Runner name: "\n',
+                                    '      - line: "Runner name: "\n'
+                                    '        shape: "x{n}y"\n', 1),
+             "declares exactly one of `line:`, `shape:` and `argument:`"),
+            ("an empty line prefix",
+             _with_instance.replace('line: "Runner name: "', 'line: ""', 1),
+             "`line:` must be non-empty"),
+            ("an argument row with no flag",
+             _with_instance.replace('        flags: ["--name", "--label"]\n', "", 1),
+             "`flags:` must be a non-empty sequence"),
+            ("a duplicate flag",
+             _with_instance.replace('["--name", "--label"]', '["--name", "--name"]', 1),
+             "duplicate flag"),
+            ("a flag holding whitespace",
+             _with_instance.replace('["--name", "--label"]', '["--name", "--la bel"]', 1),
+             "a flag is one token"),
+            ("a key not ending in `=`",
+             _with_instance.replace('keys: ["label="]', 'keys: ["label"]', 1),
+             "a key is spelled with its `=`"),
+            ("flags on a line row",
+             _with_instance.replace('      - line: "Runner name: "\n',
+                                    '      - line: "Runner name: "\n        flags: ["-x"]\n', 1),
+             "`flags:` and `keys:` belong to an argument row"),
+            ("a row gated to any dialect",
+             _with_instance.replace('"Runner name: "\n        dialect_gate: self\n',
+                                    '"Runner name: "\n        dialect_gate: any\n', 1),
+             "an instance row is gated to its own package"),
+            ("two equal rows",
+             _with_instance.replace('      - shape: "production',
+                                    '      - line: "Runner name: "\n        dialect_gate: self\n'
+                                    '      - shape: "production', 1),
+             "duplicates rows[0]")):
+        _expect_rejection(f"refuse instance: {_label}", failures, _needle,
+                          lambda text=_text: _parse_fixture(text))
+
     # ── a stop announcement: a whole line a runner writes into a step it stops ───────────
     _stop_row = ('      - shape: "##[error]The operation was canceled."\n'
                  '        dialect_gate: self\n'
