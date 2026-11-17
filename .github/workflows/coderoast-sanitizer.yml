@@ -80,15 +80,15 @@ jobs:
 
       - name: malf at this workflow's commit, as git
         id: malf
-        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@4307244abc8fc8df897bc89d35956713a52f1060
+        uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@93bb0ff077d20f58312e9298ce22566bf954250d
         with:
           workflow: coderoast-sanitizer.yml
 
       - name: The pinned gh the attestation reads run through
-        uses: CodeRoasted/malf-toolchain/.github/actions/setup-gh@4307244abc8fc8df897bc89d35956713a52f1060
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-gh@93bb0ff077d20f58312e9298ce22566bf954250d
 
       - name: The pinned build environment and the host's provisioning tools
-        uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-environment@4307244abc8fc8df897bc89d35956713a52f1060
+        uses: CodeRoasted/malf-toolchain/.github/actions/setup-build-environment@93bb0ff077d20f58312e9298ce22566bf954250d
 
       - name: The upstream candidates, read through their own stores, their sources at the commits they record
         if: ${{ inputs.upstream != '{}' }}
