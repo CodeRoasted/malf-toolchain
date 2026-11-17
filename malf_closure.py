@@ -67,15 +67,25 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 SYMLINK_MODE = "120000"
 ROOT = "."
-# The anchors every malf file and every consumer file may name malf by: the driver's own directory
-# and the variable a consumer's build is handed for the same tree.
-ROOT_ANCHOR = re.compile(r"\$\{?(?:MALF_DIR|MALF_TOOLCHAIN_DIR)\}?/(?P<path>[A-Za-z0-9_.][A-Za-z0-9_./-]*)")
+# The anchors every malf file and every consumer file may name malf by: the driver's own directory,
+# the variable a consumer's build is handed for the same tree, and the checkout `coderoast-malf-checkout`
+# exports to a job (`MALF_CHECKOUT`, where the candidate, publish and sanitizer workflows run malf's tools).
+ROOT_ANCHOR = re.compile(r"\$\{?(?:MALF_DIR|MALF_TOOLCHAIN_DIR|MALF_CHECKOUT)\}?/(?P<path>[A-Za-z0-9_.][A-Za-z0-9_./-]*)")
+# A here-document a shell (the driver, a workflow's `run:`) feeds `python3`: its body is Python, and its
+# imports are edges as a Python file's are. The opener is `<<TAG`, `<<-TAG` or a quoted tag (never `<<<`);
+# its command is the opener's line with the lines it continues (`\` at their end), and it feeds Python when
+# that command runs `python`/`python3`. The body runs from the line after the command to the tag alone on
+# its line (indented in a workflow's block scalar, so the body is dedented before it is parsed).
+HEREDOC = re.compile(r"(?<!<)<<-?[ \t]*(?P<quote>['\"]?)(?P<tag>[A-Za-z_][A-Za-z0-9_]*)(?P=quote)")
+HEREDOC_RUNNER = re.compile(r"\bpython3?\b")
+SHELL_SUFFIXES = (".sh", ".bash", ".yml", ".yaml")
 # The naming file's own directory as a shell spells it, and as a composite action does (its own
 # `${{ github.action_path }}` and `$GITHUB_ACTION_PATH`).
 SELF_DIR = r'(?:\$\(dirname "(?:\$\{BASH_SOURCE\[0\]\}|\$0)"\)|\$\{\{ github\.action_path \}\}|\$\{?GITHUB_ACTION_PATH\}?)'
@@ -196,6 +206,9 @@ def edges(tree: Tree, path: str) -> set[str]:
         reached |= _targets(tree, _normal(here, match["path"]))
     for match in PROFILE_SELF.finditer(text):
         reached |= _targets(tree, _normal(here, match["path"]))
+    if path.endswith(SHELL_SUFFIXES) or re.match(r"#!\S*\b(?:env +)?(?:ba)?sh\b", text):
+        for body in _python_heredocs(text):
+            reached |= _imports(tree, path, here, body)
     if path.endswith(".py") or text.startswith("#!/usr/bin/env python"):
         for match in PYTHON_SELF.finditer(text):
             reached |= _targets(tree, _normal(here, "/".join(SEGMENT.findall(match["segments"]))))
@@ -204,6 +217,28 @@ def edges(tree: Tree, path: str) -> set[str]:
         reached |= _imports(tree, path, here, text)
     reached.discard(path)
     return reached
+
+
+def _python_heredocs(text: str) -> list[str]:
+    """The body of each here-document in shell `text` whose command runs Python (`HEREDOC`), dedented."""
+    lines = text.split("\n")
+    bodies: list[str] = []
+    for number, line in enumerate(lines):
+        for opener in HEREDOC.finditer(line):
+            command, first = line, number
+            while first > 0 and lines[first - 1].rstrip().endswith("\\"):
+                first -= 1
+                command = lines[first] + "\n" + command
+            if not HEREDOC_RUNNER.search(command[:len(command) - len(line) + opener.start()]):
+                continue
+            start = number + 1
+            while start < len(lines) and lines[start - 1].rstrip().endswith("\\"):
+                start += 1
+            end = start
+            while end < len(lines) and lines[end].strip() != opener["tag"]:
+                end += 1
+            bodies.append(textwrap.dedent("\n".join(lines[start:end])))
+    return bodies
 
 
 def _checkout_roots(text: str) -> set[str]:
@@ -608,7 +643,11 @@ def _fixture(base: Path) -> Path:
         "malf": '#!/usr/bin/env bash\nMALF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
                 'python3 "$MALF_DIR/store.py" "$@"\ncp -r "$MALF_DIR/profiles/" home\n'
                 'conan create --profile "$MALF_DIR/config/writer.profile"\n'
-                'echo "tests are run by tests/run.sh"\nfor name in a b; do cat "$MALF_DIR/$name"; done\n',
+                'echo "tests are run by tests/run.sh"\nfor name in a b; do cat "$MALF_DIR/$name"; done\n'
+                'MALF_DIR="$MALF_DIR" python3 - "$@" <<\'PY\'\nimport os\nimport sys\n\n'
+                'sys.path.insert(0, os.environ["MALF_DIR"])\nfrom folding import fold\nPY\n'
+                'python3 - "$1" \\\n    "$2" <<\'PY\'\nimport ordering\nPY\n'
+                'cat > presets.json <<JSON\nimport unreached\nJSON\n',
         "store.py": "import json\n\ndef late():\n    import helper\n    return helper\n",
         "helper.py": "from pathlib import Path\nDATA = Path(__file__).resolve().parent / 'config' / 'data.txt'\n",
         "config/data.txt": "x\n",
@@ -629,6 +668,13 @@ def _fixture(base: Path) -> Path:
                                            "      run: |\n        ROOT=\"$(cd \"$ACTION_PATH/../../..\" && pwd)\"\n"
                                            "        python3 \"$ROOT/codegen.py\"\n"
                                            "    - run: ${{ github.action_path }}/../../../helper.py\n",
+        "folding.py": "def fold():\n    return 0\n",
+        "ordering.py": "ORDER = ()\n",
+        "verdict.py": "print('named only by a workflow')\n",
+        ".github/workflows/candidate.yml": "jobs:\n  candidate:\n    steps:\n"
+                                           "      - uses: CodeRoasted/malf-toolchain/.github/actions/coderoast-malf-checkout@0123\n"
+                                           "      - run: |\n          python3 \"$MALF_CHECKOUT/verdict.py\" candidate\n"
+                                           "          python3 - <<'PY'\n          import ordering\n          PY\n",
         "unreached.py": "print('nobody names me')\n",
         ".gitattributes": "* text=auto eol=lf\n",
     })
@@ -659,8 +705,16 @@ def selftest() -> int:
         driven = closure(tree, {"malf"})
         arm("an anchored reference, a function-level import and a directory reference each reach their "
             "target; a Path(__file__) segment chain reaches its file",
-            sorted(driven.files), ["config/data.txt", "config/writer.profile", "helper.py", "malf", "profiles/one",
-                                   "profiles/two", "store.py", "wrap/malf-cc"])
+            sorted(driven.files), ["config/data.txt", "config/writer.profile", "folding.py", "helper.py", "malf",
+                                   "ordering.py", "profiles/one", "profiles/two", "store.py", "wrap/malf-cc"])
+        arm("a Python heredoc the driver feeds `python3` imports a malf module, its opener continued over lines too; "
+            "a heredoc fed to anything else (`cat <<JSON`) reaches nothing",
+            sorted(edges(tree, "malf") & {"folding.py", "ordering.py", "unreached.py"}), ["folding.py", "ordering.py"])
+        arm("a workflow-only caller: `$MALF_CHECKOUT/verdict.py`, the checkout `coderoast-malf-checkout` exports, "
+            "reaches its file, and the workflow's own indented Python heredoc its import",
+            sorted(edges(tree, ".github/workflows/candidate.yml")), ["ordering.py", "verdict.py"])
+        arm("a file only a workflow names is in the closure of the `.github` seed",
+            "verdict.py" in closure(tree, {".github/workflows/candidate.yml"}).files, True)
         arm("a bare word `tests` in a message reaches nothing, nor a computed `$MALF_DIR/$name`, nor a "
             "workflow no file names", [path for path in driven.files if path.startswith((".github", "tests"))], [])
         arm("a conan profile's `{{ profile_dir }}/../wrap` reaches every file under wrap/, and one leaving "
