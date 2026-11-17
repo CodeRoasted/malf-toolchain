@@ -4955,9 +4955,20 @@ cmd_lock() {
         shift
     done
 
-    local out tmp ok=0 fail=0 failed=()
+    local out tmp parts held ok=0 fail=0 failed=() calls=0
     out="$MALF_DIR/conan.lock"
     tmp="$(mktemp)"; rm -f "$tmp"
+    parts="$(mktemp -d)"
+    held="$parts/held.lock"
+    # A PLAIN lock starts from the committed one, so every entry it holds resolves where it stood and
+    # a fresh home reproduces the lock byte for byte (ROADMAP N470); an empty start resolved each range
+    # afresh against whatever the remote had newest (measured 2026-11-17: a fresh home took cmake
+    # 4.4.4 -> 4.5.0 and gnu-config's newer revision with no `--update`). `--update` alone starts
+    # empty and moves entries. Each call writes the CLEAN lock of its own graph (`--lockfile-clean`)
+    # and the run installs their merge, so an entry no graph uses any more (a first-party version a
+    # bump left behind, a dependency dropped) leaves the lock; `held` is what the next call resolves
+    # against: the start, plus every graph resolved so far.
+    [[ -z "$update" && -f "$out" ]] && cp "$out" "$held"
 
     # The profiles: the desk's first, then every file of the registry. Derived from the directory,
     # never listed, so a profile added to the registry is locked by the next run.
@@ -4973,10 +4984,19 @@ cmd_lock() {
     while IFS= read -r root; do
         local root_fail=()
         for profile in "${profiles[@]}"; do
-            local args=(--profile:all="$profile" --lockfile-out="$tmp")
-            [[ -f "$tmp" ]] && args+=(--lockfile="$tmp")
+            local part="$parts/$calls.lock"
+            local args=(--profile:all="$profile" --lockfile-clean --lockfile-out="$part")
+            [[ -f "$held" ]] && args+=(--lockfile="$held")
             [[ -n "$update" ]] && args+=("$update")
-            conan lock create "$root" "${args[@]}" >/dev/null 2>&1 || root_fail+=("$(basename "$profile")")
+            calls=$((calls + 1))
+            if conan lock create "$root" "${args[@]}" >/dev/null 2>&1; then
+                local merged=(--lockfile="$part")
+                [[ -f "$held" ]] && merged+=(--lockfile="$held")
+                conan lock merge "${merged[@]}" --lockfile-out="$held" >/dev/null 2>&1 \
+                    || root_fail+=("$(basename "$profile") (merge)")
+            else
+                root_fail+=("$(basename "$profile")")
+            fi
         done
         if [[ ${#root_fail[@]} -eq 0 ]]; then
             ok=$((ok + 1)); printf '  ok    %s\n' "${root#"$MALF_WORKSPACE_ROOT"/}"
@@ -4992,9 +5012,17 @@ cmd_lock() {
     if [[ $fail -gt 0 ]]; then
         echo "malf lock: $fail root(s) failed to resolve — lockfile NOT written:" >&2
         printf '  - %s\n' "${failed[@]}" >&2
-        rm -f "$tmp"
+        rm -rf "$parts"
         return 1
     fi
+    local graphs=() call
+    for ((call = 0; call < calls; call++)); do graphs+=(--lockfile="$parts/$call.lock"); done
+    if ! conan lock merge "${graphs[@]}" --lockfile-out="$tmp" >/dev/null 2>&1; then
+        echo "malf lock: the $calls resolved graphs could not be merged — lockfile NOT written" >&2
+        rm -rf "$parts"
+        return 1
+    fi
+    rm -rf "$parts"
     # The overlay's entries carry the time git holds for their recipe, never the export's clock: a
     # local-recipes-index stamps each export with its own moment, so two homes locked the same
     # revisions under different timestamps (ROADMAP N470). lock_overlay.py says what Conan reads it for.

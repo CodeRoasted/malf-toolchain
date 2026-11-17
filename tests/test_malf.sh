@@ -6819,6 +6819,7 @@ CONAN_HOME="$lk_home" bash "$MALF_BIN" profiles > /dev/null 2>&1
 CONAN_HOME="$lk_home" conan remote remove conancenter > /dev/null 2>&1
 mkdir -p "$lk_tmp/malf/profiles" "$lk_tmp/ws/lk_root" "$lk_tmp/wintool"
 printf '[settings]\nos=Linux\narch=x86_64\nbuild_type=Release\n' > "$lk_tmp/malf/profiles/lk-linux"
+cp "$MALF_ROOT/lock_overlay.py" "$lk_tmp/malf/"   # the verb stamps the overlay through it (N470)
 printf '[settings]\nos=Windows\narch=x86_64\nbuild_type=Release\n' > "$lk_tmp/malf/profiles/lk-windows"
 printf 'from conan import ConanFile\n\n\nclass WinTool(ConanFile):\n    name = "wintool"\n    version = "1.0"\n    package_type = "application"\n' > "$lk_tmp/wintool/conanfile.py"
 printf 'from conan import ConanFile\n\n\nclass LkRoot(ConanFile):\n    name = "lk_root"\n    version = "0.1"\n    settings = "os"\n    package_type = "header-library"\n\n    def build_requirements(self):\n        if self.settings.os == "Windows":\n            self.tool_requires("wintool/1.0")\n' > "$lk_tmp/ws/lk_root/conanfile.py"
@@ -6844,6 +6845,48 @@ check "the control: a lock accumulated under the Linux profile alone fails the s
       "rc=0 rc=1 1" \
       "$(CONAN_HOME="$lk_home" conan lock create "$lk_tmp/ws/lk_root" -pr:a "$lk_tmp/malf/profiles/lk-linux" --lockfile-out="$lk_tmp/malf/conan.lock" > /dev/null 2>&1; printf 'rc=%s' "$?") $(lk_strict lk-windows) $(grep -c "Requirement 'wintool/1.0' not in lockfile" "$lk_tmp/lk-windows.log")"
 rm -rf "$lk_tmp"
+echo
+
+echo "[7q7k] a plain malf lock starts from the committed lock: a range keeps the version the lock holds though a newer one is at hand, only --update moves it, and an entry no graph uses leaves the lock (N470)"
+# note: measured 2026-11-17, a plain lock started EMPTY, so a fresh home resolved every range to the
+# newest the remote held: cmake 4.4.4 -> 4.5.0 and gnu-config's newer revision, with no --update,
+# and two desks' locks disagreed. The fixture is that shape with no remote: `rng` is exported at
+# 1.0, locked, then 1.1 is exported beside it.
+lr_tmp="$(realpath "$(mktemp -d)")"; lr_home="$lr_tmp/home"
+CONAN_HOME="$lr_home" bash "$MALF_BIN" profiles > /dev/null 2>&1
+CONAN_HOME="$lr_home" conan remote remove conancenter > /dev/null 2>&1
+mkdir -p "$lr_tmp/malf/profiles" "$lr_tmp/ws/lr_root" "$lr_tmp/rng" "$lr_tmp/gone"
+printf '[settings]\nos=Linux\narch=x86_64\nbuild_type=Release\n' > "$lr_tmp/malf/profiles/lr-linux"
+cp "$MALF_ROOT/lock_overlay.py" "$lr_tmp/malf/"
+lr_recipe() {   # <dir> <name> <version>
+    printf 'from conan import ConanFile\n\n\nclass Dep(ConanFile):\n    name = "%s"\n    version = "%s"\n    package_type = "header-library"\n' "$2" "$3" > "$1/conanfile.py"
+    CONAN_HOME="$lr_home" conan export "$1" > /dev/null 2>&1
+}
+lr_root() {     # <requirement>...: the root's requires
+    { printf 'from conan import ConanFile\n\n\nclass LrRoot(ConanFile):\n    name = "lr_root"\n    version = "0.1"\n    package_type = "header-library"\n\n    def requirements(self):\n'
+      local requirement; for requirement in "$@"; do printf '        self.requires("%s")\n' "$requirement"; done; } > "$lr_tmp/ws/lr_root/conanfile.py"
+}
+lr_run() {      # [--update]: the verb as malf runs it, its root enumeration and SBOM replaced
+    CONAN_HOME="$lr_home" bash -c 'MALF_SOURCE_ONLY=1 source "$1" >/dev/null 2>&1; set +e
+        MALF_DIR="$2"; MALF_WORKSPACE_ROOT="$3"; MALF_PROFILE="$2/profiles/lr-linux"
+        _malf_workspace_packages() { MALF_GRAPH_ROWS="$(printf "lr_root\t%s" "$MALF_WORKSPACE_ROOT/lr_root")"; }
+        cmd_sbom() { :; }
+        cmd_lock "${@:4}"' _ "$MALF_BIN" "$lr_tmp/malf" "$lr_tmp/ws" "$@" > "$lr_tmp/lock.log" 2>&1
+    printf 'rc=%s' "$?"
+}
+lr_has() { grep -c "\"$1#" "$lr_tmp/malf/conan.lock" 2>/dev/null; }
+lr_recipe "$lr_tmp/rng" rng 1.0; lr_recipe "$lr_tmp/gone" gone 1.0
+lr_root "rng/[>=1.0 <2]" "gone/1.0"
+first="$(lr_run) $(lr_has rng/1.0)"
+lr_recipe "$lr_tmp/rng" rng 1.1
+check "a plain lock with no lock to start from resolves the range (rng/1.0, the newest then)" "rc=0 1" "$first"
+check "a plain lock after rng/1.1 appears keeps rng/1.0 — the committed entry, not the newest at hand" \
+      "rc=0 1 0" "$(lr_run) $(lr_has rng/1.0) $(lr_has rng/1.1)"
+lr_root "rng/[>=1.0 <2]"
+check "a dependency the root no longer requires leaves the lock on a plain run" "rc=0 0 1" \
+      "$(lr_run) $(lr_has gone/1.0) $(lr_has rng/1.0)"
+check "--update alone moves the range to rng/1.1" "rc=0 0 1" "$(lr_run --update) $(lr_has rng/1.0) $(lr_has rng/1.1)"
+rm -rf "$lr_tmp"
 echo
 
 echo "[7q8] at job end every conan home drops its build and temp folders and its superseded versions, and reports its own size"

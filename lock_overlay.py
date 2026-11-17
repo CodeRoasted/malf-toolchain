@@ -57,6 +57,8 @@ def _git(malf_dir: Path, *args: str) -> str:
 def overlay_times(malf_dir: Path) -> dict[tuple[str, str], str]:
     """`(name, version) -> timestamp` for every version the overlay serves, as Conan spells a
     float: the committer time of the last commit touching the recipe's directory."""
+    if not (malf_dir / OVERLAY).is_dir():
+        return {}  # a malf with no overlay has no overlay entry to stamp (a test fixture's, say)
     if _git(malf_dir, "rev-parse", "--is-shallow-repository") != "false":
         raise Refused(f"{malf_dir} is a shallow clone: the last commit touching an overlay recipe may "
                       "lie beyond its history, so its time would be the clone's tip. Lock from a full clone.")
@@ -127,6 +129,7 @@ def selftest() -> int:
                        env={"GIT_COMMITTER_DATE": "@1791749761", "PATH": "/usr/bin:/bin"})
         checks.append(("the time is the committer time of the recipe's last commit, as Conan spells a float",
                        overlay_times(malf) == {("libpq", "17.11"): "1791749761.0"}))
+        checks.append(("a malf with no overlay stamps nothing and needs no git", overlay_times(Path(held)) == {}))
         shallow = Path(held) / "shallow"
         subprocess.run(["git", "clone", "-q", "--depth", "1", f"file://{malf}", str(shallow)], check=True)
         try:
