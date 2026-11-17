@@ -4995,6 +4995,14 @@ cmd_lock() {
         rm -f "$tmp"
         return 1
     fi
+    # The overlay's entries carry the time git holds for their recipe, never the export's clock: a
+    # local-recipes-index stamps each export with its own moment, so two homes locked the same
+    # revisions under different timestamps (ROADMAP N470). lock_overlay.py says what Conan reads it for.
+    if ! python3 "$MALF_DIR/lock_overlay.py" stamp "$tmp" "$MALF_DIR"; then
+        echo "malf lock: the overlay's entries could not be stamped — lockfile NOT written" >&2
+        rm -f "$tmp"
+        return 1
+    fi
     mv "$tmp" "$out"
     echo "=== malf lock: $ok root(s) -> $out ==="
     # The counts and, on a split, ADR-4.D4's NOTE: computed by lock_versions.py, the one reader of

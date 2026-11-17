@@ -98,6 +98,9 @@ jobs:
       - name: lock_versions selftest (the lock's one-name-two-versions reader, NOTE and refusal, ADR-4.D4)
         run: python3 lock_versions.py selftest
 
+      - name: lock_overlay selftest (the overlay's lock entries stamped with git's time, byte-reproducible, N470)
+        run: python3 lock_overlay.py selftest
+
       - name: store_publish selftest (a release job's fetch, verify and stage, against an in-process registry)
         # Its own step until tests/test_malf.sh carries it beside store_replica's.
         run: timeout 120 python3 store_publish.py selftest
